@@ -1,11 +1,13 @@
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import agentic_shell
+from agentic import state_paths
 
 
 class ShellTests(unittest.TestCase):
@@ -88,6 +90,49 @@ class ShellTests(unittest.TestCase):
             self.assertEqual(job.exit_code, 0)
             self.assertIn('hello', job.log_path.read_text())
             self.assertIn('EXIT 0', _capture_ps(shell))
+
+    def test_background_job_completion_callback_runs_without_refresh(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            completed = []
+            ready = threading.Event()
+
+            def callback(code):
+                completed.append(code)
+                ready.set()
+
+            job = shell._launch(
+                [sys.executable, '-c', 'print("hello")'],
+                on_complete=callback,
+            )
+            self.assertTrue(ready.wait(timeout=5))
+            job.process.wait(timeout=5)
+            shell.refresh()
+            self.assertEqual(completed, [0])
+
+    def test_dashboard_opens_generated_output_after_success(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state_dir = root / 'state'
+            shell = agentic_shell.AgenticShell(
+                root, Path(__file__).resolve().parents[1] / 'agentic.py',
+                state_dir=state_dir, session_dir=root / 'logs',
+            )
+            with (patch.object(shell, '_launch') as launch,
+                  patch('agentic_shell._open_dashboard') as open_dashboard):
+                shell.run_dashboard(['/dashboard'])
+                argv = launch.call_args.args[0]
+                output = Path(argv[argv.index('--output') + 1])
+                self.assertEqual(output, state_paths(root, state_dir).dashboards / 'dashboard.html')
+                self.assertEqual(argv[argv.index('--state-dir') + 1], str(state_dir.resolve()))
+                callback = launch.call_args.kwargs['on_complete']
+                callback(0)
+                open_dashboard.assert_called_once_with(output)
+
+                open_dashboard.reset_mock()
+                callback(1)
+                open_dashboard.assert_not_called()
 
     def test_job_records_are_visible_from_a_later_shell(self):
         with tempfile.TemporaryDirectory() as temp:

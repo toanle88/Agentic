@@ -15,11 +15,12 @@ import signal
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TextIO
+from typing import Callable, TextIO
 
 
 HELP = """Commands:
@@ -31,7 +32,7 @@ HELP = """Commands:
   /logs JOB [LINES]                      show the latest captured terminal output
   /stop JOB                              stop a running job
   /status [--json]                       show Agentic worktree status
-  /dashboard [OUTPUT]                    generate the HTML run dashboard
+  /dashboard [OUTPUT]                    generate and open the HTML dashboard
   /help                                  show this help
   /quit                                  leave the shell; running jobs continue
 
@@ -142,6 +143,7 @@ class Job:
     finished: float | None = None
     exit_code: int | None = None
     notified: bool = False
+    completion_callback: Callable[[int], None] | None = None
 
     @property
     def running(self) -> bool:
@@ -163,6 +165,65 @@ class Job:
     def elapsed(self) -> int:
         end = self.finished or time.time()
         return max(0, int(end - self.started))
+
+
+def _windows_path(path: Path) -> str:
+    """Return a Windows spelling when WSL can provide one."""
+    wslpath = shutil.which("wslpath")
+    if not wslpath:
+        return str(path)
+    try:
+        result = subprocess.run(
+            [wslpath, "-w", str(path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return str(path)
+    converted = result.stdout.strip()
+    return converted if result.returncode == 0 and converted else str(path)
+
+
+def _open_dashboard(path: Path) -> None:
+    """Open a generated dashboard with the host platform's default handler."""
+    path = path.resolve()
+    if os.name == "nt":
+        startfile = getattr(os, "startfile", None)
+        if callable(startfile):
+            try:
+                startfile(str(path))
+                print(f"[DASHBOARD] Opened {path}")
+                return
+            except OSError:
+                pass
+
+    # wslview is the most reliable bridge for Linux paths in WSL. explorer.exe
+    # is the fallback for minimal WSL installations without wslview.
+    openers: list[tuple[str, str]] = []
+    if shutil.which("wslview"):
+        openers.append(("wslview", str(path)))
+    if shutil.which("explorer.exe"):
+        openers.append(("explorer.exe", _windows_path(path)))
+    if shutil.which("open"):
+        openers.append(("open", str(path)))
+    if shutil.which("xdg-open"):
+        openers.append(("xdg-open", str(path)))
+
+    for opener, target in openers:
+        try:
+            subprocess.Popen(
+                [opener, target],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            print(f"[DASHBOARD] Opened {path}")
+            return
+        except OSError:
+            continue
+    print(f"[DASHBOARD] Ready: {path} (open it manually; no desktop opener found)")
 
 
 def _display_command(argv: list[str]) -> str:
@@ -295,7 +356,8 @@ class AgenticShell:
             if state == "running":
                 self._write_record(job)
 
-    def _launch(self, argv: list[str]) -> Job:
+    def _launch(self, argv: list[str],
+                on_complete: Callable[[int], None] | None = None) -> Job:
         number = self.next_number
         self.next_number += 1
         log_path = self.session_dir / f"job-{number:03d}.log"
@@ -316,12 +378,30 @@ class AgenticShell:
             log_handle.close()
             raise
         job = Job(number, argv, log_path, process, time.time(), log_handle,
-                  record_path, self.session_id)
+                  record_path, self.session_id, completion_callback=on_complete)
         self.jobs[number] = job
         self._write_record(job)
         print(f"[JOB {number}] started (PID {process.pid})")
         print(f"[JOB {number}] log: {log_path}")
+        if on_complete is not None:
+            threading.Thread(
+                target=self._wait_for_completion,
+                args=(job,),
+                name=f"agentic-job-{number}",
+                daemon=True,
+            ).start()
         return job
+
+    @staticmethod
+    def _wait_for_completion(job: Job) -> None:
+        """Run a transient completion action without delaying the shell prompt."""
+        if job.process is None or job.completion_callback is None:
+            return
+        code = job.process.wait()
+        try:
+            job.completion_callback(code)
+        except Exception as exc:  # desktop openers must not crash the shell
+            print(f"[DASHBOARD] Could not open dashboard: {exc}")
 
     def _refresh(self, job: Job) -> None:
         if job.finished is not None:
@@ -413,8 +493,19 @@ class AgenticShell:
         if len(parts) > 2:
             raise ValueError("usage: /dashboard [OUTPUT]")
         if len(parts) == 2:
-            argv.extend(["--output", str(Path(parts[1]).expanduser().resolve())])
-        self._launch(argv)
+            output = Path(parts[1]).expanduser().resolve()
+        else:
+            from agentic import state_paths
+            output = state_paths(self.repo, self.state_dir).dashboards / "dashboard.html"
+        argv.extend(["--output", str(output)])
+
+        def open_when_ready(code: int) -> None:
+            if code == 0:
+                _open_dashboard(output)
+            else:
+                print(f"[DASHBOARD] Generation failed (exit {code}); use /logs for details")
+
+        self._launch(argv, on_complete=open_when_ready)
 
     def show_processes(self, parts: list[str] | None = None) -> None:
         parts = parts or ["/ps"]
