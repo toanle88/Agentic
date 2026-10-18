@@ -6,11 +6,30 @@ Each issue or local-task run follows this sequence:
 
 1. Resolve the repository's base branch; GitHub mode also loads the GitHub issue.
 2. Create or reuse an isolated worktree for the issue or deterministic local task.
-3. Give the task and repository instructions to the configured developer provider.
-4. Run every configured test command.
-5. Stage and inspect the proposed patch.
-6. Ask an independent read-only configured reviewer for a structured verdict.
-7. Approve, retry with evidence, or preserve the worktree for resume.
+3. Ask an independent read-only configured investigator whether the issue is valid and actionable.
+4. Automatically continue when the investigation returns `pass`; pause on `reject` or `needs_input`.
+5. Give the task and repository instructions to the configured developer provider.
+6. Run every configured test command.
+7. Stage and inspect the proposed patch.
+8. Ask an independent read-only configured reviewer for a structured verdict.
+9. Approve, retry with evidence, or preserve the worktree for resume.
+
+## Issue investigation
+
+Investigation is a read-only gate before development. The investigator inspects
+the issue against the repository and records a structured result in the run
+logs as `investigation-*.json`:
+
+- `pass` means the issue is sufficiently valid and clear, so development starts automatically.
+- `reject` means the issue is incorrect, resolved, out of scope, or contradictory.
+- `needs_input` means the issue may be valid but needs clarification.
+
+For `reject` and `needs_input`, a foreground run shows the evidence and asks
+whether to continue. Type `continue` to explicitly override the gate; any
+other response stops the run, returns a nonzero exit status, and keeps the
+worktree. Background shell jobs do not have interactive input, so they stop
+safely with the same nonzero status and can be resumed from the foreground
+after inspecting their logs.
 
 The base checkout is not the development worktree. This keeps unfinished changes isolated from the user's main checkout.
 

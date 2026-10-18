@@ -336,13 +336,40 @@ class GitTest(unittest.TestCase):
         with (patch('agentic.preflight_test_commands'),
               patch('agentic.preflight_agent_settings'),
               patch('agentic.create_local_worktree', return_value=fake_run) as create,
+              patch('agentic._run_investigation', return_value={
+                  'status': 'pass', 'summary': 'Valid local task', 'findings': [],
+              }),
               patch('agentic.run_tests', return_value=(True, 'ok')),
               patch('agentic.develop', return_value=True) as develop):
-            agentic.execute_locked(args, self.repo)
+            self.assertEqual(agentic.execute_locked(args, self.repo), 0)
         task = create.call_args.args[2]
         self.assertTrue(task.is_local)
         self.assertIn('Add CSV export', task.body)
         self.assertEqual(develop.call_args.args[1], task)
+
+    def test_blocked_investigation_returns_nonzero_exit_status(self):
+        config_path = self.repo / 'local-agent-config.json'
+        config_path.write_text(json.dumps({
+            'task_source': 'local',
+            'test_commands': [[sys.executable, '-c', 'print("ok")']],
+        }))
+        args = agentic.build_parser().parse_args([
+            '--repo', str(self.repo), '--config', str(config_path),
+            '--state-dir', str(Path(self.tmp.name) / 'agentic-state'),
+            '--task', 'Investigate before implementing.',
+        ])
+        fake_run = agentic.Run(None, 'agent/task-investigate-aabbccddeeff', Path('/tmp/fake-worktree'))
+        with (patch('agentic.preflight_test_commands'),
+              patch('agentic.preflight_agent_settings'),
+              patch('agentic.create_local_worktree', return_value=fake_run),
+              patch('agentic._run_investigation', return_value={
+                  'status': 'reject', 'summary': 'Not actionable', 'findings': [],
+              }),
+              patch('agentic._investigation_allows_development', return_value=False),
+              patch('agentic.print_run_summary') as print_summary):
+            result = agentic.execute_locked(args, self.repo)
+        self.assertEqual(result, agentic.INVESTIGATION_BLOCKED_EXIT)
+        self.assertEqual(print_summary.call_args.args[1], 'INVESTIGATION BLOCKED')
 
 
 class PureTests(unittest.TestCase):
@@ -538,6 +565,90 @@ class PureTests(unittest.TestCase):
                 verdict = agentic.review(worktree, issue, folder, 'base')
         self.assertTrue(verdict['_tooling_error'])
         self.assertIn('wrong shape', verdict['summary'])
+
+    def test_issue_investigation_returns_structured_pass(self):
+        with tempfile.TemporaryDirectory() as temp:
+            worktree = Path(temp)
+            folder = worktree / 'logs'
+            folder.mkdir()
+            issue = agentic.Issue(21, 'Investigate', 'Confirm the behavior')
+            message = json.dumps({
+                'status': 'PASS', 'summary': 'The issue is actionable',
+                'findings': ['The relevant code path exists'],
+            })
+            def fake_run_agent(*args, **kwargs):
+                kwargs['output'].write_text(message)
+                return True, message
+            with patch('agentic.run_agent', side_effect=fake_run_agent) as run_agent:
+                verdict = agentic.investigate_issue(worktree, issue, folder)
+            self.assertEqual(verdict['status'], 'pass')
+            self.assertEqual(verdict['findings'], ['The relevant code path exists'])
+            self.assertTrue(run_agent.call_args.kwargs['readonly'])
+            self.assertTrue((folder / 'investigation-001.json').is_file())
+            self.assertTrue((folder / 'investigation-schema.json').is_file())
+
+    def test_issue_investigation_invalid_output_is_not_treated_as_reject(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / 'logs'
+            folder.mkdir()
+            with patch('agentic.run_agent', return_value=(True, 'not json')):
+                verdict = agentic.investigate_issue(
+                    Path(temp), agentic.Issue(22, 'Investigate', ''), folder,
+                )
+        self.assertTrue(verdict['_tooling_error'])
+        self.assertIn('invalid', verdict['summary'])
+
+    def test_cached_investigation_is_invalidated_when_issue_changes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / 'logs'
+            folder.mkdir()
+            issue = agentic.Issue(23, 'Original', 'Original body')
+            message = json.dumps({'status': 'pass', 'summary': 'Valid', 'findings': []})
+            with patch('agentic.run_agent', return_value=(True, message)):
+                agentic.investigate_issue(Path(temp), issue, folder)
+            self.assertIsNotNone(agentic._latest_investigation(folder, issue))
+            changed = agentic.Issue(23, 'Changed', 'Original body')
+            self.assertIsNone(agentic._latest_investigation(folder, changed))
+
+    def test_passed_investigation_continues_without_confirmation(self):
+        with patch('builtins.input') as input_mock:
+            self.assertTrue(agentic._investigation_allows_development({
+                'status': 'pass', 'summary': 'Valid', 'findings': [],
+            }))
+        input_mock.assert_not_called()
+
+    def test_rejected_investigation_requires_explicit_continue(self):
+        with patch('builtins.input', return_value='continue'):
+            self.assertTrue(agentic._investigation_allows_development({
+                'status': 'reject', 'summary': 'Not valid', 'findings': [],
+            }))
+        with patch('builtins.input', return_value='no'):
+            self.assertFalse(agentic._investigation_allows_development({
+                'status': 'reject', 'summary': 'Not valid', 'findings': [],
+            }))
+
+    def test_investigation_retry_recomputes_remaining_timeout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / 'logs'
+            folder.mkdir()
+            run = agentic.Run(None, 'agent/issue-24-aabbccdd', Path(temp) / 'worktree')
+            issue = agentic.Issue(24, 'Investigate retry', '')
+            config = {
+                'reviewer_agent': {'provider': 'codex'},
+                'effective_reviewer_timeout_seconds': 30,
+                'sandbox': None,
+            }
+            results = [
+                {'status': 'reject', 'summary': 'Invalid first result', 'findings': [], '_tooling_error': True},
+                {'status': 'pass', 'summary': 'Valid retry result', 'findings': []},
+            ]
+            with (patch('agentic._latest_investigation', return_value=None),
+                  patch('agentic._remaining_timeout', side_effect=[17, 4]) as remaining,
+                  patch('agentic.investigate_issue', side_effect=results) as investigate):
+                verdict = agentic._run_investigation(run, issue, config, folder, deadline=100.0)
+        self.assertEqual(verdict['status'], 'pass')
+        self.assertEqual(remaining.call_args_list, [call(100.0, 30), call(100.0, 30)])
+        self.assertEqual([item.kwargs['timeout'] for item in investigate.call_args_list], [17, 4])
 
     def test_preflight_rejects_missing_test_dependency(self):
         with tempfile.TemporaryDirectory() as dirname:
@@ -1390,6 +1501,11 @@ class PureTests(unittest.TestCase):
             state_dir=agentic.default_state_dir(),
         )
 
+    def test_main_propagates_runner_exit_status(self):
+        with patch('agentic.execute', return_value=agentic.INVESTIGATION_BLOCKED_EXIT) as execute:
+            self.assertEqual(agentic.main(['--issue', '42']), agentic.INVESTIGATION_BLOCKED_EXIT)
+        execute.assert_called_once()
+
 
 if __name__ == '__main__':
     unittest.main()
@@ -1413,6 +1529,9 @@ class ResumeIntegrationTests(GitTest):
               patch('agentic.check_existing_pr', return_value=[]),
               patch('agentic.create_worktree') as create_new,
               patch('agentic.refresh_base') as refresh_base,
+              patch('agentic._run_investigation', return_value={
+                  'status': 'pass', 'summary': 'Valid issue', 'findings': [],
+              }),
               patch('agentic.preflight_test_commands'),
               patch('agentic.preflight_agent_settings'),
               patch('agentic.develop', return_value=True) as develop):
