@@ -102,6 +102,44 @@ class GitTest(unittest.TestCase):
         self.assertEqual(len(digest), 64)
         self.assertEqual(summary.count('file-'), 11)
 
+    def test_manual_approval_records_exact_patch_and_reason(self):
+        run = agentic.create_worktree(self.repo, 'main', 19)
+        (run.worktree / 'fix.py').write_text('fixed=True\n')
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(19, 'Manual completion', 'Resolve the issue')
+        approval = agentic.record_manual_approval(
+            run, issue, 'main', {'max_files': 10}, folder,
+            'Human reviewed; the remaining finding is outside this issue',
+        )
+        loaded = agentic.load_manual_approval(folder)
+        self.assertEqual(loaded, approval)
+        self.assertEqual(approval['status'], 'approved')
+        self.assertEqual(approval['branch'], run.branch)
+        self.assertEqual(len(approval['patch_digest']), 64)
+        self.assertIn('outside this issue', approval['reason'])
+        defaulted = agentic.record_manual_approval(
+            run, issue, 'main', {'max_files': 10}, folder, '  ',
+        )
+        self.assertEqual(defaulted['reason'], 'Manually marked done by user')
+
+    def test_manual_publish_rejects_patch_changed_after_mark_done(self):
+        run = agentic.create_worktree(self.repo, 'main', 20)
+        (run.worktree / 'fix.py').write_text('before\n')
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(20, 'Changed manual completion', 'Resolve the issue')
+        config = {
+            'test_commands': [[sys.executable, '-c', 'print("ok")']],
+            'max_files': 10,
+        }
+        approval = agentic.record_manual_approval(
+            run, issue, 'main', config, folder, 'Human approved the current patch',
+        )
+        (run.worktree / 'fix.py').write_text('after\n')
+        with self.assertRaisesRegex(RuntimeError, 'Patch changed since --mark-done'):
+            agentic.verify_manual_approval(
+                run, issue, 'main', config, folder, approval,
+            )
+
     def test_cleanup_previews_and_removes_only_clean_worktrees(self):
         run = agentic.create_worktree(self.repo, 'main', 18)
         self.assertEqual(agentic.cleanup(self.repo, issue=18), 0)
@@ -224,6 +262,48 @@ class GitTest(unittest.TestCase):
         self.assertIn('main', pr_command)
         self.assertIn('Independent Gemini review', pr_command[-1])
 
+    def test_publish_uses_manual_approval_without_repeating_reviewer(self):
+        run = agentic.create_worktree(self.repo, 'main', 33)
+        (run.worktree / 'fix.py').write_text('fixed=True\n')
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(33, 'Manual publish', 'Make the fix')
+        config = {
+            'test_commands': [[sys.executable, '-c', 'print("ok")']],
+            'max_files': 10,
+        }
+        approval = agentic.record_manual_approval(
+            run, issue, 'main', config, folder, 'Human accepted the remaining scope decision',
+        )
+        commands = []
+
+        def fake_command(argv, cwd, **kwargs):
+            commands.append(argv)
+            if argv[:4] == ['git', 'diff', '--cached', '--quiet']:
+                return CompletedProcess(argv, 1, stdout='')
+            return CompletedProcess(argv, 0, stdout='https://github.test/pr/33')
+
+        with (patch('agentic.check_existing_pr', return_value=[]),
+              patch('agentic.verify_manual_approval', return_value=(
+                  True, 'tests passed',
+                  {'approved': True, 'summary': 'Manual', 'findings': [], 'manual': True},
+                  approval['patch_digest'], approval['base_sha'],
+              )) as manual_verify,
+              patch('agentic.verify_and_review') as automated_verify,
+              patch('agentic.prepare_patch', return_value=(
+                  approval['base_sha'], approval['patch_digest'], 'summary',
+              )),
+              patch('agentic.git'),
+              patch('agentic.command', side_effect=fake_command),
+              patch('builtins.input', return_value='publish')):
+            agentic.publish(
+                run, issue, 'owner/repo', 'main', config, folder,
+                manual_approval=approval,
+            )
+        manual_verify.assert_called_once()
+        automated_verify.assert_not_called()
+        pr_command = next(argv for argv in commands if argv[:3] == ['gh', 'pr', 'create'])
+        self.assertIn('Manual completion approval', pr_command[-1])
+
     def test_publish_skips_existing_pr_and_rejects_closed_issue(self):
         run = agentic.create_worktree(self.repo, 'main', 35)
         folder = agentic.logs_path(self.repo, run)
@@ -305,6 +385,7 @@ class GitTest(unittest.TestCase):
             self.assertTrue(agentic.develop(run, issue, 'main', config, folder))
         self.assertEqual(run_agent.call_count, 2)
         second_prompt = run_agent.call_args_list[1].args[1]
+        self.assertIn('first', second_prompt)
         self.assertIn('Missing regression test', second_prompt)
         self.assertIn('Add a regression test', second_prompt)
 
@@ -1539,6 +1620,14 @@ class PureTests(unittest.TestCase):
         self.assertIsNone(args.command)
         self.assertEqual(args.issue, 42)
         self.assertTrue(args.publish)
+        manual = agentic.build_parser().parse_args([
+            '--issue', '42', '--mark-done', '--reason', 'human reviewed',
+        ])
+        self.assertTrue(manual.mark_done)
+        self.assertEqual(manual.reason, 'human reviewed')
+        self.assertIsNone(agentic.build_parser().parse_args([
+            '--issue', '42', '--mark-done',
+        ]).reason)
         self.assertEqual(Path(args.repo), agentic.SCRIPT_DIR)
         self.assertIsNone(args.config)
         self.assertEqual(agentic.build_parser().parse_args(['help']).command, 'help')

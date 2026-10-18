@@ -27,9 +27,10 @@ from typing import Any, Callable, TextIO, cast
 HELP = """Commands:
 
   Run
-    /run ISSUE [--profile fast|slow] [--review|--publish|--new]
+    /run ISSUE [--profile fast|slow] [--review|--publish|--mark-done|--new]
+                                      [--reason "why"] with --mark-done
                                       start a background job
-    /run [--profile fast|slow] [--review|--publish|--new]
+    /run [--profile fast|slow] [--review|--publish|--mark-done|--new]
                                       local mode: paste a task, finish with /done
 
   Inspect
@@ -76,7 +77,7 @@ SHELL_COMMANDS = (
     "/?",
 )
 SHELL_OPTIONS = {
-    "/run": ("--profile", "--review", "--publish", "--new"),
+    "/run": ("--profile", "--review", "--publish", "--mark-done", "--reason", "--new"),
     "/ps": ("--all",),
     "/status": ("--json",),
 }
@@ -97,11 +98,13 @@ OPTION_DESCRIPTIONS: dict[str, str] = {
     "--profile": "execution profile (fast or slow)",
     "--review": "request read-only review",
     "--publish": "open draft PR on success",
+    "--mark-done": "record human completion for the current patch",
+    "--reason": "reason recorded with manual completion",
     "--new": "start fresh worktree, ignoring cached state",
     "--all": "show jobs across all shell sessions",
     "--json": "output status in JSON format",
-    "fast": "run lightweight checks and fast model",
-    "slow": "run comprehensive checks and full reasoning",
+    "fast": "run the configured fast checks",
+    "slow": "run fast checks plus configured slow checks",
 }
 
 
@@ -132,10 +135,9 @@ def _completion_candidates(line: str, cursor: int | None = None,
 
     current = "" if trailing_space else tokens[-1]
     previous = tokens[-1] if trailing_space else (tokens[-2] if len(tokens) > 1 else "")
-    if command == "/run" and (previous == "--profile" or current == "--profile"):
+    if command == "/run" and previous == "--profile":
         values = ("fast", "slow")
-        partial = "" if current == "--profile" else current
-        return [value for value in values if value.startswith(partial)]
+        return [value for value in values if value.startswith(current)]
 
     if command in {"/logs", "/stop"}:
         values = [str(number) for number in sorted(job_numbers)]
@@ -1013,29 +1015,32 @@ def _parse_job_command(parts: list[str]) -> tuple[str | None, list[str]]:
     elif len(parts) == 1 or parts[1].startswith("--"):
         flags = parts[1:]
     else:
-        raise ValueError("usage: /run ISSUE [--profile fast|slow] [--review|--publish|--new]")
-    allowed = {"--review", "--publish", "--new", "--profile", "fast", "slow"}
-    unknown = [flag for flag in flags if flag not in allowed]
-    if unknown:
-        raise ValueError(f"unknown /run option: {unknown[0]}")
-    if "--profile" not in flags and any(flag in {"fast", "slow"} for flag in flags):
-        raise ValueError("usage: /run ISSUE [--profile fast|slow] [--review|--publish|--new]")
-    if "--profile" in flags:
-        index = flags.index("--profile")
-        if index + 1 >= len(flags) or flags[index + 1] not in {"fast", "slow"}:
-            raise ValueError("usage: /run ISSUE [--profile fast|slow] [--review|--publish|--new]")
-        if any(flag in {"fast", "slow"} for flag in flags[:index]):
-            raise ValueError("usage: /run ISSUE [--profile fast|slow] [--review|--publish|--new]")
-        if any(
-            flag in {"fast", "slow"}
-            for flag in flags[index + 2:]
-            if flag not in {"--review", "--publish", "--new"}
-        ):
-            raise ValueError("usage: /run ISSUE [--profile fast|slow] [--review|--publish|--new]")
+        raise ValueError("usage: /run ISSUE [--profile fast|slow] [--review|--publish|--mark-done|--new]")
+    value_options = {"--profile", "--reason"}
+    boolean_options = {"--review", "--publish", "--mark-done", "--new"}
+    index = 0
+    while index < len(flags):
+        flag = flags[index]
+        if flag in value_options:
+            if index + 1 >= len(flags) or flags[index + 1].startswith("--"):
+                raise ValueError(f"{flag} requires a value")
+            if flag == "--profile" and flags[index + 1] not in {"fast", "slow"}:
+                raise ValueError("--profile must be fast or slow")
+            index += 2
+            continue
+        if flag not in boolean_options:
+            raise ValueError(f"unknown /run option: {flag}")
+        index += 1
     if flags.count("--profile") > 1:
         raise ValueError("/run accepts --profile only once")
+    if flags.count("--reason") > 1:
+        raise ValueError("/run accepts --reason only once")
     if "--review" in flags and "--publish" in flags:
         raise ValueError("/run cannot combine --review and --publish")
+    if "--mark-done" in flags and "--publish" in flags:
+        raise ValueError("/run cannot combine --mark-done and --publish")
+    if "--mark-done" not in flags and "--reason" in flags:
+        raise ValueError("/run --reason requires --mark-done")
     return issue, flags
 
 
@@ -1255,6 +1260,12 @@ class AgenticShell:
         argv.extend(flags)
         return argv
 
+    def _run_foreground(self, argv: list[str]) -> None:
+        """Run a command with the shell's terminal attached for confirmation."""
+        result = subprocess.run(argv, cwd=self.repo, check=False)
+        if result.returncode:
+            raise RuntimeError(f"command failed with exit {result.returncode}")
+
     def _task_source(self) -> str:
         config_path = self.config or (self.repo / "agent_config.json")
         try:
@@ -1294,7 +1305,11 @@ class AgenticShell:
         argv = self._runner_args(issue, flags)
         if task_file:
             argv.extend(["--task-file", str(task_file)])
-        self._launch(argv)
+        if "--publish" in flags:
+            print("[PUBLISH] Running in the foreground so publication confirmation can be entered")
+            self._run_foreground(argv)
+        else:
+            self._launch(argv)
 
     def run_dashboard(self, parts: list[str]) -> None:
         dashboard = self.runner.with_name("agentic_dashboard.py")
@@ -1331,8 +1346,9 @@ class AgenticShell:
             print("No matching jobs. Use /ps --all to include previous shell sessions.")
             return
         print("ID  STATUS      PID     AGE  SESSION      COMMAND")
-        for job in sorted(jobs, key=lambda job: not job.running):
-            status = "RUNNING" if job.running else f"EXIT {job.exit_code if job.exit_code not in (None, -1) else '?'}"
+        states = [(job, job.running) for job in jobs]
+        for job, running in sorted(states, key=lambda item: (not item[1], item[0].pid, item[0].number)):
+            status = "RUNNING" if running else f"EXIT {job.exit_code if job.exit_code not in (None, -1) else '?'}"
             session = "current" if job.session_id == self.session_id else job.session_id[:8]
             print(f"{job.number:<3} {status:<10} {job.pid:<7} {job.elapsed:>3}s  {session:<8} {_display_command(job.argv)}")
 

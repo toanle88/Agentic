@@ -38,9 +38,10 @@ Available commands:
 
 ```text
 /run ISSUE [--profile fast|slow]       Start a background job
-     [--review|--publish|--new]
+     [--review|--publish|--mark-done|--new]
+     [--reason "why"] with --mark-done
 /run [--profile fast|slow]             Local mode: paste task, finish with /done
-     [--review|--publish|--new]
+     [--review|--publish|--mark-done|--new]
 /ps [--all]                            Show current or persisted job status
 /logs JOB|PID [LINES]                  Follow a running job or show recent output
 /stop JOB                              Stop a running job
@@ -65,7 +66,7 @@ escapes with zero third-party dependencies.
 the same GitHub CLI-backed issue listing as `agentic --list` and does not create
 a background job.
 
-The default `fast` profile uses `test_commands`. Use `/run 119 --profile slow` to run the fast checks followed by `slow_test_commands`.
+The default `fast` profile runs the configured `test_commands`. Use `/run 119 --profile slow` to run those checks followed by the configured `slow_test_commands`. Profiles select which checks run; they do not select the provider model or reasoning setting.
 
 GitHub issue mode is the default. If `task_source` is `local`, use `/run`
 without an issue number, paste the requirements, and finish with `/done`.
@@ -110,6 +111,27 @@ The developer does not commit, push, or open pull requests. After tests and revi
 ```bash
 agentic --issue 119 --publish
 ```
+
+If the automated review is repeatedly rejecting a finding that a human has
+explicitly judged out of scope, mark the existing worktree complete with an
+auditable reason, then publish normally:
+
+```bash
+agentic --issue 119 --mark-done --reason "Human reviewed; finding is outside this issue"
+agentic --issue 119 --publish
+```
+
+`--mark-done` does not close the GitHub issue and does not publish anything. It
+records the current patch digest outside the repository. The `--reason` option
+is optional; when omitted, Agentic records `Manually marked done by user`.
+Publication still
+runs the configured tests, refuses any patch changed after the mark, asks for
+the exact `publish` confirmation, and opens only a draft PR. If the code or
+issue changes, mark it done again with a new reason.
+
+In the interactive shell, `/run ... --publish` runs in the foreground so the
+shell can receive the exact publication confirmation. Other `/run` operations
+remain background jobs.
 
 For a local task, use `agentic --task-file task.md --publish` or resume from
 the saved task file created by the interactive shell.

@@ -83,6 +83,12 @@ class ShellTests(unittest.TestCase):
             agentic_shell._parse_job_command(['/run', '119', '--profile', 'slow']),
             ('119', ['--profile', 'slow']),
         )
+        self.assertEqual(
+            agentic_shell._parse_job_command([
+                '/run', '119', '--mark-done', '--reason', 'human reviewed',
+            ]),
+            ('119', ['--mark-done', '--reason', 'human reviewed']),
+        )
         with self.assertRaises(ValueError):
             agentic_shell._parse_job_command(['/run', '119', '--review', '--publish'])
         with self.assertRaises(ValueError):
@@ -110,6 +116,14 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(
             agentic_shell._completion_candidates('/run --profile s'),
             ['slow'],
+        )
+        self.assertEqual(
+            agentic_shell._completion_candidates('/run --profile'),
+            ['--profile'],
+        )
+        self.assertEqual(
+            agentic_shell._completion_candidates('/run --profile '),
+            ['fast', 'slow'],
         )
         self.assertEqual(
             agentic_shell._completion_candidates('/logs ', job_numbers=(2, 1)),
@@ -149,8 +163,8 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(run_options['--profile'], 'execution profile (fast or slow)')
 
         profiles = dict(agentic_shell._completion_items('/run --profile '))
-        self.assertEqual(profiles.get('fast'), 'run lightweight checks and fast model')
-        self.assertEqual(profiles.get('slow'), 'run comprehensive checks and full reasoning')
+        self.assertEqual(profiles.get('fast'), 'run the configured fast checks')
+        self.assertEqual(profiles.get('slow'), 'run fast checks plus configured slow checks')
 
     def test_interactive_input_tab_completes_candidate(self):
         keys = [('CHAR', '/'), ('CHAR', 'r'), ('TAB', '\t'), ('ENTER', '\n')]
@@ -486,6 +500,35 @@ class ShellTests(unittest.TestCase):
             self.assertIn(str(task), argv)
             self.assertIn('--profile', argv)
             self.assertIn('slow', argv)
+
+    def test_shell_runs_publish_in_foreground_for_confirmation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), session_dir=root / 'logs'
+            )
+            result = type('Result', (), {'returncode': 0})()
+            with (patch('agentic_shell.subprocess.run', return_value=result) as run,
+                  patch.object(shell, '_launch') as launch,
+                  patch('sys.stdout', new_callable=StringIO) as output):
+                shell.run_issue(['/run', '119', '--publish'])
+            launch.assert_not_called()
+            run.assert_called_once()
+            argv = run.call_args.args[0]
+            self.assertIn('--publish', argv)
+            self.assertNotIn('stdin', run.call_args.kwargs)
+            self.assertIn('foreground', output.getvalue())
+
+    def test_shell_reports_foreground_publish_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), session_dir=root / 'logs'
+            )
+            result = type('Result', (), {'returncode': 1})()
+            with patch('agentic_shell.subprocess.run', return_value=result):
+                with self.assertRaisesRegex(RuntimeError, 'exit 1'):
+                    shell.run_issue(['/run', '119', '--publish'])
 
     def test_shell_stop_and_log_tail_handle_running_and_missing_jobs(self):
         with tempfile.TemporaryDirectory() as temp:
