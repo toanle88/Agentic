@@ -38,7 +38,10 @@ codex login
 
 ## Installation
 
-On Debian, Ubuntu, or WSL, install with `pipx`:
+`main` is protected. Changes to Agentic itself are made through pull requests; CI runs on every pull request and the `main` branch.
+
+On Debian, Ubuntu, or WSL, install the CLI once with `pipx`; target repositories
+do not need copies of the Python files:
 
 ```bash
 sudo apt update
@@ -88,7 +91,18 @@ agentic doctor
 By default, worktrees, logs, shell records, and dashboards live under the user-level Agentic state directory, not beside the target repository. In WSL, use a shared Windows-mounted location when you need to open worktrees with Windows Git:
 
 ```bash
-agentic --state-dir /mnt/d/Dev/AgenticState --issue 119
+agentic --state-dir /path/to/shared-agentic-state --issue 119
+agentic --help                           # show all runner options
+agentic --version                        # show the installed package version
+agentic help                             # equivalent help command
+agentic shell                            # open the background-job shell
+agentic dashboard                        # generate the HTML dashboard
+agentic --list                           # list open GitHub issues
+agentic --runs                           # list existing worktrees
+agentic --issue 119                      # create or resume issue 119
+agentic --issue 119 --review              # rerun tests and review only
+agentic --issue 119 --publish             # validate, then offer draft-PR publication
+agentic --issue 119 --new                 # explicitly create a second worktree
 ```
 
 Start the interactive shell:
@@ -148,6 +162,19 @@ Running the same issue again resumes its existing worktree. Use `--new` only whe
 | [Troubleshooting](docs/troubleshooting.md) | Missing tools, failed checks, repeated rejections, and WSL/Git issues. |
 | [Architecture](docs/architecture.md) | Components, lifecycle, filesystem layout, and safety boundaries. |
 | [Development](docs/development.md) | Local development, tests, CI, releases, and contribution workflow. |
+
+## Development and releases
+
+Run the local checks with:
+
+```bash
+python -m unittest discover -s tests -q
+```
+
+Release tags use semantic versioning, such as `v0.1.1`. The release workflow
+verifies the tag against `agentic --version`, builds the package artifacts, and
+creates a GitHub release. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
+pull-request and release process.
 
 ## Safety summary
 
