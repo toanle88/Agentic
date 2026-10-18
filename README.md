@@ -13,19 +13,17 @@ The target repository must have an `origin` remote and a GitHub default branch.
 
 ## Quick start
 
-The commands below use WSL paths. Windows `D:\Dev\Projects\Tally` is `/mnt/d/Dev/Projects/Tally` in WSL.
-
 ```bash
-python /mnt/d/dev/projects/agentic/agentic.py \
-  --repo /mnt/d/Dev/Projects/Tally \
+python /path/to/agentic.py \
+  --repo /path/to/project \
   --issue 119
 ```
 
-The runner reads `/mnt/d/Dev/Projects/Tally/agent_config.json` by default. To use another file:
+The runner reads `agent_config.json` from the target repository by default. To use another file:
 
 ```bash
-python /mnt/d/dev/projects/agentic/agentic.py \
-  --repo /mnt/d/Dev/Projects/Tally \
+python /path/to/agentic.py \
+  --repo /path/to/project \
   --config /path/to/agent_config.json \
   --issue 119
 ```
@@ -34,7 +32,7 @@ If the target configuration is missing, the runner stops before starting Codex. 
 
 ## Configuration
 
-Create `agent_config.json` in the target project. For Tally, use the project's actual Go checks:
+Create `agent_config.json` in the target project. Replace the example test command with the project's actual checks:
 
 ```json
 {
@@ -83,11 +81,11 @@ The terminal view shows a compact run banner, colored status labels when output 
 
 ## Worktrees and logs
 
-For a project named `Tally`, worktrees and logs are created next to the checkout:
+For a project named `my-project`, worktrees and logs are created next to the checkout:
 
 ```text
-../.Tally-agent-worktrees/issue-119-XXXXXXXX/
-../.Tally-agent-runs/agent-issue-119-XXXXXXXX/
+../.my-project-agent-worktrees/issue-119-XXXXXXXX/
+../.my-project-agent-runs/agent-issue-119-XXXXXXXX/
 ```
 
 The worktree is preserved after failure, timeout, or exhausted retries. Logs contain developer/reviewer progress, test output, and the final review result.
@@ -102,7 +100,7 @@ Manual repair from WSL, after upgrading both Git installations:
 
 ```bash
 git config worktree.useRelativePaths true
-git worktree repair --relative-paths /mnt/d/Dev/Projects/.Tally-agent-worktrees/issue-119-5802a6ff
+git worktree repair --relative-paths /path/to/.my-project-agent-worktrees/issue-119-XXXXXXXX
 ```
 
 ## Safety boundaries
