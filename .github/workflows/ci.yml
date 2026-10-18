@@ -48,3 +48,13 @@ jobs:
         run: python -m pip install --upgrade build
       - name: Build sdist and wheel
         run: python -m build
+      - name: Install wheel in a clean environment
+        run: |
+          python -m venv "$RUNNER_TEMP/agentic-smoke"
+          "$RUNNER_TEMP/agentic-smoke/bin/python" -m pip install --no-deps dist/*.whl
+          "$RUNNER_TEMP/agentic-smoke/bin/agentic" --version
+          "$RUNNER_TEMP/agentic-smoke/bin/agentic" --help
+          "$RUNNER_TEMP/agentic-smoke/bin/agentic-shell" --help
+          "$RUNNER_TEMP/agentic-smoke/bin/agentic-dashboard" --help
+          "$RUNNER_TEMP/agentic-smoke/bin/agentic" init --help
+          "$RUNNER_TEMP/agentic-smoke/bin/agentic" doctor --help

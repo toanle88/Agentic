@@ -13,6 +13,8 @@ import re
 from pathlib import Path
 from typing import Any, Iterable
 
+from agentic import default_state_dir, legacy_runs_dir, state_paths
+
 
 RUN_NAME = re.compile(r"^agent-issue-(?P<issue>\d+)-(?P<token>[A-Za-z0-9_-]+)$")
 NUMBERED_FILE = re.compile(r"^(?P<prefix>.+)-(?P<number>\d+)(?P<suffix>\.[^.]+)$")
@@ -20,8 +22,17 @@ MAX_TEXT = 5_000
 MAX_FILES_PER_RUN = 24
 
 
-def default_logs_root(repo: Path) -> Path:
-    return repo.parent / f".{repo.name}-agent-runs"
+def default_logs_root(repo: Path, state_dir: Path | None = None) -> Path:
+    return state_paths(repo, state_dir).runs
+
+
+def collect_runs_from_roots(logs_roots: Iterable[Path]) -> list[dict[str, Any]]:
+    """Merge centralized and legacy logs, preferring the centralized snapshot."""
+    merged: dict[str, dict[str, Any]] = {}
+    for root in logs_roots:
+        for run in collect_runs(root):
+            merged.setdefault(run["id"], run)
+    return sorted(merged.values(), key=lambda run: (run["last_activity"], run["id"]), reverse=True)
 
 
 def _numbered_files(folder: Path, prefixes: Iterable[str]) -> list[Path]:
@@ -103,8 +114,32 @@ def _review(folder: Path) -> tuple[dict[str, Any], Path | None]:
     # review document.
     path = _latest(path for path in _numbered_files(folder, ["review"])
                    if path.suffix == ".json")
+    history_path = folder / "review-history.json"
+    recurring: list[dict[str, Any]] = []
+    try:
+        history = json.loads(history_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        history = []
+    counts: dict[str, dict[str, Any]] = {}
+    if isinstance(history, list):
+        for entry in history:
+            if not isinstance(entry, dict):
+                continue
+            for item in entry.get("findings", []):
+                if not isinstance(item, dict) or not isinstance(item.get("fingerprint"), str):
+                    continue
+                key = item["fingerprint"]
+                current = counts.setdefault(key, {
+                    "fingerprint": key, "count": 0,
+                    "severity": str(item.get("severity", "UNSPECIFIED")),
+                    "text": str(item.get("text", "")),
+                })
+                current["count"] += 1
+    recurring = sorted((item for item in counts.values() if item["count"] > 1),
+                       key=lambda item: (-item["count"], item["fingerprint"]))
     if path is None:
-        return {"status": "not-run", "summary": "No review result recorded.", "findings": []}, None
+        return {"status": "not-run", "summary": "No review result recorded.", "findings": [],
+                "recurring": recurring}, None
     raw = _parse_json_object(_read(path, 100_000))
     if raw is None:
         try:
@@ -117,6 +152,7 @@ def _review(folder: Path) -> tuple[dict[str, Any], Path | None]:
             "status": "invalid",
             "summary": f"Review output is not valid JSON: {error}",
             "findings": [],
+            "recurring": recurring,
         }, path
     approved = raw.get("approved") is True
     findings = raw.get("findings", [])
@@ -126,6 +162,7 @@ def _review(folder: Path) -> tuple[dict[str, Any], Path | None]:
         "status": "approved" if approved else "rejected",
         "summary": str(raw.get("summary", "No review summary.")),
         "findings": [str(item) for item in findings],
+        "recurring": recurring,
         "file": path.name,
         "updated": _timestamp(path),
     }, path
@@ -378,10 +415,12 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
       const detail = document.querySelector("#detail");
       if (!run) {{ detail.innerHTML = `<div class="empty">No run selected.</div>`; return; }}
       const findings = run.review.findings?.length ? `<ul class="findings">${{run.review.findings.map(item => `<li>${{esc(item)}}</li>`).join("")}}</ul>` : `<p class="subtle">No findings recorded.</p>`;
+      const recurring = run.review.recurring?.length ? `<section class="callout rejected"><strong>Recurring findings</strong><ul class="findings">${{run.review.recurring.map(item => `<li>[${{esc(item.severity)}}] ${{esc(item.text)}} <span class="meta">(${{esc(item.count)}} reviews)</span></li>`).join("")}}</ul></section>` : "";
       const files = run.files.length ? run.files.map(file => `<details><summary>${{esc(file.kind)}} · ${{esc(file.name)}} <span class="meta">${{esc(file.updated)}}</span></summary><pre>${{esc(file.content)}}</pre></details>`).join("") : `<div class="empty">No log files recorded.</div>`;
       detail.innerHTML = `<div class="detail-top"><div><h2>Issue #${{esc(run.issue)}}</h2><div class="branch">${{esc(run.branch)}}</div></div>${{badge(run.status)}}</div>
         <div class="meta" style="margin-top:12px"><span>${{esc(run.attempts)}} developer attempt${{run.attempts === 1 ? "" : "s"}}</span><span>Last activity: ${{esc(run.last_activity)}}</span><span>${{esc(run.file_count)}} log files</span></div>
         <section class="callout ${{esc(run.review.status)}}"><strong>Review · ${{esc(labels[run.review.status] || run.review.status)}}</strong><p>${{esc(run.review.summary)}}</p>${{findings}}</section>
+        ${{recurring}}
         <h3>Tests · ${{esc(run.tests.status)}}</h3><pre>${{esc(run.tests.summary)}}</pre>
         <h3>Latest developer result</h3><pre>${{esc(run.developer.summary)}}</pre>
         <h3>Run logs</h3><div class="file-list">${{files}}</div>`;
@@ -401,8 +440,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", nargs="?", choices=("help",), help="Show this help message and exit")
     parser.add_argument("--repo", type=Path, default=Path.cwd(), help="Target repository root")
-    parser.add_argument("--logs", type=Path, help="Run-log directory (default: sibling .<repo>-agent-runs)")
-    parser.add_argument("--output", type=Path, help="HTML output path (default: sibling .<repo>-agent-dashboard.html)")
+    parser.add_argument("--logs", type=Path, help="Run-log directory (default: centralized Agentic state)")
+    parser.add_argument("--state-dir", type=Path, help="Agentic state root (shared /mnt path recommended for WSL/Windows)")
+    parser.add_argument("--output", type=Path, help="HTML output path (default: centralized Agentic state)")
     return parser
 
 
@@ -413,10 +453,16 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 0
     repo = args.repo.resolve()
-    logs_root = (args.logs or default_logs_root(repo)).resolve()
-    output = (args.output or repo.parent / f".{repo.name}-agent-dashboard.html").resolve()
+    state_dir = (args.state_dir or default_state_dir()).expanduser().resolve()
+    logs_root = (args.logs or default_logs_root(repo, state_dir)).resolve()
+    roots = [logs_root]
+    if args.logs is None:
+        legacy = legacy_runs_dir(repo).resolve()
+        if legacy != logs_root:
+            roots.append(legacy)
+    output = (args.output or state_paths(repo, state_dir).dashboards / "dashboard.html").resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
-    runs = collect_runs(logs_root)
+    runs = collect_runs_from_roots(roots)
     output.write_text(render_dashboard(runs, repo.name, logs_root.name), encoding="utf-8")
     print(f"Dashboard written to {output}")
     print(f"Runs found: {len(runs)}")

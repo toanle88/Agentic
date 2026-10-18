@@ -1,9 +1,10 @@
 {
   "test_commands": [
-    ["python", "-m", "pytest", "-q"]
+    ["python", "-m", "unittest", "discover", "-s", "tests", "-q"]
   ],
+  "slow_test_commands": [],
   "max_retries": 3,
-  "max_files": 30,
+  "max_files": null,
   "codex_model": null,
   "codex_reasoning_effort": null,
   "codex_timeout_seconds": null,

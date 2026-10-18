@@ -43,6 +43,15 @@ class GitTest(unittest.TestCase):
         self.assertFalse((self.repo / 'new.py').exists())
         self.assertEqual(agentic.pending_files(run.worktree), ['new.py'])
 
+    def test_central_state_dir_keeps_runtime_artifacts_outside_repository(self):
+        state_dir = self.repo.parent / 'agentic-state'
+        run = agentic.create_worktree(self.repo, 'main', 43, state_dir)
+        self.assertTrue(run.worktree.is_relative_to(state_dir))
+        folder = agentic.logs_path(self.repo, run, state_dir)
+        self.assertTrue(folder.is_relative_to(state_dir))
+        self.assertFalse(run.worktree.is_relative_to(self.repo.parent / f'.{self.repo.name}-agent-worktrees'))
+        agentic.cleanup(self.repo, issue=43, confirm=True, state_dir=state_dir)
+
     def test_repository_lock_blocks_concurrent_mutating_run(self):
         with agentic.repository_lock(self.repo):
             with self.assertRaisesRegex(RuntimeError, 'already active'):
@@ -71,6 +80,13 @@ class GitTest(unittest.TestCase):
         self.assertTrue(base)
         self.assertEqual(len(digest), 64)
         self.assertEqual(summary.count('file-'), 11)
+
+    def test_cleanup_previews_and_removes_only_clean_worktrees(self):
+        run = agentic.create_worktree(self.repo, 'main', 18)
+        self.assertEqual(agentic.cleanup(self.repo, issue=18), 0)
+        self.assertTrue(run.worktree.is_dir())
+        self.assertEqual(agentic.cleanup(self.repo, issue=18, confirm=True), 0)
+        self.assertFalse(run.worktree.exists())
 
     def test_sensitive_files_refused_before_index(self):
         run = agentic.create_worktree(self.repo, 'main', 9)
@@ -211,6 +227,54 @@ class PureTests(unittest.TestCase):
             }))
             self.assertEqual(agentic.load_resume_feedback(folder), '')
 
+    def test_review_result_parser_accepts_markdown_wrapped_json(self):
+        parsed = agentic.parse_review_result(
+            'Review result:\n```json\n'
+            '{"approved": true, "summary": "Looks good", "findings": []}\n'
+            '```'
+        )
+        self.assertEqual(parsed["approved"], True)
+        self.assertEqual(parsed["findings"], [])
+
+    def test_repeated_review_findings_are_fingerprinted_and_reported(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            first = {
+                'approved': False, 'summary': 'Fix it',
+                'findings': ['[BLOCKER] Production wiring is unavailable at cmd/api/runtime.go:82'],
+            }
+            second = {
+                'approved': False, 'summary': 'Still broken',
+                'findings': ['BLOCKER — Production wiring is unavailable at cmd/api/runtime.go:119'],
+            }
+            agentic.record_review_findings(folder, first)
+            result = agentic.record_review_findings(folder, second)
+            self.assertEqual(result['_finding_analysis'][0]['severity'], 'BLOCKER')
+            self.assertEqual(len(result['_repeated_findings']), 1)
+            self.assertIn('Recurring review findings', agentic.review_history_feedback(folder))
+
+    def test_init_detects_go_and_ignores_personal_config(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            sh('git', 'init', '--initial-branch=main', str(repo), cwd=repo.parent)
+            (repo / 'go.mod').write_text('module example.test/demo\n')
+            self.assertEqual(agentic.init_repository(repo, create_agents=True), 0)
+            config = agentic.load_config(repo / 'agent_config.json')
+            self.assertEqual(config['test_commands'], [['go', 'test', './...']])
+            self.assertIn('agent_config.json', (repo / '.gitignore').read_text())
+            self.assertTrue((repo / 'AGENTS.md').is_file())
+
+    def test_invalid_review_result_is_marked_as_tooling_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            worktree = Path(temp)
+            folder = worktree / 'logs'
+            folder.mkdir()
+            issue = agentic.Issue(19, 'Review', '')
+            with patch('agentic.run_codex', return_value=(True, 'not json')):
+                verdict = agentic.review(worktree, issue, folder, 'base')
+        self.assertTrue(verdict['_tooling_error'])
+        self.assertFalse(verdict['approved'])
+
     def test_preflight_rejects_missing_test_dependency(self):
         with tempfile.TemporaryDirectory() as dirname:
             with self.assertRaisesRegex(RuntimeError, 'module.*not installed'):
@@ -308,9 +372,10 @@ class PureTests(unittest.TestCase):
 
     def test_config_validation(self):
         folder = Path(__file__).resolve().parents[1]
-        config = agentic.load_config(folder / 'agent_config.json')
+        config = agentic.load_config(folder / 'agent_config.example.json')
         self.assertEqual(config['max_retries'], 3)
-        self.assertEqual(config['max_files'], 30)
+        self.assertIsNone(config['max_files'])
+        self.assertEqual(config['slow_test_commands'], [])
         self.assertIsNone(config['codex_model'])
         self.assertIsNone(config['codex_reasoning_effort'])
         self.assertIsNone(config['codex_timeout_seconds'])
@@ -326,6 +391,33 @@ class PureTests(unittest.TestCase):
             }))
             self.assertIsNone(agentic.load_config(unlimited)['max_files'])
 
+    def test_slow_profile_appends_opt_in_checks(self):
+        config = {
+            'test_commands': [['go', 'test', './...']],
+            'slow_test_commands': [['make', 'persistence-check']],
+        }
+        self.assertEqual(
+            agentic.test_commands_for_profile(config, 'slow'),
+            [['go', 'test', './...'], ['make', 'persistence-check']],
+        )
+        with self.assertRaisesRegex(RuntimeError, 'slow test profile'):
+            agentic.test_commands_for_profile({'test_commands': []}, 'slow')
+
+    def test_runs_and_issue_list_do_not_require_configuration(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            runs_args = agentic.build_parser().parse_args(['--repo', str(repo), '--runs'])
+            with patch('agentic.show_runs') as show_runs:
+                agentic.execute_locked(runs_args, repo)
+            show_runs.assert_called_once_with(repo)
+
+            list_args = agentic.build_parser().parse_args(['--repo', str(repo), '--list'])
+            with (patch('agentic.github_metadata', return_value=('owner/repo', 'main')),
+                  patch('agentic.fetch_issues', return_value=[]),
+                  patch('agentic.show_issues') as show_issues):
+                agentic.execute_locked(list_args, repo)
+            show_issues.assert_called_once_with(repo, [])
+
     def test_cli_options(self):
         args = agentic.build_parser().parse_args(['--issue', '42', '--publish'])
         self.assertIsNone(args.command)
@@ -336,7 +428,16 @@ class PureTests(unittest.TestCase):
         self.assertEqual(agentic.build_parser().parse_args(['help']).command, 'help')
         self.assertEqual(agentic.build_parser().parse_args(['shell']).command, 'shell')
         self.assertEqual(agentic.build_parser().parse_args(['dashboard']).command, 'dashboard')
+        self.assertEqual(agentic.build_parser().parse_args(['--state-dir', '/tmp/agentic-state']).state_dir, '/tmp/agentic-state')
         self.assertEqual(agentic.__version__, '0.1.0')
+
+    def test_no_arguments_open_interactive_shell(self):
+        with patch('agentic_shell.run_shell', return_value=0) as run_shell:
+            self.assertEqual(agentic.main([]), 0)
+        run_shell.assert_called_once_with(
+            Path.cwd(), agentic.SCRIPT_DIR / 'agentic.py', None,
+            state_dir=agentic.default_state_dir(),
+        )
 
 
 if __name__ == '__main__':
@@ -353,7 +454,7 @@ class ResumeIntegrationTests(GitTest):
             'findings': ['Add regression coverage'],
         }))
         args = agentic.build_parser().parse_args(['--repo', str(self.repo),
-                                                  '--config', str(Path(__file__).resolve().parents[1] / 'agent_config.json'),
+                                                  '--config', str(Path(__file__).resolve().parents[1] / 'agent_config.example.json'),
                                                   '--issue', '25'])
         issue = agentic.Issue(25, 'Finish work', 'Do it')
         with (patch('agentic.github_metadata', return_value=('owner/repo','main')),

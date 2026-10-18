@@ -21,6 +21,7 @@ dist/
 *.egg-info/
 
 # Local configuration and secrets
+agent_config.json
 .env
 .env.*
 !.env.example
