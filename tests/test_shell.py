@@ -391,7 +391,7 @@ class ShellTests(unittest.TestCase):
                 shell.show_issues(['/list'])
             argv = run.call_args.args[0]
             self.assertIn('--list', argv)
-            self.assertEqual(run.call_args.kwargs['cwd'], root)
+            self.assertEqual(Path(run.call_args.kwargs['cwd']).resolve(), root.resolve())
             self.assertEqual(output.getvalue(), '#1 Fix it\n')
 
     def test_list_rejects_arguments(self):
