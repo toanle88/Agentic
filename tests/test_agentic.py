@@ -1208,7 +1208,7 @@ class PureTests(unittest.TestCase):
         self.assertEqual(agentic.build_parser().parse_args(['status']).command, 'status')
         self.assertTrue(agentic.build_parser().parse_args(['runs', '--json']).json)
         self.assertEqual(agentic.build_parser().parse_args(['--state-dir', '/tmp/agentic-state']).state_dir, '/tmp/agentic-state')
-        self.assertEqual(agentic.__version__, '0.2.0')
+        self.assertEqual(agentic.__version__, '1.0.0')
 
     def test_no_arguments_open_interactive_shell(self):
         with patch('agentic_shell.run_shell', return_value=0) as run_shell:

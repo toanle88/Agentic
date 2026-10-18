@@ -229,10 +229,20 @@ Run the local checks with:
 python -m unittest discover -s tests -q
 ```
 
-Release tags use semantic versioning, such as `v0.1.1`. The release workflow
-verifies the tag against `agentic --version`, builds the package artifacts, and
-creates a GitHub release. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
-pull-request and release process.
+Release tags use semantic versioning, such as `v1.0.0`. After the version
+change has been merged to `main`, run the release helper from this checkout:
+
+```bash
+python scripts/release.py --dry-run  # check everything without creating a tag
+python scripts/release.py            # check, confirm, tag, and push
+```
+
+The helper verifies that `main` is clean and synchronized with `origin/main`,
+runs the offline tests and compile checks, and prevents reuse of an existing
+tag. The GitHub Actions release workflow then builds the package artifacts and
+creates the GitHub release. Use `--yes` only when the release has already been
+reviewed and should run without a prompt. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for the pull-request and release process.
 
 ## Safety summary
 

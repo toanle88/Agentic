@@ -20,11 +20,16 @@ The package version is defined by `agentic.__version__` and exposed by:
 agentic --version
 ```
 
-For a release, update the version in a pull request, merge it, then create and push a semantic-version tag from the resulting `main` commit:
+For a release, update the version in a pull request, merge it, then run the
+release helper from the resulting `main` checkout:
 
 ```bash
-git tag v0.1.1
-git push origin v0.1.1
+python scripts/release.py --dry-run
+python scripts/release.py
 ```
 
-The release workflow verifies that the tag matches the package version, builds the source distribution and wheel, and attaches them to a GitHub release.
+The helper verifies the clean, synchronized branch, runs the test and compile
+checks, prevents reuse of an existing tag, and asks for confirmation before
+creating and pushing it. The release workflow verifies that the tag matches the
+package version, builds the source distribution and wheel, and attaches them to
+a GitHub release.
