@@ -456,6 +456,47 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
     return True, "\n\n".join(results)
 
 
+def preflight_test_commands(repo: Path, test_commands: list[list[str]]) -> None:
+    """Fail early when the configured test tool or Python module is unavailable."""
+    for argv in test_commands:
+        executable = argv[0]
+        if shutil.which(executable) is None:
+            raise RuntimeError(
+                f"Configured test command is unavailable: {argv!r}; "
+                f"executable {executable!r} was not found on PATH"
+            )
+        executable_name = Path(executable).name.lower()
+        if len(argv) >= 3 and argv[1] == "-m" and (
+            executable_name.startswith("python") or executable_name == "py"
+        ):
+            module = argv[2]
+            result = command([
+                executable, "-c",
+                "import importlib.util, sys; "
+                "sys.exit(0 if importlib.util.find_spec(sys.argv[1]) else 1)",
+                module,
+            ], repo, timeout=30, check=False)
+            if result.returncode:
+                raise RuntimeError(
+                    f"Configured test dependency is unavailable: Python module "
+                    f"{module!r} is not installed for {executable!r}"
+                )
+
+
+def retryable_test_failure(report: str) -> bool:
+    """Return false for failures that retries cannot repair by changing code."""
+    lower = report.lower()
+    environment_markers = (
+        "no module named",
+        "command not found",
+        "executable file not found",
+        "address already in use",
+        "cannot bind",
+        "no such file or directory",
+    )
+    return not any(marker in lower for marker in environment_markers)
+
+
 def forbidden(filename: str) -> bool:
     path = PurePosixPath(filename)
     base = path.name.lower()
@@ -683,6 +724,11 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
             feedback = json.dumps(verdict)
         else:
             feedback = test_output
+            if not retryable_test_failure(test_output):
+                raise RuntimeError(
+                    "Tests failed because of an environment or infrastructure problem; "
+                    f"retries skipped.\n{test_output[-2500:]}"
+                )
         print("[RETRY] Returning evidence to developer (if retries remain)")
         # Preserve all files, only unstage to make subsequent git diff easier to inspect.
         git(run.worktree, "reset", "--quiet")
@@ -758,7 +804,10 @@ def select_issue(issues: list[Issue]) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default=str(SCRIPT_DIR), help="Project root (default: script directory)")
-    parser.add_argument("--config", default=str(SCRIPT_DIR / "agent_config.json"))
+    parser.add_argument(
+        "--config", default=None,
+        help="Configuration file (default: agent_config.json in the target repository)",
+    )
     parser.add_argument("--issue", type=int, help="GitHub issue number")
     parser.add_argument("--list", action="store_true", help="List open issues")
     parser.add_argument("--runs", action="store_true", help="List existing worktrees without contacting GitHub")
@@ -785,7 +834,15 @@ def execute(args: argparse.Namespace) -> None:
 def execute_locked(args: argparse.Namespace, repo: Path) -> None:
     if args.new and (args.review or args.publish):
         raise RuntimeError("--new cannot be combined with --review or --publish")
-    config = load_config(Path(args.config).resolve())
+    config_path = Path(args.config).resolve() if args.config else repo / "agent_config.json"
+    if not config_path.is_file():
+        raise RuntimeError(
+            f"No configuration found at {config_path}. Create a target-repository "
+            "agent_config.json or pass --config explicitly"
+        )
+    config = load_config(config_path)
+    if not args.list:
+        preflight_test_commands(repo, config["test_commands"])
     github_repo, base = github_metadata(repo)
     if args.list:
         show_issues(repo, fetch_issues(repo, github_repo))

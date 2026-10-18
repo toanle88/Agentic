@@ -21,6 +21,7 @@ python agentic.py --issue 42       # create worktree or RESUME prior worktree fo
 python agentic.py --issue 42 --review  # rerun tests and independent read-only review
 python agentic.py --issue 42 --publish # rerun checks and request approval for draft PR
 python agentic.py --issue 42 --new # explicitly start a SECOND worktree for #42
+python agentic.py --repo /path/to/project --config /path/to/project/agent_config.json --issue 42
 ```
 
 > `--publish` is **not** a development command. It only accepts an **existing** worktree, runs fresh validation and a fresh review, and asks you to type `publish`. It never merges or marks the PR ready. If publication fails after the commit/push, rerun `--publish`: it can detect the committed branch patch and retry PR creation. If a PR already exists for the branch, it prints its link rather than creating a duplicate.
@@ -114,7 +115,28 @@ Those directories are deliberately outside the main checkout. Logs are for troub
 }
 ```
 
-Test commands are argv arrays, not shell strings. They run in the worktree. Change them for your project, for example:
+By default, the runner loads `agent_config.json` from the target repository. Use
+`--config` when the configuration is stored elsewhere. The runner validates
+configured executables and Python `-m` modules before starting Codex, so a
+missing dependency fails immediately instead of consuming retries.
+
+Test commands are argv arrays, not shell strings. They run in the worktree.
+The Python command above is only an example; change it for your project. For a
+Go project, for example:
+
+```json
+{
+  "test_commands": [["go", "test", "./..."]],
+  "max_retries": 3,
+  "max_files": 30,
+  "codex_model": null,
+  "codex_reasoning_effort": null,
+  "codex_timeout_seconds": null,
+  "test_timeout_seconds": null
+}
+```
+
+For projects using `uv`, an alternative is:
 
 ```json
 {
@@ -132,6 +154,10 @@ Test commands are argv arrays, not shell strings. They run in the worktree. Chan
 ```
 
 These `uv` examples require packages already installed/available in that worktree environment; adjust for your actual project setup.
+
+Clearly environmental failures such as missing modules, unavailable commands,
+port-binding conflicts, and missing files are not retried because changing
+source code cannot repair them.
 
 Leave `codex_model` and `codex_reasoning_effort` as `null` to inherit the
 Codex CLI configuration already selected for your account, such as a

@@ -179,6 +179,18 @@ class PureTests(unittest.TestCase):
             agentic.refresh_base(repo, 'main')
         git_mock.assert_called_once_with(repo, 'fetch', 'origin', 'main')
 
+    def test_preflight_rejects_missing_test_dependency(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            with self.assertRaisesRegex(RuntimeError, 'module.*not installed'):
+                agentic.preflight_test_commands(
+                    Path(dirname), [[sys.executable, '-m', 'module_that_is_not_installed']]
+                )
+
+    def test_environment_test_failures_are_not_retryable(self):
+        self.assertFalse(agentic.retryable_test_failure('No module named pytest'))
+        self.assertFalse(agentic.retryable_test_failure('listen tcp: address already in use'))
+        self.assertTrue(agentic.retryable_test_failure('AssertionError: expected 2, got 3'))
+
     def test_codex_config_overrides_are_added_to_cli(self):
         with tempfile.TemporaryDirectory() as dirname:
             root = Path(dirname)
@@ -264,6 +276,7 @@ class PureTests(unittest.TestCase):
         self.assertEqual(args.issue, 42)
         self.assertTrue(args.publish)
         self.assertEqual(Path(args.repo), agentic.SCRIPT_DIR)
+        self.assertIsNone(args.config)
 
 
 if __name__ == '__main__':
@@ -282,6 +295,7 @@ class ResumeIntegrationTests(GitTest):
               patch('agentic.check_existing_pr', return_value=[]),
               patch('agentic.create_worktree') as create_new,
               patch('agentic.refresh_base') as refresh_base,
+              patch('agentic.preflight_test_commands'),
               patch('agentic.develop', return_value=True) as develop):
             agentic.execute(args)
             create_new.assert_not_called()
