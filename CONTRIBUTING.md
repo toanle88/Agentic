@@ -20,8 +20,16 @@ The package version is defined by `agentic.__version__` and exposed by:
 agentic --version
 ```
 
-For a release, update the version in a pull request, merge it, then run the
-release helper from the resulting `main` checkout:
+For a release, prepare the version pull request from a clean, synchronized
+`main` checkout:
+
+```bash
+python scripts/prepare_release.py
+```
+
+The helper prompts for a new semantic version, runs local checks, pushes a
+release branch, and opens a normal pull request. After that pull request is
+merged, run the tag helper from the resulting `main` checkout:
 
 ```bash
 python scripts/release.py --dry-run
