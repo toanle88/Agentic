@@ -60,7 +60,7 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
         })
         command = sandbox_command(["rg", "needle", "."], Path("/tmp/worktree"), settings, read_only=True)
         self.assertEqual(command[command.index("--network") + 1], "none")
-        self.assertIn("/tmp/worktree:/workspace:ro", command)
+        self.assertIn(f"{Path('/tmp/worktree').resolve()}:/workspace:ro", command)
 
     def test_sandbox_mounts_linked_worktree_git_metadata(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -77,8 +77,8 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
                 "enabled": True, "engine": "docker", "image": "test-image",
             })
             command = sandbox_command(["git", "status"], worktree, settings)
-        self.assertIn(f"{common}:/agentic-git-common:ro", command)
-        self.assertIn(f"{git_dir}:/agentic-git-worktree:rw", command)
+        self.assertIn(f"{common.resolve()}:/agentic-git-common:ro", command)
+        self.assertIn(f"{git_dir.resolve()}:/agentic-git-worktree:rw", command)
         self.assertIn("GIT_DIR=/agentic-git-worktree", command)
         self.assertIn("GIT_COMMON_DIR=/agentic-git-common", command)
         self.assertIn("GIT_WORK_TREE=/workspace", command)
