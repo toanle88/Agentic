@@ -34,7 +34,7 @@ HELP = """Commands:
 
   Inspect
     /ps [--all]                         show current or persisted jobs
-    /logs JOB [LINES]                   show the latest captured terminal output
+    /logs JOB|PID [LINES]               follow or show captured terminal output
     /list                               list open GitHub issues
     /status [--json]                    show Agentic worktree status
     /dashboard [OUTPUT]                 generate and open the HTML dashboard
@@ -83,7 +83,7 @@ SHELL_OPTIONS = {
 COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/run": "start a background job or local task",
     "/ps": "show running or persisted background jobs",
-    "/logs": "show latest captured terminal output",
+    "/logs": "follow or show captured terminal output",
     "/list": "list open GitHub issues",
     "/stop": "stop a running background job",
     "/status": "show Agentic worktree and git status",
@@ -869,7 +869,7 @@ def _welcome_banner(repo: Path, state_dir: Path | None = None,
     print(row(f"State       {state_text}"))
     print(row(f"Config      {config_text}"))
     print(row(f"Jobs        {job_text}"))
-    print(_shell_paint(row("Commands    /run ISSUE   /ps   /logs JOB   /help   /quit"), "36"))
+    print(_shell_paint(row("Commands    /run ISSUE   /ps   /logs JOB|PID   /help   /quit"), "36"))
     print(_shell_paint(border(bottom_left, bottom_right), "36"))
     if previous_jobs:
         print(_shell_paint("Tip: use /ps --all to inspect jobs from previous sessions.", "33"))
@@ -983,6 +983,13 @@ def _tail(path: Path, lines: int) -> str:
     except OSError as exc:
         return f"Could not read {path}: {exc}"
     # Avoid loading an accidentally enormous log just to display its tail.
+    text = text[-200_000:]
+    selected = text.splitlines()[-lines:]
+    return "\n".join(selected) or "(log is empty)"
+
+
+def _tail_from_text(text: str, lines: int) -> str:
+    """Return a bounded tail from text already read from an open log."""
     text = text[-200_000:]
     selected = text.splitlines()[-lines:]
     return "\n".join(selected) or "(log is empty)"
@@ -1331,18 +1338,64 @@ class AgenticShell:
 
     def show_logs(self, parts: list[str]) -> None:
         if len(parts) < 2 or not parts[1].isdigit():
-            raise ValueError("usage: /logs JOB [LINES]")
-        job = self.jobs.get(int(parts[1]))
+            raise ValueError("usage: /logs JOB|PID [LINES]")
+        identifier = int(parts[1])
+        job = self.jobs.get(identifier)
         if job is None:
-            raise ValueError(f"unknown job: {parts[1]}")
+            job = next((candidate for candidate in self.jobs.values()
+                        if candidate.pid == identifier), None)
+        if job is None:
+            raise ValueError(f"unknown job or PID: {parts[1]}")
         lines = 40
         if len(parts) > 3 or (len(parts) == 3 and (not parts[2].isdigit() or int(parts[2]) < 1)):
-            raise ValueError("usage: /logs JOB [LINES]")
+            raise ValueError("usage: /logs JOB|PID [LINES]")
         if len(parts) == 3:
             lines = min(int(parts[2]), 500)
+        self._refresh(job)
         print(f"--- job {job.number}: {_display_command(job.argv)} ---")
-        print(_tail(job.log_path, lines))
+        if job.running:
+            print("--- following live output; press Ctrl-C to stop following ---")
+            self._follow_log(job, lines)
+        else:
+            print(_tail(job.log_path, lines))
         print(f"--- end; full log: {job.log_path} ---")
+
+    def _follow_log(self, job: Job, lines: int) -> None:
+        """Print a running job's existing tail and stream appended output."""
+        try:
+            with job.log_path.open("r", encoding="utf-8", errors="replace") as stream:
+                stream.seek(0, os.SEEK_END)
+                initial_end = stream.tell()
+                initial_start = max(0, initial_end - 200_000)
+                stream.seek(initial_start)
+                initial = stream.read(initial_end - initial_start)
+                print(_tail_from_text(initial, lines))
+                # Keep the position at the end of the initial snapshot rather
+                # than seeking to the current EOF, so a concurrent write is
+                # still included in the first live read.
+                stream.seek(initial_end)
+
+                while job.running:
+                    self._refresh(job)
+                    chunk = stream.read()
+                    if chunk:
+                        sys.stdout.write(chunk)
+                        sys.stdout.flush()
+                    if not job.running:
+                        break
+                    time.sleep(0.1)
+
+                # The child may have flushed its last bytes just before the
+                # process status changed. Drain once after observing exit.
+                self._refresh(job)
+                chunk = stream.read()
+                if chunk:
+                    sys.stdout.write(chunk)
+                    sys.stdout.flush()
+        except KeyboardInterrupt:
+            print("\n--- live output follow stopped; job continues running ---")
+        except OSError as exc:
+            print(f"Could not read {job.log_path}: {exc}")
 
     def stop(self, parts: list[str]) -> None:
         if len(parts) != 2 or not parts[1].isdigit():
