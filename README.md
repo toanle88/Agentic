@@ -156,6 +156,8 @@ agentic status --json                     # machine-readable worktree status
 agentic runs --json                       # alias for status
 agentic --issue 119                      # create or resume issue 119
 agentic --issue 119 --review              # rerun tests and review only
+agentic --issue 119 --mark-done                     # optional reason is recorded automatically
+agentic --issue 119 --mark-done --reason "Human reviewed; remaining finding is out of scope"
 agentic --issue 119 --publish             # validate, then offer draft-PR publication
 agentic --issue 119 --new                 # explicitly create a second worktree
 ```
@@ -210,7 +212,8 @@ Running the same issue again resumes its existing worktree. Use `--new` only whe
 | `agentic --issue N` | Create or resume issue `N` in the foreground. |
 | `agentic --issue N --profile slow` | Run the fast checks plus configured slow checks. |
 | `agentic --issue N --review` | Re-run checks and review an existing worktree without coding. |
-| `agentic --issue N --publish` | Revalidate, request confirmation, then publish a draft PR. |
+| `agentic --issue N --mark-done [--reason "..."]` | Record explicit human completion for the current patch. |
+| `agentic --issue N --publish` | Revalidate, request confirmation, then publish a draft PR. Uses a recorded manual completion when present. |
 | `agentic --task TEXT` | Start or resume a local task when `task_source` is `local`. |
 | `agentic --task-file PATH` | Start or resume a local task from a file. |
 | `agentic --task-file task.md --publish` | Publish a reviewed local task as a draft PR. |
