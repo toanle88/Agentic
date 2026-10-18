@@ -38,10 +38,13 @@ Available commands:
 /quit                                  Leave the shell; jobs continue running
 ```
 
-Press Tab after `/` to complete a command. Agentic also completes supported
-options such as `/run --profile` and known job IDs for `/logs` and `/stop`.
-Completion uses the terminal's native line editor on WSL/Linux and a small
-standard-library fallback on interactive Windows consoles.
+Type `/` to open an interactive autocomplete dropdown showing available commands
+and their descriptions. Use the <kbd>↑</kbd> and <kbd>↓</kbd> arrow keys to navigate,
+<kbd>Enter</kbd> or <kbd>Tab</kbd> to select the highlighted item, and <kbd>Esc</kbd>
+to dismiss. Supported options such as `/run --profile` and known job IDs for
+`/logs` and `/stop` are completed dynamically. On interactive terminals, Agentic
+renders the dropdown with live filtering and command descriptions using standard ANSI
+escapes with zero third-party dependencies.
 
 `/run` starts a child process and returns immediately. `/ps` shows jobs started in the current shell; `/ps --all` also discovers job records from previous shell sessions. The child runner's durable logs remain available after the shell exits, and `/logs JOB` works for persisted jobs too.
 
