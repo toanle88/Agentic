@@ -179,6 +179,29 @@ class PureTests(unittest.TestCase):
             agentic.refresh_base(repo, 'main')
         git_mock.assert_called_once_with(repo, 'fetch', 'origin', 'main')
 
+    def test_resume_feedback_loads_latest_failed_review_and_tests(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            folder = Path(dirname)
+            (folder / 'review-schema.json').write_text('{}')
+            (folder / 'review-001.json').write_text(json.dumps({
+                'approved': False,
+                'summary': 'Fix duplicate prevention',
+                'findings': ['Use the canonical source key'],
+            }))
+            (folder / 'tests-001.txt').write_text('go test ./... failed: duplicate row')
+            feedback = agentic.load_resume_feedback(folder)
+        self.assertIn('Fix duplicate prevention', feedback)
+        self.assertIn('Use the canonical source key', feedback)
+        self.assertIn('duplicate row', feedback)
+
+    def test_resume_feedback_ignores_approved_review(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            folder = Path(dirname)
+            (folder / 'review-001.json').write_text(json.dumps({
+                'approved': True, 'summary': 'Good', 'findings': [],
+            }))
+            self.assertEqual(agentic.load_resume_feedback(folder), '')
+
     def test_preflight_rejects_missing_test_dependency(self):
         with tempfile.TemporaryDirectory() as dirname:
             with self.assertRaisesRegex(RuntimeError, 'module.*not installed'):
@@ -286,6 +309,12 @@ class ResumeIntegrationTests(GitTest):
     def test_resume_reuses_existing_worktree_without_stage_metadata(self):
         run = agentic.create_worktree(self.repo, 'main', 25)
         (run.worktree / 'partial.py').write_text('unfinished = True\n')
+        folder = agentic.logs_path(self.repo, run)
+        (folder / 'review-001.json').write_text(json.dumps({
+            'approved': False,
+            'summary': 'Previous review found a missing test',
+            'findings': ['Add regression coverage'],
+        }))
         args = agentic.build_parser().parse_args(['--repo', str(self.repo),
                                                   '--config', str(Path(__file__).resolve().parents[1] / 'agent_config.json'),
                                                   '--issue', '25'])
@@ -301,6 +330,7 @@ class ResumeIntegrationTests(GitTest):
             create_new.assert_not_called()
             refresh_base.assert_called_once_with(self.repo, 'main')
             self.assertEqual(develop.call_args.args[0], run)
+            self.assertIn('Previous review found a missing test', develop.call_args.kwargs['initial_feedback'])
             self.assertTrue((run.worktree / 'partial.py').exists())
 
 

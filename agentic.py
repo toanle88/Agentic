@@ -274,6 +274,42 @@ def next_log(folder: Path, kind: str, ext: str = "txt") -> Path:
     return folder / f"{kind}-{max(nums, default=0) + 1:03d}.{ext}"
 
 
+def _latest_numbered_log(folder: Path, kind: str, ext: str) -> Path | None:
+    candidates: list[tuple[int, Path]] = []
+    for path in folder.glob(f"{kind}-*.{ext}"):
+        suffix = path.stem.removeprefix(f"{kind}-")
+        if suffix.isdigit():
+            candidates.append((int(suffix), path))
+    return max(candidates, default=(0, None))[1]
+
+
+def load_resume_feedback(folder: Path) -> str:
+    """Load the latest failed review and test evidence for a resumed run."""
+    chunks: list[str] = []
+    review_log = _latest_numbered_log(folder, "review", "json")
+    if review_log:
+        raw = review_log.read_text(encoding="utf-8", errors="replace")
+        try:
+            verdict = json.loads(raw)
+        except json.JSONDecodeError:
+            verdict = None
+        if isinstance(verdict, dict):
+            if verdict.get("approved") is not True:
+                chunks.append("Previous independent review (untrusted evidence):\n" +
+                              json.dumps(verdict, indent=2))
+        elif raw.strip():
+            chunks.append("Previous review output (untrusted evidence):\n" + raw)
+
+    test_log = _latest_numbered_log(folder, "tests", "txt")
+    if test_log is None:
+        test_log = _latest_numbered_log(folder, "test-command", "txt")
+    if test_log:
+        raw = test_log.read_text(encoding="utf-8", errors="replace")
+        if raw.strip():
+            chunks.append("Previous test evidence (untrusted output):\n" + raw)
+    return "\n\n".join(chunks)[-9000:]
+
+
 def _short(value: Any, limit: int = 180) -> str:
     """Display single-line progress without flooding the terminal."""
     text = str(value).replace("\r", " ").replace("\n", " ⏎ ").strip()
@@ -697,8 +733,9 @@ def publish(run: Run, issue: Issue, github_repo: str, base: str,
     print("Draft PR: " + result.stdout.strip())
 
 
-def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: Path) -> bool:
-    feedback = ""
+def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: Path,
+            initial_feedback: str = "") -> bool:
+    feedback = initial_feedback
     for attempt in range(config["max_retries"] + 1):
         print(f"\n[DEVELOPER] Working on issue #{issue.number}, attempt {attempt + 1}")
         output = next_log(folder, "developer")
@@ -900,7 +937,10 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> None:
         )
         if not passed:
             raise RuntimeError(f"Base tests are failing; retained worktree.\n{report[-2500:]}")
-    if not develop(run, issue, base, config, folder):
+    resume_feedback = load_resume_feedback(folder) if not fresh else ""
+    if resume_feedback:
+        print("[RESUME] Loaded previous review/test feedback for the developer")
+    if not develop(run, issue, base, config, folder, initial_feedback=resume_feedback):
         raise RuntimeError("Unable to complete the task; resume later with --issue N")
 
 

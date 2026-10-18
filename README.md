@@ -75,6 +75,8 @@ python agentic.py --issue 119 --new      # explicitly create a second worktree
 
 Running the same `--issue` command again resumes the existing worktree. Changes and commits are preserved. Use `--new` only when you intentionally want another worktree.
 
+When resuming, the runner loads the latest failed review and test evidence from the run logs and gives it to Codex as untrusted feedback. This lets a new invocation continue fixing the previous rejection.
+
 The developer does not commit or push. `--publish` reruns tests and review, checks that the patch has not changed, and asks you to type `publish` before committing, pushing, and opening a draft PR.
 
 ## Worktrees and logs
