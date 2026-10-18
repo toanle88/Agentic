@@ -1,5 +1,6 @@
 """Offline tests: no GitHub or Codex credentials needed."""
 import json
+import io
 import subprocess
 import sys
 import tempfile
@@ -43,6 +44,16 @@ class GitTest(unittest.TestCase):
         self.assertFalse((self.repo / 'new.py').exists())
         self.assertEqual(agentic.pending_files(run.worktree), ['new.py'])
 
+    def test_status_json_reports_worktree_without_parsing_terminal_output(self):
+        run = agentic.create_worktree(self.repo, 'main', 44)
+        from io import StringIO
+        with patch('sys.stdout', new_callable=StringIO) as output:
+            agentic.show_runs(self.repo, json_output=True)
+        records = json.loads(output.getvalue())
+        self.assertEqual(records[0]['issue'], 44)
+        self.assertEqual(records[0]['branch'], run.branch)
+        self.assertFalse(records[0]['dirty'])
+
     def test_local_task_worktree_has_deterministic_identity(self):
         task = agentic.Issue.from_local_text('Add CSV export\nInclude regression tests.')
         run = agentic.create_local_worktree(self.repo, 'main', task)
@@ -55,9 +66,10 @@ class GitTest(unittest.TestCase):
     def test_central_state_dir_keeps_runtime_artifacts_outside_repository(self):
         state_dir = self.repo.parent / 'agentic-state'
         run = agentic.create_worktree(self.repo, 'main', 43, state_dir)
-        self.assertTrue(run.worktree.is_relative_to(state_dir))
+        canonical_state_dir = state_dir.resolve()
+        self.assertTrue(run.worktree.is_relative_to(canonical_state_dir))
         folder = agentic.logs_path(self.repo, run, state_dir)
-        self.assertTrue(folder.is_relative_to(state_dir))
+        self.assertTrue(folder.is_relative_to(canonical_state_dir))
         self.assertFalse(run.worktree.is_relative_to(self.repo.parent / f'.{self.repo.name}-agent-worktrees'))
         agentic.cleanup(self.repo, issue=43, confirm=True, state_dir=state_dir)
 
@@ -338,14 +350,27 @@ class PureTests(unittest.TestCase):
         with (patch.object(agentic, 'installed_git_version',
                            side_effect=[(2, 48, 0), (2, 48, 0)]),
               patch.object(agentic.shutil, 'which', return_value='git.exe'),
+              patch.object(agentic.os, 'name', 'posix'),
               patch.dict(agentic.os.environ, {'WSL_DISTRO_NAME': 'Ubuntu'})):
             self.assertTrue(agentic.relative_worktree_paths_supported())
 
         with (patch.object(agentic, 'installed_git_version',
                            side_effect=[(2, 48, 0), (2, 47, 0)]),
               patch.object(agentic.shutil, 'which', return_value='git.exe'),
+              patch.object(agentic.os, 'name', 'posix'),
               patch.dict(agentic.os.environ, {'WSL_DISTRO_NAME': 'Ubuntu'})):
             self.assertFalse(agentic.relative_worktree_paths_supported())
+
+    def test_run_summary_uses_ascii_on_legacy_console_encoding(self):
+        class LegacyConsole(io.StringIO):
+            encoding = 'cp1252'
+
+        output = LegacyConsole()
+        run = agentic.Run(1, 'agent/issue-1-test', Path('C:/agentic-worktree'))
+        with patch.object(agentic.sys, 'stdout', output):
+            agentic.print_run_summary(run, 'APPROVED', 'continue')
+        self.assertIn('-' * 72, output.getvalue())
+        self.assertNotIn('─', output.getvalue())
 
     def test_relative_worktree_configuration_is_not_written_when_unsupported(self):
         with (patch('agentic.relative_worktree_paths_supported', return_value=False),
@@ -768,6 +793,13 @@ class PureTests(unittest.TestCase):
             self.assertIn('ERROR: protected file', agentic._openrouter_tool_call(
                 root, 'write_file', {'path': '.env', 'content': 'secret'}, readonly=False
             ))
+            (root / '.env').write_text('PRIVATE=do-not-send\n')
+            self.assertIn('ERROR: protected file', agentic._openrouter_tool_call(
+                root, 'read_file', {'path': '.env'}, readonly=False
+            ))
+            self.assertNotIn('.env', agentic._openrouter_tool_call(
+                root, 'list_files', {'path': '.'}, readonly=False
+            ))
             self.assertIn('ERROR: unknown tool', agentic._openrouter_tool_call(
                 root, 'unknown', {}, readonly=False
             ))
@@ -778,6 +810,11 @@ class PureTests(unittest.TestCase):
             allowed, reason = agentic._openrouter_command_allowed(argv, readonly=False)
             self.assertFalse(allowed, argv)
             self.assertTrue(reason)
+
+        allowed, reason = agentic._openrouter_command_allowed(
+            ['curl', 'https://example.test'], readonly=False, allow_network=True
+        )
+        self.assertTrue(allowed, reason)
         for argv in (['git', 'status'], ['git', 'diff'], ['rg', 'needle', '.']):
             allowed, reason = agentic._openrouter_command_allowed(argv, readonly=True)
             self.assertTrue(allowed, reason)
@@ -866,6 +903,27 @@ class PureTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, '\\.git'):
                 agentic._safe_worktree_path(root, '.git/config', write=True)
 
+    def test_openrouter_tool_command_timeout_is_reported(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result = agentic._openrouter_tool_call(
+                Path(temp), 'run_command',
+                {'argv': [sys.executable, '-c', 'import time; time.sleep(2)']},
+                readonly=False, command_timeout=1,
+            )
+        self.assertIn('timed out after 1s', result)
+
+    def test_secret_values_are_redacted_from_output(self):
+        with patch.dict(agentic.os.environ, {'TEST_API_KEY': 'super-secret-value'}, clear=True):
+            value = agentic.redact_secrets(
+                'Authorization: Bearer bearer-secret-value\n'
+                'api_key=inline-secret-value\n'
+                'env=super-secret-value'
+            )
+        self.assertNotIn('bearer-secret-value', value)
+        self.assertNotIn('inline-secret-value', value)
+        self.assertNotIn('super-secret-value', value)
+        self.assertGreaterEqual(value.count('[REDACTED]'), 3)
+
     def test_provider_config_rejects_invalid_values_and_embedded_secrets(self):
         base = {'test_commands': [['go', 'test', './...']]}
         invalid = [
@@ -884,6 +942,23 @@ class PureTests(unittest.TestCase):
                     path.write_text(json.dumps({**base, **extra}))
                     with self.assertRaisesRegex(ValueError, expected):
                         agentic.load_config(path)
+
+    def test_openrouter_limits_are_loaded_and_validated(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'agent_config.json'
+            path.write_text(json.dumps({
+                'test_commands': [['go', 'test', './...']],
+                'developer': {
+                    'provider': 'openrouter', 'model': 'openai/test',
+                    'max_tool_turns': 12, 'command_timeout_seconds': 7,
+                    'allow_network': True,
+                },
+            }))
+            config = agentic.load_config(path)
+        settings = config['developer_agent']
+        self.assertEqual(settings['max_tool_turns'], 12)
+        self.assertEqual(settings['command_timeout_seconds'], 7)
+        self.assertTrue(settings['allow_network'])
 
     def test_legacy_codex_settings_are_applied_to_both_roles(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -941,6 +1016,27 @@ class PureTests(unittest.TestCase):
         self.assertIn('Agentic doctor', output.getvalue())
         self.assertIn('Agentic config', output.getvalue())
         self.assertIn('provider (codex)', output.getvalue())
+
+    def test_doctor_json_is_machine_readable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            config = repo / 'agent_config.json'
+            config.write_text(json.dumps({'test_commands': [[sys.executable, '-c', 'pass']]}))
+
+            def fake_probe(argv, cwd, **kwargs):
+                if argv[:2] == ['git', 'rev-parse']:
+                    return True, str(repo)
+                return True, 'ok'
+
+            with (patch('agentic.installed_git_version', return_value=(2, 48, 0)),
+                  patch('agentic.probe', side_effect=fake_probe),
+                  patch('agentic.shutil.which', return_value='/usr/bin/codex'),
+                  patch('sys.stdout', new_callable=io.StringIO) as output):
+                result = agentic.doctor(repo, config, json_output=True)
+        self.assertEqual(result, 0)
+        payload = json.loads(output.getvalue())
+        self.assertTrue(payload['ok'])
+        self.assertTrue(any(item['name'] == 'Agentic config' for item in payload['checks']))
 
     def test_all_provider_templates_are_valid_configs(self):
         templates = sorted((Path(__file__).resolve().parents[1] / 'examples' / 'provider-configs').glob(
@@ -1109,6 +1205,8 @@ class PureTests(unittest.TestCase):
         self.assertEqual(agentic.build_parser().parse_args(['help']).command, 'help')
         self.assertEqual(agentic.build_parser().parse_args(['shell']).command, 'shell')
         self.assertEqual(agentic.build_parser().parse_args(['dashboard']).command, 'dashboard')
+        self.assertEqual(agentic.build_parser().parse_args(['status']).command, 'status')
+        self.assertTrue(agentic.build_parser().parse_args(['runs', '--json']).json)
         self.assertEqual(agentic.build_parser().parse_args(['--state-dir', '/tmp/agentic-state']).state_dir, '/tmp/agentic-state')
         self.assertEqual(agentic.__version__, '0.2.0')
 

@@ -30,4 +30,10 @@ agentic init --provider codex --reviewer-provider openrouter
 
 The OpenRouter template expects `OPENROUTER_API_KEY` in the environment. Do
 not copy an API key into the JSON file. `agent_config.json` is personal and
-should remain ignored by Git.
+should remain ignored by Git. Its `max_tool_turns`,
+`command_timeout_seconds`, and `allow_network` fields control the OpenRouter
+tool loop; leave network access disabled unless the repository explicitly
+needs it.
+
+For editor completion and validation, associate the configuration with the
+repository's [`agent_config.schema.json`](../../agent_config.schema.json).

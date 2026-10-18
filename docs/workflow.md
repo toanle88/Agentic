@@ -33,6 +33,7 @@ Available commands:
 /logs JOB [LINES]                      Show recent output for a job
 /stop JOB                              Stop a running job
 /dashboard [OUTPUT]                    Generate the HTML dashboard
+/status [--json]                       Show worktree status
 /help                                  Show command help
 /quit                                  Leave the shell; jobs continue running
 ```
@@ -117,6 +118,13 @@ agentic dashboard \
 ```
 
 Regenerate the dashboard after a run to refresh its contents.
+
+For scripts and external dashboards, use the read-only status command instead
+of parsing terminal output:
+
+```bash
+agentic status --json
+```
 
 ## Cleanup
 

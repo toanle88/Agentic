@@ -19,6 +19,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TextIO
 
 
 HELP = """Commands:
@@ -29,6 +30,7 @@ HELP = """Commands:
   /ps [--all]                            show current or persisted jobs
   /logs JOB [LINES]                      show the latest captured terminal output
   /stop JOB                              stop a running job
+  /status [--json]                       show Agentic worktree status
   /dashboard [OUTPUT]                    generate the HTML run dashboard
   /help                                  show this help
   /quit                                  leave the shell; running jobs continue
@@ -133,7 +135,7 @@ class Job:
     log_path: Path
     process: subprocess.Popen[bytes] | None
     started: float
-    log_handle: object
+    log_handle: TextIO | None
     record_path: Path
     session_id: str
     persisted_pid: int = 0
@@ -467,6 +469,20 @@ class AgenticShell:
                 os.kill(job.pid, signal.SIGTERM)
         print(f"[JOB {job.number}] stop requested")
 
+    def show_status(self, parts: list[str]) -> None:
+        if len(parts) > 2 or (len(parts) == 2 and parts[1] != "--json"):
+            raise ValueError("usage: /status [--json]")
+        argv = [sys.executable, str(self.runner), "status", "--repo", str(self.repo)]
+        if len(parts) == 2:
+            argv.append("--json")
+        result = subprocess.run(
+            argv, cwd=self.repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace", check=False,
+        )
+        print(result.stdout.rstrip())
+        if result.returncode:
+            raise RuntimeError(f"status command failed with exit {result.returncode}")
+
     def execute(self, line: str) -> bool:
         try:
             parts = shlex.split(line)
@@ -490,6 +506,8 @@ class AgenticShell:
                 self.show_logs(parts)
             elif command == "/stop":
                 self.stop(parts)
+            elif command == "/status":
+                self.show_status(parts)
             elif command == "/dashboard":
                 self.run_dashboard(parts)
             elif command in {"/quit", "/exit"}:

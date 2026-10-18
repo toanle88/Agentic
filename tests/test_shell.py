@@ -25,6 +25,7 @@ class ShellTests(unittest.TestCase):
         self.assertIn('/run ISSUE', output.getvalue())
         self.assertIn('/ps', output.getvalue())
         self.assertIn('/logs JOB', output.getvalue())
+        self.assertIn('/status', output.getvalue())
 
     def test_welcome_banner_does_not_emit_color_when_output_is_not_a_terminal(self):
         from contextlib import redirect_stdout
@@ -127,7 +128,7 @@ class ShellTests(unittest.TestCase):
             root = Path(temp)
             shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
             job = shell._launch([sys.executable, '-c', 'import time; time.sleep(5)'])
-            with patch('sys.stdout') as output:
+            with patch('sys.stdout'):
                 shell.stop(['/stop', str(job.number)])
             job.process.wait(timeout=5)
             shell.refresh()

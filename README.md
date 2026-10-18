@@ -17,6 +17,8 @@ Agentic is designed for human-supervised development. It does not silently commi
 - Self-contained HTML dashboard for run history.
 - Centralized user-level state so target repositories stay clean.
 - WSL/Windows Git worktree compatibility when supported by both Git installations.
+- Secret redaction in provider, test, and dashboard output.
+- Machine-readable diagnostics and worktree status for shell automation.
 
 ## Requirements
 
@@ -127,6 +129,7 @@ Run the environment diagnostic before the first issue:
 
 ```bash
 agentic doctor
+agentic doctor --json
 ```
 
 By default, worktrees, logs, shell records, and dashboards live under the user-level Agentic state directory, not beside the target repository. In WSL, use a shared Windows-mounted location when you need to open worktrees with Windows Git:
@@ -140,6 +143,8 @@ agentic shell                            # open the background-job shell
 agentic dashboard                        # generate the HTML dashboard
 agentic --list                           # list open GitHub issues
 agentic --runs                           # list existing worktrees
+agentic status --json                     # machine-readable worktree status
+agentic runs --json                       # alias for status
 agentic --issue 119                      # create or resume issue 119
 agentic --issue 119 --review              # rerun tests and review only
 agentic --issue 119 --publish             # validate, then offer draft-PR publication
@@ -193,6 +198,8 @@ Running the same issue again resumes its existing worktree. Use `--new` only whe
 | `agentic --issue N --new` | Create a separate worktree for the issue. |
 | `agentic --list` | List open GitHub issues. |
 | `agentic --runs` | List existing Agentic worktrees. |
+| `agentic status --json` | Emit machine-readable worktree status. |
+| `agentic runs --json` | Alias for `status --json`. |
 | `agentic init [--provider NAME]` | Create ignored target configuration and detect a starter check. |
 | `agentic doctor` | Diagnose Git, GitHub CLI, selected provider CLIs/API key, config, and check prerequisites. |
 | `agentic --state-dir PATH ...` | Store worktrees and runtime artifacts in a chosen location. |
@@ -212,6 +219,7 @@ Running the same issue again resumes its existing worktree. Use `--new` only whe
 | [Troubleshooting](docs/troubleshooting.md) | Missing tools, failed checks, repeated rejections, and WSL/Git issues. |
 | [Architecture](docs/architecture.md) | Components, lifecycle, filesystem layout, and safety boundaries. |
 | [Development](docs/development.md) | Local development, tests, CI, releases, and contribution workflow. |
+| [`agent_config.schema.json`](agent_config.schema.json) | JSON Schema for editor-assisted configuration validation. |
 
 ## Development and releases
 
