@@ -41,7 +41,7 @@ Git worktrees are the source of truth for code state. Durable run logs are store
 - structured review results; and
 - evidence used when resuming a rejected run.
 
-The interactive shell keeps a separate terminal-output copy for each background job. The dashboard reads these artifacts without modifying the repository or running tests. Job records contain the PID, command, timestamps, and log path so a later shell can display or stop jobs from an earlier session with `/ps --all`.
+The interactive shell keeps a separate terminal-output copy for each background job. The dashboard reads these artifacts without modifying the repository or running tests. Job records contain the PID, command, timestamps, and log path so a later shell can display or stop jobs from an earlier session with `/ps --all`. `/logs` can identify a job by number or PID and follows appended output while the job is running.
 
 ## Filesystem layout
 
