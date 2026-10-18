@@ -40,6 +40,29 @@ class ShellTests(unittest.TestCase):
             agentic_shell._welcome_banner(Path('/tmp/example'))
         self.assertNotIn('\033[', output.getvalue())
 
+    def test_help_does_not_emit_color_when_output_is_not_a_terminal(self):
+        from contextlib import redirect_stdout
+
+        output = StringIO()
+        with redirect_stdout(output):
+            agentic_shell._print_help()
+        self.assertIn('Run', output.getvalue())
+        self.assertIn('/dashboard [OUTPUT]', output.getvalue())
+        self.assertNotIn('\033[', output.getvalue())
+
+    def test_help_uses_color_on_a_terminal(self):
+        from contextlib import redirect_stdout
+
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        output = TTYBuffer()
+        with patch.dict(os.environ, {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), redirect_stdout(output):
+            agentic_shell._print_help()
+        self.assertIn('\033[1;36mCommands:', output.getvalue())
+        self.assertIn('\033[1;37m/run', output.getvalue())
+
     def test_help_command_is_available(self):
         self.assertEqual(agentic_shell.build_parser().parse_args(['help']).command, 'help')
 

@@ -25,25 +25,40 @@ from typing import Any, Callable, TextIO, cast
 
 
 HELP = """Commands:
-  /run ISSUE [--profile fast|slow]       start a background job
-       [--review|--publish|--new]
-  /run [--profile fast|slow]             local mode: paste a task, finish with /done
-       [--review|--publish|--new]
-  /ps [--all]                            show current or persisted jobs
-  /logs JOB [LINES]                      show the latest captured terminal output
-  /stop JOB                              stop a running job
-  /status [--json]                       show Agentic worktree status
-  /dashboard [OUTPUT]                    generate and open the HTML dashboard
-  /help                                  show this help
-  /quit                                  leave the shell; running jobs continue
 
-Jobs have no supervisor timeout. The configured Agentic test/Codex timeouts,
-if any, still apply inside the child runner.
+  Run
+    /run ISSUE [--profile fast|slow] [--review|--publish|--new]
+                                      start a background job
+    /run [--profile fast|slow] [--review|--publish|--new]
+                                      local mode: paste a task, finish with /done
 
-Type / to open an interactive autocomplete dropdown. Use Up/Down arrows to
-navigate, Enter or Tab to select, and Esc to dismiss. Supported options and
-known job IDs are completed where applicable.
+  Inspect
+    /ps [--all]                         show current or persisted jobs
+    /logs JOB [LINES]                   show the latest captured terminal output
+    /status [--json]                    show Agentic worktree status
+    /dashboard [OUTPUT]                 generate and open the HTML dashboard
+
+  Session
+    /stop JOB                           stop a running job
+    /help                               show this help
+    /quit                               leave the shell; running jobs continue
+
+Notes:
+  Jobs have no supervisor timeout. Configured Agentic test/Codex timeouts,
+  if any, still apply inside the child runner.
+
+  Type / to open autocomplete. Use Up/Down to navigate, Enter or Tab to
+  select, and Esc to dismiss. Options and known job IDs are completed too.
 """
+
+
+HELP_SECTION_COLORS = {
+    "Commands:": "1;36",
+    "Run": "36",
+    "Inspect": "36",
+    "Session": "36",
+    "Notes:": "1;33",
+}
 
 
 SHELL_COMMANDS = (
@@ -463,7 +478,8 @@ def _interactive_input(
                     dropdown_strings.append(content)
 
         buf: list[str] = []
-        buf.append(f"\r\033[2K{prompt}{line}")
+        display_prompt = _shell_paint(prompt, "1;36")
+        buf.append(f"\r\033[2K{display_prompt}{line}")
         for s in dropdown_strings:
             buf.append(f"\n\033[2K{s}")
         if prev_dropdown_lines > new_dropdown_lines:
@@ -486,7 +502,8 @@ def _interactive_input(
             for _ in range(prev_dropdown_lines):
                 buf.append("\n\033[2K")
             buf.append(f"\033[{prev_dropdown_lines}A")
-            buf.append(f"\r\033[2K{prompt}{line}")
+            display_prompt = _shell_paint(prompt, "1;36")
+            buf.append(f"\r\033[2K{display_prompt}{line}")
             cursor_col = len(prompt) + cursor_pos + 1
             buf.append(f"\033[{cursor_col}G")
             sys.stdout.write("".join(buf))
@@ -744,6 +761,35 @@ def _shell_paint(text: str, code: str) -> str:
     return f"\033[{code}m{text}\033[0m"
 
 
+def _help_line(line: str) -> str:
+    """Color one help line while preserving its plain-text layout."""
+    stripped = line.strip()
+    section_code = HELP_SECTION_COLORS.get(stripped)
+    if section_code:
+        return _shell_paint(line, section_code)
+    if stripped.startswith("/"):
+        indent = line[:len(line) - len(line.lstrip())]
+        command_end = line.find(" ", len(indent))
+        if command_end < 0:
+            return _shell_paint(line, "1;37")
+        return (
+            indent
+            + _shell_paint(line[len(indent):command_end], "1;37")
+            + _shell_paint(line[command_end:], "37")
+        )
+    if stripped.startswith("Jobs have") or stripped.startswith("if any"):
+        return _shell_paint(line, "33")
+    if stripped.startswith("Type /") or stripped.startswith("select,"):
+        return _shell_paint(line, "90")
+    return _shell_paint(line, "90")
+
+
+def _print_help() -> None:
+    """Print command help with a colorful terminal-only presentation."""
+    for line in HELP.rstrip().splitlines():
+        print(_help_line(line))
+
+
 def _fit_terminal_text(text: str, width: int) -> str:
     """Keep a welcome line inside its frame, including a small ellipsis."""
     if width <= 0:
@@ -776,11 +822,14 @@ def _welcome_banner(repo: Path, state_dir: Path | None = None,
     # split panes or small CI terminals.
     if columns < 62:
         print(_shell_paint("AGENTIC", "1;36"))
-        print(f"Interactive coding workflow - {_fit_terminal_text(repo.name, max(columns - 34, 8))}")
+        print(_shell_paint(
+            f"Interactive coding workflow - {_fit_terminal_text(repo.name, max(columns - 34, 8))}",
+            "36",
+        ))
         print(f"{active_jobs} running job(s); use /help for commands.")
         if previous_jobs:
-            print(f"{previous_jobs} previous job(s); use /ps --all to inspect.")
-        print("Use /help for commands. Jobs continue after /quit.")
+            print(_shell_paint(f"{previous_jobs} previous job(s); use /ps --all to inspect.", "33"))
+        print(_shell_paint("Use /help for commands. Jobs continue after /quit.", "90"))
         return
 
     width = min(columns, 88)
@@ -817,7 +866,7 @@ def _welcome_banner(repo: Path, state_dir: Path | None = None,
     print(row(f"State       {state_text}"))
     print(row(f"Config      {config_text}"))
     print(row(f"Jobs        {job_text}"))
-    print(_shell_paint(row("Commands    /run ISSUE   /ps   /logs JOB   /help   /quit"), "2"))
+    print(_shell_paint(row("Commands    /run ISSUE   /ps   /logs JOB   /help   /quit"), "36"))
     print(_shell_paint(border(bottom_left, bottom_right), "36"))
     if previous_jobs:
         print(_shell_paint("Tip: use /ps --all to inspect jobs from previous sessions.", "33"))
@@ -1345,7 +1394,7 @@ class AgenticShell:
         command = parts[0].lower()
         try:
             if command in {"/help", "/?"}:
-                print(HELP)
+                _print_help()
             elif command == "/run":
                 self.run_issue(parts)
             elif command == "/ps":
@@ -1376,8 +1425,7 @@ class AgenticShell:
             active_jobs=active_jobs,
             previous_jobs=previous_jobs,
         )
-        print("Available commands:")
-        print(HELP.rstrip())
+        _print_help()
         completion_state = self._configure_completion()
         try:
             while True:
