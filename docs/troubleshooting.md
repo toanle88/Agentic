@@ -88,7 +88,7 @@ In the interactive shell:
 /logs 1 80
 ```
 
-The shell has no additional supervisor timeout. Configured developer, reviewer, and test timeouts still apply. A `null` timeout means unlimited. `/logs JOB` or `/logs PID` follows a running child and prints new output as it arrives; press Ctrl-C to return to the prompt without stopping it. Use `/stop JOB` only when you intentionally want to stop the child process.
+The shell has no additional supervisor timeout. Configured developer, reviewer, and test timeouts still apply. A `null` test timeout means unlimited for that test command; the separate `task_timeout_seconds` limit still applies to the complete task. `/logs JOB` or `/logs PID` follows a running child and prints new output as it arrives; press Ctrl-C to return to the prompt without stopping it. Use `/stop JOB` only when you intentionally want to stop the child process.
 
 For a direct foreground run, inspect the durable run log from another terminal. The current terminal is occupied by the foreground runner.
 

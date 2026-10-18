@@ -204,7 +204,11 @@ def load_config(path: Path) -> dict[str, Any]:
         "codex_timeout_seconds": codex_timeout,
         "test_timeout_seconds": test_timeout,
         "task_timeout_seconds": task_timeout,
-        "effective_test_timeout_seconds": _effective_timeout(test_timeout, DEFAULT_TEST_TIMEOUT),
+        # An omitted test timeout keeps the safe default; an explicit null
+        # disables the per-test-command timeout.
+        "effective_test_timeout_seconds": (
+            DEFAULT_TEST_TIMEOUT if "test_timeout_seconds" not in data else test_timeout
+        ),
         "effective_developer_timeout_seconds": _effective_timeout(
             developer_agent.timeout_seconds, DEFAULT_DEVELOPER_TIMEOUT
         ),

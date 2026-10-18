@@ -62,7 +62,7 @@ from agentic_security import redact_secrets
 from agentic_telemetry import combine_usage, extract_jsonl_usage, normalize_usage, record_usage
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.4"
+__version__ = "1.1.5"
 # Keep the configuration constants available from the historical runner module
 # while the implementation lives in agentic_config.
 DEFAULT_SECURITY_MODE = _agentic_config.DEFAULT_SECURITY_MODE
