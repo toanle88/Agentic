@@ -105,7 +105,7 @@ Those directories are deliberately outside the main checkout. Logs are for troub
 ```json
 {
   "test_commands": [["python", "-m", "pytest", "-q"]],
-  "max_retries": 2,
+  "max_retries": 3,
   "max_files": 30,
   "codex_model": null,
   "codex_reasoning_effort": null,
@@ -122,7 +122,7 @@ Test commands are argv arrays, not shell strings. They run in the worktree. Chan
     ["uv", "run", "--no-sync", "pytest", "-q"],
     ["uv", "run", "--no-sync", "ruff", "check", "."]
   ],
-  "max_retries": 2,
+  "max_retries": 3,
   "max_files": 30,
   "codex_model": null,
   "codex_reasoning_effort": null,

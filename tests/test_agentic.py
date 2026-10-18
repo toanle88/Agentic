@@ -251,7 +251,7 @@ class PureTests(unittest.TestCase):
     def test_config_validation(self):
         folder = Path(__file__).resolve().parents[1]
         config = agentic.load_config(folder / 'agent_config.json')
-        self.assertEqual(config['max_retries'], 2)
+        self.assertEqual(config['max_retries'], 3)
         self.assertIsNone(config['codex_model'])
         self.assertIsNone(config['codex_reasoning_effort'])
         self.assertIsNone(config['codex_timeout_seconds'])

@@ -698,7 +698,7 @@ def load_config(path: Path) -> dict[str, Any]:
         for c in commands
     ):
         raise ValueError("test_commands must be a nonempty list of argv arrays")
-    retries = data.get("max_retries", 2)
+    retries = data.get("max_retries", 3)
     max_files = data.get("max_files", 30)
     codex_timeout = data.get("codex_timeout_seconds")
     test_timeout = data.get("test_timeout_seconds")
