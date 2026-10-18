@@ -1,4 +1,5 @@
 {
+  "task_source": "github",
   "test_commands": [
     ["python", "-m", "unittest", "discover", "-s", "tests", "-q"]
   ],

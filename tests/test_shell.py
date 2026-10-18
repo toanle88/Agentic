@@ -40,6 +40,11 @@ class ShellTests(unittest.TestCase):
 
     def test_parse_run_command(self):
         self.assertEqual(agentic_shell._parse_job_command(['/run', '119']), ('119', []))
+        self.assertEqual(agentic_shell._parse_job_command(['/run']), (None, []))
+        self.assertEqual(
+            agentic_shell._parse_job_command(['/run', '--publish']),
+            (None, ['--publish']),
+        )
         self.assertEqual(
             agentic_shell._parse_job_command(['/run', '119', '--review']),
             ('119', ['--review']),
@@ -52,6 +57,18 @@ class ShellTests(unittest.TestCase):
             agentic_shell._parse_job_command(['/run', '119', '--review', '--publish'])
         with self.assertRaises(ValueError):
             agentic_shell._parse_job_command(['/run', '119', 'slow'])
+
+    def test_local_task_capture_writes_a_reusable_task_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / 'agent_config.json'
+            config.write_text('{"task_source":"local"}')
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), config=config, session_dir=root / 'logs'
+            )
+            with patch('builtins.input', side_effect=['Add export support', 'Add tests', '/done']):
+                task_file = shell._capture_local_task()
+            self.assertEqual(task_file.read_text(), 'Add export support\nAdd tests\n')
 
     def test_shell_launches_and_collects_a_background_job(self):
         with tempfile.TemporaryDirectory() as temp:

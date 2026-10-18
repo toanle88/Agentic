@@ -1,6 +1,6 @@
 # Getting started
 
-This guide takes you from installation to the first issue run.
+This guide takes you from installation to the first GitHub issue or local-task run.
 
 ## Prerequisites
 
@@ -73,7 +73,7 @@ agentic doctor
 Agentic stores worktrees, run logs, shell records, and dashboards in a user-level state directory. If both WSL Git and Windows Git must access the worktree, choose a shared mounted path:
 
 ```bash
-agentic --state-dir /mnt/d/Dev/AgenticState --issue 119
+agentic --state-dir /path/to/shared-agentic-state --issue 119
 ```
 
 ## Start a run
@@ -98,6 +98,11 @@ For a foreground run, use:
 ```bash
 agentic --issue 119
 ```
+
+GitHub issue mode is the default. For manually pasted requirements, set
+`"task_source": "local"` in `agent_config.json`, then use `/run` in the
+interactive shell. Paste the task and finish with `/done`; local tasks can
+still be published as GitHub draft pull requests.
 
 To use a target repository without changing directories:
 

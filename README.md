@@ -9,7 +9,7 @@ Agentic is designed for human-supervised development. It does not silently commi
 
 ## Highlights
 
-- One isolated Git worktree per GitHub issue.
+- One isolated Git worktree per GitHub issue or local task.
 - Resume support for unfinished or rejected work.
 - Configurable project checks using safe argument arrays.
 - Independent read-only review before publication.
@@ -105,6 +105,12 @@ agentic --issue 119 --publish             # validate, then offer draft-PR public
 agentic --issue 119 --new                 # explicitly create a second worktree
 ```
 
+GitHub issues are the default task source. To use manually pasted requirements,
+set `"task_source": "local"` in the target's ignored `agent_config.json`, then
+run `/run` in the interactive shell and finish the pasted task with `/done`.
+Local tasks use the same review and resume flow and can still be published as
+GitHub draft pull requests.
+
 Start the interactive shell:
 
 ```bash
@@ -140,6 +146,9 @@ Running the same issue again resumes its existing worktree. Use `--new` only whe
 | `agentic --issue N --profile slow` | Run the fast checks plus configured slow checks. |
 | `agentic --issue N --review` | Re-run checks and review an existing worktree without coding. |
 | `agentic --issue N --publish` | Revalidate, request confirmation, then publish a draft PR. |
+| `agentic --task TEXT` | Start or resume a local task when `task_source` is `local`. |
+| `agentic --task-file PATH` | Start or resume a local task from a file. |
+| `agentic --task-file task.md --publish` | Publish a reviewed local task as a draft PR. |
 | `agentic --issue N --new` | Create a separate worktree for the issue. |
 | `agentic --list` | List open GitHub issues. |
 | `agentic --runs` | List existing Agentic worktrees. |

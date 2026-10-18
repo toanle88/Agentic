@@ -10,6 +10,7 @@ Runtime state is controlled separately from project configuration. Use `--state-
 
 ```json
 {
+  "task_source": "github",
   "test_commands": [
     ["make", "check-fast"],
     ["pnpm", "run", "test:web:fast"],
@@ -35,6 +36,7 @@ Use commands that are actually supported by the target repository. Agentic does 
 
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
+| `task_source` | `github` or `local` | `github` | Selects where work requirements come from. GitHub mode uses issue numbers; local mode accepts `--task`, `--task-file`, or pasted tasks from `/run`. |
 | `test_commands` | array of argv arrays | required | Checks run inside the worktree. Each command must be an array such as `["go", "test", "./..."]`; shell strings are not accepted. |
 | `slow_test_commands` | array of argv arrays | `[]` | Additional checks run after the fast checks when `--profile slow` is selected. |
 | `max_retries` | integer `0..3` | `3` | Extra developer attempts after the first attempt. `3` permits up to four total attempts. |
@@ -59,7 +61,7 @@ Commands are represented as argument arrays rather than shell strings:
 }
 ```
 
-This prevents issue text or filenames from becoming shell syntax and makes command execution predictable across environments. Commands run with the issue worktree as their current directory.
+This prevents task text or filenames from becoming shell syntax and makes command execution predictable across environments. Commands run with the issue or local-task worktree as their current directory.
 
 Agentic validates executables and Python `-m` modules before development starts. Missing dependencies, unavailable commands, port conflicts, and missing files are environmental failures; they should be fixed in the environment or configuration rather than retried as code defects.
 
@@ -85,6 +87,43 @@ The slow profile runs every `test_commands` entry first, followed by every `slow
 ## Per-developer configuration
 
 Configuration is target-repository input. If developers need different models, checks, or limits, keep the personal `agent_config.json` untracked or ignored and commit a separate example file for the team. Never put credentials, API keys, or production connection strings in the configuration.
+
+## Task source
+
+GitHub issue mode is the default:
+
+```json
+{ "task_source": "github" }
+```
+
+To work from manually pasted requirements instead, set:
+
+```json
+{ "task_source": "local" }
+```
+
+Local tasks use the same worktrees, tests, reviews, retries, resume behavior,
+logs, and dashboard. They can still be published as GitHub draft pull requests
+with `--publish`; the PR contains the local task text instead of a `Closes #N`
+reference.
+
+For a direct run, use either:
+
+```bash
+agentic --task "Add CSV invoice export"
+agentic --task-file task.md
+```
+
+In the interactive shell, use `/run` without an issue number. Paste the task
+and finish with a line containing `/done`:
+
+```text
+agentic> /run
+Paste the local task. Finish with a line containing /done; use /cancel to abort.
+task> Add CSV invoice export.
+task> Include regression tests.
+task> /done
+```
 
 Use an explicit file when needed:
 
