@@ -51,6 +51,29 @@ class ReleaseScriptTests(unittest.TestCase):
             self.assertNotIn(("git", "tag", "-a", "v0.2.0", "-m", "Release v0.2.0"), calls)
             self.assertNotIn(("git", "push", "origin", "v0.2.0"), calls)
 
+    def test_local_checks_hide_successful_agent_output(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+
+            def fake_run(argv, *, root, capture_output=False):
+                if "unittest" in argv:
+                    return release.subprocess.CompletedProcess(
+                        argv, 0, "[DEVELOPER] noisy output\nRan 124 tests in 9.2s\n\nOK\n", ""
+                    )
+                return release.subprocess.CompletedProcess(argv, 0, "", "")
+
+            output = StringIO()
+            with patch.object(release, "_run", side_effect=fake_run), redirect_stdout(output):
+                release._run_local_checks(root)
+
+            rendered = output.getvalue()
+            self.assertIn("Unit tests passed: Ran 124 tests in 9.2s", rendered)
+            self.assertIn("Compile checks passed", rendered)
+            self.assertNotIn("[DEVELOPER] noisy output", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()
