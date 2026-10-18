@@ -43,6 +43,12 @@ class GitTest(unittest.TestCase):
         self.assertFalse((self.repo / 'new.py').exists())
         self.assertEqual(agentic.pending_files(run.worktree), ['new.py'])
 
+    def test_repository_lock_blocks_concurrent_mutating_run(self):
+        with agentic.repository_lock(self.repo):
+            with self.assertRaisesRegex(RuntimeError, 'already active'):
+                with agentic.repository_lock(self.repo):
+                    pass
+
     def test_prepare_patch_across_commits_and_staged_changes(self):
         run = agentic.create_worktree(self.repo, 'main', 12)
         (run.worktree / 'first.py').write_text('print(1)\n')
@@ -91,7 +97,7 @@ class GitTest(unittest.TestCase):
 
         with patch('agentic.streamed_command', side_effect=fake_stream):
             agentic.run_codex(run.worktree, 'Implement it', output=folder / 'developer-001.txt')
-            verdict = agentic.review(run.worktree, issue, folder, base)
+            verdict = agentic.review(run.worktree, issue, folder, base, test_report='pytest passed')
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0][0:3], ['codex', 'exec', '--json'])
         self.assertEqual(calls[0][3:5], ['--sandbox', 'workspace-write'])
@@ -99,6 +105,8 @@ class GitTest(unittest.TestCase):
         self.assertEqual(verdict['approved'], True)
         self.assertEqual(len(list(folder.glob('review-*.json'))), 2)  # review-schema + review-001
         self.assertIn('git diff --cached', calls[1][-1])
+        self.assertIn('description', calls[1][-1])
+        self.assertIn('pytest passed', calls[1][-1])
 
     def test_publish_requires_new_verification_and_confirmation(self):
         run = agentic.create_worktree(self.repo, 'main', 15)
@@ -165,6 +173,34 @@ class PureTests(unittest.TestCase):
             call(repo, 'worktree', 'repair', '--relative-paths', str(worktree)),
         ])
 
+    def test_refresh_base_fetches_remote_branch(self):
+        repo = Path('/repo')
+        with patch('agentic.git') as git_mock:
+            agentic.refresh_base(repo, 'main')
+        git_mock.assert_called_once_with(repo, 'fetch', 'origin', 'main')
+
+    def test_codex_config_overrides_are_added_to_cli(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            output = root / 'message.txt'
+
+            def fake_stream(argv, cwd, **kwargs):
+                Path(argv[argv.index('--output-last-message') + 1]).write_text('done')
+                return CompletedProcess(argv, 0, stdout='')
+
+            with patch('agentic.streamed_command', side_effect=fake_stream) as streamed:
+                ok, message = agentic.run_codex(
+                    root, 'prompt', output=output,
+                    model='gpt-5.6-luna', reasoning_effort='max', timeout=7,
+                )
+            self.assertTrue(ok)
+            self.assertEqual(message, 'done')
+            argv = streamed.call_args.args[0]
+            self.assertIn('--model', argv)
+            self.assertIn('gpt-5.6-luna', argv)
+            self.assertIn('model_reasoning_effort="max"', argv)
+            self.assertEqual(streamed.call_args.kwargs['timeout'], 7)
+
     def test_issue_eligibility_depends_only_on_builtin_status(self):
         self.assertTrue(agentic.eligible(agentic.Issue(1, 'Bug', 'hello')))
         self.assertTrue(agentic.eligible(agentic.Issue(2, 'Security task', '', state='OPEN')))
@@ -214,7 +250,12 @@ class PureTests(unittest.TestCase):
 
     def test_config_validation(self):
         folder = Path(__file__).resolve().parents[1]
-        self.assertEqual(agentic.load_config(folder / 'agent_config.json')['max_retries'], 2)
+        config = agentic.load_config(folder / 'agent_config.json')
+        self.assertEqual(config['max_retries'], 2)
+        self.assertIsNone(config['codex_model'])
+        self.assertIsNone(config['codex_reasoning_effort'])
+        self.assertEqual(config['codex_timeout_seconds'], 1200)
+        self.assertEqual(config['test_timeout_seconds'], 360)
         self.assertTrue(agentic.forbidden('.env'))
         self.assertFalse(agentic.forbidden('src/main.py'))
 
@@ -240,9 +281,11 @@ class ResumeIntegrationTests(GitTest):
               patch('agentic.get_issue', return_value=issue),
               patch('agentic.check_existing_pr', return_value=[]),
               patch('agentic.create_worktree') as create_new,
+              patch('agentic.refresh_base') as refresh_base,
               patch('agentic.develop', return_value=True) as develop):
             agentic.execute(args)
             create_new.assert_not_called()
+            refresh_base.assert_called_once_with(self.repo, 'main')
             self.assertEqual(develop.call_args.args[0], run)
             self.assertTrue((run.worktree / 'partial.py').exists())
 

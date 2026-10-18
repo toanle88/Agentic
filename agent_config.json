@@ -3,5 +3,9 @@
     ["python", "-m", "pytest", "-q"]
   ],
   "max_retries": 2,
-  "max_files": 30
+  "max_files": 30,
+  "codex_model": null,
+  "codex_reasoning_effort": null,
+  "codex_timeout_seconds": 1200,
+  "test_timeout_seconds": 360
 }

@@ -59,13 +59,15 @@ Each agent session writes two logs under `../.<project>-agent-runs/<branch>/`:
 New invocations automatically increment the log number. Test commands print their
 output live. When an agent is quiet, a **15-second heartbeat** confirms that the
 subprocess has not terminated; a heartbeat does *not* prove forward progress.
-Codex still has a 20-minute per-invocation timeout, and each test command has a
-6-minute timeout. These limits are intentionally independent of retries.
+Codex defaults to a 20-minute per-invocation timeout, and each test command
+defaults to a 6-minute timeout. These limits are configurable and intentionally
+independent of retries.
 
 **Upgrading while an old run is active:** stop the old invocation normally
-(e.g. Ctrl+C), ensure it has exited, replace `agentic.py` with the v3.2 script,
-and run `python agentic.py --issue 119` again. It reuses the existing worktree.
-Don't launch two runners simultaneously against the same issue worktree.
+(e.g. Ctrl+C), ensure it has exited, replace `agentic.py` with the updated script,
+and run `python agentic.py --issue 119` again. It reuses the existing worktree
+and refreshes `origin/<base>` before validation. A per-repository lock rejects
+simultaneous mutating runs.
 
 ### Workflow (no stages to track)
 
@@ -104,7 +106,11 @@ Those directories are deliberately outside the main checkout. Logs are for troub
 {
   "test_commands": [["python", "-m", "pytest", "-q"]],
   "max_retries": 2,
-  "max_files": 30
+  "max_files": 30,
+  "codex_model": null,
+  "codex_reasoning_effort": null,
+  "codex_timeout_seconds": 1200,
+  "test_timeout_seconds": 360
 }
 ```
 
@@ -117,11 +123,20 @@ Test commands are argv arrays, not shell strings. They run in the worktree. Chan
     ["uv", "run", "--no-sync", "ruff", "check", "."]
   ],
   "max_retries": 2,
-  "max_files": 30
+  "max_files": 30,
+  "codex_model": null,
+  "codex_reasoning_effort": null,
+  "codex_timeout_seconds": 1200,
+  "test_timeout_seconds": 360
 }
 ```
 
 These `uv` examples require packages already installed/available in that worktree environment; adjust for your actual project setup.
+
+Leave `codex_model` and `codex_reasoning_effort` as `null` to inherit the
+Codex CLI configuration already selected for your account, such as a
+configured Luna model and Max reasoning effort. Set them explicitly when a
+repository needs reproducible model settings. Timeout values are in seconds.
 
 ### No-label behavior
 
@@ -144,7 +159,7 @@ codex exec --sandbox read-only --output-schema /path/review-schema.json \
   --output-last-message /path/review-001.json "Review the proposed PR diff..."
 ```
 
-The two calls share the worktree files but **not the developer conversation**. They use the same subscription login and usage allowance. A review is helpful but cannot prove a patch is bug-free.
+The two calls share the worktree files but **not the developer conversation**. They use the same subscription login and usage allowance. The reviewer receives the full issue description and test report as untrusted context. A review is helpful but cannot prove a patch is bug-free.
 
 ### Important boundaries and trade-offs
 
@@ -153,7 +168,7 @@ The two calls share the worktree files but **not the developer conversation**. T
 - `AGENTS.md`, `agentic.py`, `agent_config.json`, `.env*`, private keys, `.gitmodules`, `.codex/`, and `.github/workflows/` are blocked from automated proposed patches. Inspect and apply such changes manually if needed.
 - The runner runs unit tests **outside the Codex sandbox** under the current operating-system account; a malicious test can access that account's secrets. For untrusted issues or contributors, use a locked-down container or disposable VM with minimal credentials. Even a read-only agent is not a complete security boundary.
 - `codex exec` options may evolve; check `codex exec --help` for your installed version. Windows users may prefer WSL. Codex availability and subscription limits depend on your plan.
-- This is a supervised single-user prototype, not a queue/multi-worker service. Concurrent runs for the *same* issue require additional locking; use one active runner per worktree. PR creation isn't the same as CI passing. CI and human code review are still required.
+- This is a supervised single-user prototype, not a queue/multi-worker service. A per-repository lock prevents concurrent mutating runner processes, but separate worktrees for the same issue still require deliberate coordination. PR creation isn't the same as CI passing. CI and human code review are still required.
 - The runner **does not** automatically delete worktrees. Manage them with `git worktree list` and, when truly finished, `git worktree remove /path/to/worktree` after reviewing/preserving any changes.
 
 ### WSL and Windows Git
