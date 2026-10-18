@@ -166,11 +166,11 @@ run `/run` in the interactive shell and finish the pasted task with `/done`.
 Local tasks use the same review and resume flow and can still be published as
 GitHub draft pull requests.
 
-Before development, an independent read-only investigator classifies the issue
-as `pass`, `reject`, or `needs_input`. All valid investigator results are
-recorded and development continues automatically; `reject` and `needs_input`
-remain visible in the run log as warnings. Invalid investigator output or
-investigator tooling failures still stop the run.
+Before development, an independent read-only investigator analyzes the issue and
+records feedback about relevant code, tests, ambiguity, risks, and recommended
+next steps. The summary and findings are passed to the developer automatically;
+investigation does not produce a status or block development. Invalid
+investigator output or investigator tooling failures still stop the run.
 
 Start the interactive shell:
 
