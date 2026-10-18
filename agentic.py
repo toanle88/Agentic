@@ -28,6 +28,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+__version__ = "0.1.0"
 BRANCH_RE = re.compile(r"^agent/issue-(\d+)-([a-f0-9]{8})$")
 RELATIVE_WORKTREE_GIT = (2, 48, 0)
 REVIEW_SCHEMA = {
@@ -886,6 +887,7 @@ def select_issue(issues: list[Issue]) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
         "command", nargs="?", choices=("help", "shell", "dashboard"),
         help="Show help or route to a built-in subcommand",

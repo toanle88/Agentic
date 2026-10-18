@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentic-runner"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A resumable Codex and GitHub issue coding-agent runner"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,3 +18,6 @@ agentic-shell = "agentic_shell:main"
 
 [tool.setuptools]
 py-modules = ["agentic", "agentic_dashboard", "agentic_shell"]
+
+[tool.setuptools.dynamic]
+version = {attr = "agentic.__version__"}
