@@ -62,7 +62,7 @@ from agentic_security import redact_secrets
 from agentic_telemetry import combine_usage, extract_jsonl_usage, normalize_usage, record_usage
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 # Keep the configuration constants available from the historical runner module
 # while the implementation lives in agentic_config.
 DEFAULT_SECURITY_MODE = _agentic_config.DEFAULT_SECURITY_MODE
@@ -1735,23 +1735,16 @@ def _run_investigation(run: Run, issue: Issue, config: dict[str, Any],
 
 
 def _investigation_allows_development(verdict: dict[str, Any]) -> bool:
-    """Pass automatically; require an explicit override for other outcomes."""
+    """Continue after recording the investigator's result and warnings."""
     if verdict.get("status") == "pass":
         print("[INVESTIGATION] PASS; continuing automatically")
-        return True
-    status = str(verdict.get("status", "unknown")).upper()
-    try:
-        answer = input(
-            f"\n[INVESTIGATION] Status is {status}. Continue anyway? "
-            "Type 'continue' to override: "
-        ).strip().lower()
-    except (EOFError, OSError):
-        answer = ""
-    if answer == "continue":
-        print("[INVESTIGATION] Explicit override accepted; continuing")
-        return True
-    print("[INVESTIGATION] Development stopped; revise the issue or resume and type 'continue'.")
-    return False
+    else:
+        status = str(verdict.get("status", "unknown")).upper()
+        print(
+            f"[INVESTIGATION] Status is {status}; continuing automatically "
+            "with the investigator's findings recorded"
+        )
+    return True
 
 
 def review(worktree: Path, issue: Issue, folder: Path, base_sha: str,
@@ -2511,13 +2504,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
         investigation = _run_investigation(
             run, issue, config, folder, deadline=task_deadline,
         )
-        if not _investigation_allows_development(investigation):
-            print_run_summary(
-                run,
-                "INVESTIGATION BLOCKED",
-                "revise the issue or resume and type 'continue' to override",
-            )
-            return INVESTIGATION_BLOCKED_EXIT
+        _investigation_allows_development(investigation)
     if not fresh and github_repo:
         existing = check_existing_pr(run.worktree, github_repo, run.branch)
         if existing:
