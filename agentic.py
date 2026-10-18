@@ -31,17 +31,35 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from agentic_models import AgentSettings, Issue, Run, StatePaths
+from agentic_sandbox import sandbox_command, validate_sandbox
 from agentic_security import redact_secrets
+from agentic_telemetry import combine_usage, extract_jsonl_usage, normalize_usage, record_usage
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 SUPPORTED_PROVIDERS = ("codex", "gemini", "claude", "copilot", "openrouter")
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MAX_TURNS = 80
 OPENROUTER_MAX_TOOL_TURNS = (1, 200)
 OPENROUTER_COMMAND_TIMEOUT = (1, 86400)
+DEFAULT_TEST_TIMEOUT = 300
+DEFAULT_DEVELOPER_TIMEOUT = 600
+DEFAULT_REVIEWER_TIMEOUT = 300
+DEFAULT_TASK_TIMEOUT = 1800
+MAX_TASK_TIMEOUT = 86400
+DEFAULT_OPENROUTER_COMMAND_TIMEOUT = 300
 NETWORK_COMMANDS = {"curl", "wget", "ssh", "scp", "sftp", "ftp", "nc", "netcat", "telnet", "gh"}
 ALWAYS_BLOCKED_COMMANDS = {"gh", "ssh", "scp", "sftp"}
+READONLY_GIT_COMMANDS = {"status", "diff", "log", "show", "branch", "rev-parse"}
+READONLY_INSPECTION_COMMANDS = {"rg", "grep", "ls", "pwd", "file"}
+GIT_UNSAFE_OPTIONS = {
+    "-c", "--config-env", "--exec-path", "--git-dir", "--work-tree", "-C",
+    "--output", "-o", "--ext-diff", "--textconv", "--no-index",
+}
+READONLY_BRANCH_OPTIONS = {
+    "--list", "-l", "--show-current", "-r", "--remotes", "-a", "--all",
+    "-v", "-vv", "--verbose",
+}
 BRANCH_RE = re.compile(r"^agent/issue-(\d+)-([a-f0-9]{8})$")
 LOCAL_BRANCH_RE = re.compile(
     r"^agent/task-(?P<slug>[a-z0-9-]+)-(?P<key>[a-f0-9]{12})(?:-(?P<ident>[a-f0-9]{8}))?$"
@@ -223,11 +241,8 @@ def refresh_base(repo: Path, base: str) -> None:
 
 
 @contextmanager
-def repository_lock(repo: Path):
-    """Prevent concurrent runners from mutating the same repository."""
-    lock_path = Path(git(repo, "rev-parse", "--git-path", "agentic.lock"))
-    if not lock_path.is_absolute():
-        lock_path = repo / lock_path
+def _exclusive_lock(lock_path: Path, message: str):
+    """Acquire a cross-process lock using only a narrowly scoped state file."""
     lock_path = lock_path.resolve()
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path.touch(exist_ok=True)
@@ -247,10 +262,7 @@ def repository_lock(repo: Path):
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             acquired = True
         except (BlockingIOError, OSError) as exc:
-            raise RuntimeError(
-                f"Another agentic run is already active for {repo}; "
-                "wait for it to finish before starting another run"
-            ) from exc
+            raise RuntimeError(message) from exc
         try:
             yield
         finally:
@@ -262,6 +274,45 @@ def repository_lock(repo: Path):
                 else:
                     import fcntl
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def repository_lock(repo: Path, state_dir: Path | None = None):
+    """Serialize operations that mutate shared Git repository metadata."""
+    lock_path = state_paths(repo, state_dir).root / "locks" / "repository.lock"
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # Read-only test sandboxes and locked-down hosts may not permit the
+        # configured user state root. Keep the operation safe with a narrow
+        # Git-metadata fallback rather than disabling locking.
+        lock_path = Path(git(repo, "rev-parse", "--git-path", "agentic.lock"))
+        if not lock_path.is_absolute():
+            lock_path = repo / lock_path
+    with _exclusive_lock(
+        lock_path,
+        f"Another Agentic repository operation is already active for {repo}; wait for it to finish",
+    ):
+        yield
+
+
+@contextmanager
+def worktree_lock(repo: Path, run: Run, state_dir: Path | None = None):
+    """Allow independent worktrees to run concurrently, but not one worktree twice."""
+    identity = hashlib.sha256(run.branch.encode("utf-8")).hexdigest()[:16]
+    lock_path = state_paths(repo, state_dir).root / "locks" / f"worktree-{identity}.lock"
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        git_dir = Path(git(repo, "rev-parse", "--git-path", "agentic-worktree-locks"))
+        if not git_dir.is_absolute():
+            git_dir = repo / git_dir
+        lock_path = git_dir / f"{identity}.lock"
+    with _exclusive_lock(
+        lock_path,
+        f"Another Agentic run is already active for worktree {run.worktree}; wait for it to finish",
+    ):
+        yield
 
 
 def github_metadata(repo: Path) -> tuple[str, str]:
@@ -361,16 +412,17 @@ def choose_existing(runs: list[Run]) -> Run:
 
 def create_worktree(repo: Path, base: str, issue_number: int,
                     state_dir: Path | None = None) -> Run:
-    refresh_base(repo, base)
-    relative_paths = configure_relative_worktree_paths(repo)
-    ident = uuid.uuid4().hex[:8]
-    branch = f"agent/issue-{issue_number}-{ident}"
-    # ``state_dir`` is supplied by the CLI. The legacy fallback keeps this
-    # low-level helper compatible for callers that intentionally manage paths.
-    parent = state_paths(repo, state_dir).worktrees if state_dir else legacy_worktrees_dir(repo)
-    parent.mkdir(parents=True, exist_ok=True)
-    worktree = parent / f"issue-{issue_number}-{ident}"
-    git(repo, "worktree", "add", "-b", branch, str(worktree), f"origin/{base}")
+    with repository_lock(repo, state_dir):
+        refresh_base(repo, base)
+        relative_paths = configure_relative_worktree_paths(repo)
+        ident = uuid.uuid4().hex[:8]
+        branch = f"agent/issue-{issue_number}-{ident}"
+        # ``state_dir`` is supplied by the CLI. The legacy fallback keeps this
+        # low-level helper compatible for callers that intentionally manage paths.
+        parent = state_paths(repo, state_dir).worktrees if state_dir else legacy_worktrees_dir(repo)
+        parent.mkdir(parents=True, exist_ok=True)
+        worktree = parent / f"issue-{issue_number}-{ident}"
+        git(repo, "worktree", "add", "-b", branch, str(worktree), f"origin/{base}")
     if relative_paths:
         print("[GIT] Using relative worktree paths for WSL/Windows compatibility")
     else:
@@ -388,15 +440,16 @@ def create_local_worktree(repo: Path, base: str, issue: Issue,
                           separate: bool = False) -> Run:
     if not issue.is_local or not issue.task_key:
         raise ValueError("create_local_worktree requires a local task")
-    refresh_base(repo, base)
-    relative_paths = configure_relative_worktree_paths(repo)
-    slug = _task_slug(issue.title)
-    ident = f"-{uuid.uuid4().hex[:8]}" if separate else ""
-    branch = f"agent/task-{slug}-{issue.task_key}{ident}"
-    parent = state_paths(repo, state_dir).worktrees if state_dir else legacy_worktrees_dir(repo)
-    parent.mkdir(parents=True, exist_ok=True)
-    worktree = parent / f"task-{slug}-{issue.task_key}{ident}"
-    git(repo, "worktree", "add", "-b", branch, str(worktree), f"origin/{base}")
+    with repository_lock(repo, state_dir):
+        refresh_base(repo, base)
+        relative_paths = configure_relative_worktree_paths(repo)
+        slug = _task_slug(issue.title)
+        ident = f"-{uuid.uuid4().hex[:8]}" if separate else ""
+        branch = f"agent/task-{slug}-{issue.task_key}{ident}"
+        parent = state_paths(repo, state_dir).worktrees if state_dir else legacy_worktrees_dir(repo)
+        parent.mkdir(parents=True, exist_ok=True)
+        worktree = parent / f"task-{slug}-{issue.task_key}{ident}"
+        git(repo, "worktree", "add", "-b", branch, str(worktree), f"origin/{base}")
     if relative_paths:
         print("[GIT] Using relative worktree paths for WSL/Windows compatibility")
     else:
@@ -465,6 +518,44 @@ def _short(value: Any, limit: int = 180) -> str:
     """Display single-line progress without flooding the terminal."""
     text = str(value).replace("\r", " ").replace("\n", " ⏎ ").strip()
     return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def _remaining_timeout(deadline: float | None, maximum: int | None) -> int | None:
+    """Return the smaller configured/deadline timeout, never zero."""
+    if deadline is None:
+        return maximum
+    remaining = max(1, int(deadline - time.monotonic()))
+    return remaining if maximum is None else min(remaining, maximum)
+
+
+def _effective_timeout(value: int | None, default: int) -> int:
+    """Turn legacy ``null`` timeout settings into safe runtime defaults."""
+    return default if value is None else value
+
+
+def _runtime_agent_settings(config: dict[str, Any], role: str) -> dict[str, Any]:
+    settings = dict(config.get(f"{role}_agent", {}))
+    default = DEFAULT_DEVELOPER_TIMEOUT if role == "developer" else DEFAULT_REVIEWER_TIMEOUT
+    settings["timeout_seconds"] = _effective_timeout(settings.get("timeout_seconds"), default)
+    if settings.get("provider") == "openrouter":
+        settings["command_timeout_seconds"] = _effective_timeout(
+            settings.get("command_timeout_seconds"), DEFAULT_OPENROUTER_COMMAND_TIMEOUT
+        )
+    return settings
+
+
+def _record_provider_usage(output: Path, readonly: bool, usage: dict[str, Any]) -> None:
+    role = "reviewer" if readonly else "developer"
+    record_usage(output.parent, role, usage)
+    tokens = usage.get("total_tokens")
+    cost = usage.get("estimated_cost_usd")
+    if tokens is not None or cost is not None:
+        parts = []
+        if tokens is not None:
+            parts.append(f"{tokens:,} tokens")
+        if cost is not None:
+            parts.append(f"${cost:.4f}")
+        print(f"[COST] {role.title()}: {' '.join(parts)}", flush=True)
 
 
 def _console_text(value: Any, stream: Any = None) -> str:
@@ -614,7 +705,9 @@ def _codex_progress(line: str) -> str | None:
 def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                      timeout: int | None, codex_json: bool = False,
                      heartbeat: int = 15,
-                     progress_parser: Any | None = None) -> subprocess.CompletedProcess[str]:
+                     progress_parser: Any | None = None,
+                     sandbox: dict[str, Any] | None = None,
+                     sandbox_read_only: bool = False) -> subprocess.CompletedProcess[str]:
     """Stream a subprocess to terminal + durable log; print heartbeats when quiet.
 
     Raw JSONL events are stored next to the human-readable log when a provider
@@ -622,9 +715,12 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
     Only a bounded output tail is retained in memory for error reporting.
     """
     log_file.parent.mkdir(parents=True, exist_ok=True)
+    process_argv = sandbox_command(
+        argv, cwd, sandbox, output_root=log_file.parent, read_only=sandbox_read_only
+    )
     try:
         proc = subprocess.Popen(
-            argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            process_argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace",
             bufsize=1, start_new_session=(os.name != "nt"),
         )
@@ -715,7 +811,8 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
 def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = False,
               schema: Path | None = None, timeout: int | None = None,
               model: str | None = None,
-              reasoning_effort: str | None = None) -> tuple[bool, str]:
+              reasoning_effort: str | None = None,
+              sandbox: dict[str, Any] | None = None) -> tuple[bool, str]:
     # Each invocation creates a fresh session. The repository is the memory.
     args = ["codex", "exec", "--json", "--sandbox", "read-only" if readonly else "workspace-write"]
     if model:
@@ -727,10 +824,17 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
     args += ["--output-last-message", str(output), prompt]
     label = "REVIEW" if readonly else "DEVELOPER"
     result = streamed_command(args, worktree, label=label, log_file=output.with_suffix(".log"),
-                              timeout=timeout, codex_json=True)
+                              timeout=timeout, codex_json=True, sandbox=sandbox,
+                              sandbox_read_only=readonly)
     message = output.read_text(encoding="utf-8") if output.exists() else result.stdout[-4000:]
     message = redact_secrets(message)
     output.write_text(message, encoding="utf-8")
+    usage_path = output.with_suffix(".jsonl")
+    usage = extract_jsonl_usage(
+        usage_path.read_text(encoding="utf-8", errors="replace") if usage_path.exists() else "",
+        provider="codex",
+    )
+    _record_provider_usage(output, readonly, usage)
     return result.returncode == 0, message
 
 
@@ -817,7 +921,8 @@ def _extract_provider_message(raw: str, provider: str) -> str:
 def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
                      provider: str, readonly: bool = False,
                      timeout: int | None = None,
-                     model: str | None = None) -> tuple[bool, str]:
+                     model: str | None = None,
+                     sandbox: dict[str, Any] | None = None) -> tuple[bool, str]:
     """Run a locally installed coding CLI in its non-interactive mode."""
     if provider == "gemini":
         args = [
@@ -841,15 +946,11 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
         if model:
             args += ["--model", model]
         if readonly:
-            # Copilot has no universal read-only mode; limit the available
-            # tools and explicitly deny common mutating shell operations.
+            # Copilot has no universal read-only mode; omit its shell tool and
+            # expose only file-inspection capabilities for review.
             args += [
-                "--available-tools", "view,grep,glob,shell",
-                "--deny-tool", "shell(git commit)",
-                "--deny-tool", "shell(git push)",
-                "--deny-tool", "shell(git reset)",
-                "--deny-tool", "shell(git checkout)",
-                "--deny-tool", "shell(git clean)",
+                "--available-tools", "view,grep,glob",
+                "--deny-tool", "shell(*)",
             ]
         else:
             args += ["--allow-all-tools", "--allow-all-paths"]
@@ -862,11 +963,14 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
         args, worktree, label=label, log_file=output.with_suffix(".log"),
         timeout=timeout, codex_json=structured,
         progress_parser=(lambda line: _provider_progress(line, provider)) if structured else None,
+        sandbox=sandbox, sandbox_read_only=readonly,
     )
     raw_path = output.with_suffix(".jsonl") if structured else None
     raw = raw_path.read_text(encoding="utf-8", errors="replace") if raw_path and raw_path.exists() else result.stdout
     message = redact_secrets(_extract_provider_message(raw, provider) or result.stdout[-10000:].strip())
     output.write_text(message, encoding="utf-8")
+    usage = extract_jsonl_usage(raw, provider=provider)
+    _record_provider_usage(output, readonly, usage)
     return result.returncode == 0, message
 
 
@@ -884,6 +988,55 @@ def _safe_worktree_path(worktree: Path, relative: str, *, write: bool = False) -
     if write and (target == root / ".git" or ".git" in target.relative_to(root).parts):
         raise ValueError("writes inside .git are not allowed")
     return target
+
+
+def _readonly_git_command_allowed(argv: list[str]) -> tuple[bool, str]:
+    """Allow only inspection-oriented Git commands in a review worktree.
+
+    The command is run with ``cwd=worktree``.  Options that can redirect Git
+    to another repository, execute an external diff, or write output are
+    rejected even though the process is not started through a shell.
+    """
+    if len(argv) < 2 or argv[1].startswith("-"):
+        return False, "review Git commands must name an inspection subcommand"
+    subcommand = argv[1]
+    if subcommand not in READONLY_GIT_COMMANDS:
+        return False, f"git {subcommand} is not allowed during read-only review"
+    if subcommand == "branch" and any(part not in READONLY_BRANCH_OPTIONS for part in argv[2:]):
+        return False, "only inspection-oriented git branch options are allowed during read-only review"
+    for index, part in enumerate(argv[2:], 2):
+        option = part.split("=", 1)[0]
+        if option in GIT_UNSAFE_OPTIONS or option.startswith(("--git-dir", "--work-tree", "--output")):
+            return False, f"git option {part} is not allowed during read-only review"
+        if part in {"--upload-pack", "--receive-pack"} or part.startswith(("--upload-pack=", "--receive-pack=")):
+            return False, f"git option {part} is not allowed during read-only review"
+        if part.startswith("-") and subcommand == "status" and part not in {
+            "--short", "--porcelain", "--branch", "--untracked-files=no",
+        }:
+            return False, f"git option {part} is not allowed during read-only review"
+        if index == 2 and subcommand == "rev-parse" and part in {"--show-toplevel", "--git-dir", "--git-common-dir"}:
+            return False, f"git option {part} is not allowed during read-only review"
+    return True, ""
+
+
+def _readonly_inspection_command_allowed(argv: list[str]) -> tuple[bool, str]:
+    """Allow bounded, non-mutating text inspection without path escapes."""
+    executable = Path(argv[0]).name.lower()
+    if executable not in READONLY_INSPECTION_COMMANDS:
+        return False, f"{executable} is not allowed during read-only review"
+    if any(
+        part in {"--pre", "--pre-glob", "--hostname-bin"}
+        or part.startswith(("--pre=", "--pre-glob=", "--hostname-bin="))
+        for part in argv[1:]
+    ):
+        return False, f"{executable} execution hooks are not allowed during read-only review"
+    for part in argv[1:]:
+        if part.startswith("-"):
+            continue
+        candidate = Path(part)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            return False, "inspection paths must stay inside the worktree"
+    return True, ""
 
 
 def _openrouter_tools(readonly: bool) -> list[dict[str, Any]]:
@@ -946,15 +1099,13 @@ def _openrouter_command_allowed(argv: Any, readonly: bool,
     if executable in NETWORK_COMMANDS and not allow_network:
         return False, f"{executable} is not allowed from an OpenRouter tool call"
     if executable == "git":
+        if readonly:
+            return _readonly_git_command_allowed(argv)
         subcommand = argv[1] if len(argv) > 1 else ""
         if subcommand in {"commit", "push", "reset", "clean", "checkout", "switch", "worktree"}:
             return False, f"git {subcommand} is not allowed"
-        if readonly and subcommand not in {"status", "diff", "log", "show", "branch", "rev-parse"}:
-            return False, f"git {subcommand} is not allowed during review"
-    if readonly and executable not in {
-        "git", "cat", "head", "tail", "sed", "awk", "find", "rg", "grep", "ls", "pwd", "file",
-    }:
-        return False, f"{executable} is not allowed during read-only review"
+    if readonly:
+        return _readonly_inspection_command_allowed(argv)
     return True, ""
 
 
@@ -969,19 +1120,24 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                 return f"ERROR: {relative!r} is not a directory"
             paths = []
             for item in sorted(target.rglob("*")):
-                relative_item = item.relative_to(worktree.resolve()).as_posix()
+                try:
+                    resolved_item = item.resolve()
+                    relative_item = resolved_item.relative_to(worktree.resolve()).as_posix()
+                except ValueError:
+                    continue
                 if sensitive_read(relative_item):
                     continue
-                if item.is_file():
+                if resolved_item.is_file():
                     paths.append(relative_item)
                 if len(paths) >= 300:
                     break
             return "\n".join(paths) or "(no files)"
         if name == "read_file":
             relative = arguments.get("path", "")
-            if sensitive_read(relative):
-                return f"ERROR: protected file {relative!r} cannot be read"
             target = _safe_worktree_path(worktree, relative)
+            normalized = target.relative_to(worktree.resolve()).as_posix()
+            if sensitive_read(normalized):
+                return f"ERROR: protected file {relative!r} cannot be read"
             return target.read_text(encoding="utf-8", errors="replace")[:120000]
         if name == "write_file":
             if readonly:
@@ -1055,6 +1211,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
     if not model:
         raise RuntimeError("OpenRouter requires a model, for example openai/gpt-5.4")
     max_tool_turns = max_tool_turns or OPENROUTER_MAX_TURNS
+    command_timeout = command_timeout or DEFAULT_OPENROUTER_COMMAND_TIMEOUT
     api_key = os.environ.get(api_key_env)
     if not api_key:
         raise RuntimeError(f"OpenRouter API key is missing; set ${api_key_env}")
@@ -1076,6 +1233,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
     tools = _openrouter_tools(readonly)
     started = time.monotonic()
     last_message = ""
+    usage_records: list[dict[str, Any]] = []
     log_file.write_text("", encoding="utf-8")
     raw_file.write_text("", encoding="utf-8")
 
@@ -1104,6 +1262,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
             response = _openrouter_request(
                 base_url.rstrip("/") + "/chat/completions", api_key, body, remaining
             )
+            usage_records.append(normalize_usage(response, provider="openrouter"))
             with raw_file.open("a", encoding="utf-8") as handle:
                 handle.write(redact_secrets(json.dumps(
                     {"turn": turn + 1, "response": response}, ensure_ascii=False
@@ -1157,11 +1316,15 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
         message = redact_secrets(last_message or str(exc))
         emit("ERROR: " + message)
         output.write_text(message, encoding="utf-8")
+        usage = combine_usage(usage_records, provider="openrouter")
+        _record_provider_usage(output, readonly, usage)
         return False, message
     seconds = int(time.monotonic() - started)
     emit(f"Finished in {seconds}s (exit 0)")
     last_message = redact_secrets(last_message)
     output.write_text(last_message, encoding="utf-8")
+    usage = combine_usage(usage_records, provider="openrouter")
+    _record_provider_usage(output, readonly, usage)
     return True, last_message
 
 
@@ -1169,7 +1332,8 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
               settings: dict[str, Any] | AgentSettings | None = None,
               readonly: bool = False, schema: Path | None = None,
               model: str | None = None, reasoning_effort: str | None = None,
-              timeout: int | None = None) -> tuple[bool, str]:
+              timeout: int | None = None,
+              sandbox: dict[str, Any] | None = None) -> tuple[bool, str]:
     """Dispatch one developer/reviewer turn to the configured provider."""
     if isinstance(settings, AgentSettings):
         selected = settings.as_dict()
@@ -1186,6 +1350,7 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
         return run_codex(
             worktree, prompt, output=output, readonly=readonly, schema=schema,
             timeout=timeout, model=model, reasoning_effort=reasoning_effort,
+            **({"sandbox": sandbox} if sandbox is not None else {}),
         )
     if provider == "openrouter":
         router_kwargs: dict[str, Any] = {
@@ -1206,24 +1371,43 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
     return run_cli_provider(
         worktree, prompt, output=output, provider=provider,
         readonly=readonly, timeout=timeout, model=model,
+        **({"sandbox": sandbox} if sandbox is not None else {}),
     )
 
 
 def run_tests(worktree: Path, test_commands: list[list[str]],
-              folder: Path | None = None, timeout: int | None = None) -> tuple[bool, str]:
+              folder: Path | None = None, timeout: int | None = None,
+              sandbox: dict[str, Any] | None = None,
+              deadline: float | None = None) -> tuple[bool, str]:
     results: list[str] = []
     for argv in test_commands:
+        if deadline is not None and time.monotonic() >= deadline:
+            report = "\n\n".join(results) + "\nTask deadline reached before the next test command"
+            print("[TESTS] Overall task deadline reached", flush=True)
+            return False, report.strip()
         display_command = " ".join(argv)
         print(f"[TESTS] Running: {display_command}", flush=True)
         log = next_log(folder, "test-command") if folder else (Path(tempfile.gettempdir()) / f"agentic-tests-{os.getpid()}.log")
         result = streamed_command(argv, worktree, label="TESTS", log_file=log,
-                                  timeout=timeout, heartbeat=15)
+                                  timeout=_remaining_timeout(deadline, timeout),
+                                  heartbeat=15, sandbox=sandbox)
         results.append(f"$ {display_command}\n{result.stdout[-6000:]}")
         if result.returncode:
             print(f"[TESTS] FAILED (exit {result.returncode})", flush=True)
             return False, "\n\n".join(results)
         print("[TESTS] PASSED", flush=True)
-    if command(["git", "diff", "--check"], worktree, check=False).returncode:
+    if deadline is not None and time.monotonic() >= deadline:
+        report = "\n\n".join(results) + "\nTask deadline reached before git diff --check"
+        print("[TESTS] Overall task deadline reached", flush=True)
+        return False, report.strip()
+    try:
+        diff_check = command(
+            ["git", "diff", "--check"], worktree,
+            timeout=_remaining_timeout(deadline, 180), check=False,
+        )
+    except RuntimeError as exc:
+        return False, "\n\n".join(results) + f"\ngit diff --check failed: {exc}"
+    if diff_check.returncode:
         print("[TESTS] git diff --check FAILED", flush=True)
         return False, "\n\n".join(results) + "\ngit diff --check failed"
     print("[TESTS] All configured checks passed", flush=True)
@@ -1481,7 +1665,8 @@ def review(worktree: Path, issue: Issue, folder: Path, base_sha: str,
            test_report: str = "", *, model: str | None = None,
            reasoning_effort: str | None = None,
            timeout: int | None = None,
-           agent: dict[str, Any] | AgentSettings | None = None) -> dict[str, Any]:
+           agent: dict[str, Any] | AgentSettings | None = None,
+           sandbox: dict[str, Any] | None = None) -> dict[str, Any]:
     schema = folder / "review-schema.json"
     schema.write_text(json.dumps(REVIEW_SCHEMA, indent=2), encoding="utf-8")
     output = next_log(folder, "review", "json")
@@ -1506,10 +1691,14 @@ Return a structured JSON object with approved (bool), summary (str), findings (a
 Reject substantive bugs or missing coverage; explain exact reasons.
 """
     print(f"[REVIEW] Launching independent read-only {provider} process")
+    run_kwargs: dict[str, Any] = {
+        "model": model, "reasoning_effort": reasoning_effort, "timeout": timeout,
+    }
+    if sandbox is not None and sandbox.get("enabled"):
+        run_kwargs["sandbox"] = sandbox
     ok, message = run_agent(
         worktree, prompt, readonly=True, schema=schema, output=output,
-        model=model, reasoning_effort=reasoning_effort, timeout=timeout,
-        settings=agent,
+        settings=agent, **run_kwargs,
     )
     if not ok:
         return {
@@ -1566,11 +1755,17 @@ Explain the actual changes, what you verified, and what remains unresolved.
 
 def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
                       folder: Path, test_commands: list[list[str]] | None = None
+                      , deadline: float | None = None
                       ) -> tuple[bool, str, dict[str, Any], str, str]:
     commands = test_commands if test_commands is not None else config["test_commands"]
     passed, report = run_tests(
         run.worktree, commands, folder,
-        timeout=config.get("test_timeout_seconds"),
+        timeout=_remaining_timeout(
+            deadline,
+            config.get("effective_test_timeout_seconds", config.get("test_timeout_seconds")),
+        ),
+        sandbox=config.get("sandbox"),
+        deadline=deadline,
     )
     next_log(folder, "tests").write_text(report, encoding="utf-8")
     if not passed:
@@ -1581,12 +1776,22 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
     verdict = review(
         run.worktree, issue, folder, base_sha, test_report=report,
         agent=config.get("reviewer_agent"),
+        timeout=_remaining_timeout(
+            deadline,
+            config.get("effective_reviewer_timeout_seconds"),
+        ),
+        sandbox=config.get("sandbox"),
     )
     if verdict.get("_tooling_error"):
         print("[REVIEW] Reviewer result was invalid; retrying read-only review")
         verdict = review(
             run.worktree, issue, folder, base_sha, test_report=report,
             agent=config.get("reviewer_agent"),
+            timeout=_remaining_timeout(
+                deadline,
+                config.get("effective_reviewer_timeout_seconds"),
+            ),
+            sandbox=config.get("sandbox"),
         )
     if verdict.get("_tooling_error"):
         raise RuntimeError(
@@ -1610,7 +1815,8 @@ def check_existing_pr(repo: Path, github_repo: str, branch: str) -> list[dict[st
 
 def publish(run: Run, issue: Issue, github_repo: str, base: str,
             config: dict[str, Any], folder: Path,
-            test_commands: list[list[str]] | None = None) -> None:
+            test_commands: list[list[str]] | None = None,
+            deadline: float | None = None) -> None:
     """Fresh tests + fresh review every time: no stale approval state to trust."""
     if not eligible(issue):
         raise RuntimeError("Issue is closed; publication blocked")
@@ -1619,7 +1825,8 @@ def publish(run: Run, issue: Issue, github_repo: str, base: str,
         print(f"Existing PR for this branch: {prs[0]['url']}. No duplicate PR created.")
         return
     passed, report, verdict, digest, _base_sha = verify_and_review(
-        run, issue, base, config, folder, test_commands=test_commands
+        run, issue, base, config, folder, test_commands=test_commands,
+        deadline=deadline,
     )
     if not passed:
         raise RuntimeError("Tests/reviewer did not approve current code; nothing published")
@@ -1654,14 +1861,24 @@ def publish(run: Run, issue: Issue, github_repo: str, base: str,
 
 def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: Path,
             initial_feedback: str = "",
-            test_commands: list[list[str]] | None = None) -> bool:
+            test_commands: list[list[str]] | None = None,
+            deadline: float | None = None) -> bool:
     feedback = initial_feedback
     for attempt in range(config["max_retries"] + 1):
+        if deadline is not None and time.monotonic() >= deadline:
+            print("[TIMEOUT] Overall task deadline reached")
+            return False
         print(f"\n[DEVELOPER] Working on {issue.reference}, attempt {attempt + 1}")
         output = next_log(folder, "developer")
+        agent_kwargs: dict[str, Any] = {
+            "settings": config.get("developer_agent"),
+            "timeout": _remaining_timeout(deadline, config.get("effective_developer_timeout_seconds")),
+        }
+        if config.get("sandbox", {}).get("enabled"):
+            agent_kwargs["sandbox"] = config["sandbox"]
         ok, message = run_agent(
             run.worktree, agent_prompt(issue, feedback), output=output,
-            settings=config.get("developer_agent"),
+            **agent_kwargs,
         )
         if not ok:
             provider = config.get("developer_agent", {}).get("provider", "codex")
@@ -1670,7 +1887,8 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
             continue
         try:
             passed, test_output, verdict, _, _ = verify_and_review(
-                run, issue, base, config, folder, test_commands=test_commands
+                run, issue, base, config, folder, test_commands=test_commands,
+                deadline=deadline,
             )
         except RuntimeError:
             # Policy violations, malformed diff, or mid-review mutation are not model-retryable.
@@ -1793,6 +2011,7 @@ def load_config(path: Path) -> dict[str, Any]:
     max_files = data.get("max_files")
     codex_timeout = data.get("codex_timeout_seconds")
     test_timeout = data.get("test_timeout_seconds")
+    task_timeout = data.get("task_timeout_seconds", DEFAULT_TASK_TIMEOUT)
     codex_model = data.get("codex_model")
     reasoning_effort = data.get("codex_reasoning_effort")
     if type(retries) is not int or not 0 <= retries <= 3:
@@ -1803,6 +2022,8 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError("codex_timeout_seconds must be null or an integer from 1 to 86400")
     if test_timeout is not None and (type(test_timeout) is not int or not 1 <= test_timeout <= 86400):
         raise ValueError("test_timeout_seconds must be null or an integer from 1 to 86400")
+    if type(task_timeout) is not int or not 1 <= task_timeout <= MAX_TASK_TIMEOUT:
+        raise ValueError(f"task_timeout_seconds must be an integer from 1 to {MAX_TASK_TIMEOUT}")
     for name, value in (("codex_model", codex_model), ("codex_reasoning_effort", reasoning_effort)):
         if value is not None and (not isinstance(value, str) or not value.strip()):
             raise ValueError(f"{name} must be a nonempty string or null")
@@ -1814,6 +2035,9 @@ def load_config(path: Path) -> dict[str, Any]:
         data, "reviewer", legacy_provider="codex", legacy_model=codex_model,
         legacy_reasoning=reasoning_effort, legacy_timeout=codex_timeout,
     )
+    sandbox = validate_sandbox(data.get("sandbox"))
+    if sandbox["enabled"] and (developer_agent.provider == "openrouter" or reviewer_agent.provider == "openrouter"):
+        raise ValueError("sandbox mode is not supported with the OpenRouter adapter")
     return {
         "task_source": task_source,
         "test_commands": commands,
@@ -1822,10 +2046,19 @@ def load_config(path: Path) -> dict[str, Any]:
         "max_files": max_files,
         "codex_timeout_seconds": codex_timeout,
         "test_timeout_seconds": test_timeout,
+        "task_timeout_seconds": task_timeout,
+        "effective_test_timeout_seconds": _effective_timeout(test_timeout, DEFAULT_TEST_TIMEOUT),
+        "effective_developer_timeout_seconds": _effective_timeout(
+            developer_agent.timeout_seconds, DEFAULT_DEVELOPER_TIMEOUT
+        ),
+        "effective_reviewer_timeout_seconds": _effective_timeout(
+            reviewer_agent.timeout_seconds, DEFAULT_REVIEWER_TIMEOUT
+        ),
         "codex_model": codex_model,
         "codex_reasoning_effort": reasoning_effort,
         "developer_agent": developer_agent.as_dict(),
         "reviewer_agent": reviewer_agent.as_dict(),
+        "sandbox": sandbox,
     }
 
 
@@ -1921,7 +2154,7 @@ def default_provider_settings(provider: str) -> dict[str, Any]:
         "provider": provider,
         "model": None,
         "reasoning_effort": None,
-        "timeout_seconds": None,
+        "timeout_seconds": DEFAULT_DEVELOPER_TIMEOUT,
     }
     if provider == "openrouter":
         settings.update({
@@ -1929,7 +2162,7 @@ def default_provider_settings(provider: str) -> dict[str, Any]:
             "api_key_env": "OPENROUTER_API_KEY",
             "base_url": DEFAULT_OPENROUTER_BASE_URL,
             "max_tool_turns": OPENROUTER_MAX_TURNS,
-            "command_timeout_seconds": None,
+            "command_timeout_seconds": DEFAULT_OPENROUTER_COMMAND_TIMEOUT,
             "allow_network": False,
         })
     return settings
@@ -1948,15 +2181,20 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
     config_path = repo / AGENT_CONFIG_FILENAME
     commands, detection = detect_test_commands(repo)
     reviewer_provider = reviewer_provider or provider
+    developer_settings = default_provider_settings(provider)
+    reviewer_settings = default_provider_settings(reviewer_provider)
+    reviewer_settings["timeout_seconds"] = DEFAULT_REVIEWER_TIMEOUT
     config = {
         "task_source": "github",
         "test_commands": commands,
         "slow_test_commands": [],
         "max_retries": 3,
         "max_files": None,
-        "test_timeout_seconds": None,
-        "developer": default_provider_settings(provider),
-        "reviewer": default_provider_settings(reviewer_provider),
+        "test_timeout_seconds": DEFAULT_TEST_TIMEOUT,
+        "task_timeout_seconds": DEFAULT_TASK_TIMEOUT,
+        "developer": developer_settings,
+        "reviewer": reviewer_settings,
+        "sandbox": {"enabled": False, "engine": "docker", "image": "agentic-runner:latest", "allow_network": False},
     }
     if config_path.exists() and not force:
         print(f"[INIT] Keeping existing {config_path}")
@@ -2003,6 +2241,11 @@ def doctor(repo: Path, config_path: Path | None = None, *, json_output: bool = F
             preflight_test_commands(repo, loaded["test_commands"] + loaded["slow_test_commands"])
             checks.append(("Agentic config", True, str(target_config), True))
             checks.append(("Configured checks", True, f"{len(loaded['test_commands'])} fast / {len(loaded['slow_test_commands'])} slow", True))
+            sandbox = loaded.get("sandbox", {})
+            if sandbox.get("enabled"):
+                engine = sandbox["engine"]
+                checks.append(("Sandbox engine", shutil.which(engine) is not None,
+                               f"{engine} is available" if shutil.which(engine) else f"{engine} not found", True))
             providers = []
             for role, settings in (("developer", loaded["developer_agent"]), ("reviewer", loaded["reviewer_agent"])):
                 provider = settings["provider"]
@@ -2202,8 +2445,7 @@ def execute(args: argparse.Namespace) -> None:
         show_runs(repo)
         return
 
-    with repository_lock(repo):
-        execute_locked(args, repo)
+    execute_locked(args, repo)
 
 
 def execute_locked(args: argparse.Namespace, repo: Path) -> None:
@@ -2230,6 +2472,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> None:
     preflight_test_commands(repo, test_commands)
     preflight_agent_settings(config["developer_agent"], config["reviewer_agent"])
     state_dir = Path(args.state_dir).expanduser().resolve() if args.state_dir else default_state_dir()
+    task_deadline = time.monotonic() + config["task_timeout_seconds"]
 
     task_source = config["task_source"]
     if task_source == "local":
@@ -2281,8 +2524,10 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> None:
     elif previous:
         run = choose_existing(previous)
         fresh = False
-        refresh_base(repo, base)
-        if repair_relative_worktree(repo, run.worktree):
+        with repository_lock(repo, state_dir):
+            refresh_base(repo, base)
+            repaired = repair_relative_worktree(repo, run.worktree)
+        if repaired:
             print(f"[GIT] Repaired worktree metadata: {run.worktree}")
     else:
         if args.review or args.publish:
@@ -2303,9 +2548,11 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> None:
         flush=True,
     )
     if args.review:
-        passed, *_ = verify_and_review(
-            run, issue, base, config, folder, test_commands=test_commands
-        )
+        with worktree_lock(repo, run, state_dir):
+            passed, *_ = verify_and_review(
+                run, issue, base, config, folder, test_commands=test_commands,
+                deadline=task_deadline,
+            )
         if not passed:
             raise RuntimeError("Review or tests did not approve current changes")
         next_action = (f"python agentic.py --issue {issue.number} --publish"
@@ -2315,10 +2562,11 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> None:
     if args.publish:
         if not github_repo:
             raise RuntimeError("Publishing requires a GitHub origin remote and GitHub CLI access")
-        publish(
-            run, issue, github_repo, base, config, folder,
-            test_commands=test_commands,
-        )
+        with worktree_lock(repo, run, state_dir):
+            publish(
+                run, issue, github_repo, base, config, folder,
+                test_commands=test_commands, deadline=task_deadline,
+            )
         return
     if not eligible(issue):
         raise RuntimeError("Issue is closed; development blocked")
@@ -2328,19 +2576,25 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> None:
             raise RuntimeError(f"A PR already exists: {existing[0]['url']}. Review it instead of editing here")
     if fresh:
         print("[BASELINE] Verifying untouched base before development")
-        passed, report = run_tests(
-            run.worktree, test_commands, folder,
-            timeout=config["test_timeout_seconds"],
-        )
+        with worktree_lock(repo, run, state_dir):
+            passed, report = run_tests(
+                run.worktree, test_commands, folder,
+                timeout=_remaining_timeout(task_deadline, config["effective_test_timeout_seconds"]),
+                sandbox=config.get("sandbox"),
+                deadline=task_deadline,
+            )
         if not passed:
             raise RuntimeError(f"Base tests are failing; retained worktree.\n{report[-2500:]}")
     resume_feedback = load_resume_feedback(folder) if not fresh else ""
     if resume_feedback:
         print("[RESUME] Loaded previous review/test feedback for the developer")
-    if not develop(
-        run, issue, base, config, folder,
-        initial_feedback=resume_feedback, test_commands=test_commands,
-    ):
+    with worktree_lock(repo, run, state_dir):
+        completed = develop(
+            run, issue, base, config, folder,
+            initial_feedback=resume_feedback, test_commands=test_commands,
+            deadline=task_deadline,
+        )
+    if not completed:
         raise RuntimeError("Unable to complete the task; resume later with --issue N")
 
 
@@ -2382,11 +2636,12 @@ def main(argv: list[str] | None = None) -> int:
             root = _absolute_path(Path(git(repo, "rev-parse", "--show-toplevel")))
             if not _paths_equal(repo, root):
                 raise RuntimeError("Run cleanup from the project root or pass --repo pointing to that root")
-            with repository_lock(repo):
+            cleanup_state_dir = Path(args.state_dir).expanduser().resolve() if args.state_dir else default_state_dir()
+            with repository_lock(repo, cleanup_state_dir):
                 return cleanup(
                     repo, issue=args.issue, all_runs=args.all_runs,
                     confirm=args.yes, remove_logs=args.remove_logs,
-                    state_dir=Path(args.state_dir).expanduser().resolve() if args.state_dir else default_state_dir(),
+                    state_dir=cleanup_state_dir,
                 )
         if args.profile != "fast" and args.issue is None and args.task is None and args.task_file is None:
             parser.error("--profile requires --issue or --task; use /run ISSUE --profile slow in the interactive shell")

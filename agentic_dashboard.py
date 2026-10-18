@@ -15,6 +15,7 @@ from typing import Any, Iterable
 
 from agentic import default_state_dir, legacy_runs_dir, state_paths
 from agentic_security import redact_secrets
+from agentic_telemetry import read_run_usage
 
 
 RUN_NAME = re.compile(
@@ -272,6 +273,7 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
         "has_review": review_path is not None,
         "has_tests": tests_path is not None,
         "has_developer": bool(developer_paths),
+        "usage": read_run_usage(folder),
     }
 
 
@@ -434,6 +436,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
       const files = run.files.length ? run.files.map(file => `<details><summary>${{esc(file.kind)}} · ${{esc(file.name)}} <span class="meta">${{esc(file.updated)}}</span></summary><pre>${{esc(file.content)}}</pre></details>`).join("") : `<div class="empty">No log files recorded.</div>`;
       detail.innerHTML = `<div class="detail-top"><div><h2>${{esc(run.label)}}</h2><div class="branch">${{esc(run.branch)}}</div></div>${{badge(run.status)}}</div>
         <div class="meta" style="margin-top:12px"><span>${{esc(run.attempts)}} developer attempt${{run.attempts === 1 ? "" : "s"}}</span><span>Last activity: ${{esc(run.last_activity)}}</span><span>${{esc(run.file_count)}} log files</span></div>
+        <section class="callout"><strong>Usage and cost</strong><p>${{esc(run.usage.total_tokens == null ? "Provider usage unavailable" : `${{run.usage.total_tokens.toLocaleString()}} tokens`)}}${{run.usage.estimated_cost_usd == null ? "" : ` · $${{Number(run.usage.estimated_cost_usd).toFixed(4)}} estimated`}}</p></section>
         <section class="callout ${{esc(run.review.status)}}"><strong>Review · ${{esc(labels[run.review.status] || run.review.status)}}</strong><p>${{esc(run.review.summary)}}</p>${{findings}}</section>
         ${{recurring}}
         <h3>Tests · ${{esc(run.tests.status)}}</h3><pre>${{esc(run.tests.summary)}}</pre>

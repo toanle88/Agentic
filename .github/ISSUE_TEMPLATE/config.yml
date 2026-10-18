@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and provider compatibility
+    url: https://github.com/toanle88/Agentic/discussions
+    about: Ask usage and provider-integration questions in Discussions.

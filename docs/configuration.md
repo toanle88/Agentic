@@ -38,18 +38,19 @@ Runtime state is controlled separately from project configuration. Use `--state-
   ],
   "max_retries": 3,
   "max_files": null,
-  "test_timeout_seconds": null,
+  "test_timeout_seconds": 300,
+  "task_timeout_seconds": 1800,
   "developer": {
     "provider": "codex",
     "model": null,
     "reasoning_effort": null,
-    "timeout_seconds": null
+    "timeout_seconds": 600
   },
   "reviewer": {
     "provider": "codex",
     "model": null,
     "reasoning_effort": null,
-    "timeout_seconds": null
+    "timeout_seconds": 300
   }
 }
 ```
@@ -67,8 +68,10 @@ Use commands that are actually supported by the target repository. Agentic does 
 | `max_files` | integer `1..100` or `null` | `null` | Maximum distinct files in the proposed patch. `null` disables this limit. |
 | `codex_model` | string or `null` | `null` | Model passed to Codex. `null` inherits the Codex CLI configuration. |
 | `codex_reasoning_effort` | string or `null` | `null` | Reasoning setting passed to Codex, such as `max`. `null` inherits the Codex CLI configuration. |
-| `codex_timeout_seconds` | integer or `null` | `null` | Developer/reviewer timeout. `null` means unlimited. |
-| `test_timeout_seconds` | integer or `null` | `null` | Per-test-command timeout. `null` means unlimited. |
+| `codex_timeout_seconds` | integer or `null` | `null` | Legacy developer/reviewer timeout. `null` uses the safe provider default. |
+| `test_timeout_seconds` | integer or `null` | `300` | Per-test-command timeout. `null` uses 300 seconds at runtime. |
+| `task_timeout_seconds` | integer | `1800` | Maximum wall-clock time for one task invocation, including checks and review. |
+| `sandbox` | object | disabled | Optional Docker/Podman isolation for native provider and test processes. |
 | `developer` | object | Codex defaults | Provider settings for the coding agent. |
 | `reviewer` | object | Codex defaults | Provider settings for the independent reviewer. |
 
@@ -79,11 +82,11 @@ Each provider object supports these fields:
 | `provider` | string | `codex`, `gemini`, `claude`, `copilot`, or `openrouter`. |
 | `model` | string or `null` | Provider model; `null` uses the native CLI default. OpenRouter requires a model. |
 | `reasoning_effort` | string or `null` | Optional reasoning setting used by Codex/OpenRouter, such as `max`; native CLIs use their own options. |
-| `timeout_seconds` | integer or `null` | Per developer/reviewer invocation limit; `null` means unlimited. |
+| `timeout_seconds` | integer or `null` | Per developer/reviewer invocation limit; `null` uses 600 seconds for developers or 300 seconds for reviewers. |
 | `api_key_env` | string | OpenRouter only: environment variable containing the API key. |
 | `base_url` | URL | OpenRouter only: API base URL, defaulting to the public OpenRouter endpoint. |
 | `max_tool_turns` | integer or `null` | OpenRouter only: maximum number of model/tool rounds; default `80`. |
-| `command_timeout_seconds` | integer or `null` | OpenRouter only: maximum duration of one tool command; `null` means unlimited. |
+| `command_timeout_seconds` | integer or `null` | OpenRouter only: maximum duration of one tool command; `null` uses 300 seconds. |
 | `allow_network` | boolean | OpenRouter only: allow explicitly network-capable commands. Defaults to `false`. This is not an OS-level network sandbox. |
 
 ### Providers
@@ -120,6 +123,29 @@ Then export the key in the shell that runs Agentic:
 ```bash
 export OPENROUTER_API_KEY='your-key'
 ```
+
+### Optional container sandbox
+
+For native CLI providers and configured test commands, Agentic can run child
+processes in a hardened Docker or Podman container:
+
+```json
+{
+  "sandbox": {
+    "enabled": true,
+    "engine": "docker",
+    "image": "agentic-runner:latest",
+    "allow_network": false
+  }
+}
+```
+
+The image must contain the selected provider CLI and all tools needed by the
+configured checks. Agentic mounts only the task worktree and the run-output
+directory, drops Linux capabilities, applies process/resource limits, and
+disables networking unless explicitly enabled. OpenRouter is not compatible
+with this mode because its API adapter and scoped file tools run in the host
+Python process. Use a native provider when container isolation is required.
 
 OpenRouter receives scoped function tools for listing and reading files,
 running argv commands, and (for the developer only) writing files. Commits,
