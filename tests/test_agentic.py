@@ -1470,6 +1470,7 @@ class PureTests(unittest.TestCase):
         self.assertIsNone(config['codex_reasoning_effort'])
         self.assertIsNone(config['codex_timeout_seconds'])
         self.assertIsNone(config['test_timeout_seconds'])
+        self.assertIsNone(config['effective_test_timeout_seconds'])
         self.assertEqual(config['task_source'], 'github')
         self.assertTrue(agentic.forbidden('.env'))
         self.assertFalse(agentic.forbidden('src/main.py'))
@@ -1480,7 +1481,16 @@ class PureTests(unittest.TestCase):
                 'test_commands': [['go', 'test', './...']],
                 'max_files': None,
             }))
-            self.assertIsNone(agentic.load_config(unlimited)['max_files'])
+            unlimited_config = agentic.load_config(unlimited)
+            self.assertIsNone(unlimited_config['max_files'])
+            self.assertEqual(unlimited_config['effective_test_timeout_seconds'], 300)
+
+            no_test_timeout = Path(temp) / 'no-test-timeout.json'
+            no_test_timeout.write_text(json.dumps({
+                'test_commands': [['go', 'test', './...']],
+                'test_timeout_seconds': None,
+            }))
+            self.assertIsNone(agentic.load_config(no_test_timeout)['effective_test_timeout_seconds'])
 
             local = Path(temp) / 'local.json'
             local.write_text(json.dumps({

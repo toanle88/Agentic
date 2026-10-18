@@ -69,7 +69,7 @@ Use commands that are actually supported by the target repository. Agentic does 
 | `codex_model` | string or `null` | `null` | Model passed to Codex. `null` inherits the Codex CLI configuration. |
 | `codex_reasoning_effort` | string or `null` | `null` | Reasoning setting passed to Codex, such as `max`. `null` inherits the Codex CLI configuration. |
 | `codex_timeout_seconds` | integer or `null` | `null` | Legacy developer/reviewer timeout. `null` uses the safe provider default. |
-| `test_timeout_seconds` | integer or `null` | `300` | Per-test-command timeout. `null` uses 300 seconds at runtime. |
+| `test_timeout_seconds` | integer or `null` | `300` when omitted | Per-test-command timeout. Explicit `null` disables the per-test-command limit. |
 | `task_timeout_seconds` | integer | `1800` | Maximum wall-clock time for one task invocation, including checks and review. |
 | `security_mode` | `trusted` or `isolated` | `trusted` | `isolated` requires the configured Docker/Podman engine and image and fails closed when either is unavailable. |
 | `sandbox` | object | disabled | Optional Docker/Podman isolation for provider, OpenRouter tool, and test processes. `pass_env` names explicit credential variables to pass into the container. |
