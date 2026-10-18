@@ -178,32 +178,29 @@ def _investigation(folder: Path) -> tuple[dict[str, Any], Path | None]:
                    if path.suffix == ".json")
     if path is None:
         return {
-            "status": "not-run", "summary": "No issue investigation recorded.",
+            "state": "not-run", "summary": "No issue investigation recorded.",
             "findings": [],
         }, None
     raw = _parse_json_object(_read(path, 100_000))
     if raw is None:
         return {
-            "status": "invalid",
+            "state": "invalid",
             "summary": "Investigation output is not valid JSON.",
             "findings": [],
             "file": path.name,
             "updated": _timestamp(path),
         }, path
-    status = str(raw.get("status", "")).strip().lower()
-    if status not in {"pass", "reject", "needs_input"}:
+    findings = raw.get("findings", [])
+    if not isinstance(raw.get("summary"), str) or not isinstance(findings, list):
         return {
-            "status": "invalid",
-            "summary": "Investigation output has an unknown status.",
+            "state": "invalid",
+            "summary": "Investigation output does not contain valid feedback.",
             "findings": [],
             "file": path.name,
             "updated": _timestamp(path),
         }, path
-    findings = raw.get("findings", [])
-    if not isinstance(findings, list):
-        findings = [str(findings)]
     return {
-        "status": status,
+        "state": "recorded",
         "summary": str(raw.get("summary", "No investigation summary.")),
         "findings": [str(item) for item in findings],
         "file": path.name,
@@ -270,12 +267,10 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
 
     if _process_running(folder):
         status = "in-progress"
-    elif investigation["status"] == "reject" and not developer_paths and review["status"] == "not-run":
-        status = "investigation-rejected"
-    elif investigation["status"] == "needs_input" and not developer_paths and review["status"] == "not-run":
-        status = "investigation-needs-input"
-    elif investigation["status"] == "invalid" and not developer_paths and review["status"] == "not-run":
+    elif investigation["state"] == "invalid" and not developer_paths and review["status"] == "not-run":
         status = "investigation-invalid"
+    elif investigation["state"] == "recorded" and not developer_paths and review["status"] == "not-run":
+        status = "awaiting-development"
     elif review["status"] == "approved":
         status = "approved"
     elif review["status"] == "rejected":
@@ -393,8 +388,8 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
     .badge {{ display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 3px 9px; font-size: 12px; font-weight: 700; white-space: nowrap; }}
     .badge::before {{ content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }}
     .approved {{ color: var(--green); background: color-mix(in srgb, var(--green) 15%, transparent); }}
-    .needs-fix, .tests-failed, .investigation-rejected, .investigation-invalid {{ color: var(--red); background: color-mix(in srgb, var(--red) 15%, transparent); }}
-    .investigation-needs-input {{ color: var(--yellow); background: color-mix(in srgb, var(--yellow) 15%, transparent); }}
+    .needs-fix, .tests-failed, .investigation-invalid {{ color: var(--red); background: color-mix(in srgb, var(--red) 15%, transparent); }}
+    .awaiting-development {{ color: var(--yellow); background: color-mix(in srgb, var(--yellow) 15%, transparent); }}
     .in-progress {{ color: var(--blue); background: color-mix(in srgb, var(--blue) 15%, transparent); }}
     .awaiting-review {{ color: var(--yellow); background: color-mix(in srgb, var(--yellow) 15%, transparent); }}
     .no-activity {{ color: var(--muted); background: color-mix(in srgb, var(--muted) 15%, transparent); }}
@@ -435,7 +430,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
           <label class="sr-only" for="search">Search runs</label>
           <input id="search" type="search" placeholder="Search issue, task, or branch…">
           <label class="sr-only" for="status">Filter status</label>
-          <select id="status"><option value="all">All statuses</option><option value="needs-fix">Needs fix</option><option value="investigation-rejected">Investigation rejected</option><option value="investigation-needs-input">Investigation needs input</option><option value="approved">Approved</option><option value="in-progress">In progress</option><option value="tests-failed">Tests failed</option><option value="awaiting-review">Awaiting review</option></select>
+          <select id="status"><option value="all">All statuses</option><option value="needs-fix">Needs fix</option><option value="investigation-invalid">Investigation invalid</option><option value="awaiting-development">Awaiting development</option><option value="approved">Approved</option><option value="in-progress">In progress</option><option value="tests-failed">Tests failed</option><option value="awaiting-review">Awaiting review</option></select>
         </div>
         <div class="run-list" id="run-list" aria-live="polite"></div>
       </div>
@@ -448,8 +443,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
     const labels = {{
       "approved": "Approved", "needs-fix": "Needs fix", "in-progress": "In progress",
       "tests-failed": "Tests failed", "awaiting-review": "Awaiting review", "no-activity": "No activity",
-      "investigation-rejected": "Investigation rejected", "investigation-needs-input": "Investigation needs input",
-      "investigation-invalid": "Investigation invalid"
+      "investigation-invalid": "Investigation invalid", "awaiting-development": "Awaiting development"
     }};
     const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}}[char]));
     const badge = status => `<span class="badge ${{esc(status)}}">${{esc(labels[status] || status)}}</span>`;
@@ -458,7 +452,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
       (`${{run.label}} ${{run.branch}}`.toLowerCase().includes(state.query.toLowerCase()))
     );
     const runSummary = run => {{
-      const investigationSummary = run.investigation.status === "not-run" ? "" : run.investigation.summary;
+      const investigationSummary = run.investigation.state === "not-run" ? "" : run.investigation.summary;
       return investigationSummary || run.review.summary || run.developer.summary || "No summary recorded.";
     }};
     function renderMetrics() {{
@@ -492,7 +486,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
       detail.innerHTML = `<div class="detail-top"><div><h2>${{esc(run.label)}}</h2><div class="branch">${{esc(run.branch)}}</div></div>${{badge(run.status)}}</div>
         <div class="meta" style="margin-top:12px"><span>${{esc(run.attempts)}} developer attempt${{run.attempts === 1 ? "" : "s"}}</span><span>Last activity: ${{esc(run.last_activity)}}</span><span>${{esc(run.file_count)}} log files</span></div>
         <section class="callout"><strong>Usage and cost</strong><p>${{esc(run.usage.total_tokens == null ? "Provider usage unavailable" : `${{run.usage.total_tokens.toLocaleString()}} tokens`)}}${{run.usage.estimated_cost_usd == null ? "" : ` · $${{Number(run.usage.estimated_cost_usd).toFixed(4)}} estimated`}}</p></section>
-        <section class="callout ${{esc(run.investigation.status)}}"><strong>Investigation · ${{esc(labels[run.investigation.status] || run.investigation.status)}}</strong><p>${{esc(run.investigation.summary)}}</p>${{investigationFindings}}</section>
+        <section class="callout"><strong>Investigation feedback</strong><p>${{esc(run.investigation.summary)}}</p>${{investigationFindings}}</section>
         <section class="callout ${{esc(run.review.status)}}"><strong>Review · ${{esc(labels[run.review.status] || run.review.status)}}</strong><p>${{esc(run.review.summary)}}</p>${{findings}}</section>
         ${{recurring}}
         <h3>Tests · ${{esc(run.tests.status)}}</h3><pre>${{esc(run.tests.summary)}}</pre>

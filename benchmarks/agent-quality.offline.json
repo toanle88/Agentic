@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "tasks": [
+    {
+      "id": "add-subtract",
+      "name": "Add subtract with regression coverage",
+      "repository": "tasks/add-subtract/repository",
+      "review_repository": "tasks/add-subtract/candidate",
+      "task_file": "tasks/add-subtract/task.md",
+      "checks": [["python", "-m", "unittest", "discover", "-s", "tests", "-q"]],
+      "defects": [
+        {
+          "id": "signed-subtract-bug",
+          "description": "subtract incorrectly adds its operands"
+        }
+      ]
+    }
+  ],
+  "runners": {
+    "agent-alone": [
+      "python", "{benchmark_root}/adapters/deterministic.py",
+      "--mode", "alone", "--repo", "{repo}", "--task-file", "{task_file}",
+      "--result-file", "{result_file}"
+    ],
+    "agentic": [
+      "python", "{benchmark_root}/adapters/deterministic.py",
+      "--mode", "agentic", "--repo", "{repo}", "--task-file", "{task_file}",
+      "--result-file", "{result_file}"
+    ]
+  },
+  "reviewers": {
+    "deterministic-a": [
+      "python", "{benchmark_root}/adapters/deterministic.py",
+      "--mode", "reviewer", "--repo", "{repo}", "--task-file", "{task_file}",
+      "--result-file", "{result_file}", "--reviewer", "{reviewer}"
+    ],
+    "deterministic-b": [
+      "python", "{benchmark_root}/adapters/deterministic.py",
+      "--mode", "reviewer", "--repo", "{repo}", "--task-file", "{task_file}",
+      "--result-file", "{result_file}", "--reviewer", "{reviewer}"
+    ]
+  }
+}

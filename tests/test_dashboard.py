@@ -66,19 +66,18 @@ class DashboardTests(unittest.TestCase):
             self.assertIn("not valid JSON", snapshot["review"]["summary"])
             self.assertEqual(snapshot["review"]["findings"], [])
 
-    def test_investigation_rejection_is_visible_before_development(self):
+    def test_investigation_feedback_is_visible_before_development(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / ".demo-agent-runs"
             run = root / "agent-issue-10-deadbeef"
             run.mkdir(parents=True)
             (run / "investigation-001.json").write_text(json.dumps({
-                "status": "reject",
                 "summary": "The requested behavior is already present.",
                 "findings": ["Existing tests cover the reported case."],
             }))
             snapshot = agentic_dashboard.collect_runs(root)[0]
-            self.assertEqual(snapshot["status"], "investigation-rejected")
-            self.assertEqual(snapshot["investigation"]["status"], "reject")
+            self.assertEqual(snapshot["status"], "awaiting-development")
+            self.assertEqual(snapshot["investigation"]["state"], "recorded")
             self.assertIn("already present", snapshot["investigation"]["summary"])
 
     def test_legacy_run_list_uses_review_summary_without_investigation(self):
@@ -94,7 +93,7 @@ class DashboardTests(unittest.TestCase):
             html = agentic_dashboard.render_dashboard(
                 agentic_dashboard.collect_runs(root), "demo", root.name,
             )
-            self.assertIn('const investigationSummary = run.investigation.status === "not-run" ? "" : run.investigation.summary;', html)
+            self.assertIn('const investigationSummary = run.investigation.state === "not-run" ? "" : run.investigation.summary;', html)
             self.assertIn('esc(runSummary(run))', html)
 
     def test_dashboard_statuses_distinguish_active_tests_and_empty_runs(self):

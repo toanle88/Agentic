@@ -50,8 +50,8 @@ and declares the checks and any known review defects:
     }
   ],
   "runners": {
-    "agent-alone": ["python", "adapters/alone.py", "{repo}", "{task_file}", "{result_file}"],
-    "agentic": ["python", "adapters/agentic.py", "{repo}", "{task_file}", "{state_dir}", "{result_file}"]
+    "agent-alone": ["python", "adapters/agent-alone.py"],
+    "agentic": ["python", "adapters/agentic.py"]
   }
 }
 ```
@@ -81,7 +81,7 @@ Validate a corpus without running providers:
 python scripts/agent_benchmark.py benchmarks/agent-quality.example.json --validate-only
 ```
 
-Run live scenarios only when credentials and provider adapters are ready:
+Run live scenarios only when credentials and provider commands are ready:
 
 ```bash
 python scripts/agent_benchmark.py benchmarks/agent-quality.example.json \
@@ -125,3 +125,36 @@ provider output in the normalized result. Results are grouped under
 The harness reports the metrics needed for comparison but does not pick a
 winner, since accuracy, latency, intervention rate, and cost may have
 different priorities.
+
+### Supplying provider commands
+
+The checked-in adapters under `benchmarks/adapters/` are deliberately thin.
+They accept provider-specific commands through environment variables so the
+benchmark corpus stays free of credentials, local paths, and model-specific
+assumptions. Commands are JSON argv arrays and are never passed through a
+shell. For example:
+
+```bash
+export AGENTIC_BENCHMARK_ALONE_COMMAND='["python","/path/to/provider_adapter.py","--repo","{repo}","--task-file","{task_file}","--result-file","{result_file}"]'
+export AGENTIC_BENCHMARK_AGENTIC_COMMAND='["python","/path/to/agentic.py","--repo","{repo}","--task-file","{task_file}","--state-dir","{state_dir}","--config","/path/to/benchmark-agent_config.json"]'
+export AGENTIC_BENCHMARK_REVIEWER_COMMAND='["python","/path/to/reviewer_adapter.py","--repo","{repo}","--task-file","{task_file}","--result-file","{result_file}"]'
+```
+
+The commands must be provider-aware if they need to report attempts,
+interventions, review findings, token usage, or cost. A wrapper fallback result
+records only whether the command completed successfully. Keep live benchmark
+runs isolated, use disposable repositories, and pass only the credentials
+required by the selected provider. The benchmark is an evaluation harness,
+not an operating-system security boundary.
+
+The repository also includes a deterministic workflow profile for validating
+the harness without credentials. It intentionally does not measure model
+quality:
+
+```bash
+python scripts/agent_benchmark.py benchmarks/agent-quality.offline.json \
+  --live --output /tmp/agentic-offline-benchmark.json
+```
+
+This exercises baseline and Agentic scenarios, labeled reviewer findings,
+sanitized result aggregation, retries, recovery, and reviewer comparison.

@@ -15,6 +15,13 @@ from scripts.benchmark import run_case
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_checked_in_deterministic_quality_profile_is_valid(self):
+        path = Path(__file__).resolve().parents[1] / "benchmarks" / "agent-quality.offline.json"
+        config = load_benchmark(path)
+        validate_benchmark_files(config)
+        self.assertEqual(len(config["tasks"]), 1)
+        self.assertEqual(set(config["reviewers"]), {"deterministic-a", "deterministic-b"})
+
     def test_missing_executable_is_a_failed_case(self):
         result = run_case(
             Path.cwd(),

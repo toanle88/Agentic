@@ -335,6 +335,27 @@ class ShellTests(unittest.TestCase):
             self.assertIn('hello', job.log_path.read_text())
             self.assertIn('EXIT 0', _capture_ps(shell))
 
+    def test_logs_accepts_pid_and_follows_running_job(self):
+        from contextlib import redirect_stdout
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            job = shell._launch([
+                sys.executable, '-c',
+                'import time; print("first", flush=True); time.sleep(.15); print("second", flush=True)',
+            ])
+            output = StringIO()
+            with redirect_stdout(output):
+                shell.show_logs(['/logs', str(job.process.pid), '1'])
+
+            job.process.wait(timeout=5)
+            rendered = output.getvalue()
+            self.assertIn('following live output', rendered)
+            self.assertIn('first', rendered)
+            self.assertIn('second', rendered)
+            self.assertIn('full log:', rendered)
+
     def test_background_job_completion_callback_runs_without_refresh(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

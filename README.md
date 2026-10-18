@@ -10,7 +10,7 @@ Agentic is designed for human-supervised development. It does not silently commi
 ## Highlights
 
 - One isolated Git worktree per GitHub issue or local task.
-- Read-only issue investigation; valid issues continue automatically before development.
+- Read-only issue investigation; findings are recorded before development continues automatically.
 - Resume support for unfinished or rejected work.
 - Configurable project checks using safe argument arrays.
 - Independent read-only review before publication.
@@ -166,11 +166,11 @@ run `/run` in the interactive shell and finish the pasted task with `/done`.
 Local tasks use the same review and resume flow and can still be published as
 GitHub draft pull requests.
 
-Before development, an independent read-only investigator classifies the issue
-as `pass`, `reject`, or `needs_input`. `pass` starts development automatically;
-the other results pause the run and require an explicit `continue` override in
-the foreground. A run that remains blocked exits nonzero so foreground and
-background callers can distinguish it from a completed run.
+Before development, an independent read-only investigator analyzes the issue and
+records feedback about relevant code, tests, ambiguity, risks, and recommended
+next steps. The summary and findings are passed to the developer automatically;
+investigation does not produce a status or block development. Invalid
+investigator output or investigator tooling failures still stop the run.
 
 Start the interactive shell:
 

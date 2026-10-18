@@ -26,6 +26,8 @@ RUNTIME_MODULES = (
     "agentic_security.py",
     "agentic_sandbox.py",
     "agentic_telemetry.py",
+    "agentic_providers.py",
+    "agentic_review.py",
     "agentic_dashboard.py",
     "agentic_shell.py",
 )

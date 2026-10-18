@@ -6,8 +6,8 @@ Each issue or local-task run follows this sequence:
 
 1. Resolve the repository's base branch; GitHub mode also loads the GitHub issue.
 2. Create or reuse an isolated worktree for the issue or deterministic local task.
-3. Ask an independent read-only configured investigator whether the issue is valid and actionable.
-4. Automatically continue when the investigation returns `pass`; pause on `reject` or `needs_input`.
+3. Ask an independent read-only configured investigator to analyze the issue and repository.
+4. Record the investigation feedback and pass it to the developer automatically.
 5. Give the task and repository instructions to the configured developer provider.
 6. Run every configured test command.
 7. Stage and inspect the proposed patch.
@@ -16,20 +16,13 @@ Each issue or local-task run follows this sequence:
 
 ## Issue investigation
 
-Investigation is a read-only gate before development. The investigator inspects
-the issue against the repository and records a structured result in the run
-logs as `investigation-*.json`:
-
-- `pass` means the issue is sufficiently valid and clear, so development starts automatically.
-- `reject` means the issue is incorrect, resolved, out of scope, or contradictory.
-- `needs_input` means the issue may be valid but needs clarification.
-
-For `reject` and `needs_input`, a foreground run shows the evidence and asks
-whether to continue. Type `continue` to explicitly override the gate; any
-other response stops the run, returns a nonzero exit status, and keeps the
-worktree. Background shell jobs do not have interactive input, so they stop
-safely with the same nonzero status and can be resumed from the foreground
-after inspecting their logs.
+Investigation is a read-only analysis before development. The investigator
+inspects the issue against the repository and records structured feedback in the
+run logs as `investigation-*.json`. The feedback contains a summary and concise
+findings covering relevant code and tests, ambiguity or risks, and recommended
+next steps. It is passed to the developer as context for the first attempt; it
+does not produce a status or block development. Invalid investigator output or
+investigator tooling failures still stop the run.
 
 The base checkout is not the development worktree. This keeps unfinished changes isolated from the user's main checkout.
 
@@ -49,7 +42,7 @@ Available commands:
 /run [--profile fast|slow]             Local mode: paste task, finish with /done
      [--review|--publish|--new]
 /ps [--all]                            Show current or persisted job status
-/logs JOB [LINES]                      Show recent output for a job
+/logs JOB|PID [LINES]                  Follow a running job or show recent output
 /stop JOB                              Stop a running job
 /list                                  List open GitHub issues
 /dashboard [OUTPUT]                    Generate and open the HTML dashboard
@@ -66,7 +59,7 @@ to dismiss. Supported options such as `/run --profile` and known job IDs for
 renders the dropdown with live filtering and command descriptions using standard ANSI
 escapes with zero third-party dependencies.
 
-`/run` starts a child process and returns immediately. `/ps` shows jobs started in the current shell; `/ps --all` also discovers job records from previous shell sessions. The child runner's durable logs remain available after the shell exits, and `/logs JOB` works for persisted jobs too.
+`/run` starts a child process and returns immediately. `/ps` shows jobs started in the current shell; `/ps --all` also discovers job records from previous shell sessions. The child runner's durable logs remain available after the shell exits, and `/logs JOB` works for persisted jobs too. Use `/logs JOB` or `/logs PID` on a running job to follow new output until it exits; press Ctrl-C to stop following without stopping the job. Add `LINES` to control how much existing output is shown first.
 
 `/list` synchronously lists the target repository's open GitHub issues. It uses
 the same GitHub CLI-backed issue listing as `agentic --list` and does not create
