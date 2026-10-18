@@ -48,7 +48,8 @@ def _run(
     root: Path,
     capture_output: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    print(f"[release] {_display_command(argv)}")
+    if not capture_output:
+        print(f"[release] {_display_command(argv)}")
     return subprocess.run(
         list(argv),
         cwd=root,
@@ -79,6 +80,10 @@ def _git(*args: str, root: Path, check: bool = True) -> str:
         detail = (result.stderr or output).strip()
         raise ReleaseError(f"Git command failed: git {' '.join(args)}\n{detail}")
     return output
+
+
+def _combined_output(result: subprocess.CompletedProcess[str]) -> str:
+    return "\n".join(part for part in (result.stdout or "", result.stderr or "") if part).strip()
 
 
 def package_version(root: Path) -> str:
@@ -138,8 +143,33 @@ def _ensure_release_preconditions(root: Path, remote: str, branch: str) -> tuple
 
 
 def _run_local_checks(root: Path) -> None:
-    _run_checked((sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"), root=root)
-    _run_checked((sys.executable, "-m", "py_compile", *RUNTIME_MODULES), root=root)
+    print("[release] Running unit tests...")
+    tests = _run(
+        (sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"),
+        root=root,
+        capture_output=True,
+    )
+    if tests.returncode != 0:
+        output = _combined_output(tests)
+        detail = f"\n{output[-8000:]}" if output else ""
+        raise ReleaseError(f"Unit tests failed with exit {tests.returncode}{detail}")
+    summary = next(
+        (line.strip() for line in _combined_output(tests).splitlines() if line.strip().startswith("Ran ")),
+        "completed successfully",
+    )
+    print(f"[release] Unit tests passed: {summary}")
+
+    print("[release] Compiling runtime modules...")
+    compile_result = _run(
+        (sys.executable, "-m", "py_compile", *RUNTIME_MODULES),
+        root=root,
+        capture_output=True,
+    )
+    if compile_result.returncode != 0:
+        output = _combined_output(compile_result)
+        detail = f"\n{output[-8000:]}" if output else ""
+        raise ReleaseError(f"Python compilation failed with exit {compile_result.returncode}{detail}")
+    print("[release] Compile checks passed")
 
 
 def _ensure_tag_is_unused(root: Path, remote: str, tag: str) -> None:
