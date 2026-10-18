@@ -22,6 +22,10 @@ class DashboardTests(unittest.TestCase):
                 "summary": "Needs persistence fixes",
                 "findings": ["Use an empty JSON array instead of null."],
             }))
+            # Progress/event files share the review prefix but are not the
+            # structured review result.
+            (run / "review-001.log").write_text("[REVIEW] Finished in 1s (exit 0)\n")
+            (run / "review-001.jsonl").write_text('{"type":"turn.completed"}\n')
             snapshots = agentic_dashboard.collect_runs(root)
             self.assertEqual(len(snapshots), 1)
             snapshot = snapshots[0]
@@ -30,6 +34,16 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(snapshot["tests"]["status"], "passed")
             self.assertEqual(snapshot["attempts"], 1)
             self.assertIn("persistence", snapshot["review"]["summary"])
+
+    def test_review_parser_accepts_json_code_fence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            run = Path(temp) / "agent-issue-8-cafebabe"
+            run.mkdir(parents=True)
+            (run / "review-001.json").write_text(
+                '```json\n{"approved": true, "summary": "Looks good", "findings": []}\n```'
+            )
+            snapshot = agentic_dashboard.collect_runs(run.parent)
+            self.assertEqual(snapshot[0]["review"]["status"], "approved")
 
     def test_render_dashboard_escapes_log_content_and_supports_empty_runs(self):
         html = agentic_dashboard.render_dashboard([], "demo", ".demo-agent-runs")

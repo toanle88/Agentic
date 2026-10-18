@@ -76,20 +76,48 @@ def _file_record(path: Path, kind: str) -> dict[str, str]:
     }
 
 
+def _parse_json_object(text: str) -> dict[str, Any] | None:
+    """Parse strict JSON or a JSON object wrapped in prose/code fences."""
+    candidates = [text.strip()]
+    candidates.extend(re.findall(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text, re.IGNORECASE))
+    start = text.find("{")
+    if start >= 0:
+        candidates.append(text[start:])
+    decoder = json.JSONDecoder()
+    for candidate in candidates:
+        try:
+            value = json.loads(candidate)
+        except json.JSONDecodeError:
+            try:
+                value, _ = decoder.raw_decode(candidate)
+            except json.JSONDecodeError:
+                continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+
 def _review(folder: Path) -> tuple[dict[str, Any], Path | None]:
-    path = _latest(_numbered_files(folder, ["review"]))
+    # A review has three related files: the structured .json result, a .log
+    # progress trace, and a .jsonl Codex event trace. Only the first is the
+    # review document.
+    path = _latest(path for path in _numbered_files(folder, ["review"])
+                   if path.suffix == ".json")
     if path is None:
         return {"status": "not-run", "summary": "No review result recorded.", "findings": []}, None
-    try:
-        raw = json.loads(_read(path, 100_000))
-    except json.JSONDecodeError as exc:
+    raw = _parse_json_object(_read(path, 100_000))
+    if raw is None:
+        try:
+            json.loads(_read(path, 100_000))
+        except json.JSONDecodeError as exc:
+            error = str(exc)
+        else:
+            error = "Review output is not a JSON object."
         return {
             "status": "invalid",
-            "summary": f"Review output is not valid JSON: {exc}",
+            "summary": f"Review output is not valid JSON: {error}",
             "findings": [],
         }, path
-    if not isinstance(raw, dict):
-        return {"status": "invalid", "summary": "Review output is not a JSON object.", "findings": []}, path
     approved = raw.get("approved") is True
     findings = raw.get("findings", [])
     if not isinstance(findings, list):
