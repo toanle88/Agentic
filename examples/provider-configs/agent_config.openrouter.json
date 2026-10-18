@@ -1,0 +1,26 @@
+{
+  "task_source": "github",
+  "test_commands": [
+    ["git", "diff", "--check"]
+  ],
+  "slow_test_commands": [],
+  "max_retries": 3,
+  "max_files": null,
+  "test_timeout_seconds": null,
+  "developer": {
+    "provider": "openrouter",
+    "model": "openai/gpt-5.4",
+    "reasoning_effort": null,
+    "timeout_seconds": null,
+    "api_key_env": "OPENROUTER_API_KEY",
+    "base_url": "https://openrouter.ai/api/v1"
+  },
+  "reviewer": {
+    "provider": "openrouter",
+    "model": "openai/gpt-5.4",
+    "reasoning_effort": null,
+    "timeout_seconds": null,
+    "api_key_env": "OPENROUTER_API_KEY",
+    "base_url": "https://openrouter.ai/api/v1"
+  }
+}

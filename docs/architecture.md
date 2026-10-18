@@ -12,7 +12,7 @@ Agentic is intentionally small and uses the Python standard library at runtime.
 | `agent_config.json` | Target-repository checks and per-run policy settings. |
 | Git worktrees | Isolate issue or local-task changes from the base checkout and preserve unfinished work. |
 | GitHub CLI | Read issues and publish an explicitly approved branch/PR. |
-| Codex CLI | Run the developer and independent read-only reviewer. |
+| Provider adapters | Run Codex, Gemini, Claude Code, GitHub Copilot, or OpenRouter for developer/reviewer turns. |
 
 `agentic init` and `agentic doctor` are local setup tools. Initialization creates ignored, target-specific configuration; doctor performs prerequisite checks without running the full project test suite.
 
@@ -21,7 +21,7 @@ Agentic is intentionally small and uses the Python standard library at runtime.
 Git worktrees are the source of truth for code state. Durable run logs are stored outside the worktree and contain:
 
 - developer progress and final output;
-- Codex event traces;
+- provider event traces;
 - each test command's output;
 - structured review results; and
 - evidence used when resuming a rejected run.
@@ -51,9 +51,10 @@ Set `AGENTIC_STATE_DIR` or pass `--state-dir PATH` to choose another root. A sha
 ## Safety boundaries
 
 - Test commands run under the host account, not as isolated application code. Use a trusted or disposable checkout and do not expose production credentials.
-- The developer receives write access to its worktree; the reviewer receives read-only access.
+- The developer receives write access to its worktree; the reviewer is invoked in the provider's read-only or restricted review mode.
+- Native provider CLIs receive provider-specific non-interactive permissions. Gemini and Claude use their read-only review modes; Copilot is restricted to its available read/review tools and denied common Git mutations. OpenRouter uses an Agentic-owned scoped tool loop.
 - The runner refuses protected changes including Agentic configuration, agent instructions, secrets, private keys, `.codex/`, and GitHub workflows.
-- Issue text, repository files, and test output are untrusted input to Codex.
+- Issue text, repository files, and test output are untrusted input to the selected provider.
 - GitHub issue intake is the default; local task intake is opt-in through `task_source: "local"`.
 - The developer does not commit or push. Publication requires a separate validation step and explicit human confirmation.
 - A repository lock prevents concurrent mutating runs from corrupting shared Git metadata.

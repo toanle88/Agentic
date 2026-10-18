@@ -175,6 +175,163 @@ class GitTest(unittest.TestCase):
                 agentic.publish(run, issue, 'fake/repo', 'main', cfg, folder)
         self.assertEqual(agentic.git(run.worktree, 'log', '-1', '--format=%s'), 'initial')
 
+    def test_publish_commits_pushes_and_opens_draft_pr_after_confirmation(self):
+        run = agentic.create_worktree(self.repo, 'main', 30)
+        (run.worktree / 'fix.py').write_text('fixed=True\n')
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(30, 'Publish fix', 'Make the fix')
+        config = {
+            'test_commands': [[sys.executable, '-c', 'print("ok")']],
+            'max_files': None,
+            'reviewer_agent': {'provider': 'gemini'},
+        }
+        commands = []
+
+        def fake_command(argv, cwd, **kwargs):
+            commands.append(argv)
+            if argv[:4] == ['git', 'diff', '--cached', '--quiet']:
+                return CompletedProcess(argv, 1, stdout='')
+            return CompletedProcess(argv, 0, stdout='https://github.test/pr/30')
+
+        with (patch('agentic.check_existing_pr', return_value=[]),
+              patch('agentic.verify_and_review', return_value=(
+                  True, 'tests passed',
+                  {'approved': True, 'summary': 'Good', 'findings': []},
+                  'digest', 'base-sha',
+              )),
+              patch('agentic.prepare_patch', return_value=('base-sha', 'digest', 'summary')),
+              patch('agentic.git') as git_mock,
+              patch('agentic.command', side_effect=fake_command),
+              patch('builtins.input', return_value='publish')):
+            agentic.publish(run, issue, 'owner/repo', 'main', config, folder)
+        self.assertIn(call(run.worktree, 'commit', '-m', 'fix: resolve issue #30'), git_mock.call_args_list)
+        self.assertIn(call(run.worktree, 'push', '-u', 'origin', run.branch), git_mock.call_args_list)
+        pr_command = next(argv for argv in commands if argv[:3] == ['gh', 'pr', 'create'])
+        self.assertIn('--draft', pr_command)
+        self.assertIn('--base', pr_command)
+        self.assertIn('main', pr_command)
+        self.assertIn('Independent Gemini review', pr_command[-1])
+
+    def test_publish_skips_existing_pr_and_rejects_closed_issue(self):
+        run = agentic.create_worktree(self.repo, 'main', 35)
+        folder = agentic.logs_path(self.repo, run)
+        config = {'test_commands': [['go', 'test', './...']], 'max_files': None}
+        existing = {'url': 'https://github.test/pr/35'}
+        with (patch('agentic.check_existing_pr', return_value=[existing]) as check,
+              patch('agentic.verify_and_review') as verify):
+            agentic.publish(run, agentic.Issue(35, 'Existing', ''), 'owner/repo', 'main', config, folder)
+        check.assert_called_once()
+        verify.assert_not_called()
+        with self.assertRaisesRegex(RuntimeError, 'closed'):
+            agentic.publish(
+                run, agentic.Issue(35, 'Closed', '', state='CLOSED'),
+                'owner/repo', 'main', config, folder,
+            )
+
+    def test_verify_and_review_retries_invalid_reviewer_output(self):
+        run = agentic.create_worktree(self.repo, 'main', 31)
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(31, 'Validate review retry', '')
+        config = {
+            'test_commands': [['go', 'test', './...']],
+            'max_files': None,
+            'reviewer_agent': {'provider': 'claude'},
+        }
+        patch_value = ('base-sha', 'digest', 'one file changed')
+        invalid = {'_tooling_error': True, 'approved': False, 'summary': 'invalid', 'findings': []}
+        approved = {'approved': True, 'summary': 'Good', 'findings': []}
+        with (patch('agentic.run_tests', return_value=(True, 'tests passed')),
+              patch('agentic.prepare_patch', side_effect=[patch_value, patch_value]),
+              patch('agentic.review', side_effect=[invalid, approved]) as review,
+              patch('agentic.record_review_findings') as record):
+            result = agentic.verify_and_review(run, issue, 'main', config, folder)
+        self.assertTrue(result[0])
+        self.assertEqual(review.call_count, 2)
+        self.assertEqual(review.call_args.kwargs['agent'], config['reviewer_agent'])
+        record.assert_called_once_with(folder, approved)
+
+    def test_verify_and_review_stops_before_review_when_tests_fail(self):
+        run = agentic.create_worktree(self.repo, 'main', 32)
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(32, 'Tests fail', '')
+        config = {'test_commands': [['go', 'test', './...']], 'max_files': None}
+        with (patch('agentic.run_tests', return_value=(False, 'AssertionError: expected 2')),
+              patch('agentic.prepare_patch') as prepare,
+              patch('agentic.review') as review):
+            passed, report, verdict, digest, base_sha = agentic.verify_and_review(
+                run, issue, 'main', config, folder
+            )
+        self.assertFalse(passed)
+        self.assertIn('AssertionError', report)
+        self.assertEqual(verdict, {})
+        self.assertEqual(digest, '')
+        self.assertEqual(base_sha, '')
+        prepare.assert_not_called()
+        review.assert_not_called()
+
+    def test_develop_returns_review_feedback_to_the_next_attempt(self):
+        run = agentic.create_worktree(self.repo, 'main', 33)
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(33, 'Retry review feedback', 'Implement it')
+        config = {
+            'max_retries': 1,
+            'max_files': None,
+            'developer_agent': {'provider': 'codex'},
+        }
+        agent_results = [(True, 'first'), (True, 'second')]
+        review_results = [
+            (False, 'tests passed', {
+                'approved': False, 'summary': 'Missing regression test',
+                'findings': ['Add a regression test'],
+            }, '', ''),
+            (True, 'tests passed', {
+                'approved': True, 'summary': 'Good', 'findings': [],
+            }, '', ''),
+        ]
+        with (patch('agentic.run_agent', side_effect=agent_results) as run_agent,
+              patch('agentic.verify_and_review', side_effect=review_results)):
+            self.assertTrue(agentic.develop(run, issue, 'main', config, folder))
+        self.assertEqual(run_agent.call_count, 2)
+        second_prompt = run_agent.call_args_list[1].args[1]
+        self.assertIn('Missing regression test', second_prompt)
+        self.assertIn('Add a regression test', second_prompt)
+
+    def test_develop_does_not_retry_environment_failures(self):
+        run = agentic.create_worktree(self.repo, 'main', 34)
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(34, 'Environment failure', '')
+        config = {'max_retries': 3, 'max_files': None, 'developer_agent': {'provider': 'codex'}}
+        with (patch('agentic.run_agent', return_value=(True, 'implemented')) as run_agent,
+              patch('agentic.verify_and_review', return_value=(
+                  False, 'No module named pytest', {}, '', ''
+              ))):
+            with self.assertRaisesRegex(RuntimeError, 'environment or infrastructure'):
+                agentic.develop(run, issue, 'main', config, folder)
+        run_agent.assert_called_once()
+
+    def test_execute_local_task_dispatches_to_workflow(self):
+        config_path = self.repo / 'local-agent-config.json'
+        config_path.write_text(json.dumps({
+            'task_source': 'local',
+            'test_commands': [[sys.executable, '-c', 'print("ok")']],
+        }))
+        args = agentic.build_parser().parse_args([
+            '--repo', str(self.repo), '--config', str(config_path),
+            '--state-dir', str(Path(self.tmp.name) / 'agentic-state'),
+            '--task', 'Add CSV export\nAdd regression tests.',
+        ])
+        fake_run = agentic.Run(None, 'agent/task-csv-aabbccddeeff', Path('/tmp/fake-worktree'))
+        with (patch('agentic.preflight_test_commands'),
+              patch('agentic.preflight_agent_settings'),
+              patch('agentic.create_local_worktree', return_value=fake_run) as create,
+              patch('agentic.run_tests', return_value=(True, 'ok')),
+              patch('agentic.develop', return_value=True) as develop):
+            agentic.execute_locked(args, self.repo)
+        task = create.call_args.args[2]
+        self.assertTrue(task.is_local)
+        self.assertIn('Add CSV export', task.body)
+        self.assertEqual(develop.call_args.args[1], task)
+
 
 class PureTests(unittest.TestCase):
     def test_relative_worktree_paths_require_both_wsl_and_windows_git(self):
@@ -273,6 +430,26 @@ class PureTests(unittest.TestCase):
             self.assertIn('agent_config.json', (repo / '.gitignore').read_text())
             self.assertTrue((repo / 'AGENTS.md').is_file())
 
+    def test_init_can_generate_provider_specific_config(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            sh('git', 'init', '--initial-branch=main', str(repo), cwd=repo.parent)
+            (repo / 'go.mod').write_text('module example.test/demo\n')
+            self.assertEqual(
+                agentic.init_repository(repo, provider='openrouter', reviewer_provider='claude'),
+                0,
+            )
+            config = agentic.load_config(repo / 'agent_config.json')
+            self.assertEqual(config['developer_agent']['provider'], 'openrouter')
+            self.assertEqual(config['developer_agent']['model'], 'openai/gpt-5.4')
+            self.assertEqual(config['developer_agent']['api_key_env'], 'OPENROUTER_API_KEY')
+            self.assertEqual(config['reviewer_agent']['provider'], 'claude')
+
+    def test_provider_init_options_are_exposed(self):
+        args = agentic.build_parser().parse_args(['init', '--provider', 'gemini'])
+        self.assertEqual(args.provider, 'gemini')
+        self.assertIsNone(args.reviewer_provider)
+
     def test_invalid_review_result_is_marked_as_tooling_error(self):
         with tempfile.TemporaryDirectory() as temp:
             worktree = Path(temp)
@@ -284,12 +461,32 @@ class PureTests(unittest.TestCase):
         self.assertTrue(verdict['_tooling_error'])
         self.assertFalse(verdict['approved'])
 
+    def test_review_wrong_json_shape_is_marked_as_tooling_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            worktree = Path(temp)
+            folder = worktree / 'logs'
+            folder.mkdir()
+            issue = agentic.Issue(20, 'Review shape', '')
+            with patch('agentic.run_agent', return_value=(True, json.dumps({
+                'approved': 'yes', 'summary': 'bad', 'findings': [],
+            }))):
+                verdict = agentic.review(worktree, issue, folder, 'base')
+        self.assertTrue(verdict['_tooling_error'])
+        self.assertIn('wrong shape', verdict['summary'])
+
     def test_preflight_rejects_missing_test_dependency(self):
         with tempfile.TemporaryDirectory() as dirname:
             with self.assertRaisesRegex(RuntimeError, 'module.*not installed'):
                 agentic.preflight_test_commands(
                     Path(dirname), [[sys.executable, '-m', 'module_that_is_not_installed']]
                 )
+
+    def test_preflight_rejects_missing_test_executable(self):
+        with tempfile.TemporaryDirectory() as dirname, patch(
+            'agentic.shutil.which', return_value=None
+        ):
+            with self.assertRaisesRegex(RuntimeError, 'unavailable'):
+                agentic.preflight_test_commands(Path(dirname), [['missing-test-tool', '--check']])
 
     def test_environment_test_failures_are_not_retryable(self):
         self.assertFalse(agentic.retryable_test_failure('No module named pytest'))
@@ -331,6 +528,465 @@ class PureTests(unittest.TestCase):
             self.assertIn('gpt-5.6-luna', argv)
             self.assertIn('model_reasoning_effort="max"', argv)
             self.assertEqual(streamed.call_args.kwargs['timeout'], 7)
+
+    def test_provider_config_supports_different_developer_and_reviewer(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'agent_config.json'
+            path.write_text(json.dumps({
+                'test_commands': [['go', 'test', './...']],
+                'developer': {
+                    'provider': 'gemini', 'model': 'gemini-3-pro-preview',
+                    'timeout_seconds': None,
+                },
+                'reviewer': {
+                    'provider': 'openrouter', 'model': 'openai/gpt-5.4',
+                    'api_key_env': 'MY_OPENROUTER_KEY',
+                },
+            }))
+            config = agentic.load_config(path)
+        self.assertEqual(config['developer_agent']['provider'], 'gemini')
+        self.assertEqual(config['developer_agent']['model'], 'gemini-3-pro-preview')
+        self.assertEqual(config['reviewer_agent']['provider'], 'openrouter')
+        self.assertEqual(config['reviewer_agent']['api_key_env'], 'MY_OPENROUTER_KEY')
+        self.assertEqual(config['reviewer_agent']['base_url'], agentic.DEFAULT_OPENROUTER_BASE_URL)
+
+    def test_openrouter_requires_model_and_never_reads_key_from_config(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'agent_config.json'
+            path.write_text(json.dumps({
+                'test_commands': [['go', 'test', './...']],
+                'developer': {'provider': 'openrouter'},
+            }))
+            with self.assertRaisesRegex(ValueError, 'developer.model'):
+                agentic.load_config(path)
+
+    def test_cli_provider_uses_headless_structured_mode(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / 'developer-001.txt'
+
+            def fake_stream(argv, cwd, **kwargs):
+                kwargs['log_file'].with_suffix('.jsonl').write_text(
+                    json.dumps({'type': 'result', 'response': 'finished'}) + '\n'
+                )
+                return CompletedProcess(argv, 0, stdout='')
+
+            with patch('agentic.streamed_command', side_effect=fake_stream) as streamed:
+                ok, message = agentic.run_cli_provider(
+                    root, 'prompt', output=output, provider='gemini', model='gemini-3-pro-preview'
+                )
+            self.assertTrue(ok)
+            self.assertEqual(message, 'finished')
+            argv = streamed.call_args.args[0]
+            self.assertEqual(argv[:2], ['gemini', '-p'])
+            self.assertIn('--output-format', argv)
+            self.assertIn('stream-json', argv)
+            self.assertIn('--approval-mode', argv)
+            self.assertIn('yolo', argv)
+
+    def test_cli_provider_modes_are_restricted_for_reviewers(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+
+            def fake_stream(argv, cwd, **kwargs):
+                if kwargs.get('codex_json'):
+                    kwargs['log_file'].with_suffix('.jsonl').write_text(
+                        json.dumps({'type': 'message', 'content': 'done'}) + '\n'
+                    )
+                return CompletedProcess(argv, 0, stdout='done')
+
+            with patch('agentic.streamed_command', side_effect=fake_stream) as streamed:
+                agentic.run_cli_provider(
+                    root, 'review', output=root / 'claude-review.txt',
+                    provider='claude', readonly=True, model='claude-sonnet',
+                )
+                claude_review = streamed.call_args.args[0]
+                agentic.run_cli_provider(
+                    root, 'implement', output=root / 'claude-dev.txt',
+                    provider='claude', readonly=False, model='claude-sonnet',
+                )
+                claude_developer = streamed.call_args.args[0]
+                agentic.run_cli_provider(
+                    root, 'review', output=root / 'copilot-review.txt',
+                    provider='copilot', readonly=True, model='gpt-5.6-luna',
+                )
+                copilot_review = streamed.call_args.args[0]
+                agentic.run_cli_provider(
+                    root, 'implement', output=root / 'copilot-dev.txt',
+                    provider='copilot', readonly=False, model='gpt-5.6-luna',
+                )
+                copilot_developer = streamed.call_args.args[0]
+
+            self.assertIn('--permission-mode', claude_review)
+            self.assertIn('plan', claude_review)
+            self.assertNotIn('--dangerously-skip-permissions', claude_review)
+            self.assertIn('--dangerously-skip-permissions', claude_developer)
+            self.assertNotIn('--permission-mode', claude_developer)
+            self.assertIn('--available-tools', copilot_review)
+            self.assertIn('--deny-tool', copilot_review)
+            self.assertNotIn('--allow-all-tools', copilot_review)
+            self.assertIn('--allow-all-tools', copilot_developer)
+            self.assertIn('--allow-all-paths', copilot_developer)
+
+    def test_provider_output_parsing_handles_mixed_events_and_copilot_text(self):
+        raw = '\n'.join([
+            'not json',
+            json.dumps({'type': 'assistant', 'content': [{'text': 'part one'}]}),
+            json.dumps({'type': 'tool_call', 'name': 'read_file'}),
+            json.dumps({'type': 'result', 'result': {'content': [{'text': 'final'}]}}),
+        ])
+        self.assertEqual(agentic._extract_provider_message(raw, 'claude'), 'final')
+        self.assertEqual(agentic._extract_provider_message('copilot output\n', 'copilot'), 'copilot output')
+        self.assertIn('Using tool: read_file', agentic._provider_progress(
+            json.dumps({'type': 'tool_use', 'tool': {'name': 'read_file'}}), 'gemini'
+        ))
+        self.assertIn('ERROR:', agentic._provider_progress(
+            json.dumps({'type': 'turn.failed', 'message': 'failed'}), 'claude'
+        ))
+
+    def test_cli_provider_failure_is_returned_and_saved(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+
+            def fake_stream(argv, cwd, **kwargs):
+                return CompletedProcess(argv, 7, stdout='provider failed')
+
+            with patch('agentic.streamed_command', side_effect=fake_stream):
+                ok, message = agentic.run_cli_provider(
+                    root, 'prompt', output=root / 'developer.txt', provider='copilot'
+                )
+            self.assertFalse(ok)
+            self.assertEqual(message, 'provider failed')
+            self.assertEqual((root / 'developer.txt').read_text(), 'provider failed')
+
+    def test_run_agent_dispatches_settings_and_preserves_no_timeout(self):
+        root = Path('/tmp/agentic-provider-dispatch-test')
+        with (patch('agentic.run_cli_provider', return_value=(True, 'cli')) as cli,
+              patch('agentic.run_codex', return_value=(True, 'codex')) as codex,
+              patch('agentic.run_openrouter', return_value=(True, 'router')) as router):
+            result = agentic.run_agent(
+                root, 'prompt', output=root / 'message.txt',
+                settings=agentic.AgentSettings(
+                    provider='gemini', model='gemini-model',
+                    timeout_seconds=None,
+                ),
+            )
+            self.assertEqual(result, (True, 'cli'))
+            cli.assert_called_once_with(
+                root, 'prompt', output=root / 'message.txt', provider='gemini',
+                readonly=False, timeout=None, model='gemini-model',
+            )
+
+            agentic.run_agent(
+                root, 'prompt', output=root / 'message.txt',
+                settings={'provider': 'codex', 'model': 'codex-model',
+                          'reasoning_effort': 'max', 'timeout_seconds': None},
+            )
+            codex.assert_called_once_with(
+                root, 'prompt', output=root / 'message.txt', readonly=False,
+                schema=None, timeout=None, model='codex-model', reasoning_effort='max',
+            )
+
+            agentic.run_agent(
+                root, 'prompt', output=root / 'message.txt',
+                settings={'provider': 'openrouter', 'model': 'router-model',
+                          'api_key_env': 'ROUTER_KEY', 'base_url': 'https://router.test'},
+            )
+            router.assert_called_once_with(
+                root, 'prompt', output=root / 'message.txt', readonly=False,
+                schema=None, timeout=None, model='router-model', reasoning_effort=None,
+                api_key_env='ROUTER_KEY', base_url='https://router.test',
+            )
+
+    def test_openrouter_tool_loop_can_write_only_inside_worktree(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / 'developer-001.txt'
+            responses = iter([
+                {'choices': [{'message': {
+                    'role': 'assistant', 'content': None,
+                    'tool_calls': [{'id': 'call-1', 'type': 'function', 'function': {
+                        'name': 'write_file',
+                        'arguments': json.dumps({'path': 'hello.txt', 'content': 'hello\n'}),
+                    }}],
+                }}]},
+                {'choices': [{'message': {'role': 'assistant', 'content': 'done'}}]},
+            ])
+
+            class Response:
+                def __init__(self, value):
+                    self.value = value
+                def __enter__(self):
+                    return self
+                def __exit__(self, *args):
+                    return False
+                def read(self):
+                    return json.dumps(self.value).encode()
+
+            def fake_urlopen(request, *args, **kwargs):
+                return Response(next(responses))
+
+            with (patch.dict(agentic.os.environ, {'MY_OPENROUTER_KEY': 'secret'}, clear=False),
+                  patch('agentic.urllib.request.urlopen', side_effect=fake_urlopen)):
+                ok, message = agentic.run_openrouter(
+                    root, 'prompt', output=output, model='openai/gpt-5.4',
+                    api_key_env='MY_OPENROUTER_KEY',
+                )
+            self.assertTrue(ok)
+            self.assertEqual(message, 'done')
+            self.assertEqual((root / 'hello.txt').read_text(), 'hello\n')
+            self.assertNotIn('secret', output.with_suffix('.log').read_text())
+            with self.assertRaisesRegex(ValueError, 'worktree'):
+                agentic._safe_worktree_path(root, '../outside')
+
+    def test_openrouter_tools_cover_readonly_boundaries_and_file_operations(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'src').mkdir()
+            (root / 'src' / 'main.go').write_text('package main\n')
+            (root / '.git').mkdir()
+
+            names = [item['function']['name'] for item in agentic._openrouter_tools(True)]
+            self.assertEqual(names, ['list_files', 'read_file', 'run_command'])
+            self.assertIn('src/main.go', agentic._openrouter_tool_call(
+                root, 'list_files', {'path': '.'}, readonly=True
+            ))
+            self.assertEqual(
+                agentic._openrouter_tool_call(root, 'read_file', {'path': 'src/main.go'}, readonly=True),
+                'package main\n',
+            )
+            self.assertIn('ERROR: write_file is unavailable', agentic._openrouter_tool_call(
+                root, 'write_file', {'path': 'new.txt', 'content': 'nope'}, readonly=True
+            ))
+            self.assertFalse((root / 'new.txt').exists())
+            self.assertIn('exit 0', agentic._openrouter_tool_call(
+                root, 'run_command', {'argv': [sys.executable, '-c', 'print("ok")']}, readonly=False
+            ))
+            self.assertIn('ERROR:', agentic._openrouter_tool_call(
+                root, 'list_files', {'path': 'src/main.go'}, readonly=True
+            ))
+            self.assertIn('ERROR: protected file', agentic._openrouter_tool_call(
+                root, 'write_file', {'path': '.env', 'content': 'secret'}, readonly=False
+            ))
+            self.assertIn('ERROR: unknown tool', agentic._openrouter_tool_call(
+                root, 'unknown', {}, readonly=False
+            ))
+
+    def test_openrouter_command_policy_rejects_shell_network_and_review_mutations(self):
+        for argv in ([], ['bash', '-c', 'echo unsafe'], ['curl', 'https://example.test'],
+                     ['git', 'push'], ['git', 'checkout', 'main']):
+            allowed, reason = agentic._openrouter_command_allowed(argv, readonly=False)
+            self.assertFalse(allowed, argv)
+            self.assertTrue(reason)
+        for argv in (['git', 'status'], ['git', 'diff'], ['rg', 'needle', '.']):
+            allowed, reason = agentic._openrouter_command_allowed(argv, readonly=True)
+            self.assertTrue(allowed, reason)
+        for argv in (['python', '-c', 'print(1)'], ['git', 'fetch']):
+            allowed, reason = agentic._openrouter_command_allowed(argv, readonly=True)
+            self.assertFalse(allowed, argv)
+            self.assertTrue(reason)
+
+    def test_openrouter_request_translates_http_network_and_payload_errors(self):
+        from io import BytesIO
+
+        class Response:
+            def __init__(self, body):
+                self.body = body
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self):
+                return self.body
+
+        cases = [
+            (agentic.urllib.error.HTTPError(
+                'https://router.test', 401, 'unauthorized', {}, BytesIO(b'bad key')
+            ), '401'),
+            (agentic.urllib.error.URLError('offline'), 'offline'),
+            (json.JSONDecodeError('bad json', '!', 0), 'bad json'),
+        ]
+        for error, expected in cases:
+            with self.subTest(expected=expected), patch(
+                'agentic.urllib.request.urlopen', side_effect=error
+            ):
+                with self.assertRaisesRegex(RuntimeError, 'OpenRouter request failed') as raised:
+                    agentic._openrouter_request(
+                        'https://router.test/chat/completions', 'secret', {}, timeout=2
+                    )
+                self.assertIn(expected, str(raised.exception))
+
+        for body, message in [(b'[]', 'non-object'), (b'{"error":"quota"}', 'quota')]:
+            with self.subTest(message=message), patch(
+                'agentic.urllib.request.urlopen', return_value=Response(body)
+            ):
+                with self.assertRaisesRegex(RuntimeError, message):
+                    agentic._openrouter_request(
+                        'https://router.test/chat/completions', 'secret', {}, timeout=None
+                    )
+
+    def test_openrouter_tool_turn_limit_is_reported(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / 'developer.txt'
+            response = {'choices': [{'message': {
+                'role': 'assistant', 'content': None,
+                'tool_calls': [{'id': 'call', 'function': {
+                    'name': 'unknown', 'arguments': '{not-json',
+                }}],
+            }}]}
+            with (patch.dict(agentic.os.environ, {'ROUTER_KEY': 'secret'}, clear=False),
+                  patch.object(agentic, 'OPENROUTER_MAX_TURNS', 2),
+                  patch('agentic._openrouter_request', return_value=response)):
+                ok, message = agentic.run_openrouter(
+                    root, 'prompt', output=output, model='openai/test',
+                    api_key_env='ROUTER_KEY', timeout=None,
+                )
+            self.assertFalse(ok)
+            self.assertIn('exceeded 2 tool turns', message)
+            self.assertIn('exceeded 2 tool turns', output.read_text())
+
+    def test_openrouter_rejects_symlink_escape_and_invalid_paths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'worktree'
+            outside = Path(temp) / 'outside.txt'
+            root.mkdir()
+            outside.write_text('private')
+            link = root / 'outside-link'
+            try:
+                link.symlink_to(outside)
+            except OSError as exc:
+                self.skipTest(f'symlinks unavailable: {exc}')
+            with self.assertRaisesRegex(ValueError, 'escapes'):
+                agentic._safe_worktree_path(root, 'outside-link')
+            with self.assertRaisesRegex(ValueError, 'absolute'):
+                agentic._safe_worktree_path(root, str(outside))
+            with self.assertRaisesRegex(ValueError, 'non-empty'):
+                agentic._safe_worktree_path(root, '')
+            with self.assertRaisesRegex(ValueError, '\\.git'):
+                agentic._safe_worktree_path(root, '.git/config', write=True)
+
+    def test_provider_config_rejects_invalid_values_and_embedded_secrets(self):
+        base = {'test_commands': [['go', 'test', './...']]}
+        invalid = [
+            ({'developer': {'provider': 'unknown'}}, 'provider'),
+            ({'developer': []}, 'developer must be an object'),
+            ({'developer': {'api_key': 'secret'}}, 'api_key'),
+            ({'developer': {'timeout_seconds': 0}}, 'timeout_seconds'),
+            ({'developer': {'model': ' '}}, 'model'),
+            ({'developer': {'provider': 'openrouter', 'model': 'x', 'base_url': 'ftp://router'}}, 'base_url'),
+            ({'developer': {'provider': 'gemini', 'api_key_env': 'KEY'}}, 'only valid for openrouter'),
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            for extra, expected in invalid:
+                with self.subTest(expected=expected):
+                    path = Path(temp) / f'{len(list(Path(temp).glob("*.json")))}.json'
+                    path.write_text(json.dumps({**base, **extra}))
+                    with self.assertRaisesRegex(ValueError, expected):
+                        agentic.load_config(path)
+
+    def test_legacy_codex_settings_are_applied_to_both_roles(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'legacy.json'
+            path.write_text(json.dumps({
+                'test_commands': [['go', 'test', './...']],
+                'codex_model': 'gpt-5.6-luna',
+                'codex_reasoning_effort': 'max',
+                'codex_timeout_seconds': None,
+            }))
+            config = agentic.load_config(path)
+        self.assertEqual(config['developer_agent']['model'], 'gpt-5.6-luna')
+        self.assertEqual(config['reviewer_agent']['model'], 'gpt-5.6-luna')
+        self.assertEqual(config['developer_agent']['reasoning_effort'], 'max')
+        self.assertEqual(config['reviewer_agent']['reasoning_effort'], 'max')
+
+    def test_preflight_agent_settings_checks_cli_and_openrouter_credentials(self):
+        with patch.dict(agentic.os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, 'OPENROUTER_API_KEY'):
+                agentic.preflight_agent_settings({
+                    'provider': 'openrouter', 'api_key_env': 'OPENROUTER_API_KEY'
+                })
+        with patch('agentic.shutil.which', return_value=None):
+            with self.assertRaisesRegex(RuntimeError, 'gemini'):
+                agentic.preflight_agent_settings({'provider': 'gemini'})
+        with patch('agentic.shutil.which', return_value='/usr/bin/codex'):
+            agentic.preflight_agent_settings(
+                {'provider': 'codex'}, {'provider': 'codex'}
+            )
+
+    def test_doctor_reports_repository_config_and_provider_health(self):
+        from io import StringIO
+
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            config = repo / 'agent_config.json'
+            config.write_text(json.dumps({
+                'test_commands': [[sys.executable, '-c', 'pass']],
+            }))
+
+            def fake_probe(argv, cwd, **kwargs):
+                if argv[:2] == ['git', 'rev-parse']:
+                    return True, str(repo)
+                return True, 'ok'
+
+            def fake_which(name):
+                return '/usr/bin/' + Path(name).name
+
+            with (patch('agentic.installed_git_version', return_value=(2, 48, 0)),
+                  patch('agentic.probe', side_effect=fake_probe),
+                  patch('agentic.shutil.which', side_effect=fake_which),
+                  patch('sys.stdout', new_callable=StringIO) as output):
+                result = agentic.doctor(repo, config)
+        self.assertEqual(result, 0)
+        self.assertIn('Agentic doctor', output.getvalue())
+        self.assertIn('Agentic config', output.getvalue())
+        self.assertIn('provider (codex)', output.getvalue())
+
+    def test_all_provider_templates_are_valid_configs(self):
+        templates = sorted((Path(__file__).resolve().parents[1] / 'examples' / 'provider-configs').glob(
+            'agent_config.*.json'
+        ))
+        self.assertEqual(len(templates), len(agentic.SUPPORTED_PROVIDERS))
+        for path in templates:
+            with self.subTest(path=path.name):
+                config = agentic.load_config(path)
+                self.assertIn(config['developer_agent']['provider'], agentic.SUPPORTED_PROVIDERS)
+                self.assertIn(config['reviewer_agent']['provider'], agentic.SUPPORTED_PROVIDERS)
+
+    def test_detect_test_commands_for_common_project_types(self):
+        cases = [
+            ('Cargo.toml', None, [['cargo', 'test']]),
+            ('package.json', 'pnpm-lock.yaml', [['pnpm', 'test']]),
+            ('package.json', 'yarn.lock', [['yarn', 'test']]),
+            ('package.json', None, [['npm', 'test']]),
+            ('Makefile', None, [['make', 'check']]),
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            for marker, extra, expected in cases:
+                with self.subTest(marker=marker, extra=extra):
+                    repo = Path(temp) / f'{marker}-{extra or "none"}'
+                    repo.mkdir()
+                    if marker == 'package.json':
+                        (repo / marker).write_text('{"scripts":{"test":"echo test"}}')
+                    elif marker == 'Makefile':
+                        (repo / marker).write_text('check:\n\techo check\n')
+                    else:
+                        (repo / marker).write_text('placeholder\n')
+                    if extra:
+                        (repo / extra).write_text('')
+                    commands, _ = agentic.detect_test_commands(repo)
+                    self.assertEqual(commands, expected)
+
+            python_repo = Path(temp) / 'python'
+            python_repo.mkdir()
+            (python_repo / 'pyproject.toml').write_text('[project]\nname="demo"\n')
+            (python_repo / 'tests').mkdir()
+            self.assertEqual(agentic.detect_test_commands(python_repo)[0][0][:3],
+                             ['python', '-m', 'unittest'])
+
+            fallback = Path(temp) / 'fallback'
+            fallback.mkdir()
+            self.assertEqual(agentic.detect_test_commands(fallback)[0], [['git', 'diff', '--check']])
 
     def test_issue_eligibility_depends_only_on_builtin_status(self):
         self.assertTrue(agentic.eligible(agentic.Issue(1, 'Bug', 'hello')))
@@ -454,7 +1110,7 @@ class PureTests(unittest.TestCase):
         self.assertEqual(agentic.build_parser().parse_args(['shell']).command, 'shell')
         self.assertEqual(agentic.build_parser().parse_args(['dashboard']).command, 'dashboard')
         self.assertEqual(agentic.build_parser().parse_args(['--state-dir', '/tmp/agentic-state']).state_dir, '/tmp/agentic-state')
-        self.assertEqual(agentic.__version__, '0.1.0')
+        self.assertEqual(agentic.__version__, '0.2.0')
 
     def test_no_arguments_open_interactive_shell(self):
         with patch('agentic_shell.run_shell', return_value=0) as run_shell:
@@ -559,6 +1215,27 @@ class StreamingTests(unittest.TestCase):
             self.assertTrue(ok)
             self.assertIn('hello', report)
             self.assertFalse((root / '.agent-test-output.log').exists())
+
+    def test_test_runner_reports_command_and_diff_check_failures(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            sh('git', 'init', cwd=root)
+            failed, report = agentic.run_tests(
+                root, [[sys.executable, '-c', 'print("bad"); raise SystemExit(2)']]
+            )
+            self.assertFalse(failed)
+            self.assertIn('bad', report)
+
+            (root / 'tracked.txt').write_text('clean\n')
+            sh('git', 'add', 'tracked.txt', cwd=root)
+            sh('git', '-c', 'user.name=Test', '-c', 'user.email=test@example.com',
+               'commit', '-m', 'tracked', cwd=root)
+            (root / 'tracked.txt').write_text('trailing whitespace  \n')
+            passed, report = agentic.run_tests(
+                root, [[sys.executable, '-c', 'print("ok")']]
+            )
+            self.assertFalse(passed)
+            self.assertIn('git diff --check failed', report)
 
     def test_stream_timeout_does_not_hang(self):
         from io import StringIO

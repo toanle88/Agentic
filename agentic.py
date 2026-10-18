@@ -2,9 +2,9 @@
 """A stage-free, resumable coding-agent runner.
 
 Install Agentic once, then place a target-specific agent_config.json in the
-repository being worked on. Codex is responsible for understanding progress;
-Git worktrees supply durable context. No API key or third-party Python
-packages are required by the runner itself.
+repository being worked on. The selected provider is responsible for
+understanding progress; Git worktrees supply durable context. No third-party
+Python packages are required by the runner itself.
 """
 from __future__ import annotations
 
@@ -24,12 +24,17 @@ import shutil
 import subprocess
 import sys
 import uuid
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "0.1.0"
+__version__ = "0.2.0"
+SUPPORTED_PROVIDERS = ("codex", "gemini", "claude", "copilot", "openrouter")
+DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_MAX_TURNS = 80
 BRANCH_RE = re.compile(r"^agent/issue-(\d+)-([a-f0-9]{8})$")
 LOCAL_BRANCH_RE = re.compile(
     r"^agent/task-(?P<slug>[a-z0-9-]+)-(?P<key>[a-f0-9]{12})(?:-(?P<ident>[a-f0-9]{8}))?$"
@@ -123,6 +128,28 @@ class StatePaths:
     runs: Path
     shell: Path
     dashboards: Path
+
+
+@dataclass(frozen=True)
+class AgentSettings:
+    """Provider settings shared by developer and reviewer invocations."""
+
+    provider: str = "codex"
+    model: str | None = None
+    reasoning_effort: str | None = None
+    timeout_seconds: int | None = None
+    api_key_env: str | None = None
+    base_url: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "model": self.model,
+            "reasoning_effort": self.reasoning_effort,
+            "timeout_seconds": self.timeout_seconds,
+            "api_key_env": self.api_key_env,
+            "base_url": self.base_url,
+        }
 
 
 def default_state_dir() -> Path:
@@ -602,10 +629,12 @@ def _codex_progress(line: str) -> str | None:
 
 def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                      timeout: int | None, codex_json: bool = False,
-                     heartbeat: int = 15) -> subprocess.CompletedProcess[str]:
+                     heartbeat: int = 15,
+                     progress_parser: Any | None = None) -> subprocess.CompletedProcess[str]:
     """Stream a subprocess to terminal + durable log; print heartbeats when quiet.
 
-    Raw JSONL events are stored next to the human-readable log for Codex.
+    Raw JSONL events are stored next to the human-readable log when a provider
+    emits structured output.
     Only a bounded output tail is retained in memory for error reporting.
     """
     log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -673,7 +702,10 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                     raw_file.write(line)
                     raw_file.flush()
                 tail = (tail + line)[-10000:]
-                shown = _codex_progress(line) if codex_json else line.strip("\r\n")
+                if codex_json:
+                    shown = (progress_parser or _codex_progress)(line)
+                else:
+                    shown = line.strip("\r\n")
                 if shown:
                     display(shown if codex_json else _short(shown, 500))
             proc.wait()
@@ -713,6 +745,434 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
                               timeout=timeout, codex_json=True)
     message = output.read_text(encoding="utf-8") if output.exists() else result.stdout[-4000:]
     return result.returncode == 0, message
+
+
+def _provider_progress(line: str, provider: str) -> str | None:
+    """Turn Gemini/Claude JSON events into compact terminal progress."""
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return _short(line, 350) if line.strip() else None
+    if not isinstance(event, dict):
+        return None
+    event_type = str(event.get("type", ""))
+    if event_type in {"init", "thread.started", "session_start"}:
+        return f"{provider.title()} session started"
+    if event_type in {"result", "turn.completed", "session_end"}:
+        return f"{provider.title()} agent finished"
+    if event_type in {"tool_use", "tool_call"}:
+        tool = event.get("tool")
+        tool_name = tool.get("name") if isinstance(tool, dict) else tool
+        name = event.get("name") or event.get("tool_name") or tool_name
+        return f"Using tool: {_short(name or 'tool', 160)}"
+    if event_type in {"error", "turn.failed"}:
+        return "ERROR: " + _short(event.get("error", event.get("message", line)), 300)
+    if event_type in {"message", "assistant", "agent_message"}:
+        content = event.get("content") or event.get("text")
+        if isinstance(content, list):
+            content = " ".join(
+                str(item.get("text", "")) for item in content
+                if isinstance(item, dict) and item.get("text")
+            )
+        return "Agent: " + _short(content, 350) if content else None
+    return None
+
+
+def _message_text(value: Any) -> str:
+    """Extract text from the common CLI/API message content shapes."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("content")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(part for part in parts if part)
+    if isinstance(value, dict):
+        return _message_text(value.get("text") or value.get("content") or value.get("response"))
+    return ""
+
+
+def _extract_provider_message(raw: str, provider: str) -> str:
+    """Recover the final assistant message from a provider's JSON stream."""
+    if provider == "copilot":
+        return raw.strip()
+    chunks: list[str] = []
+    final: list[str] = []
+    for line in raw.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("type", ""))
+        response = _message_text(event.get("response"))
+        result = _message_text(event.get("result"))
+        if response:
+            final.append(response)
+        if result:
+            final.append(result)
+        if event_type in {"message", "assistant", "agent_message"}:
+            message = event.get("message")
+            content = _message_text(event.get("content"))
+            if not content and isinstance(message, dict):
+                content = _message_text(message.get("content"))
+            if content:
+                chunks.append(content)
+    return (final[-1] if final else "\n".join(chunks)).strip()
+
+
+def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
+                     provider: str, readonly: bool = False,
+                     timeout: int | None = None,
+                     model: str | None = None) -> tuple[bool, str]:
+    """Run a locally installed coding CLI in its non-interactive mode."""
+    if provider == "gemini":
+        args = [
+            "gemini", "-p", prompt, "--output-format", "stream-json",
+            "--approval-mode", "plan" if readonly else "yolo",
+        ]
+        if model:
+            args += ["--model", model]
+        structured = True
+    elif provider == "claude":
+        args = ["claude", "-p", prompt, "--output-format", "stream-json"]
+        if readonly:
+            args += ["--permission-mode", "plan"]
+        else:
+            args += ["--dangerously-skip-permissions"]
+        if model:
+            args += ["--model", model]
+        structured = True
+    elif provider == "copilot":
+        args = ["copilot", "-p", prompt, "-s"]
+        if model:
+            args += ["--model", model]
+        if readonly:
+            # Copilot has no universal read-only mode; limit the available
+            # tools and explicitly deny common mutating shell operations.
+            args += [
+                "--available-tools", "view,grep,glob,shell",
+                "--deny-tool", "shell(git commit)",
+                "--deny-tool", "shell(git push)",
+                "--deny-tool", "shell(git reset)",
+                "--deny-tool", "shell(git checkout)",
+                "--deny-tool", "shell(git clean)",
+            ]
+        else:
+            args += ["--allow-all-tools", "--allow-all-paths"]
+        structured = False
+    else:
+        raise ValueError(f"Unsupported CLI provider: {provider}")
+
+    label = "REVIEW" if readonly else "DEVELOPER"
+    result = streamed_command(
+        args, worktree, label=label, log_file=output.with_suffix(".log"),
+        timeout=timeout, codex_json=structured,
+        progress_parser=(lambda line: _provider_progress(line, provider)) if structured else None,
+    )
+    raw_path = output.with_suffix(".jsonl") if structured else None
+    raw = raw_path.read_text(encoding="utf-8", errors="replace") if raw_path and raw_path.exists() else result.stdout
+    message = _extract_provider_message(raw, provider) or result.stdout[-10000:].strip()
+    output.write_text(message, encoding="utf-8")
+    return result.returncode == 0, message
+
+
+def _safe_worktree_path(worktree: Path, relative: str, *, write: bool = False) -> Path:
+    """Resolve a model-supplied path without allowing worktree escape."""
+    if not isinstance(relative, str) or not relative.strip():
+        raise ValueError("path must be a non-empty worktree-relative string")
+    candidate = Path(relative)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise ValueError("path must stay inside the worktree and may not be absolute")
+    root = worktree.resolve()
+    target = (root / candidate).resolve()
+    if not target.is_relative_to(root):
+        raise ValueError("path escapes the worktree")
+    if write and (target == root / ".git" or ".git" in target.relative_to(root).parts):
+        raise ValueError("writes inside .git are not allowed")
+    return target
+
+
+def _openrouter_tools(readonly: bool) -> list[dict[str, Any]]:
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "list_files",
+                "description": "List files below a relative directory in the current worktree.",
+                "parameters": {"type": "object", "properties": {
+                    "path": {"type": "string", "description": "Relative directory, default '.'."},
+                }},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read a UTF-8 text file from the current worktree.",
+                "parameters": {"type": "object", "properties": {
+                    "path": {"type": "string"},
+                }, "required": ["path"]},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_command",
+                "description": "Run a non-interactive argv command in the current worktree; do not use a shell.",
+                "parameters": {"type": "object", "properties": {
+                    "argv": {"type": "array", "items": {"type": "string"}},
+                }, "required": ["argv"]},
+            },
+        },
+    ]
+    if not readonly:
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "Write complete UTF-8 file content inside the current worktree.",
+                "parameters": {"type": "object", "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                }, "required": ["path", "content"]},
+            },
+        })
+    return tools
+
+
+def _openrouter_command_allowed(argv: list[str], readonly: bool) -> tuple[bool, str]:
+    if not argv or not all(isinstance(part, str) and part for part in argv):
+        return False, "argv must be a non-empty array of strings"
+    executable = Path(argv[0]).name.lower()
+    if executable in {"bash", "sh", "zsh", "fish", "cmd", "powershell", "pwsh"}:
+        return False, "shell commands are not allowed; provide argv directly"
+    if executable in {"curl", "wget", "ssh", "scp", "gh"}:
+        return False, f"{executable} is not allowed from an OpenRouter tool call"
+    if executable == "git":
+        subcommand = argv[1] if len(argv) > 1 else ""
+        if subcommand in {"commit", "push", "reset", "clean", "checkout", "switch", "worktree"}:
+            return False, f"git {subcommand} is not allowed"
+        if readonly and subcommand not in {"status", "diff", "log", "show", "branch", "rev-parse"}:
+            return False, f"git {subcommand} is not allowed during review"
+    if readonly and executable not in {
+        "git", "cat", "head", "tail", "sed", "awk", "find", "rg", "grep", "ls", "pwd", "file",
+    }:
+        return False, f"{executable} is not allowed during read-only review"
+    return True, ""
+
+
+def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
+                          *, readonly: bool) -> str:
+    try:
+        if name == "list_files":
+            relative = arguments.get("path", ".")
+            target = worktree.resolve() if relative == "." else _safe_worktree_path(worktree, relative)
+            if not target.is_dir():
+                return f"ERROR: {relative!r} is not a directory"
+            paths = []
+            for item in sorted(target.rglob("*")):
+                if ".git" in item.relative_to(worktree.resolve()).parts:
+                    continue
+                if item.is_file():
+                    paths.append(str(item.relative_to(worktree.resolve())))
+                if len(paths) >= 300:
+                    break
+            return "\n".join(paths) or "(no files)"
+        if name == "read_file":
+            target = _safe_worktree_path(worktree, arguments.get("path", ""))
+            return target.read_text(encoding="utf-8", errors="replace")[:120000]
+        if name == "write_file":
+            if readonly:
+                return "ERROR: write_file is unavailable during review"
+            target = _safe_worktree_path(worktree, arguments.get("path", ""), write=True)
+            relative = str(target.relative_to(worktree.resolve()))
+            if forbidden(relative):
+                return f"ERROR: protected file {relative!r} cannot be changed"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(arguments.get("content", ""), encoding="utf-8")
+            return f"Wrote {relative}"
+        if name == "run_command":
+            argv = arguments.get("argv")
+            allowed, reason = _openrouter_command_allowed(argv, readonly)
+            if not allowed:
+                return "ERROR: " + reason
+            result = subprocess.run(
+                argv, cwd=worktree, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace", check=False,
+            )
+            return f"exit {result.returncode}\n{result.stdout[-20000:]}"
+        return f"ERROR: unknown tool {name!r}"
+    except (OSError, UnicodeError, ValueError) as exc:
+        return f"ERROR: {exc}"
+
+
+def _openrouter_request(url: str, api_key: str, body: dict[str, Any],
+                        timeout: int | None) -> dict[str, Any]:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "X-Title": "Agentic",
+        },
+        method="POST",
+    )
+    try:
+        response_context = urllib.request.urlopen(request, timeout=timeout) if timeout else urllib.request.urlopen(request)
+        with response_context as response:
+            value = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[-1000:]
+        raise RuntimeError(f"OpenRouter request failed ({exc.code}): {detail}") from exc
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"OpenRouter request failed: {exc}") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("OpenRouter returned a non-object response")
+    if value.get("error"):
+        raise RuntimeError(f"OpenRouter returned an error: {_short(value['error'], 1000)}")
+    return value
+
+
+def run_openrouter(worktree: Path, prompt: str, *, output: Path,
+                   readonly: bool = False, schema: Path | None = None,
+                   timeout: int | None = None, model: str | None = None,
+                   reasoning_effort: str | None = None,
+                   api_key_env: str = "OPENROUTER_API_KEY",
+                   base_url: str = DEFAULT_OPENROUTER_BASE_URL) -> tuple[bool, str]:
+    """Run an OpenAI-compatible OpenRouter agent with scoped local tools."""
+    if not model:
+        raise RuntimeError("OpenRouter requires a model, for example openai/gpt-5.4")
+    api_key = os.environ.get(api_key_env)
+    if not api_key:
+        raise RuntimeError(f"OpenRouter API key is missing; set ${api_key_env}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    log_file = output.with_suffix(".log")
+    raw_file = output.with_suffix(".jsonl")
+    label = "REVIEW" if readonly else "DEVELOPER"
+    messages: list[dict[str, Any]] = [{
+        "role": "system",
+        "content": (
+            "You are running inside an isolated Agentic Git worktree. "
+            "Use only the supplied tools and keep all paths relative to the worktree. "
+            "Never commit, push, publish, access the network, or change protected agent files. "
+            + ("This is a read-only review: do not edit files or run project code." if readonly else "You may edit files and run the project's checks.")
+        ),
+    }, {"role": "user", "content": prompt}]
+    tools = _openrouter_tools(readonly)
+    started = time.monotonic()
+    last_message = ""
+    log_file.write_text("", encoding="utf-8")
+    raw_file.write_text("", encoding="utf-8")
+
+    def emit(message: str) -> None:
+        now = datetime.datetime.now().strftime("%H:%M:%S")
+        line = f"[{now}] [{label}] {message}"
+        print(line, flush=True)
+        with log_file.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+
+    emit(f"Started (OpenRouter/{model})")
+    try:
+        for turn in range(OPENROUTER_MAX_TURNS):
+            body: dict[str, Any] = {
+                "model": model,
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": "auto",
+            }
+            if reasoning_effort:
+                body["reasoning_effort"] = reasoning_effort
+            response = _openrouter_request(
+                base_url.rstrip("/") + "/chat/completions", api_key, body, timeout
+            )
+            with raw_file.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"turn": turn + 1, "response": response}, ensure_ascii=False) + "\n")
+            choices = response.get("choices")
+            if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                raise RuntimeError("OpenRouter response did not contain a choice")
+            message = choices[0].get("message")
+            if not isinstance(message, dict):
+                raise RuntimeError("OpenRouter response did not contain a message")
+            messages.append(message)
+            tool_calls = message.get("tool_calls") or []
+            content = _message_text(message.get("content"))
+            if content:
+                last_message = content
+                emit("Agent: " + _short(content, 350))
+            if not tool_calls:
+                break
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict):
+                    continue
+                function = tool_call.get("function") or {}
+                name = function.get("name", "")
+                raw_arguments = function.get("arguments", "{}")
+                try:
+                    arguments = raw_arguments if isinstance(raw_arguments, dict) else json.loads(raw_arguments)
+                except (TypeError, json.JSONDecodeError):
+                    arguments = {}
+                if not isinstance(arguments, dict):
+                    arguments = {}
+                emit(f"Using tool: {name}")
+                result = _openrouter_tool_call(worktree, name, arguments, readonly=readonly)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.get("id", f"call-{turn}"),
+                    "content": result,
+                })
+        else:
+            raise RuntimeError(f"OpenRouter agent exceeded {OPENROUTER_MAX_TURNS} tool turns")
+    except RuntimeError as exc:
+        emit("ERROR: " + str(exc))
+        output.write_text(last_message or str(exc), encoding="utf-8")
+        return False, last_message or str(exc)
+    seconds = int(time.monotonic() - started)
+    emit(f"Finished in {seconds}s (exit 0)")
+    output.write_text(last_message, encoding="utf-8")
+    return True, last_message
+
+
+def run_agent(worktree: Path, prompt: str, *, output: Path,
+              settings: dict[str, Any] | AgentSettings | None = None,
+              readonly: bool = False, schema: Path | None = None,
+              model: str | None = None, reasoning_effort: str | None = None,
+              timeout: int | None = None) -> tuple[bool, str]:
+    """Dispatch one developer/reviewer turn to the configured provider."""
+    if isinstance(settings, AgentSettings):
+        selected = settings.as_dict()
+    else:
+        selected = dict(settings or {})
+    provider = str(selected.get("provider", "codex"))
+    if selected.get("model") is not None:
+        model = selected["model"]
+    if selected.get("reasoning_effort") is not None:
+        reasoning_effort = selected["reasoning_effort"]
+    if selected.get("timeout_seconds") is not None:
+        timeout = selected["timeout_seconds"]
+    if provider == "codex":
+        return run_codex(
+            worktree, prompt, output=output, readonly=readonly, schema=schema,
+            timeout=timeout, model=model, reasoning_effort=reasoning_effort,
+        )
+    if provider == "openrouter":
+        return run_openrouter(
+            worktree, prompt, output=output, readonly=readonly, schema=schema,
+            timeout=timeout, model=model, reasoning_effort=reasoning_effort,
+            api_key_env=selected.get("api_key_env") or "OPENROUTER_API_KEY",
+            base_url=selected.get("base_url") or DEFAULT_OPENROUTER_BASE_URL,
+        )
+    return run_cli_provider(
+        worktree, prompt, output=output, provider=provider,
+        readonly=readonly, timeout=timeout, model=model,
+    )
 
 
 def run_tests(worktree: Path, test_commands: list[list[str]],
@@ -848,7 +1308,7 @@ def prepare_patch(worktree: Path, base: str, max_files: int | None) -> tuple[str
 def parse_review_result(text: str) -> dict[str, Any] | None:
     """Parse strict or lightly wrapped JSON returned by the reviewer.
 
-    Codex is asked for schema-constrained output, but a CLI wrapper or a
+    Providers are asked for schema-constrained output where supported, but a CLI wrapper or a
     platform-specific transport can still add Markdown fences or a short
     prefix/suffix. Recovering the object here avoids treating a reviewer
     formatting problem as a code rejection.
@@ -968,12 +1428,14 @@ def review_history_feedback(folder: Path) -> str:
 def review(worktree: Path, issue: Issue, folder: Path, base_sha: str,
            test_report: str = "", *, model: str | None = None,
            reasoning_effort: str | None = None,
-           timeout: int | None = None) -> dict[str, Any]:
+           timeout: int | None = None,
+           agent: dict[str, Any] | AgentSettings | None = None) -> dict[str, Any]:
     schema = folder / "review-schema.json"
     schema.write_text(json.dumps(REVIEW_SCHEMA, indent=2), encoding="utf-8")
     output = next_log(folder, "review", "json")
+    provider = agent.provider if isinstance(agent, AgentSettings) else (agent or {}).get("provider", "codex")
     prompt = f"""You are an INDEPENDENT, READ-ONLY senior code reviewer.
-This is a fresh Codex session; do not assume the implementer's conclusions are right.
+This is a fresh {provider} session; do not assume the implementer's conclusions are right.
 Read AGENTS.md if present and inspect source code, tests and the proposed PR diff:
   git diff --cached {base_sha}
 Work item: {issue.reference} — {issue.title}
@@ -991,10 +1453,11 @@ Do not edit files, commit, push, or run untrusted code.
 Return a structured JSON object with approved (bool), summary (str), findings (array of strings).
 Reject substantive bugs or missing coverage; explain exact reasons.
 """
-    print("[REVIEW] Launching independent read-only Codex process")
-    ok, message = run_codex(
+    print(f"[REVIEW] Launching independent read-only {provider} process")
+    ok, message = run_agent(
         worktree, prompt, readonly=True, schema=schema, output=output,
         model=model, reasoning_effort=reasoning_effort, timeout=timeout,
+        settings=agent,
     )
     if not ok:
         return {
@@ -1065,17 +1528,13 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
     print("[PATCH] Proposed changes:\n" + summary)
     verdict = review(
         run.worktree, issue, folder, base_sha, test_report=report,
-        model=config.get("codex_model"),
-        reasoning_effort=config.get("codex_reasoning_effort"),
-        timeout=config.get("codex_timeout_seconds"),
+        agent=config.get("reviewer_agent"),
     )
     if verdict.get("_tooling_error"):
         print("[REVIEW] Reviewer result was invalid; retrying read-only review")
         verdict = review(
             run.worktree, issue, folder, base_sha, test_report=report,
-            model=config.get("codex_model"),
-            reasoning_effort=config.get("codex_reasoning_effort"),
-            timeout=config.get("codex_timeout_seconds"),
+            agent=config.get("reviewer_agent"),
         )
     if verdict.get("_tooling_error"):
         raise RuntimeError(
@@ -1128,8 +1587,9 @@ def publish(run: Run, issue: Issue, github_repo: str, base: str,
     git(run.worktree, "push", "-u", "origin", run.branch)
     task_section = (f"## Local task\n\n{issue.body[:8000]}\n\n"
                     if issue.is_local else f"Closes #{issue.number}\n\n")
+    reviewer_provider = config.get("reviewer_agent", {}).get("provider", "codex")
     body = (f"{task_section}## Independent validation\n\n"
-            f"```text\n{report[-4000:]}\n```\n\n## Independent Codex review\n\n"
+            f"```text\n{report[-4000:]}\n```\n\n## Independent {reviewer_provider.title()} review\n\n"
             f"{verdict.get('summary', '')}\n\nDraft PR: CI and human review still required.")
     title_prefix = "Task" if issue.is_local else f"Issue #{issue.number}"
     result = command([
@@ -1147,14 +1607,13 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
     for attempt in range(config["max_retries"] + 1):
         print(f"\n[DEVELOPER] Working on {issue.reference}, attempt {attempt + 1}")
         output = next_log(folder, "developer")
-        ok, message = run_codex(
+        ok, message = run_agent(
             run.worktree, agent_prompt(issue, feedback), output=output,
-            timeout=config.get("codex_timeout_seconds"),
-            model=config.get("codex_model"),
-            reasoning_effort=config.get("codex_reasoning_effort"),
+            settings=config.get("developer_agent"),
         )
         if not ok:
-            feedback = f"Codex invocation failed: {message[-3000:]}"
+            provider = config.get("developer_agent", {}).get("provider", "codex")
+            feedback = f"{provider} invocation failed: {message[-3000:]}"
             print(feedback[-1000:])
             continue
         try:
@@ -1183,6 +1642,53 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
         git(run.worktree, "reset", "--quiet")
     print(f"\nAttempts exhausted; worktree preserved: {run.worktree}")
     return False
+
+
+def _agent_settings_from_config(data: dict[str, Any], section: str, *,
+                                legacy_provider: str, legacy_model: str | None,
+                                legacy_reasoning: str | None,
+                                legacy_timeout: int | None) -> AgentSettings:
+    raw = data.get(section)
+    if raw is None and section == "developer":
+        raw = data.get("agent")
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"{section} must be an object")
+    for secret_field in ("api_key", "apiKey", "token", "secret"):
+        if secret_field in raw:
+            raise ValueError(
+                f"{section}.{secret_field} is not accepted; store credentials in the environment"
+            )
+
+    provider = raw.get("provider", data.get(f"{section}_provider", legacy_provider))
+    model = raw.get("model", legacy_model)
+    reasoning = raw.get("reasoning_effort", legacy_reasoning)
+    timeout = raw.get("timeout_seconds", legacy_timeout)
+    api_key_env = raw.get("api_key_env")
+    base_url = raw.get("base_url")
+    if not isinstance(provider, str) or provider not in SUPPORTED_PROVIDERS:
+        choices = ", ".join(SUPPORTED_PROVIDERS)
+        raise ValueError(f"{section}.provider must be one of: {choices}")
+    for name, value in (("model", model), ("reasoning_effort", reasoning), ("base_url", base_url)):
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError(f"{section}.{name} must be a nonempty string or null")
+    if timeout is not None and (type(timeout) is not int or not 1 <= timeout <= 86400):
+        raise ValueError(f"{section}.timeout_seconds must be null or an integer from 1 to 86400")
+    if api_key_env is not None and (
+        not isinstance(api_key_env, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", api_key_env)
+    ):
+        raise ValueError(f"{section}.api_key_env must be a valid environment variable name")
+    if provider == "openrouter":
+        if not model:
+            raise ValueError(f"{section}.model is required when provider is openrouter")
+        api_key_env = api_key_env or "OPENROUTER_API_KEY"
+        base_url = base_url or DEFAULT_OPENROUTER_BASE_URL
+        if not re.match(r"^https?://", base_url, re.IGNORECASE):
+            raise ValueError(f"{section}.base_url must start with http:// or https://")
+    elif api_key_env is not None or base_url is not None:
+        raise ValueError(f"{section}.api_key_env and {section}.base_url are only valid for openrouter")
+    return AgentSettings(provider, model, reasoning, timeout, api_key_env, base_url)
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -1219,6 +1725,14 @@ def load_config(path: Path) -> dict[str, Any]:
     for name, value in (("codex_model", codex_model), ("codex_reasoning_effort", reasoning_effort)):
         if value is not None and (not isinstance(value, str) or not value.strip()):
             raise ValueError(f"{name} must be a nonempty string or null")
+    developer_agent = _agent_settings_from_config(
+        data, "developer", legacy_provider="codex", legacy_model=codex_model,
+        legacy_reasoning=reasoning_effort, legacy_timeout=codex_timeout,
+    )
+    reviewer_agent = _agent_settings_from_config(
+        data, "reviewer", legacy_provider="codex", legacy_model=codex_model,
+        legacy_reasoning=reasoning_effort, legacy_timeout=codex_timeout,
+    )
     return {
         "task_source": task_source,
         "test_commands": commands,
@@ -1229,7 +1743,33 @@ def load_config(path: Path) -> dict[str, Any]:
         "test_timeout_seconds": test_timeout,
         "codex_model": codex_model,
         "codex_reasoning_effort": reasoning_effort,
+        "developer_agent": developer_agent.as_dict(),
+        "reviewer_agent": reviewer_agent.as_dict(),
     }
+
+
+def preflight_agent_settings(*settings: dict[str, Any]) -> None:
+    """Check selected providers before creating work or spending API time."""
+    checked: set[str] = set()
+    for item in settings:
+        provider = str(item.get("provider", "codex"))
+        if provider in checked:
+            continue
+        checked.add(provider)
+        if provider == "openrouter":
+            env_name = item.get("api_key_env") or "OPENROUTER_API_KEY"
+            if not os.environ.get(env_name):
+                raise RuntimeError(f"OpenRouter API key is missing; set ${env_name}")
+            continue
+        executable = shutil.which(provider)
+        if not executable:
+            install_hint = {
+                "codex": "install/authenticate the Codex CLI",
+                "gemini": "install/authenticate Gemini CLI",
+                "claude": "install/authenticate Claude Code",
+                "copilot": "install/authenticate GitHub Copilot CLI",
+            }.get(provider, "install the provider CLI")
+            raise RuntimeError(f"Configured provider {provider!r} is unavailable; {install_hint}")
 
 
 def test_commands_for_profile(config: dict[str, Any], profile: str) -> list[list[str]]:
@@ -1292,7 +1832,27 @@ def _append_gitignore_entry(repo: Path, entry: str) -> bool:
     return True
 
 
-def init_repository(repo: Path, *, force: bool = False, create_agents: bool = False) -> int:
+def default_provider_settings(provider: str) -> dict[str, Any]:
+    """Return a copy-ready provider block for ``agentic init``."""
+    if provider not in SUPPORTED_PROVIDERS:
+        raise ValueError(f"provider must be one of: {', '.join(SUPPORTED_PROVIDERS)}")
+    settings: dict[str, Any] = {
+        "provider": provider,
+        "model": None,
+        "reasoning_effort": None,
+        "timeout_seconds": None,
+    }
+    if provider == "openrouter":
+        settings.update({
+            "model": "openai/gpt-5.4",
+            "api_key_env": "OPENROUTER_API_KEY",
+            "base_url": DEFAULT_OPENROUTER_BASE_URL,
+        })
+    return settings
+
+
+def init_repository(repo: Path, *, force: bool = False, create_agents: bool = False,
+                     provider: str = "codex", reviewer_provider: str | None = None) -> int:
     """Create personal target-repository setup without overwriting it by default."""
     repo = repo.resolve()
     root_result = probe(["git", "rev-parse", "--show-toplevel"], repo)
@@ -1303,16 +1863,16 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
         raise RuntimeError(f"Run init from the repository root or pass --repo {root}")
     config_path = repo / AGENT_CONFIG_FILENAME
     commands, detection = detect_test_commands(repo)
+    reviewer_provider = reviewer_provider or provider
     config = {
         "task_source": "github",
         "test_commands": commands,
         "slow_test_commands": [],
         "max_retries": 3,
         "max_files": None,
-        "codex_model": None,
-        "codex_reasoning_effort": None,
-        "codex_timeout_seconds": None,
         "test_timeout_seconds": None,
+        "developer": default_provider_settings(provider),
+        "reviewer": default_provider_settings(reviewer_provider),
     }
     if config_path.exists() and not force:
         print(f"[INIT] Keeping existing {config_path}")
@@ -1331,6 +1891,7 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
     print(f"[INIT] {detection}: {' '.join(commands[0])}")
     if commands == [["git", "diff", "--check"]]:
         print("[INIT] Warning: replace the starter check with the project's real test/build commands")
+    print(f"[INIT] Providers: developer={provider}, reviewer={reviewer_provider}")
     print("[INIT] Review agent_config.json before the first issue run")
     return 0
 
@@ -1351,9 +1912,6 @@ def doctor(repo: Path, config_path: Path | None = None) -> int:
     gh_path = shutil.which("gh")
     gh_ok, gh_output = probe([gh_path or "gh", "auth", "status"], repo) if gh_path else (False, "gh not found")
     checks.append(("GitHub CLI auth", gh_ok, _short(gh_output or "not authenticated", 180), True))
-    codex_path = shutil.which("codex")
-    codex_ok, codex_output = probe([codex_path or "codex", "--version"], repo) if codex_path else (False, "codex not found")
-    checks.append(("Codex CLI", codex_ok, _short(codex_output or "not found", 180), True))
     target_config = (config_path or repo / AGENT_CONFIG_FILENAME).resolve()
     if target_config.is_file():
         try:
@@ -1361,6 +1919,20 @@ def doctor(repo: Path, config_path: Path | None = None) -> int:
             preflight_test_commands(repo, loaded["test_commands"] + loaded["slow_test_commands"])
             checks.append(("Agentic config", True, str(target_config), True))
             checks.append(("Configured checks", True, f"{len(loaded['test_commands'])} fast / {len(loaded['slow_test_commands'])} slow", True))
+            providers = []
+            for role, settings in (("developer", loaded["developer_agent"]), ("reviewer", loaded["reviewer_agent"])):
+                provider = settings["provider"]
+                if provider in providers:
+                    continue
+                providers.append(provider)
+                if provider == "openrouter":
+                    env_name = settings["api_key_env"]
+                    checks.append((f"{role.title()} provider ({provider})", bool(os.environ.get(env_name)),
+                                   f"${env_name} is set" if os.environ.get(env_name) else f"${env_name} is missing", True))
+                else:
+                    executable = shutil.which(provider)
+                    ok, detail = probe([executable or provider, "--version"], repo) if executable else (False, f"{provider} not found")
+                    checks.append((f"{role.title()} provider ({provider})", ok, _short(detail or "not found", 180), True))
         except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
             checks.append(("Agentic config", False, str(exc), True))
     else:
@@ -1487,6 +2059,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--new", action="store_true", help="Make another worktree even if one already exists")
     parser.add_argument("--force", action="store_true", help="Allow init to replace generated setup files")
     parser.add_argument("--agents", action="store_true", help="With init, create a starter AGENTS.md")
+    parser.add_argument(
+        "--provider", choices=SUPPORTED_PROVIDERS, default="codex",
+        help="With init, provider for the developer and (by default) reviewer",
+    )
+    parser.add_argument(
+        "--reviewer-provider", choices=SUPPORTED_PROVIDERS, default=None,
+        help="With init, use a different provider for the independent reviewer",
+    )
     parser.add_argument("--yes", action="store_true", help="Confirm a cleanup operation")
     parser.add_argument("--remove-logs", action="store_true", help="With cleanup, also delete matching run logs")
     parser.add_argument("--all", dest="all_runs", action="store_true", help="With cleanup, select all clean Agentic worktrees")
@@ -1528,6 +2108,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> None:
     config = load_config(config_path)
     test_commands = test_commands_for_profile(config, args.profile)
     preflight_test_commands(repo, test_commands)
+    preflight_agent_settings(config["developer_agent"], config["reviewer_agent"])
     state_dir = Path(args.state_dir).expanduser().resolve() if args.state_dir else default_state_dir()
 
     task_source = config["task_source"]
@@ -1587,6 +2168,11 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> None:
         fresh = True
     folder = logs_path(repo, run, state_dir)
     print_run_header(issue, run, fresh)
+    print(
+        f"Providers: developer={config['developer_agent']['provider']} "
+        f"reviewer={config['reviewer_agent']['provider']}",
+        flush=True,
+    )
     if args.review:
         passed, *_ = verify_and_review(
             run, issue, base, config, folder, test_commands=test_commands
@@ -1642,7 +2228,10 @@ def main(argv: list[str] | None = None) -> int:
             parser.print_help()
             return 0
         if args.command == "init":
-            return init_repository(Path(args.repo), force=args.force, create_agents=args.agents)
+            return init_repository(
+                Path(args.repo), force=args.force, create_agents=args.agents,
+                provider=args.provider, reviewer_provider=args.reviewer_provider,
+            )
         if args.command == "doctor":
             return doctor(Path(args.repo), Path(args.config) if args.config else None)
         if args.command == "cleanup":

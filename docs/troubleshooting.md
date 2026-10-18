@@ -31,6 +31,32 @@ agentic --repo /path/to/target-repository \
 
 Agentic stops instead of silently using a configuration from another repository.
 
+## A provider is unavailable
+
+Run the diagnostic from the target repository root:
+
+```bash
+agentic doctor
+```
+
+Install and authenticate the provider selected in `agent_config.json`. For
+OpenRouter, export the configured key environment variable instead of putting
+the key in JSON:
+
+```bash
+export OPENROUTER_API_KEY='your-key'
+agentic doctor
+```
+
+To switch providers, regenerate the personal configuration with `--force`, or
+copy a template from `examples/provider-configs/`:
+
+```bash
+agentic init --provider gemini --force
+```
+
+Only use `--force` when you intend to replace the existing ignored config.
+
 ## A test command fails before development starts
 
 Run each configured command manually from the target repository. Install the target project's dependencies and update `test_commands` to match its actual toolchain. Agentic does not assume that Python or `pytest` is installed.

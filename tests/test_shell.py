@@ -57,6 +57,12 @@ class ShellTests(unittest.TestCase):
             agentic_shell._parse_job_command(['/run', '119', '--review', '--publish'])
         with self.assertRaises(ValueError):
             agentic_shell._parse_job_command(['/run', '119', 'slow'])
+        with self.assertRaises(ValueError):
+            agentic_shell._parse_job_command(['/run', '119', '--profile', 'fast', '--profile', 'slow'])
+        with self.assertRaises(ValueError):
+            agentic_shell._parse_job_command(['/run', '119', '--profile', 'fast', 'slow'])
+        with self.assertRaises(ValueError):
+            agentic_shell._parse_job_command(['/run', '119', '--unknown'])
 
     def test_local_task_capture_writes_a_reusable_task_file(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -95,6 +101,49 @@ class ShellTests(unittest.TestCase):
             job.process.wait(timeout=5)
             first.refresh()
             self.assertIn('persisted', job.log_path.read_text())
+
+    def test_shell_preserves_local_task_file_in_runner_arguments(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / 'agent_config.json'
+            config.write_text('{"task_source":"local"}')
+            task = root / 'logs' / 'task.md'
+            task.parent.mkdir()
+            task.write_text('Implement export\n')
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), config=config, session_dir=root / 'logs'
+            )
+            with (patch.object(shell, '_capture_local_task', return_value=task),
+                  patch.object(shell, '_launch') as launch):
+                shell.run_issue(['/run', '--profile', 'slow'])
+            argv = launch.call_args.args[0]
+            self.assertIn('--task-file', argv)
+            self.assertIn(str(task), argv)
+            self.assertIn('--profile', argv)
+            self.assertIn('slow', argv)
+
+    def test_shell_stop_and_log_tail_handle_running_and_missing_jobs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            job = shell._launch([sys.executable, '-c', 'import time; time.sleep(5)'])
+            with patch('sys.stdout') as output:
+                shell.stop(['/stop', str(job.number)])
+            job.process.wait(timeout=5)
+            shell.refresh()
+            self.assertIsNotNone(job.exit_code)
+            self.assertIn('Could not read', agentic_shell._tail(root / 'missing.log', 5))
+            with self.assertRaisesRegex(ValueError, 'unknown job'):
+                shell.show_logs(['/logs', '999'])
+
+    def test_shell_ignores_malformed_persisted_job_records(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            session = root / 'logs'
+            session.mkdir()
+            (session / 'job-001.json').write_text('{not-json')
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=session)
+            self.assertEqual(shell.jobs, {})
 
 
 def _capture_ps(shell, parts=None):

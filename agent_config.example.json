@@ -6,8 +6,17 @@
   "slow_test_commands": [],
   "max_retries": 3,
   "max_files": null,
-  "codex_model": null,
-  "codex_reasoning_effort": null,
-  "codex_timeout_seconds": null,
-  "test_timeout_seconds": null
+  "test_timeout_seconds": null,
+  "developer": {
+    "provider": "codex",
+    "model": null,
+    "reasoning_effort": null,
+    "timeout_seconds": null
+  },
+  "reviewer": {
+    "provider": "codex",
+    "model": null,
+    "reasoning_effort": null,
+    "timeout_seconds": null
+  }
 }
