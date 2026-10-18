@@ -12,7 +12,7 @@ Agentic is intentionally small and uses the Python standard library at runtime.
 | `agentic_models.py` | Immutable task, run, state, and provider configuration models. |
 | `agentic_security.py` | Shared credential redaction for logs and dashboard output. |
 | `agentic_telemetry.py` | Optional provider usage normalization and durable cost records. |
-| `agentic_sandbox.py` | Optional Docker/Podman command wrapping for native providers and checks. |
+| `agentic_sandbox.py` | Optional Docker/Podman command wrapping for providers, OpenRouter tool commands, and checks. |
 | `agent_config.json` | Target-repository checks and per-run policy settings. |
 | Git worktrees | Isolate issue or local-task changes from the base checkout and preserve unfinished work. |
 | GitHub CLI | Read issues and publish an explicitly approved branch/PR. |
@@ -55,7 +55,7 @@ Set `AGENTIC_STATE_DIR` or pass `--state-dir PATH` to choose another root. A sha
 
 ## Safety boundaries
 
-- Test commands run under the host account, not as isolated application code. Use a trusted or disposable checkout and do not expose production credentials.
+- Test commands run under the host account by default. When `security_mode` is `isolated`, provider and test processes run in the configured container instead; use explicit `sandbox.pass_env` names for credentials.
 - The developer receives write access to its worktree; the reviewer is invoked in the provider's read-only or restricted review mode.
 - Native provider CLIs receive provider-specific non-interactive permissions. Gemini and Claude use their read-only review modes; Copilot is restricted to its available read/review tools and denied common Git mutations. OpenRouter uses an Agentic-owned scoped tool loop.
 - The runner refuses protected changes including Agentic configuration, agent instructions, secrets, private keys, `.codex/`, and GitHub workflows.
@@ -66,7 +66,8 @@ Set `AGENTIC_STATE_DIR` or pass `--state-dir PATH` to choose another root. A sha
 - A repository lock prevents concurrent mutating runs from corrupting shared Git metadata.
 - Repository metadata operations use a shared lock while independent worktrees use separate locks.
 - Provider usage and cost are recorded only when the provider reports them; missing usage remains unknown.
-- Optional container mode mounts the task worktree and output directory only, with networking disabled by default.
+- `security_mode: "isolated"` requires the optional container mode and fails closed when its engine is unavailable.
+- Container mode mounts the task worktree, required linked-worktree Git metadata, and output directory, uses a read-only container root, and disables networking by default. OpenRouter file inspection remains host-side but its command tools use the same container boundary.
 - `agentic status --json` exposes stable worktree records for scripts without parsing terminal output.
 
 ## WSL and Windows Git compatibility

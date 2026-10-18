@@ -31,13 +31,23 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from agentic_models import AgentSettings, Issue, Run, StatePaths
-from agentic_sandbox import sandbox_command, validate_sandbox
+from agentic_sandbox import DEFAULT_SANDBOX_IMAGE, sandbox_command, validate_sandbox
 from agentic_security import redact_secrets
 from agentic_telemetry import combine_usage, extract_jsonl_usage, normalize_usage, record_usage
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 SUPPORTED_PROVIDERS = ("codex", "gemini", "claude", "copilot", "openrouter")
+SECURITY_MODES = ("trusted", "isolated")
+DEFAULT_SECURITY_MODE = "trusted"
+DEFAULT_INIT_SECURITY_MODE = "trusted"
+PROVIDER_SANDBOX_ENV = {
+    "codex": ("OPENAI_API_KEY",),
+    "gemini": ("GEMINI_API_KEY",),
+    "claude": ("ANTHROPIC_API_KEY",),
+    "copilot": ("GH_TOKEN",),
+    "openrouter": (),
+}
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MAX_TURNS = 80
 OPENROUTER_MAX_TOOL_TURNS = (1, 200)
@@ -52,6 +62,10 @@ NETWORK_COMMANDS = {"curl", "wget", "ssh", "scp", "sftp", "ftp", "nc", "netcat",
 ALWAYS_BLOCKED_COMMANDS = {"gh", "ssh", "scp", "sftp"}
 READONLY_GIT_COMMANDS = {"status", "diff", "log", "show", "branch", "rev-parse"}
 READONLY_INSPECTION_COMMANDS = {"rg", "grep", "ls", "pwd", "file"}
+INTERPRETER_EXECUTABLES = {
+    "node", "nodejs", "perl", "php", "python", "python3", "py", "ruby",
+}
+INTERPRETER_EVAL_OPTIONS = {"-c", "--command", "-e", "--eval", "-exec"}
 GIT_UNSAFE_OPTIONS = {
     "-c", "--config-env", "--exec-path", "--git-dir", "--work-tree", "-C",
     "--output", "-o", "--ext-diff", "--textconv", "--no-index",
@@ -544,6 +558,16 @@ def _runtime_agent_settings(config: dict[str, Any], role: str) -> dict[str, Any]
     return settings
 
 
+def sandbox_env_for_provider(provider: str, sandbox: dict[str, Any] | None) -> list[str]:
+    """Select only the explicit credential names relevant to one provider."""
+    configured = list((sandbox or {}).get("pass_env", []))
+    if provider == "openrouter":
+        return []
+    expected = set(PROVIDER_SANDBOX_ENV.get(provider, ()))
+    matched = [name for name in configured if name in expected]
+    return matched or configured
+
+
 def _record_provider_usage(output: Path, readonly: bool, usage: dict[str, Any]) -> None:
     role = "reviewer" if readonly else "developer"
     record_usage(output.parent, role, usage)
@@ -707,7 +731,8 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                      heartbeat: int = 15,
                      progress_parser: Any | None = None,
                      sandbox: dict[str, Any] | None = None,
-                     sandbox_read_only: bool = False) -> subprocess.CompletedProcess[str]:
+                     sandbox_read_only: bool = False,
+                     sandbox_pass_env: list[str] | None = None) -> subprocess.CompletedProcess[str]:
     """Stream a subprocess to terminal + durable log; print heartbeats when quiet.
 
     Raw JSONL events are stored next to the human-readable log when a provider
@@ -716,7 +741,8 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
     """
     log_file.parent.mkdir(parents=True, exist_ok=True)
     process_argv = sandbox_command(
-        argv, cwd, sandbox, output_root=log_file.parent, read_only=sandbox_read_only
+        argv, cwd, sandbox, output_root=log_file.parent, read_only=sandbox_read_only,
+        pass_env=sandbox_pass_env,
     )
     try:
         proc = subprocess.Popen(
@@ -825,7 +851,8 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
     label = "REVIEW" if readonly else "DEVELOPER"
     result = streamed_command(args, worktree, label=label, log_file=output.with_suffix(".log"),
                               timeout=timeout, codex_json=True, sandbox=sandbox,
-                              sandbox_read_only=readonly)
+                              sandbox_read_only=readonly,
+                              sandbox_pass_env=(sandbox or {}).get("pass_env", []))
     message = output.read_text(encoding="utf-8") if output.exists() else result.stdout[-4000:]
     message = redact_secrets(message)
     output.write_text(message, encoding="utf-8")
@@ -964,6 +991,7 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
         timeout=timeout, codex_json=structured,
         progress_parser=(lambda line: _provider_progress(line, provider)) if structured else None,
         sandbox=sandbox, sandbox_read_only=readonly,
+        sandbox_pass_env=(sandbox or {}).get("pass_env", []),
     )
     raw_path = output.with_suffix(".jsonl") if structured else None
     raw = raw_path.read_text(encoding="utf-8", errors="replace") if raw_path and raw_path.exists() else result.stdout
@@ -1094,6 +1122,10 @@ def _openrouter_command_allowed(argv: Any, readonly: bool,
     executable = Path(argv[0]).name.lower()
     if executable in {"bash", "sh", "zsh", "fish", "cmd", "powershell", "pwsh"}:
         return False, "shell commands are not allowed; provide argv directly"
+    if executable in INTERPRETER_EXECUTABLES and any(
+        part.split("=", 1)[0] in INTERPRETER_EVAL_OPTIONS for part in argv[1:]
+    ):
+        return False, f"{executable} code-evaluation flags are not allowed from an OpenRouter tool call"
     if executable in ALWAYS_BLOCKED_COMMANDS:
         return False, f"{executable} is not allowed from an OpenRouter tool call"
     if executable in NETWORK_COMMANDS and not allow_network:
@@ -1101,6 +1133,12 @@ def _openrouter_command_allowed(argv: Any, readonly: bool,
     if executable == "git":
         if readonly:
             return _readonly_git_command_allowed(argv)
+        for part in argv[1:]:
+            option = part.split("=", 1)[0]
+            if option in GIT_UNSAFE_OPTIONS or option.startswith(("--git-dir", "--work-tree", "--exec-path")):
+                return False, f"git option {part} is not allowed"
+            if part in {"--upload-pack", "--receive-pack"} or part.startswith(("--upload-pack=", "--receive-pack=")):
+                return False, f"git option {part} is not allowed"
         subcommand = argv[1] if len(argv) > 1 else ""
         if subcommand in {"commit", "push", "reset", "clean", "checkout", "switch", "worktree"}:
             return False, f"git {subcommand} is not allowed"
@@ -1111,7 +1149,8 @@ def _openrouter_command_allowed(argv: Any, readonly: bool,
 
 def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                           *, readonly: bool, command_timeout: int | None = None,
-                          allow_network: bool = False) -> str:
+                          allow_network: bool = False,
+                          sandbox: dict[str, Any] | None = None) -> str:
     try:
         if name == "list_files":
             relative = arguments.get("path", ".")
@@ -1156,9 +1195,12 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
             allowed, reason = _openrouter_command_allowed(argv, readonly, allow_network)
             if not allowed:
                 return "ERROR: " + reason
+            process_argv = sandbox_command(
+                argv, worktree, sandbox, read_only=readonly, pass_env=[],
+            )
             try:
                 result = subprocess.run(
-                    argv, cwd=worktree, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    process_argv, cwd=worktree, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, encoding="utf-8", errors="replace", check=False,
                     timeout=command_timeout,
                 )
@@ -1206,7 +1248,8 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                    base_url: str = DEFAULT_OPENROUTER_BASE_URL,
                    max_tool_turns: int | None = None,
                    command_timeout: int | None = None,
-                   allow_network: bool = False) -> tuple[bool, str]:
+                   allow_network: bool = False,
+                   sandbox: dict[str, Any] | None = None) -> tuple[bool, str]:
     """Run an OpenAI-compatible OpenRouter agent with scoped local tools."""
     if not model:
         raise RuntimeError("OpenRouter requires a model, for example openai/gpt-5.4")
@@ -1304,6 +1347,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                 result = _openrouter_tool_call(
                     worktree, name, arguments, readonly=readonly,
                     command_timeout=tool_timeout, allow_network=allow_network,
+                    sandbox=sandbox,
                 )
                 messages.append({
                     "role": "tool",
@@ -1340,6 +1384,10 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
     else:
         selected = dict(settings or {})
     provider = str(selected.get("provider", "codex"))
+    provider_sandbox = None
+    if sandbox is not None:
+        provider_sandbox = dict(sandbox)
+        provider_sandbox["pass_env"] = sandbox_env_for_provider(provider, sandbox)
     if selected.get("model") is not None:
         model = selected["model"]
     if selected.get("reasoning_effort") is not None:
@@ -1350,7 +1398,7 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
         return run_codex(
             worktree, prompt, output=output, readonly=readonly, schema=schema,
             timeout=timeout, model=model, reasoning_effort=reasoning_effort,
-            **({"sandbox": sandbox} if sandbox is not None else {}),
+            **({"sandbox": provider_sandbox} if provider_sandbox is not None else {}),
         )
     if provider == "openrouter":
         router_kwargs: dict[str, Any] = {
@@ -1363,6 +1411,8 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
             router_kwargs["command_timeout"] = selected.get("command_timeout_seconds")
         if "allow_network" in selected:
             router_kwargs["allow_network"] = bool(selected.get("allow_network"))
+        if provider_sandbox is not None:
+            router_kwargs["sandbox"] = provider_sandbox
         return run_openrouter(
             worktree, prompt, output=output, readonly=readonly, schema=schema,
             timeout=timeout, model=model, reasoning_effort=reasoning_effort,
@@ -1371,7 +1421,7 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
     return run_cli_provider(
         worktree, prompt, output=output, provider=provider,
         readonly=readonly, timeout=timeout, model=model,
-        **({"sandbox": sandbox} if sandbox is not None else {}),
+        **({"sandbox": provider_sandbox} if provider_sandbox is not None else {}),
     )
 
 
@@ -1390,7 +1440,7 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
         log = next_log(folder, "test-command") if folder else (Path(tempfile.gettempdir()) / f"agentic-tests-{os.getpid()}.log")
         result = streamed_command(argv, worktree, label="TESTS", log_file=log,
                                   timeout=_remaining_timeout(deadline, timeout),
-                                  heartbeat=15, sandbox=sandbox)
+                                  heartbeat=15, sandbox=sandbox, sandbox_pass_env=[])
         results.append(f"$ {display_command}\n{result.stdout[-6000:]}")
         if result.returncode:
             print(f"[TESTS] FAILED (exit {result.returncode})", flush=True)
@@ -1414,9 +1464,12 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
     return True, "\n\n".join(results)
 
 
-def preflight_test_commands(repo: Path, test_commands: list[list[str]]) -> None:
+def preflight_test_commands(repo: Path, test_commands: list[list[str]],
+                            sandbox: dict[str, Any] | None = None) -> None:
     """Fail early when the configured test tool or Python module is unavailable."""
     for argv in test_commands:
+        if sandbox and sandbox.get("enabled"):
+            continue
         executable = argv[0]
         if shutil.which(executable) is None:
             raise RuntimeError(
@@ -2012,6 +2065,7 @@ def load_config(path: Path) -> dict[str, Any]:
     codex_timeout = data.get("codex_timeout_seconds")
     test_timeout = data.get("test_timeout_seconds")
     task_timeout = data.get("task_timeout_seconds", DEFAULT_TASK_TIMEOUT)
+    security_mode = data.get("security_mode", DEFAULT_SECURITY_MODE)
     codex_model = data.get("codex_model")
     reasoning_effort = data.get("codex_reasoning_effort")
     if type(retries) is not int or not 0 <= retries <= 3:
@@ -2024,6 +2078,10 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError("test_timeout_seconds must be null or an integer from 1 to 86400")
     if type(task_timeout) is not int or not 1 <= task_timeout <= MAX_TASK_TIMEOUT:
         raise ValueError(f"task_timeout_seconds must be an integer from 1 to {MAX_TASK_TIMEOUT}")
+    if security_mode not in SECURITY_MODES:
+        raise ValueError(
+            f"security_mode must be one of: {', '.join(SECURITY_MODES)}"
+        )
     for name, value in (("codex_model", codex_model), ("codex_reasoning_effort", reasoning_effort)):
         if value is not None and (not isinstance(value, str) or not value.strip()):
             raise ValueError(f"{name} must be a nonempty string or null")
@@ -2036,8 +2094,8 @@ def load_config(path: Path) -> dict[str, Any]:
         legacy_reasoning=reasoning_effort, legacy_timeout=codex_timeout,
     )
     sandbox = validate_sandbox(data.get("sandbox"))
-    if sandbox["enabled"] and (developer_agent.provider == "openrouter" or reviewer_agent.provider == "openrouter"):
-        raise ValueError("sandbox mode is not supported with the OpenRouter adapter")
+    if security_mode == "isolated" and not sandbox["enabled"]:
+        raise ValueError("security_mode 'isolated' requires sandbox.enabled=true")
     return {
         "task_source": task_source,
         "test_commands": commands,
@@ -2056,13 +2114,15 @@ def load_config(path: Path) -> dict[str, Any]:
         ),
         "codex_model": codex_model,
         "codex_reasoning_effort": reasoning_effort,
+        "security_mode": security_mode,
         "developer_agent": developer_agent.as_dict(),
         "reviewer_agent": reviewer_agent.as_dict(),
         "sandbox": sandbox,
     }
 
 
-def preflight_agent_settings(*settings: dict[str, Any]) -> None:
+def preflight_agent_settings(*settings: dict[str, Any],
+                             sandbox: dict[str, Any] | None = None) -> None:
     """Check selected providers before creating work or spending API time."""
     checked: set[str] = set()
     for item in settings:
@@ -2075,6 +2135,17 @@ def preflight_agent_settings(*settings: dict[str, Any]) -> None:
             if not os.environ.get(env_name):
                 raise RuntimeError(f"OpenRouter API key is missing; set ${env_name}")
             continue
+        if sandbox and sandbox.get("enabled"):
+            missing_env = [
+                name for name in sandbox_env_for_provider(provider, sandbox)
+                if not os.environ.get(name)
+            ]
+            if missing_env:
+                names = ", ".join(f"${name}" for name in missing_env)
+                raise RuntimeError(
+                    f"Sandbox credential environment variables are missing: {names}"
+                )
+            continue
         executable = shutil.which(provider)
         if not executable:
             install_hint = {
@@ -2084,6 +2155,20 @@ def preflight_agent_settings(*settings: dict[str, Any]) -> None:
                 "copilot": "install/authenticate GitHub Copilot CLI",
             }.get(provider, "install the provider CLI")
             raise RuntimeError(f"Configured provider {provider!r} is unavailable; {install_hint}")
+
+
+def preflight_security(security_mode: str, sandbox: dict[str, Any]) -> None:
+    """Fail closed when an explicitly isolated run cannot be isolated."""
+    if security_mode not in SECURITY_MODES:
+        raise RuntimeError(f"Unknown security mode: {security_mode}")
+    if security_mode == "isolated" and not sandbox.get("enabled"):
+        raise RuntimeError("Isolated security mode requires an enabled sandbox")
+    if sandbox.get("enabled"):
+        engine = sandbox.get("engine", "docker")
+        if not shutil.which(engine):
+            raise RuntimeError(
+                f"Sandbox engine {engine!r} is unavailable; isolated execution cannot continue"
+            )
 
 
 def test_commands_for_profile(config: dict[str, Any], profile: str) -> list[list[str]]:
@@ -2168,9 +2253,23 @@ def default_provider_settings(provider: str) -> dict[str, Any]:
     return settings
 
 
+def sandbox_env_for_providers(*providers: str) -> list[str]:
+    """Return provider credential names without copying any secret values."""
+    names: list[str] = []
+    for provider in providers:
+        for name in PROVIDER_SANDBOX_ENV.get(provider, ()):
+            if name not in names:
+                names.append(name)
+    return names
+
+
 def init_repository(repo: Path, *, force: bool = False, create_agents: bool = False,
-                     provider: str = "codex", reviewer_provider: str | None = None) -> int:
+                     provider: str = "codex", reviewer_provider: str | None = None,
+                     security_mode: str = DEFAULT_INIT_SECURITY_MODE,
+                     sandbox_image: str | None = None) -> int:
     """Create personal target-repository setup without overwriting it by default."""
+    if security_mode not in SECURITY_MODES:
+        raise ValueError(f"security_mode must be one of: {', '.join(SECURITY_MODES)}")
     repo = repo.resolve()
     root_result = probe(["git", "rev-parse", "--show-toplevel"], repo)
     if not root_result[0]:
@@ -2181,9 +2280,25 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
     config_path = repo / AGENT_CONFIG_FILENAME
     commands, detection = detect_test_commands(repo)
     reviewer_provider = reviewer_provider or provider
+    if security_mode == "isolated":
+        sandbox_image = sandbox_image or os.environ.get("AGENTIC_SANDBOX_IMAGE")
+        if not sandbox_image:
+            raise ValueError(
+                "isolated init requires --sandbox-image or AGENTIC_SANDBOX_IMAGE; "
+                "use --security-mode trusted when host execution is appropriate"
+            )
+    else:
+        sandbox_image = sandbox_image or DEFAULT_SANDBOX_IMAGE
     developer_settings = default_provider_settings(provider)
     reviewer_settings = default_provider_settings(reviewer_provider)
     reviewer_settings["timeout_seconds"] = DEFAULT_REVIEWER_TIMEOUT
+    sandbox = validate_sandbox({
+        "enabled": security_mode == "isolated",
+        "engine": "docker",
+        "image": sandbox_image,
+        "allow_network": False,
+        "pass_env": sandbox_env_for_providers(provider, reviewer_provider),
+    })
     config = {
         "task_source": "github",
         "test_commands": commands,
@@ -2194,7 +2309,8 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
         "task_timeout_seconds": DEFAULT_TASK_TIMEOUT,
         "developer": developer_settings,
         "reviewer": reviewer_settings,
-        "sandbox": {"enabled": False, "engine": "docker", "image": "agentic-runner:latest", "allow_network": False},
+        "security_mode": security_mode,
+        "sandbox": sandbox,
     }
     if config_path.exists() and not force:
         print(f"[INIT] Keeping existing {config_path}")
@@ -2214,6 +2330,10 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
     if commands == [["git", "diff", "--check"]]:
         print("[INIT] Warning: replace the starter check with the project's real test/build commands")
     print(f"[INIT] Providers: developer={provider}, reviewer={reviewer_provider}")
+    if security_mode == "isolated":
+        print("[INIT] Security mode: isolated; verify the Docker image, provider tools, and credentials with agentic doctor")
+    else:
+        print("[INIT] Security mode: trusted host execution; use --security-mode isolated for untrusted code")
     print("[INIT] Review agent_config.json before the first issue run")
     return 0
 
@@ -2238,14 +2358,35 @@ def doctor(repo: Path, config_path: Path | None = None, *, json_output: bool = F
     if target_config.is_file():
         try:
             loaded = load_config(target_config)
-            preflight_test_commands(repo, loaded["test_commands"] + loaded["slow_test_commands"])
+            preflight_test_commands(
+                repo, loaded["test_commands"] + loaded["slow_test_commands"],
+                sandbox=loaded.get("sandbox"),
+            )
             checks.append(("Agentic config", True, str(target_config), True))
             checks.append(("Configured checks", True, f"{len(loaded['test_commands'])} fast / {len(loaded['slow_test_commands'])} slow", True))
+            if loaded["security_mode"] == "isolated":
+                checks.append(("Security mode", True, "isolated execution requested", True))
+            else:
+                checks.append((
+                    "Security mode", False,
+                    "trusted host execution; use security_mode=isolated for untrusted code",
+                    False,
+                ))
             sandbox = loaded.get("sandbox", {})
             if sandbox.get("enabled"):
                 engine = sandbox["engine"]
-                checks.append(("Sandbox engine", shutil.which(engine) is not None,
-                               f"{engine} is available" if shutil.which(engine) else f"{engine} not found", True))
+                engine_path = shutil.which(engine)
+                checks.append(("Sandbox engine", engine_path is not None,
+                               f"{engine} is available" if engine_path else f"{engine} not found", True))
+                if engine_path:
+                    image_ok, image_detail = probe(
+                        [engine_path, "image", "inspect", sandbox["image"]], repo, timeout=30
+                    )
+                    checks.append((
+                        "Sandbox image", image_ok,
+                        f"{sandbox['image']} is available" if image_ok else _short(image_detail or f"{sandbox['image']} not found", 180),
+                        True,
+                    ))
             providers = []
             for role, settings in (("developer", loaded["developer_agent"]), ("reviewer", loaded["reviewer_agent"])):
                 provider = settings["provider"]
@@ -2256,6 +2397,29 @@ def doctor(repo: Path, config_path: Path | None = None, *, json_output: bool = F
                     env_name = settings["api_key_env"]
                     checks.append((f"{role.title()} provider ({provider})", bool(os.environ.get(env_name)),
                                    f"${env_name} is set" if os.environ.get(env_name) else f"${env_name} is missing", True))
+                elif loaded.get("sandbox", {}).get("enabled"):
+                    pass_env = sandbox_env_for_provider(provider, loaded["sandbox"])
+                    missing_env = [name for name in pass_env if not os.environ.get(name)]
+                    if pass_env:
+                        detail = (
+                            "configured environment credentials are set"
+                            if not missing_env else
+                            "missing: " + ", ".join(f"${name}" for name in missing_env)
+                        )
+                        checks.append((
+                            f"{role.title()} sandbox credentials", not missing_env, detail, True,
+                        ))
+                    else:
+                        checks.append((
+                            f"{role.title()} provider ({provider})", False,
+                            "provider credentials must be provisioned in the image or sandbox.pass_env",
+                            False,
+                        ))
+                    checks.append((
+                        f"{role.title()} provider ({provider})", True,
+                        "expected in the configured sandbox image; executable not probed",
+                        False,
+                    ))
                 else:
                     executable = shutil.which(provider)
                     ok, detail = probe([executable or provider, "--version"], repo) if executable else (False, f"{provider} not found")
@@ -2427,6 +2591,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--reviewer-provider", choices=SUPPORTED_PROVIDERS, default=None,
         help="With init, use a different provider for the independent reviewer",
     )
+    parser.add_argument(
+        "--security-mode", choices=SECURITY_MODES, default=DEFAULT_INIT_SECURITY_MODE,
+        help="With init, choose trusted host execution or explicitly opt into isolated container execution",
+    )
+    parser.add_argument(
+        "--sandbox-image", default=None,
+        help="With isolated init, container image to use (or set AGENTIC_SANDBOX_IMAGE)",
+    )
     parser.add_argument("--yes", action="store_true", help="Confirm a cleanup operation")
     parser.add_argument("--remove-logs", action="store_true", help="With cleanup, also delete matching run logs")
     parser.add_argument("--all", dest="all_runs", action="store_true", help="With cleanup, select all clean Agentic worktrees")
@@ -2469,8 +2641,11 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> None:
         )
     config = load_config(config_path)
     test_commands = test_commands_for_profile(config, args.profile)
-    preflight_test_commands(repo, test_commands)
-    preflight_agent_settings(config["developer_agent"], config["reviewer_agent"])
+    preflight_test_commands(repo, test_commands, sandbox=config["sandbox"])
+    preflight_agent_settings(
+        config["developer_agent"], config["reviewer_agent"], sandbox=config["sandbox"]
+    )
+    preflight_security(config["security_mode"], config["sandbox"])
     state_dir = Path(args.state_dir).expanduser().resolve() if args.state_dir else default_state_dir()
     task_deadline = time.monotonic() + config["task_timeout_seconds"]
 
@@ -2616,6 +2791,7 @@ def main(argv: list[str] | None = None) -> int:
             return init_repository(
                 Path(args.repo), force=args.force, create_agents=args.agents,
                 provider=args.provider, reviewer_provider=args.reviewer_provider,
+                security_mode=args.security_mode, sandbox_image=args.sandbox_image,
             )
         if args.command == "doctor":
             return doctor(

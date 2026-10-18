@@ -8,6 +8,13 @@
   "max_files": null,
   "test_timeout_seconds": 300,
   "task_timeout_seconds": 1800,
+  "security_mode": "trusted",
+  "sandbox": {
+    "enabled": false,
+    "engine": "docker",
+    "image": "agentic-runner:latest",
+    "allow_network": false
+  },
   "developer": {
     "provider": "codex",
     "model": null,
