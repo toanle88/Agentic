@@ -24,6 +24,8 @@ from pathlib import Path
 HELP = """Commands:
   /run ISSUE [--profile fast|slow]       start a background job
        [--review|--publish|--new]
+  /run [--profile fast|slow]             local mode: paste a task, finish with /done
+       [--review|--publish|--new]
   /ps [--all]                            show current or persisted jobs
   /logs JOB [LINES]                      show the latest captured terminal output
   /stop JOB                              stop a running job
@@ -186,10 +188,15 @@ def _pid_running(pid: int) -> bool:
     return True
 
 
-def _parse_job_command(parts: list[str]) -> tuple[str, list[str]]:
-    if len(parts) < 2 or not parts[1].isdigit():
+def _parse_job_command(parts: list[str]) -> tuple[str | None, list[str]]:
+    issue: str | None = None
+    if len(parts) > 1 and parts[1].isdigit():
+        issue = parts[1]
+        flags = parts[2:]
+    elif len(parts) == 1 or parts[1].startswith("--"):
+        flags = parts[1:]
+    else:
         raise ValueError("usage: /run ISSUE [--profile fast|slow] [--review|--publish|--new]")
-    flags = parts[2:]
     allowed = {"--review", "--publish", "--new", "--profile", "fast", "slow"}
     unknown = [flag for flag in flags if flag not in allowed]
     if unknown:
@@ -212,7 +219,7 @@ def _parse_job_command(parts: list[str]) -> tuple[str, list[str]]:
         raise ValueError("/run accepts --profile only once")
     if "--review" in flags and "--publish" in flags:
         raise ValueError("/run cannot combine --review and --publish")
-    return parts[1], flags
+    return issue, flags
 
 
 class AgenticShell:
@@ -341,19 +348,58 @@ class AgenticShell:
         for job in self.jobs.values():
             self._refresh(job)
 
-    def _runner_args(self, issue: str, flags: list[str]) -> list[str]:
+    def _runner_args(self, issue: str | None, flags: list[str]) -> list[str]:
         argv = [
             sys.executable, "-u", str(self.runner), "--repo", str(self.repo),
-            "--state-dir", str(self.state_dir), "--issue", issue,
+            "--state-dir", str(self.state_dir),
         ]
+        if issue is not None:
+            argv.extend(["--issue", issue])
         if self.config:
             argv.extend(["--config", str(self.config)])
         argv.extend(flags)
         return argv
 
+    def _task_source(self) -> str:
+        config_path = self.config or (self.repo / "agent_config.json")
+        try:
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return "github"
+        return data.get("task_source", "github") if isinstance(data, dict) else "github"
+
+    def _capture_local_task(self) -> Path:
+        print("Paste the local task. Finish with a line containing /done; use /cancel to abort.")
+        lines: list[str] = []
+        while True:
+            try:
+                line = input("task> ")
+            except (EOFError, KeyboardInterrupt) as exc:
+                print()
+                raise ValueError("local task input cancelled") from exc
+            if line.strip() == "/done":
+                break
+            if line.strip() == "/cancel":
+                raise ValueError("local task input cancelled")
+            lines.append(line)
+        if not any(line.strip() for line in lines):
+            raise ValueError("local task must not be empty")
+        path = self.session_dir / f"task-{uuid.uuid4().hex[:12]}.md"
+        path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+        print(f"Local task saved: {path}")
+        return path
+
     def run_issue(self, parts: list[str]) -> None:
         issue, flags = _parse_job_command(parts)
-        self._launch(self._runner_args(issue, flags))
+        task_file: Path | None = None
+        if issue is None:
+            if self._task_source() != "local":
+                raise ValueError("GitHub mode requires /run ISSUE; set task_source to local to paste tasks")
+            task_file = self._capture_local_task()
+        argv = self._runner_args(issue, flags)
+        if task_file:
+            argv.extend(["--task-file", str(task_file)])
+        self._launch(argv)
 
     def run_dashboard(self, parts: list[str]) -> None:
         dashboard = self.runner.with_name("agentic_dashboard.py")

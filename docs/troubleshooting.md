@@ -80,7 +80,7 @@ git worktree repair --relative-paths /shared/agentic-state/my-project-<identity>
 For new runs that must be opened by both environments, keep the Agentic state on a shared mounted drive:
 
 ```bash
-agentic --state-dir /mnt/d/Dev/AgenticState --issue 119
+agentic --state-dir /path/to/shared-agentic-state --issue 119
 ```
 
 ## `--publish` refuses to publish
@@ -92,3 +92,16 @@ agentic --issue 119 --review
 ```
 
 Then retry `--publish`. If the patch changed after validation, Agentic refuses to publish and requires a fresh validation pass.
+
+## Local task mode does not start
+
+Confirm the target repository's ignored `agent_config.json` contains:
+
+```json
+{ "task_source": "local" }
+```
+
+Then start the interactive shell and use `/run` without an issue number. Paste
+the task and finish with `/done`. The same task text produces the same task
+identity, so repeating it resumes the existing worktree. Local tasks still need
+an `origin` GitHub remote and `gh` authentication when you use `--publish`.

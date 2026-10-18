@@ -53,6 +53,18 @@ class DashboardTests(unittest.TestCase):
             snapshot = agentic_dashboard.collect_runs(run.parent)
             self.assertEqual(snapshot[0]["review"]["status"], "approved")
 
+    def test_collect_runs_supports_local_task_logs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            run = root / "agent-task-add-export-ab12cd34ef56"
+            run.mkdir(parents=True)
+            (run / "developer-001.txt").write_text("Implemented local task.\n")
+            snapshots = agentic_dashboard.collect_runs(root)
+            self.assertEqual(len(snapshots), 1)
+            self.assertIsNone(snapshots[0]["issue"])
+            self.assertEqual(snapshots[0]["label"], "Local task: add-export")
+            self.assertEqual(snapshots[0]["branch"], "agent/task-add-export-ab12cd34ef56")
+
     def test_render_dashboard_escapes_log_content_and_supports_empty_runs(self):
         html = agentic_dashboard.render_dashboard([], "demo", ".demo-agent-runs")
         self.assertIn("Agentic run dashboard", html)

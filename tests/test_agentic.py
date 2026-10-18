@@ -43,6 +43,15 @@ class GitTest(unittest.TestCase):
         self.assertFalse((self.repo / 'new.py').exists())
         self.assertEqual(agentic.pending_files(run.worktree), ['new.py'])
 
+    def test_local_task_worktree_has_deterministic_identity(self):
+        task = agentic.Issue.from_local_text('Add CSV export\nInclude regression tests.')
+        run = agentic.create_local_worktree(self.repo, 'main', task)
+        found = agentic.runs_for_task(self.repo, task.task_key)
+        self.assertEqual(found, [run])
+        self.assertIsNone(run.issue_number)
+        self.assertIn('agent/task-add-csv-export-', run.branch)
+        self.assertEqual(task.reference, f'LOCAL TASK {task.task_key[:8]}')
+
     def test_central_state_dir_keeps_runtime_artifacts_outside_repository(self):
         state_dir = self.repo.parent / 'agentic-state'
         run = agentic.create_worktree(self.repo, 'main', 43, state_dir)
@@ -380,6 +389,7 @@ class PureTests(unittest.TestCase):
         self.assertIsNone(config['codex_reasoning_effort'])
         self.assertIsNone(config['codex_timeout_seconds'])
         self.assertIsNone(config['test_timeout_seconds'])
+        self.assertEqual(config['task_source'], 'github')
         self.assertTrue(agentic.forbidden('.env'))
         self.assertFalse(agentic.forbidden('src/main.py'))
 
@@ -390,6 +400,21 @@ class PureTests(unittest.TestCase):
                 'max_files': None,
             }))
             self.assertIsNone(agentic.load_config(unlimited)['max_files'])
+
+            local = Path(temp) / 'local.json'
+            local.write_text(json.dumps({
+                'task_source': 'local',
+                'test_commands': [['go', 'test', './...']],
+            }))
+            self.assertEqual(agentic.load_config(local)['task_source'], 'local')
+
+            invalid = Path(temp) / 'invalid.json'
+            invalid.write_text(json.dumps({
+                'task_source': 'jira',
+                'test_commands': [['go', 'test', './...']],
+            }))
+            with self.assertRaisesRegex(ValueError, 'task_source'):
+                agentic.load_config(invalid)
 
     def test_slow_profile_appends_opt_in_checks(self):
         config = {

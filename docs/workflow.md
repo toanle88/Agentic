@@ -2,11 +2,11 @@
 
 ## Run lifecycle
 
-Each issue run follows this sequence:
+Each issue or local-task run follows this sequence:
 
-1. Resolve the repository's GitHub remote and default branch.
-2. Create or reuse an isolated worktree for the issue.
-3. Give the issue and repository instructions to the Codex developer.
+1. Resolve the repository's base branch; GitHub mode also loads the GitHub issue.
+2. Create or reuse an isolated worktree for the issue or deterministic local task.
+3. Give the task and repository instructions to the Codex developer.
 4. Run every configured test command.
 5. Stage and inspect the proposed patch.
 6. Ask an independent read-only Codex reviewer for a structured verdict.
@@ -27,6 +27,8 @@ Available commands:
 ```text
 /run ISSUE [--profile fast|slow]       Start a background job
      [--review|--publish|--new]
+/run [--profile fast|slow]             Local mode: paste task, finish with /done
+     [--review|--publish|--new]
 /ps [--all]                            Show current or persisted job status
 /logs JOB [LINES]                      Show recent output for a job
 /stop JOB                              Stop a running job
@@ -38,6 +40,12 @@ Available commands:
 `/run` starts a child process and returns immediately. `/ps` shows jobs started in the current shell; `/ps --all` also discovers job records from previous shell sessions. The child runner's durable logs remain available after the shell exits, and `/logs JOB` works for persisted jobs too.
 
 The default `fast` profile uses `test_commands`. Use `/run 119 --profile slow` to run the fast checks followed by `slow_test_commands`.
+
+GitHub issue mode is the default. If `task_source` is `local`, use `/run`
+without an issue number, paste the requirements, and finish with `/done`.
+Pasting the same task again produces the same task identity and resumes its
+existing worktree. Local tasks can still use `/run --publish` to create a
+GitHub draft pull request.
 
 ## Resume and retries
 
@@ -76,6 +84,9 @@ The developer does not commit, push, or open pull requests. After tests and revi
 ```bash
 agentic --issue 119 --publish
 ```
+
+For a local task, use `agentic --task-file task.md --publish` or resume from
+the saved task file created by the interactive shell.
 
 Agentic revalidates the patch, checks that it did not change, and asks for the exact confirmation word `publish`. Only after confirmation does it commit, push the issue branch, and open a draft pull request. The draft state leaves a final human review step before merging.
 

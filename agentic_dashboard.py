@@ -16,7 +16,10 @@ from typing import Any, Iterable
 from agentic import default_state_dir, legacy_runs_dir, state_paths
 
 
-RUN_NAME = re.compile(r"^agent-issue-(?P<issue>\d+)-(?P<token>[A-Za-z0-9_-]+)$")
+RUN_NAME = re.compile(
+    r"^(?:agent-issue-(?P<issue>\d+)-(?P<issue_token>[A-Za-z0-9_-]+)"
+    r"|agent-task-(?P<task>.+)-(?P<task_token>[a-f0-9]{12}(?:-[a-f0-9]{8})?))$"
+)
 NUMBERED_FILE = re.compile(r"^(?P<prefix>.+)-(?P<number>\d+)(?P<suffix>\.[^.]+)$")
 MAX_TEXT = 5_000
 MAX_FILES_PER_RUN = 24
@@ -242,10 +245,21 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
         kind = path.name.split("-", 1)[0]
         file_records.append(_file_record(path, kind))
 
+    issue = match.group("issue")
+    task = match.group("task")
+    if issue is not None:
+        label = f"Issue #{issue}"
+        branch = f"agent/issue-{issue}-{match.group('issue_token')}"
+        issue_value: int | None = int(issue)
+    else:
+        label = f"Local task: {task}"
+        branch = f"agent/task-{task}-{match.group('task_token')}"
+        issue_value = None
     return {
         "id": folder.name,
-        "issue": int(match.group("issue")),
-        "branch": f"agent/issue-{match.group('issue')}-{match.group('token')}",
+        "issue": issue_value,
+        "label": label,
+        "branch": branch,
         "status": status,
         "attempts": developer["attempts"],
         "last_activity": _timestamp(last_activity) if last_activity else "unknown",
@@ -368,7 +382,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
       <div class="panel">
         <div class="toolbar">
           <label class="sr-only" for="search">Search runs</label>
-          <input id="search" type="search" placeholder="Search issue or branch…">
+          <input id="search" type="search" placeholder="Search issue, task, or branch…">
           <label class="sr-only" for="status">Filter status</label>
           <select id="status"><option value="all">All statuses</option><option value="needs-fix">Needs fix</option><option value="approved">Approved</option><option value="in-progress">In progress</option><option value="tests-failed">Tests failed</option><option value="awaiting-review">Awaiting review</option></select>
         </div>
@@ -388,7 +402,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
     const badge = status => `<span class="badge ${{esc(status)}}">${{esc(labels[status] || status)}}</span>`;
     const filtered = () => DATA.runs.filter(run =>
       (state.status === "all" || run.status === state.status) &&
-      (`${{run.issue}} ${{run.branch}}`.toLowerCase().includes(state.query.toLowerCase()))
+      (`${{run.label}} ${{run.branch}}`.toLowerCase().includes(state.query.toLowerCase()))
     );
     function renderMetrics() {{
       const runs = DATA.runs;
@@ -404,7 +418,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
       const visible = filtered();
       if (!visible.some(run => run.id === state.selected)) state.selected = visible[0]?.id || null;
       document.querySelector("#run-list").innerHTML = visible.length ? visible.map(run => `<button class="run-card ${{run.id === state.selected ? "selected" : ""}}" data-run="${{esc(run.id)}}" type="button">
-        <div class="run-top"><span class="run-title">Issue #${{esc(run.issue)}}</span>${{badge(run.status)}}</div>
+        <div class="run-top"><span class="run-title">${{esc(run.label)}}</span>${{badge(run.status)}}</div>
         <div class="summary">${{esc(run.review.summary || run.developer.summary || "No summary recorded.")}}</div>
         <div class="meta"><span>${{esc(run.attempts)}} attempt${{run.attempts === 1 ? "" : "s"}}</span><span>Tests: ${{esc(run.tests.status)}}</span><span>${{esc(run.last_activity)}}</span></div>
       </button>`).join("") : `<div class="empty">No runs match this filter.</div>`;
@@ -417,7 +431,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
       const findings = run.review.findings?.length ? `<ul class="findings">${{run.review.findings.map(item => `<li>${{esc(item)}}</li>`).join("")}}</ul>` : `<p class="subtle">No findings recorded.</p>`;
       const recurring = run.review.recurring?.length ? `<section class="callout rejected"><strong>Recurring findings</strong><ul class="findings">${{run.review.recurring.map(item => `<li>[${{esc(item.severity)}}] ${{esc(item.text)}} <span class="meta">(${{esc(item.count)}} reviews)</span></li>`).join("")}}</ul></section>` : "";
       const files = run.files.length ? run.files.map(file => `<details><summary>${{esc(file.kind)}} · ${{esc(file.name)}} <span class="meta">${{esc(file.updated)}}</span></summary><pre>${{esc(file.content)}}</pre></details>`).join("") : `<div class="empty">No log files recorded.</div>`;
-      detail.innerHTML = `<div class="detail-top"><div><h2>Issue #${{esc(run.issue)}}</h2><div class="branch">${{esc(run.branch)}}</div></div>${{badge(run.status)}}</div>
+      detail.innerHTML = `<div class="detail-top"><div><h2>${{esc(run.label)}}</h2><div class="branch">${{esc(run.branch)}}</div></div>${{badge(run.status)}}</div>
         <div class="meta" style="margin-top:12px"><span>${{esc(run.attempts)}} developer attempt${{run.attempts === 1 ? "" : "s"}}</span><span>Last activity: ${{esc(run.last_activity)}}</span><span>${{esc(run.file_count)}} log files</span></div>
         <section class="callout ${{esc(run.review.status)}}"><strong>Review · ${{esc(labels[run.review.status] || run.review.status)}}</strong><p>${{esc(run.review.summary)}}</p>${{findings}}</section>
         ${{recurring}}
