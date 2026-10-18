@@ -35,6 +35,7 @@ HELP = """Commands:
   Inspect
     /ps [--all]                         show current or persisted jobs
     /logs JOB [LINES]                   show the latest captured terminal output
+    /list                               list open GitHub issues
     /status [--json]                    show Agentic worktree status
     /dashboard [OUTPUT]                 generate and open the HTML dashboard
 
@@ -65,6 +66,7 @@ SHELL_COMMANDS = (
     "/run",
     "/ps",
     "/logs",
+    "/list",
     "/stop",
     "/status",
     "/dashboard",
@@ -82,6 +84,7 @@ COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/run": "start a background job or local task",
     "/ps": "show running or persisted background jobs",
     "/logs": "show latest captured terminal output",
+    "/list": "list open GitHub issues",
     "/stop": "stop a running background job",
     "/status": "show Agentic worktree and git status",
     "/dashboard": "generate and open the HTML dashboard",
@@ -1377,6 +1380,18 @@ class AgenticShell:
         if result.returncode:
             raise RuntimeError(f"status command failed with exit {result.returncode}")
 
+    def show_issues(self, parts: list[str]) -> None:
+        if len(parts) != 1:
+            raise ValueError("usage: /list")
+        result = subprocess.run(
+            self._runner_args(None, ["--list"]), cwd=self.repo,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace", check=False,
+        )
+        print(result.stdout.rstrip())
+        if result.returncode:
+            raise RuntimeError(f"list command failed with exit {result.returncode}")
+
     def execute(self, line: str) -> bool:
         stripped = line.strip()
         if stripped and (not self.history or self.history[-1] != stripped):
@@ -1403,6 +1418,8 @@ class AgenticShell:
                 self.show_logs(parts)
             elif command == "/stop":
                 self.stop(parts)
+            elif command == "/list":
+                self.show_issues(parts)
             elif command == "/status":
                 self.show_status(parts)
             elif command == "/dashboard":

@@ -182,6 +182,7 @@ Then run and monitor an issue:
 
 ```text
 agentic> /run 119
+agentic> /list
 agentic> /ps
 agentic> /logs 1 80
 ```

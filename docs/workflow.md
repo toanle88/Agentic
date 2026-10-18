@@ -51,6 +51,7 @@ Available commands:
 /ps [--all]                            Show current or persisted job status
 /logs JOB [LINES]                      Show recent output for a job
 /stop JOB                              Stop a running job
+/list                                  List open GitHub issues
 /dashboard [OUTPUT]                    Generate and open the HTML dashboard
 /status [--json]                       Show worktree status
 /help                                  Show command help
@@ -66,6 +67,10 @@ renders the dropdown with live filtering and command descriptions using standard
 escapes with zero third-party dependencies.
 
 `/run` starts a child process and returns immediately. `/ps` shows jobs started in the current shell; `/ps --all` also discovers job records from previous shell sessions. The child runner's durable logs remain available after the shell exits, and `/logs JOB` works for persisted jobs too.
+
+`/list` synchronously lists the target repository's open GitHub issues. It uses
+the same GitHub CLI-backed issue listing as `agentic --list` and does not create
+a background job.
 
 The default `fast` profile uses `test_commands`. Use `/run 119 --profile slow` to run the fast checks followed by `slow_test_commands`.
 
