@@ -62,12 +62,14 @@ def sandbox_command(
         replaced = part
         for source, destination in replacements:
             source_text = os.fspath(source)
-            if replaced == source_text:
+            normalized_source = os.path.normcase(os.path.realpath(os.path.normpath(source_text)))
+            normalized_part = os.path.normcase(os.path.realpath(os.path.normpath(replaced)))
+            if normalized_part == normalized_source:
                 replaced = destination
                 break
-            prefix = source_text + os.sep
-            if replaced.startswith(prefix):
-                replaced = destination + replaced[len(source_text):].replace(os.sep, "/")
+            prefix = normalized_source + os.sep
+            if normalized_part.startswith(prefix):
+                replaced = destination + normalized_part[len(normalized_source):].replace(os.sep, "/")
                 break
         command.append(replaced)
     return command
