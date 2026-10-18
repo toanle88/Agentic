@@ -11,12 +11,48 @@ codex login
 
 The target repository must have an `origin` remote and a GitHub default branch.
 
+## Install in WSL
+
+Install the CLI once with `pipx`; the target repositories no longer need copies of the Python files:
+
+```bash
+sudo apt update
+sudo apt install pipx
+pipx ensurepath
+pipx install git+https://github.com/toanle88/Agentic.git
+```
+
+After a new Agentic release:
+
+```bash
+pipx upgrade agentic-runner
+```
+
+Remove it with:
+
+```bash
+pipx uninstall agentic-runner
+```
+
+For local development, use an editable install instead:
+
+```bash
+pipx install --editable /path/to/agentic
+```
+
 ## Quick start
 
 ```bash
 python /path/to/agentic.py \
   --repo /path/to/project \
   --issue 119
+```
+
+After installation, run it from the target repository:
+
+```bash
+cd /path/to/project
+agentic --issue 119
 ```
 
 The runner reads `agent_config.json` from the target repository by default. To use another file:
@@ -63,16 +99,19 @@ Commands are checked before development starts. Missing executables and missing 
 ## Commands
 
 ```bash
-python agentic.py --help                 # show all runner options
-python agentic.py help                   # equivalent help command
-python agentic.py --interactive         # open the background-job shell
-python agentic.py --list                 # list open GitHub issues
-python agentic.py --runs                 # list existing worktrees
-python agentic.py --issue 119            # create or resume issue 119
-python agentic.py --issue 119 --review   # rerun tests and review only
-python agentic.py --issue 119 --publish  # validate, then offer draft-PR publication
-python agentic.py --issue 119 --new      # explicitly create a second worktree
+agentic --help                           # show all runner options
+agentic help                             # equivalent help command
+agentic shell                            # open the background-job shell
+agentic dashboard                        # generate the HTML dashboard
+agentic --list                           # list open GitHub issues
+agentic --runs                           # list existing worktrees
+agentic --issue 119                      # create or resume issue 119
+agentic --issue 119 --review              # rerun tests and review only
+agentic --issue 119 --publish             # validate, then offer draft-PR publication
+agentic --issue 119 --new                 # explicitly create a second worktree
 ```
+
+The direct source form remains available when running without installation: replace `agentic` with `python agentic.py`. `agentic-shell` and `agentic-dashboard` are also installed as compatibility aliases.
 
 Running the same `--issue` command again resumes the existing worktree. Changes and commits are preserved. Use `--new` only when you intentionally want another worktree.
 
@@ -87,7 +126,7 @@ The terminal view shows a compact run banner, colored status labels when output 
 Use the optional supervisor when you want one terminal for multiple background jobs:
 
 ```bash
-python agentic.py --repo /path/to/project --interactive
+agentic shell --repo /path/to/project
 ```
 
 It keeps the main prompt responsive while each runner executes in a separate child process. Jobs have no additional timeout; configured runner timeouts still apply.
@@ -109,20 +148,20 @@ Interactive-shell output is saved next to the project in `.project-agentic-shell
 Generate a searchable, self-contained status page from the run logs. It shows each issue's attempts, test result, review summary/findings, developer result, and expandable log contents:
 
 ```bash
-python agentic_dashboard.py --repo /path/to/project
+agentic dashboard --repo /path/to/project
 ```
 
 Use either standard help form:
 
 ```bash
-python agentic_dashboard.py --help
-python agentic_dashboard.py help
+agentic dashboard --help
+agentic dashboard help
 ```
 
 By default, the dashboard is written next to the project as `.project-agent-dashboard.html`. Choose another location when needed:
 
 ```bash
-python agentic_dashboard.py \
+agentic dashboard \
   --repo /path/to/project \
   --output /path/to/agentic-dashboard.html
 ```

@@ -886,8 +886,11 @@ def select_issue(issues: list[Issue]) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", nargs="?", choices=("help",), help="Show this help message and exit")
-    parser.add_argument("--repo", default=str(SCRIPT_DIR), help="Project root (default: script directory)")
+    parser.add_argument(
+        "command", nargs="?", choices=("help", "shell", "dashboard"),
+        help="Show help or route to a built-in subcommand",
+    )
+    parser.add_argument("--repo", default=str(Path.cwd()), help="Project root (default: current directory)")
     parser.add_argument("--interactive", action="store_true", help="Open the interactive background-job shell")
     parser.add_argument(
         "--config", default=None,
@@ -990,10 +993,17 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> None:
         raise RuntimeError("Unable to complete the task; resume later with --issue N")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    if raw_args and raw_args[0] == "shell":
+        from agentic_shell import main as shell_main
+        return shell_main(raw_args[1:])
+    if raw_args and raw_args[0] == "dashboard":
+        from agentic_dashboard import main as dashboard_main
+        return dashboard_main(raw_args[1:])
     parser = build_parser()
     try:
-        args = parser.parse_args()
+        args = parser.parse_args(raw_args)
         if args.command == "help":
             parser.print_help()
             return 0

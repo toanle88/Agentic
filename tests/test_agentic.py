@@ -334,6 +334,8 @@ class PureTests(unittest.TestCase):
         self.assertEqual(Path(args.repo), agentic.SCRIPT_DIR)
         self.assertIsNone(args.config)
         self.assertEqual(agentic.build_parser().parse_args(['help']).command, 'help')
+        self.assertEqual(agentic.build_parser().parse_args(['shell']).command, 'shell')
+        self.assertEqual(agentic.build_parser().parse_args(['dashboard']).command, 'dashboard')
 
 
 if __name__ == '__main__':

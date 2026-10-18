@@ -8,6 +8,9 @@ import agentic_shell
 
 
 class ShellTests(unittest.TestCase):
+    def test_help_command_is_available(self):
+        self.assertEqual(agentic_shell.build_parser().parse_args(['help']).command, 'help')
+
     def test_parse_run_command(self):
         self.assertEqual(agentic_shell._parse_job_command(['/run', '119']), ('119', []))
         self.assertEqual(

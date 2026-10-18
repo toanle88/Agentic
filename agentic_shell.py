@@ -266,6 +266,7 @@ def run_shell(repo: Path, runner: Path, config: Path | None = None,
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", nargs="?", choices=("help",), help="Show this help message and exit")
     parser.add_argument("--repo", type=Path, default=Path.cwd(), help="Target repository root")
     parser.add_argument("--runner", type=Path, default=Path(__file__).with_name("agentic.py"), help="Agentic runner script")
     parser.add_argument("--config", type=Path, help="Configuration file passed to child runs")
@@ -273,8 +274,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> int:
-    args = build_parser().parse_args()
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command == "help":
+        parser.print_help()
+        return 0
     return run_shell(args.repo, args.runner, args.config, args.session_dir)
 
 
