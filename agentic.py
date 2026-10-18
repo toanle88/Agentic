@@ -888,6 +888,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", nargs="?", choices=("help",), help="Show this help message and exit")
     parser.add_argument("--repo", default=str(SCRIPT_DIR), help="Project root (default: script directory)")
+    parser.add_argument("--interactive", action="store_true", help="Open the interactive background-job shell")
     parser.add_argument(
         "--config", default=None,
         help="Configuration file (default: agent_config.json in the target repository)",
@@ -996,6 +997,12 @@ def main() -> int:
         if args.command == "help":
             parser.print_help()
             return 0
+        if args.interactive:
+            if any((args.issue is not None, args.list, args.runs, args.new, args.review, args.publish)):
+                parser.error("--interactive cannot be combined with --issue, --list, --runs, --new, --review, or --publish")
+            from agentic_shell import run_shell
+            config = Path(args.config).resolve() if args.config else None
+            return run_shell(Path(args.repo), Path(__file__).resolve(), config)
         execute(args)
         return 0
     except (RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:

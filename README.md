@@ -65,6 +65,7 @@ Commands are checked before development starts. Missing executables and missing 
 ```bash
 python agentic.py --help                 # show all runner options
 python agentic.py help                   # equivalent help command
+python agentic.py --interactive         # open the background-job shell
 python agentic.py --list                 # list open GitHub issues
 python agentic.py --runs                 # list existing worktrees
 python agentic.py --issue 119            # create or resume issue 119
@@ -80,6 +81,28 @@ When resuming, the runner loads the latest failed review and test evidence from 
 The developer does not commit or push. `--publish` reruns tests and review, checks that the patch has not changed, and asks you to type `publish` before committing, pushing, and opening a draft PR.
 
 The terminal view shows a compact run banner, colored status labels when output is interactive, the top review findings, and a final next-action summary. Full JSON/JSONL details remain in the run logs.
+
+## Interactive shell
+
+Use the optional supervisor when you want one terminal for multiple background jobs:
+
+```bash
+python agentic.py --repo /path/to/project --interactive
+```
+
+It keeps the main prompt responsive while each runner executes in a separate child process. Jobs have no additional timeout; configured runner timeouts still apply.
+
+```text
+agentic> /run 119
+agentic> /ps
+agentic> /logs 1 80
+agentic> /stop 1
+agentic> /dashboard
+agentic> /help
+agentic> /quit
+```
+
+Interactive-shell output is saved next to the project in `.project-agentic-shell/`; the runner's normal durable logs remain in `.project-agent-runs/`.
 
 ## HTML run dashboard
 
