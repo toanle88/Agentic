@@ -113,6 +113,14 @@ def sandbox_command(
         "--network", "bridge" if policy["allow_network"] else "none",
         "-v", f"{root}:/workspace:{'ro' if read_only else 'rw'}", "-w", "/workspace",
     ]
+    # Rootless/containerized engines may map container root to an unmapped host
+    # identity, which makes a writable bind mount appear read-only. Match the
+    # invoking user's identity so developer mounts remain writable without
+    # granting the process root privileges in the container.
+    getuid = getattr(os, "getuid", None)
+    getgid = getattr(os, "getgid", None)
+    if getuid is not None and getgid is not None:
+        command[2:2] = ["--user", f"{getuid()}:{getgid()}"]
     replacements: list[tuple[Path, str]] = [(root, "/workspace")]
     git_metadata = _git_metadata(root)
     if git_metadata:
