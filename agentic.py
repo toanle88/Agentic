@@ -316,6 +316,48 @@ def _short(value: Any, limit: int = 180) -> str:
     return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
+def _paint(text: str, code: str) -> str:
+    """Use color only for interactive output; logs remain plain text."""
+    if os.environ.get("NO_COLOR") or not getattr(sys.stdout, "isatty", lambda: False)():
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def print_run_header(issue: Issue, run: Run, fresh: bool) -> None:
+    state = "NEW" if fresh else "RESUME"
+    print("\n" + "─" * 72)
+    print(f"AGENTIC  |  ISSUE #{issue.number}  |  {_paint(state, '36' if fresh else '33')}")
+    print(f"Title:    {_short(issue.title, 100)}")
+    print(f"Branch:   {run.branch}")
+    print(f"Worktree: {run.worktree}")
+    print("─" * 72, flush=True)
+
+
+def print_review_summary(verdict: dict[str, Any]) -> None:
+    approved = bool(verdict.get("approved"))
+    status = _paint("APPROVED", "32") if approved else _paint("REJECTED", "31")
+    print(f"[REVIEW] {status}")
+    summary = str(verdict.get("summary", "")).strip()
+    if summary:
+        print(f"[REVIEW] {_short(summary, 500)}")
+    findings = verdict.get("findings", [])
+    if isinstance(findings, list):
+        for finding in findings[:3]:
+            print(f"  • {_short(finding, 260)}")
+        if len(findings) > 3:
+            print(f"  • ... and {len(findings) - 3} more; see the review JSON log")
+
+
+def print_run_summary(run: Run, status: str, next_action: str) -> None:
+    color = "32" if status in {"APPROVED", "VALIDATED"} else "33"
+    print("\n" + "─" * 72)
+    print(f"RESULT:   {_paint(status, color)}")
+    print(f"Branch:   {run.branch}")
+    print(f"Worktree: {run.worktree}")
+    print(f"Next:     {next_action}")
+    print("─" * 72, flush=True)
+
+
 def _codex_progress(line: str) -> str | None:
     """Summarize Codex JSONL events. Unknown events remain in the raw trace."""
     try:
@@ -400,8 +442,12 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
             def display(message: str) -> None:
                 nonlocal last_notice
                 now = datetime.datetime.now().strftime("%H:%M:%S")
-                formatted = f"[{now}] [{label}] {message}"
-                print(formatted, flush=True)
+                prefix = f"[{now}] [{label}]"
+                formatted = f"{prefix} {message}"
+                colored_label = _paint(f"[{label}]", {
+                    "DEVELOPER": "36", "REVIEW": "35", "TESTS": "34",
+                }.get(label, "37"))
+                print(f"[{now}] {colored_label} {message}", flush=True)
                 human_log.write(formatted + "\n")
                 last_notice = time.monotonic()
 
@@ -684,7 +730,7 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
         reasoning_effort=config.get("codex_reasoning_effort"),
         timeout=config.get("codex_timeout_seconds"),
     )
-    print("[REVIEW] " + json.dumps(verdict, indent=2))
+    print_review_summary(verdict)
     # Reject if the worktree was changed during the review; review cannot authorize new changes.
     if prepare_patch(run.worktree, base, config["max_files"])[1] != digest:
         raise RuntimeError("Files changed during review; rerun checks and review")
@@ -755,7 +801,7 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
             # Policy violations, malformed diff, or mid-review mutation are not model-retryable.
             raise
         if passed:
-            print("\nApproved by checks and independent review. Use --publish when ready.")
+            print_run_summary(run, "APPROVED", f"python agentic.py --issue {issue.number} --publish")
             return True
         if verdict:
             feedback = json.dumps(verdict)
@@ -903,7 +949,6 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> None:
         refresh_base(repo, base)
         if repair_relative_worktree(repo, run.worktree):
             print(f"[GIT] Repaired worktree metadata: {run.worktree}")
-        print(f"[RESUME] Using existing worktree: {run.worktree}")
     else:
         if args.review or args.publish:
             raise RuntimeError("No existing worktree for this issue; first run --issue N")
@@ -911,13 +956,13 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> None:
             raise RuntimeError("Only open issues can start a new worktree")
         run = create_worktree(repo, base, number)
         fresh = True
-        print(f"[NEW] Worktree: {run.worktree}")
     folder = logs_path(repo, run)
+    print_run_header(issue, run, fresh)
     if args.review:
         passed, *_ = verify_and_review(run, issue, base, config, folder)
         if not passed:
             raise RuntimeError("Review or tests did not approve current changes")
-        print("All checks passed; run --issue N --publish to open a draft PR")
+        print_run_summary(run, "VALIDATED", f"python agentic.py --issue {issue.number} --publish")
         return
     if args.publish:
         publish(run, issue, github_repo, base, config, folder)
@@ -928,7 +973,6 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> None:
         existing = check_existing_pr(run.worktree, github_repo, run.branch)
         if existing:
             raise RuntimeError(f"A PR already exists: {existing[0]['url']}. Review it instead of editing here")
-    print(f"Issue #{issue.number}: {issue.title}\nBranch: {run.branch}\nWorktree: {run.worktree}\nLive progress and logs are enabled.", flush=True)
     if fresh:
         print("[BASELINE] Verifying untouched base before development")
         passed, report = run_tests(

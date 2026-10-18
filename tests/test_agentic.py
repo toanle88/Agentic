@@ -214,6 +214,20 @@ class PureTests(unittest.TestCase):
         self.assertFalse(agentic.retryable_test_failure('listen tcp: address already in use'))
         self.assertTrue(agentic.retryable_test_failure('AssertionError: expected 2, got 3'))
 
+    def test_review_summary_is_compact_and_actionable(self):
+        from io import StringIO
+        with patch('sys.stdout', new_callable=StringIO) as out:
+            agentic.print_review_summary({
+                'approved': False,
+                'summary': 'Reject: missing recovery behavior',
+                'findings': ['Add restart coverage', 'Persist failure audit'],
+            })
+        output = out.getvalue()
+        self.assertIn('[REVIEW] REJECTED', output)
+        self.assertIn('missing recovery behavior', output)
+        self.assertIn('Persist failure audit', output)
+        self.assertNotIn('"approved": false', output)
+
     def test_codex_config_overrides_are_added_to_cli(self):
         with tempfile.TemporaryDirectory() as dirname:
             root = Path(dirname)

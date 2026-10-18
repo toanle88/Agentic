@@ -79,6 +79,8 @@ When resuming, the runner loads the latest failed review and test evidence from 
 
 The developer does not commit or push. `--publish` reruns tests and review, checks that the patch has not changed, and asks you to type `publish` before committing, pushing, and opening a draft PR.
 
+The terminal view shows a compact run banner, colored status labels when output is interactive, the top review findings, and a final next-action summary. Full JSON/JSONL details remain in the run logs.
+
 ## Worktrees and logs
 
 For a project named `Tally`, worktrees and logs are created next to the checkout:
