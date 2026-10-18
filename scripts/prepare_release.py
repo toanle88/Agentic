@@ -246,7 +246,7 @@ def main(argv: Sequence[str] | None = None, *, root: Path = ROOT) -> int:
 
     pr_url = (pr.stdout or pr.stderr or "").strip().splitlines()[-1:] or ["(URL not returned)"]
     print(f"[release-pr] Release PR created: {pr_url[0]}")
-    print(f"[release-pr] Merge the PR, then run: python scripts/release.py")
+    print("[release-pr] Merge the PR, then run: python scripts/release.py")
     return 0
 
 

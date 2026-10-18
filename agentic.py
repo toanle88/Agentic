@@ -57,7 +57,7 @@ from agentic_security import redact_secrets
 from agentic_telemetry import combine_usage, extract_jsonl_usage, normalize_usage, record_usage
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.0.8"
+__version__ = "1.0.9"
 # Keep the configuration constants available from the historical runner module
 # while the implementation lives in agentic_config.
 DEFAULT_SECURITY_MODE = _agentic_config.DEFAULT_SECURITY_MODE
@@ -562,6 +562,16 @@ def _short(value: Any, limit: int = 180) -> str:
     """Display single-line progress without flooding the terminal."""
     text = str(value).replace("\r", " ").replace("\n", " ⏎ ").strip()
     return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def _doctor_public_detail(label: str, ok: bool, required: bool) -> str:
+    """Return only fixed, non-sensitive details for doctor output."""
+    if label == "Sandbox network":
+        return (
+            "enabled for developer and read-only reviewer; disable unless outbound access is required"
+            if not ok else "disabled for developer and read-only reviewer"
+        )
+    return "passed" if ok else ("required check failed" if required else "warning")
 
 
 def _remaining_timeout(deadline: float | None, maximum: int | None) -> int | None:
@@ -2235,16 +2245,16 @@ def doctor(repo: Path, config_path: Path | None = None, *, json_output: bool = F
     checks: list[tuple[str, bool, str, bool]] = []
     git_version = installed_git_version()
     checks.append(("Git", git_version is not None, ".".join(map(str, git_version)) if git_version else "not found", True))
-    root_ok, root_output = probe(["git", "rev-parse", "--show-toplevel"], repo)
-    checks.append(("Git repository", root_ok, root_output.splitlines()[-1] if root_output else "not a repository", True))
+    root_ok, _ = probe(["git", "rev-parse", "--show-toplevel"], repo)
+    checks.append(("Git repository", root_ok, "repository detected" if root_ok else "not a repository", True))
     if root_ok:
-        origin_ok, origin = probe(["git", "remote", "get-url", "origin"], repo)
-        checks.append(("origin remote", origin_ok, origin or "missing origin remote", True))
+        origin_ok, _ = probe(["git", "remote", "get-url", "origin"], repo)
+        checks.append(("origin remote", origin_ok, "origin remote configured" if origin_ok else "missing origin remote", True))
     else:
         checks.append(("origin remote", False, "skipped", True))
     gh_path = shutil.which("gh")
-    gh_ok, gh_output = probe([gh_path or "gh", "auth", "status"], repo) if gh_path else (False, "gh not found")
-    checks.append(("GitHub CLI auth", gh_ok, _short(gh_output or "not authenticated", 180), True))
+    gh_ok, _ = probe([gh_path or "gh", "auth", "status"], repo) if gh_path else (False, "gh not found")
+    checks.append(("GitHub CLI auth", gh_ok, "authenticated" if gh_ok else "not authenticated", True))
     target_config = (config_path or repo / AGENT_CONFIG_FILENAME).resolve()
     if target_config.is_file():
         try:
@@ -2270,12 +2280,12 @@ def doctor(repo: Path, config_path: Path | None = None, *, json_output: bool = F
                 checks.append(("Sandbox engine", engine_path is not None,
                                f"{engine} is available" if engine_path else f"{engine} not found", True))
                 if engine_path:
-                    image_ok, image_detail = probe(
+                    image_ok, _ = probe(
                         [engine_path, "image", "inspect", sandbox["image"]], repo, timeout=30
                     )
                     checks.append((
                         "Sandbox image", image_ok,
-                        f"{sandbox['image']} is available" if image_ok else _short(image_detail or f"{sandbox['image']} not found", 180),
+                        "sandbox image is available" if image_ok else "sandbox image is not available",
                         True,
                     ))
                 if sandbox.get("allow_network"):
@@ -2325,8 +2335,8 @@ def doctor(repo: Path, config_path: Path | None = None, *, json_output: bool = F
                     ))
                 else:
                     executable = shutil.which(provider)
-                    ok, detail = probe([executable or provider, "--version"], repo) if executable else (False, f"{provider} not found")
-                    checks.append((f"{role.title()} provider ({provider})", ok, _short(detail or "not found", 180), True))
+                    ok, _ = probe([executable or provider, "--version"], repo) if executable else (False, f"{provider} not found")
+                    checks.append((f"{role.title()} provider ({provider})", ok, "provider is available" if ok else "provider is not available", True))
         except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
             checks.append(("Agentic config", False, str(exc), True))
     else:
@@ -2347,17 +2357,17 @@ def doctor(repo: Path, config_path: Path | None = None, *, json_output: bool = F
                     "ok": ok,
                     "required": required,
                     "status": "ok" if ok else ("fail" if required else "warn"),
-                    "detail": detail,
+                    "detail": _doctor_public_detail(label, ok, required),
                 }
-                for label, ok, detail, required in checks
+                for label, ok, _detail, required in checks
             ],
         }, indent=2))
     else:
         print("Agentic doctor")
         print(f"Repository: {repo}")
-        for label, ok, detail, required in checks:
+        for label, ok, _detail, required in checks:
             state = "OK" if ok else ("FAIL" if required else "WARN")
-            print(f"[{state:<4}] {label}: {detail}")
+            print(f"[{state:<4}] {label}: {_doctor_public_detail(label, ok, required)}")
     return 0 if success else 1
 
 

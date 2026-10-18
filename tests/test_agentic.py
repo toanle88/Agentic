@@ -321,6 +321,46 @@ class GitTest(unittest.TestCase):
                 agentic.develop(run, issue, 'main', config, folder)
         run_agent.assert_called_once()
 
+    def test_offline_fake_provider_retries_failed_tests_and_approves_review(self):
+        issue = agentic.Issue.from_local_text("Add a generated feature file\n")
+        run = agentic.create_local_worktree(self.repo, "main", issue)
+        folder = agentic.logs_path(self.repo, run)
+        config = {
+            "max_retries": 1,
+            "max_files": None,
+            "developer_agent": {"provider": "fake"},
+            "reviewer_agent": {"provider": "fake"},
+        }
+        test_command = [
+            sys.executable, "-c",
+            "from pathlib import Path; p=Path('feature.txt'); "
+            "assert not p.exists() or p.read_text() == 'good\\n'",
+        ]
+        calls = []
+
+        def fake_provider(worktree, prompt, *, output, schema=None, readonly=False, **kwargs):
+            calls.append((readonly, schema.name if schema else None))
+            if schema and schema.name == "investigation-schema.json":
+                return True, json.dumps({"status": "pass", "summary": "valid", "findings": []})
+            if schema and schema.name == "review-schema.json":
+                return True, json.dumps({"approved": True, "summary": "approved", "findings": []})
+            content = "bad\n" if sum(not item[0] for item in calls) == 1 else "good\n"
+            (worktree / "feature.txt").write_text(content, encoding="utf-8")
+            output.write_text("fake developer", encoding="utf-8")
+            return True, "fake developer"
+
+        with patch("agentic.run_agent", side_effect=fake_provider):
+            self.assertTrue(
+                agentic.develop(
+                    run, issue, "main", config, folder,
+                    test_commands=[test_command],
+                )
+            )
+
+        self.assertEqual((run.worktree / "feature.txt").read_text(), "good\n")
+        self.assertEqual(sum(not readonly for readonly, _ in calls), 2)
+        self.assertIn((True, "review-schema.json"), calls)
+
     def test_execute_local_task_dispatches_to_workflow(self):
         config_path = self.repo / 'local-agent-config.json'
         config_path.write_text(json.dumps({

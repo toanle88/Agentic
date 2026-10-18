@@ -20,17 +20,17 @@ Run the test suite:
 python -m unittest discover -s tests -q
 ```
 
-Compile all Python modules:
+Compile all runtime Python modules:
 
 ```bash
-python -m py_compile agentic.py agentic_models.py agentic_security.py agentic_dashboard.py agentic_shell.py
+python -m py_compile agentic.py agentic_config.py agentic_models.py agentic_security.py agentic_sandbox.py agentic_telemetry.py agentic_dashboard.py agentic_shell.py
 ```
 
 Run the static checks used by CI:
 
 ```bash
 python -m pip install -e '.[dev]'
-ruff check agentic.py agentic_models.py agentic_security.py agentic_dashboard.py agentic_shell.py tests
+ruff check .
 pyright
 ```
 
@@ -52,7 +52,7 @@ The `main` branch is protected. Changes must go through a pull request.
 5. Open a pull request against `main`.
 6. Merge only after required CI checks and review pass.
 
-CI tests Python 3.10 through 3.13 and builds the package artifacts. Configure those checks as required status checks in repository branch protection.
+CI tests Python 3.10 through 3.14, runs static checks, coverage, Docker sandbox integration tests, and builds the package artifacts. Configure those checks as required status checks in repository branch protection.
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for the repository contribution policy.
 
