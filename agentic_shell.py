@@ -251,9 +251,10 @@ class _KeyReader:
             try:
                 import termios
                 import tty
-                self._posix_fd = sys.stdin.fileno()
-                self._old_settings = termios.tcgetattr(self._posix_fd)
-                tty.setcbreak(self._posix_fd)
+                fd = sys.stdin.fileno()
+                self._posix_fd = fd
+                self._old_settings = termios.tcgetattr(fd)
+                tty.setcbreak(fd)
                 encoding = getattr(sys.stdin, "encoding", None) or "utf-8"
                 self._posix_decoder = codecs.getincrementaldecoder(encoding)(
                     errors="replace"
