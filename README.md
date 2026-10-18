@@ -229,20 +229,30 @@ Run the local checks with:
 python -m unittest discover -s tests -q
 ```
 
-Release tags use semantic versioning, such as `v1.0.0`. After the version
-change has been merged to `main`, run the release helper from this checkout:
+Release tags use semantic versioning, such as `v1.0.0`. From a clean,
+up-to-date `main` checkout, prepare the version change and open its PR with:
+
+```bash
+python scripts/prepare_release.py          # prompt for the new version
+# or: python scripts/prepare_release.py 1.0.1
+```
+
+The helper runs the local checks, creates a `codex/release-vVERSION` branch,
+commits the version change, pushes it, and opens a normal GitHub PR. It
+requires the GitHub CLI to be installed and authenticated with `gh auth login`.
+After that PR is merged, run the release helper from the synchronized `main`:
 
 ```bash
 python scripts/release.py --dry-run  # check everything without creating a tag
 python scripts/release.py            # check, confirm, tag, and push
 ```
 
-The helper verifies that `main` is clean and synchronized with `origin/main`,
-runs the offline tests and compile checks, and prevents reuse of an existing
-tag. The GitHub Actions release workflow then builds the package artifacts and
-creates the GitHub release. Use `--yes` only when the release has already been
-reviewed and should run without a prompt. See [CONTRIBUTING.md](CONTRIBUTING.md)
-for the pull-request and release process.
+The second helper verifies that `main` is clean and synchronized with
+`origin/main`, runs the offline tests and compile checks, and prevents reuse of
+an existing tag. The GitHub Actions release workflow then builds the package
+artifacts and creates the GitHub release. Use `--yes` only when the release has
+already been reviewed and should run without a prompt. See
+[Development](docs/development.md) for the complete release process.
 
 ## Safety summary
 
