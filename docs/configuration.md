@@ -169,6 +169,14 @@ limits, and disables networking unless explicitly enabled. If the engine or
 image is unavailable, isolated runs stop instead of falling back to host
 execution.
 
+Filesystem read-only mode and networking are independent policies. A read-only
+reviewer still needs outbound access when its native provider CLI must contact
+its model service. Therefore `sandbox.allow_network: true` enables networking
+for both developer and reviewer processes, while their worktree and Git
+metadata mounts remain read-only for review. Treat this as a broad outbound
+capability and enable it only when the repository, provider, and credentials
+are trusted. `agentic doctor` reports the effective network policy.
+
 `sandbox.pass_env` contains environment variable names, never secret values.
 Only names listed there and present in the host environment are passed to the
 container. For example, native providers commonly use `OPENAI_API_KEY`,

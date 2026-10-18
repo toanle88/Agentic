@@ -7,6 +7,7 @@ Agentic is intentionally small and uses the Python standard library at runtime.
 | Component | Responsibility |
 | --- | --- |
 | `agentic.py` | Repository validation, GitHub/local task intake, worktree lifecycle, developer/reviewer orchestration, checks, retries, and publication. |
+| `agentic_config.py` | Target-repository configuration loading, provider validation/preflight, test-command detection, and setup defaults. |
 | `agentic_shell.py` | Interactive supervisor for background jobs and terminal log tails. |
 | `agentic_dashboard.py` | Read-only parser and renderer for durable run logs. |
 | `agentic_models.py` | Immutable task, run, state, and provider configuration models. |
@@ -19,6 +20,16 @@ Agentic is intentionally small and uses the Python standard library at runtime.
 | Provider adapters | Run Codex, Gemini, Claude Code, GitHub Copilot, or OpenRouter for developer/reviewer turns. |
 
 `agentic init` and `agentic doctor` are local setup tools. Initialization creates ignored, target-specific configuration; doctor performs prerequisite checks without running the full project test suite.
+
+## Incremental modularization
+
+The main runner remains the compatibility-facing entry point, but cohesive
+boundaries are extracted one at a time. `agentic_config.py` owns configuration
+parsing, provider preflight, test-command detection, and setup defaults;
+`agentic.py` re-exports those names so existing integrations and tests keep
+working. Future extractions should follow the same rule: move one boundary,
+preserve the public entry point, add characterization coverage, and verify the
+full offline suite before changing another subsystem.
 
 ## Run state
 
@@ -67,7 +78,7 @@ Set `AGENTIC_STATE_DIR` or pass `--state-dir PATH` to choose another root. A sha
 - Repository metadata operations use a shared lock while independent worktrees use separate locks.
 - Provider usage and cost are recorded only when the provider reports them; missing usage remains unknown.
 - `security_mode: "isolated"` requires the optional container mode and fails closed when its engine is unavailable.
-- Container mode mounts the task worktree, required linked-worktree Git metadata, and output directory, uses a read-only container root, and disables networking by default. OpenRouter file inspection remains host-side but its command tools use the same container boundary.
+- Container mode mounts the task worktree, required linked-worktree Git metadata, and output directory, uses a read-only container root, and disables networking by default. Read-only filesystem access does not implicitly disable networking: when `sandbox.allow_network` is enabled, both developer and reviewer processes can use outbound networking while the reviewer mounts remain read-only. OpenRouter file inspection remains host-side but its command tools use the same container boundary.
 - `agentic status --json` exposes stable worktree records for scripts without parsing terminal output.
 
 ## WSL and Windows Git compatibility

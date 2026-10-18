@@ -499,6 +499,15 @@ class PureTests(unittest.TestCase):
         self.assertTrue(config['sandbox']['enabled'])
         self.assertEqual(config['sandbox']['image'], 'test-image')
 
+    def test_init_trusted_mode_warns_about_host_account_permissions(self):
+        from io import StringIO
+
+        with tempfile.TemporaryDirectory() as temp, patch('sys.stdout', new_callable=StringIO) as output:
+            repo = Path(temp)
+            sh('git', 'init', '--initial-branch=main', str(repo), cwd=repo.parent)
+            self.assertEqual(agentic.init_repository(repo), 0)
+        self.assertIn('trusted mode runs provider CLIs and checks with host account permissions', output.getvalue())
+
     def test_isolated_init_requires_a_sandbox_image(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = Path(temp)
@@ -1168,6 +1177,38 @@ class PureTests(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertTrue(payload['ok'])
         self.assertTrue(any(item['name'] == 'Agentic config' for item in payload['checks']))
+
+    def test_doctor_reports_network_policy_for_read_only_reviewers(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            config = repo / 'agent_config.json'
+            config.write_text(json.dumps({
+                'test_commands': [[sys.executable, '-c', 'pass']],
+                'security_mode': 'isolated',
+                'sandbox': {
+                    'enabled': True,
+                    'engine': 'docker',
+                    'image': 'test-image',
+                    'allow_network': True,
+                },
+            }))
+
+            def fake_probe(argv, cwd, **kwargs):
+                if argv[:2] == ['git', 'rev-parse']:
+                    return True, str(repo)
+                return True, 'ok'
+
+            with (patch('agentic.installed_git_version', return_value=(2, 48, 0)),
+                  patch('agentic.probe', side_effect=fake_probe),
+                  patch('agentic.preflight_test_commands'),
+                  patch('agentic.shutil.which', return_value='/usr/bin/tool'),
+                  patch('sys.stdout', new_callable=io.StringIO) as output):
+                result = agentic.doctor(repo, config, json_output=True)
+        self.assertEqual(result, 0)
+        payload = json.loads(output.getvalue())
+        network = next(item for item in payload['checks'] if item['name'] == 'Sandbox network')
+        self.assertEqual(network['status'], 'warn')
+        self.assertIn('read-only reviewer', network['detail'])
 
     def test_all_provider_templates_are_valid_configs(self):
         templates = sorted((Path(__file__).resolve().parents[1] / 'examples' / 'provider-configs').glob(
