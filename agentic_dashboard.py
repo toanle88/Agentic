@@ -173,6 +173,44 @@ def _review(folder: Path) -> tuple[dict[str, Any], Path | None]:
     }, path
 
 
+def _investigation(folder: Path) -> tuple[dict[str, Any], Path | None]:
+    path = _latest(path for path in _numbered_files(folder, ["investigation"])
+                   if path.suffix == ".json")
+    if path is None:
+        return {
+            "status": "not-run", "summary": "No issue investigation recorded.",
+            "findings": [],
+        }, None
+    raw = _parse_json_object(_read(path, 100_000))
+    if raw is None:
+        return {
+            "status": "invalid",
+            "summary": "Investigation output is not valid JSON.",
+            "findings": [],
+            "file": path.name,
+            "updated": _timestamp(path),
+        }, path
+    status = str(raw.get("status", "")).strip().lower()
+    if status not in {"pass", "reject", "needs_input"}:
+        return {
+            "status": "invalid",
+            "summary": "Investigation output has an unknown status.",
+            "findings": [],
+            "file": path.name,
+            "updated": _timestamp(path),
+        }, path
+    findings = raw.get("findings", [])
+    if not isinstance(findings, list):
+        findings = [str(findings)]
+    return {
+        "status": status,
+        "summary": str(raw.get("summary", "No investigation summary.")),
+        "findings": [str(item) for item in findings],
+        "file": path.name,
+        "updated": _timestamp(path),
+    }, path
+
+
 def _tests(folder: Path) -> tuple[dict[str, Any], Path | None]:
     paths = _numbered_files(folder, ["test-command", "tests"])
     path = _latest(paths)
@@ -206,13 +244,13 @@ def _latest_developer(folder: Path) -> tuple[dict[str, Any], list[Path]]:
 def _all_log_files(folder: Path) -> list[Path]:
     files = [
         path for path in folder.iterdir()
-        if path.is_file() and path.name != "review-schema.json"
+        if path.is_file() and path.name not in {"review-schema.json", "investigation-schema.json"}
     ] if folder.is_dir() else []
     return sorted(files, key=lambda path: (path.stat().st_mtime, path.name), reverse=True)
 
 
 def _process_running(folder: Path) -> bool:
-    progress = _latest(_numbered_files(folder, ["developer", "review", "test-command"]))
+    progress = _latest(_numbered_files(folder, ["developer", "review", "investigation", "test-command"]))
     if progress is None:
         return False
     content = _read(progress, 20_000)
@@ -223,6 +261,7 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
     match = RUN_NAME.fullmatch(folder.name)
     if not match:
         return None
+    investigation, investigation_path = _investigation(folder)
     review, review_path = _review(folder)
     tests, tests_path = _tests(folder)
     developer, developer_paths = _latest_developer(folder)
@@ -231,6 +270,12 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
 
     if _process_running(folder):
         status = "in-progress"
+    elif investigation["status"] == "reject" and not developer_paths and review["status"] == "not-run":
+        status = "investigation-rejected"
+    elif investigation["status"] == "needs_input" and not developer_paths and review["status"] == "not-run":
+        status = "investigation-needs-input"
+    elif investigation["status"] == "invalid" and not developer_paths and review["status"] == "not-run":
+        status = "investigation-invalid"
     elif review["status"] == "approved":
         status = "approved"
     elif review["status"] == "rejected":
@@ -263,6 +308,7 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
         "label": label,
         "branch": branch,
         "status": status,
+        "investigation": investigation,
         "attempts": developer["attempts"],
         "last_activity": _timestamp(last_activity) if last_activity else "unknown",
         "review": review,
@@ -271,6 +317,7 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
         "files": file_records,
         "file_count": len(all_files),
         "has_review": review_path is not None,
+        "has_investigation": investigation_path is not None,
         "has_tests": tests_path is not None,
         "has_developer": bool(developer_paths),
         "usage": read_run_usage(folder),
@@ -346,7 +393,8 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
     .badge {{ display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 3px 9px; font-size: 12px; font-weight: 700; white-space: nowrap; }}
     .badge::before {{ content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }}
     .approved {{ color: var(--green); background: color-mix(in srgb, var(--green) 15%, transparent); }}
-    .needs-fix, .tests-failed {{ color: var(--red); background: color-mix(in srgb, var(--red) 15%, transparent); }}
+    .needs-fix, .tests-failed, .investigation-rejected, .investigation-invalid {{ color: var(--red); background: color-mix(in srgb, var(--red) 15%, transparent); }}
+    .investigation-needs-input {{ color: var(--yellow); background: color-mix(in srgb, var(--yellow) 15%, transparent); }}
     .in-progress {{ color: var(--blue); background: color-mix(in srgb, var(--blue) 15%, transparent); }}
     .awaiting-review {{ color: var(--yellow); background: color-mix(in srgb, var(--yellow) 15%, transparent); }}
     .no-activity {{ color: var(--muted); background: color-mix(in srgb, var(--muted) 15%, transparent); }}
@@ -387,7 +435,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
           <label class="sr-only" for="search">Search runs</label>
           <input id="search" type="search" placeholder="Search issue, task, or branch…">
           <label class="sr-only" for="status">Filter status</label>
-          <select id="status"><option value="all">All statuses</option><option value="needs-fix">Needs fix</option><option value="approved">Approved</option><option value="in-progress">In progress</option><option value="tests-failed">Tests failed</option><option value="awaiting-review">Awaiting review</option></select>
+          <select id="status"><option value="all">All statuses</option><option value="needs-fix">Needs fix</option><option value="investigation-rejected">Investigation rejected</option><option value="investigation-needs-input">Investigation needs input</option><option value="approved">Approved</option><option value="in-progress">In progress</option><option value="tests-failed">Tests failed</option><option value="awaiting-review">Awaiting review</option></select>
         </div>
         <div class="run-list" id="run-list" aria-live="polite"></div>
       </div>
@@ -399,7 +447,9 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
     const state = {{ selected: DATA.runs[0]?.id || null, query: "", status: "all" }};
     const labels = {{
       "approved": "Approved", "needs-fix": "Needs fix", "in-progress": "In progress",
-      "tests-failed": "Tests failed", "awaiting-review": "Awaiting review", "no-activity": "No activity"
+      "tests-failed": "Tests failed", "awaiting-review": "Awaiting review", "no-activity": "No activity",
+      "investigation-rejected": "Investigation rejected", "investigation-needs-input": "Investigation needs input",
+      "investigation-invalid": "Investigation invalid"
     }};
     const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}}[char]));
     const badge = status => `<span class="badge ${{esc(status)}}">${{esc(labels[status] || status)}}</span>`;
@@ -407,6 +457,10 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
       (state.status === "all" || run.status === state.status) &&
       (`${{run.label}} ${{run.branch}}`.toLowerCase().includes(state.query.toLowerCase()))
     );
+    const runSummary = run => {{
+      const investigationSummary = run.investigation.status === "not-run" ? "" : run.investigation.summary;
+      return investigationSummary || run.review.summary || run.developer.summary || "No summary recorded.";
+    }};
     function renderMetrics() {{
       const runs = DATA.runs;
       const values = [
@@ -422,7 +476,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
       if (!visible.some(run => run.id === state.selected)) state.selected = visible[0]?.id || null;
       document.querySelector("#run-list").innerHTML = visible.length ? visible.map(run => `<button class="run-card ${{run.id === state.selected ? "selected" : ""}}" data-run="${{esc(run.id)}}" type="button">
         <div class="run-top"><span class="run-title">${{esc(run.label)}}</span>${{badge(run.status)}}</div>
-        <div class="summary">${{esc(run.review.summary || run.developer.summary || "No summary recorded.")}}</div>
+        <div class="summary">${{esc(runSummary(run))}}</div>
         <div class="meta"><span>${{esc(run.attempts)}} attempt${{run.attempts === 1 ? "" : "s"}}</span><span>Tests: ${{esc(run.tests.status)}}</span><span>${{esc(run.last_activity)}}</span></div>
       </button>`).join("") : `<div class="empty">No runs match this filter.</div>`;
       document.querySelectorAll("[data-run]").forEach(button => button.addEventListener("click", () => {{ state.selected = button.dataset.run; renderList(); renderDetail(); }}));
@@ -432,11 +486,13 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
       const detail = document.querySelector("#detail");
       if (!run) {{ detail.innerHTML = `<div class="empty">No run selected.</div>`; return; }}
       const findings = run.review.findings?.length ? `<ul class="findings">${{run.review.findings.map(item => `<li>${{esc(item)}}</li>`).join("")}}</ul>` : `<p class="subtle">No findings recorded.</p>`;
+      const investigationFindings = run.investigation.findings?.length ? `<ul class="findings">${{run.investigation.findings.map(item => `<li>${{esc(item)}}</li>`).join("")}}</ul>` : `<p class="subtle">No findings recorded.</p>`;
       const recurring = run.review.recurring?.length ? `<section class="callout rejected"><strong>Recurring findings</strong><ul class="findings">${{run.review.recurring.map(item => `<li>[${{esc(item.severity)}}] ${{esc(item.text)}} <span class="meta">(${{esc(item.count)}} reviews)</span></li>`).join("")}}</ul></section>` : "";
       const files = run.files.length ? run.files.map(file => `<details><summary>${{esc(file.kind)}} · ${{esc(file.name)}} <span class="meta">${{esc(file.updated)}}</span></summary><pre>${{esc(file.content)}}</pre></details>`).join("") : `<div class="empty">No log files recorded.</div>`;
       detail.innerHTML = `<div class="detail-top"><div><h2>${{esc(run.label)}}</h2><div class="branch">${{esc(run.branch)}}</div></div>${{badge(run.status)}}</div>
         <div class="meta" style="margin-top:12px"><span>${{esc(run.attempts)}} developer attempt${{run.attempts === 1 ? "" : "s"}}</span><span>Last activity: ${{esc(run.last_activity)}}</span><span>${{esc(run.file_count)}} log files</span></div>
         <section class="callout"><strong>Usage and cost</strong><p>${{esc(run.usage.total_tokens == null ? "Provider usage unavailable" : `${{run.usage.total_tokens.toLocaleString()}} tokens`)}}${{run.usage.estimated_cost_usd == null ? "" : ` · $${{Number(run.usage.estimated_cost_usd).toFixed(4)}} estimated`}}</p></section>
+        <section class="callout ${{esc(run.investigation.status)}}"><strong>Investigation · ${{esc(labels[run.investigation.status] || run.investigation.status)}}</strong><p>${{esc(run.investigation.summary)}}</p>${{investigationFindings}}</section>
         <section class="callout ${{esc(run.review.status)}}"><strong>Review · ${{esc(labels[run.review.status] || run.review.status)}}</strong><p>${{esc(run.review.summary)}}</p>${{findings}}</section>
         ${{recurring}}
         <h3>Tests · ${{esc(run.tests.status)}}</h3><pre>${{esc(run.tests.summary)}}</pre>

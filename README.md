@@ -3,13 +3,14 @@
 [![CI](https://github.com/toanle88/Agentic/actions/workflows/ci.yml/badge.svg)](https://github.com/toanle88/Agentic/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Agentic is a resumable, issue-driven coding workflow for GitHub repositories. It gives a configurable coding agent an isolated Git worktree, runs the target repository's checks, asks an independent reviewer to inspect the patch, and preserves evidence when work needs to be resumed.
+Agentic is a resumable, issue-driven coding workflow for GitHub repositories. It gives a configurable coding agent an isolated Git worktree, investigates whether the issue is actionable, runs the target repository's checks, asks an independent reviewer to inspect the patch, and preserves evidence when work needs to be resumed.
 
 Agentic is designed for human-supervised development. It does not silently commit, push, or open pull requests during development.
 
 ## Highlights
 
 - One isolated Git worktree per GitHub issue or local task.
+- Read-only issue investigation; valid issues continue automatically before development.
 - Resume support for unfinished or rejected work.
 - Configurable project checks using safe argument arrays.
 - Independent read-only review before publication.
@@ -164,6 +165,12 @@ set `"task_source": "local"` in the target's ignored `agent_config.json`, then
 run `/run` in the interactive shell and finish the pasted task with `/done`.
 Local tasks use the same review and resume flow and can still be published as
 GitHub draft pull requests.
+
+Before development, an independent read-only investigator classifies the issue
+as `pass`, `reject`, or `needs_input`. `pass` starts development automatically;
+the other results pause the run and require an explicit `continue` override in
+the foreground. A run that remains blocked exits nonzero so foreground and
+background callers can distinguish it from a completed run.
 
 Start the interactive shell:
 
