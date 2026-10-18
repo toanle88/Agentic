@@ -29,6 +29,7 @@ class ShellTests(unittest.TestCase):
         self.assertIn('/run ISSUE', output.getvalue())
         self.assertIn('/ps', output.getvalue())
         self.assertIn('/logs JOB', output.getvalue())
+        self.assertIn('/list', output.getvalue())
         self.assertIn('/status', output.getvalue())
 
     def test_welcome_banner_does_not_emit_color_when_output_is_not_a_terminal(self):
@@ -48,6 +49,7 @@ class ShellTests(unittest.TestCase):
             agentic_shell._print_help()
         self.assertIn('Run', output.getvalue())
         self.assertIn('/dashboard [OUTPUT]', output.getvalue())
+        self.assertIn('/list', output.getvalue())
         self.assertNotIn('\033[', output.getvalue())
 
     def test_help_uses_color_on_a_terminal(self):
@@ -98,6 +100,10 @@ class ShellTests(unittest.TestCase):
             ['/run'],
         )
         self.assertEqual(
+            agentic_shell._completion_candidates('/li'),
+            ['/list'],
+        )
+        self.assertEqual(
             agentic_shell._completion_candidates('/run --p'),
             ['--profile', '--publish'],
         )
@@ -133,6 +139,8 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(items['/ps'], 'show running or persisted background jobs')
         self.assertIn('/dashboard', items)
         self.assertEqual(items['/dashboard'], 'generate and open the HTML dashboard')
+        self.assertIn('/list', items)
+        self.assertEqual(items['/list'], 'list open GitHub issues')
 
         run_options = dict(agentic_shell._completion_items('/run --'))
         self.assertIn('--profile', run_options)
@@ -369,6 +377,39 @@ class ShellTests(unittest.TestCase):
                 open_dashboard.reset_mock()
                 callback(1)
                 open_dashboard.assert_not_called()
+
+    def test_list_runs_runner_and_prints_issues(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(
+                root, Path(__file__).resolve().parents[1] / 'agentic.py',
+                state_dir=root / 'state', session_dir=root / 'logs',
+            )
+            result = type('Result', (), {'returncode': 0, 'stdout': '#1 Fix it\n'})()
+            with (patch('agentic_shell.subprocess.run', return_value=result) as run,
+                  patch('sys.stdout', new_callable=StringIO) as output):
+                shell.show_issues(['/list'])
+            argv = run.call_args.args[0]
+            self.assertIn('--list', argv)
+            self.assertEqual(run.call_args.kwargs['cwd'], root)
+            self.assertEqual(output.getvalue(), '#1 Fix it\n')
+
+    def test_list_rejects_arguments(self):
+        with tempfile.TemporaryDirectory() as temp:
+            shell = agentic_shell.AgenticShell(
+                Path(temp), Path(sys.executable), session_dir=Path(temp) / 'logs'
+            )
+            with self.assertRaises(ValueError):
+                shell.show_issues(['/list', 'extra'])
+
+    def test_list_command_dispatches_to_issue_listing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            shell = agentic_shell.AgenticShell(
+                Path(temp), Path(sys.executable), session_dir=Path(temp) / 'logs'
+            )
+            with patch.object(shell, 'show_issues') as show_issues:
+                self.assertTrue(shell.execute('/list'))
+            show_issues.assert_called_once_with(['/list'])
 
     def test_job_records_are_visible_from_a_later_shell(self):
         with tempfile.TemporaryDirectory() as temp:
