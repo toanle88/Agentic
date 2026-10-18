@@ -1331,7 +1331,7 @@ class AgenticShell:
             print("No matching jobs. Use /ps --all to include previous shell sessions.")
             return
         print("ID  STATUS      PID     AGE  SESSION      COMMAND")
-        for job in jobs:
+        for job in sorted(jobs, key=lambda job: not job.running):
             status = "RUNNING" if job.running else f"EXIT {job.exit_code if job.exit_code not in (None, -1) else '?'}"
             session = "current" if job.session_id == self.session_id else job.session_id[:8]
             print(f"{job.number:<3} {status:<10} {job.pid:<7} {job.elapsed:>3}s  {session:<8} {_display_command(job.argv)}")

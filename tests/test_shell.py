@@ -335,6 +335,27 @@ class ShellTests(unittest.TestCase):
             self.assertIn('hello', job.log_path.read_text())
             self.assertIn('EXIT 0', _capture_ps(shell))
 
+    def test_show_processes_places_running_jobs_first(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            finished = shell._launch([sys.executable, '-c', 'print("finished")'])
+            finished.process.wait(timeout=5)
+            shell.refresh()
+            running = shell._launch([sys.executable, '-c', 'import time; time.sleep(5)'])
+            try:
+                output = _capture_ps(shell)
+                rows = [line for line in output.splitlines() if line.startswith(('1 ', '2 '))]
+                self.assertEqual(len(rows), 2)
+                self.assertTrue(rows[0].startswith(f'{running.number:<3}'))
+                self.assertIn('RUNNING', rows[0])
+                self.assertTrue(rows[1].startswith(f'{finished.number:<3}'))
+                self.assertIn('EXIT 0', rows[1])
+            finally:
+                running.process.terminate()
+                running.process.wait(timeout=5)
+                shell.refresh()
+
     def test_logs_accepts_pid_and_follows_running_job(self):
         from contextlib import redirect_stdout
 

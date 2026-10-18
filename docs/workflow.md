@@ -59,7 +59,7 @@ to dismiss. Supported options such as `/run --profile` and known job IDs for
 renders the dropdown with live filtering and command descriptions using standard ANSI
 escapes with zero third-party dependencies.
 
-`/run` starts a child process and returns immediately. `/ps` shows jobs started in the current shell; `/ps --all` also discovers job records from previous shell sessions. The child runner's durable logs remain available after the shell exits, and `/logs JOB` works for persisted jobs too. Use `/logs JOB` or `/logs PID` on a running job to follow new output until it exits; press Ctrl-C to stop following without stopping the job. Add `LINES` to control how much existing output is shown first.
+`/run` starts a child process and returns immediately. `/ps` shows jobs started in the current shell; `/ps --all` also discovers job records from previous shell sessions. The child runner's durable logs remain available after the shell exits, and `/logs JOB` works for persisted jobs too. Use `/logs JOB` or `/logs PID` on a running job to follow new output until it exits; press Ctrl-C to stop following without stopping the job. Add `LINES` to control how much existing output is shown first. Running jobs are listed before completed jobs so active work is immediately visible.
 
 `/list` synchronously lists the target repository's open GitHub issues. It uses
 the same GitHub CLI-backed issue listing as `agentic --list` and does not create
