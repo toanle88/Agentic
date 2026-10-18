@@ -20,7 +20,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, TextIO
+from typing import Callable, TextIO, cast
 
 
 HELP = """Commands:
@@ -114,10 +114,14 @@ def _windows_input(prompt: str, completer: Callable[[str, int], list[str]]) -> s
     """Read one editable line with Tab completion on native Windows consoles."""
     import msvcrt
 
+    # Pyright's bundled msvcrt stubs do not expose getwch, although it is
+    # available in the Windows runtime. Keep the dynamic lookup local to the
+    # Windows-only fallback and give the call its actual signature.
+    getwch = cast(Callable[[], str], getattr(msvcrt, "getwch"))
     line = ""
     print(prompt, end="", flush=True)
     while True:
-        character = msvcrt.getwch()
+        character = getwch()
         if character in {"\r", "\n"}:
             print()
             return line
@@ -154,7 +158,7 @@ def _windows_input(prompt: str, completer: Callable[[str, int], list[str]]) -> s
         if character in {"\x00", "\xe0"}:
             # Consume the second byte of a Windows special key (arrows,
             # function keys, etc.) without corrupting the current line.
-            msvcrt.getwch()
+            getwch()
             continue
         line += character
         print(character, end="", flush=True)
