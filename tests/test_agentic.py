@@ -452,6 +452,8 @@ class PureTests(unittest.TestCase):
             self.assertEqual(agentic.init_repository(repo, create_agents=True), 0)
             config = agentic.load_config(repo / 'agent_config.json')
             self.assertEqual(config['test_commands'], [['go', 'test', './...']])
+            self.assertEqual(config['security_mode'], 'trusted')
+            self.assertFalse(config['sandbox']['enabled'])
             self.assertIn('agent_config.json', (repo / '.gitignore').read_text())
             self.assertTrue((repo / 'AGENTS.md').is_file())
 
@@ -471,9 +473,38 @@ class PureTests(unittest.TestCase):
             self.assertEqual(config['reviewer_agent']['provider'], 'claude')
 
     def test_provider_init_options_are_exposed(self):
-        args = agentic.build_parser().parse_args(['init', '--provider', 'gemini'])
+        args = agentic.build_parser().parse_args([
+            'init', '--provider', 'gemini', '--security-mode', 'isolated'
+        ])
         self.assertEqual(args.provider, 'gemini')
         self.assertIsNone(args.reviewer_provider)
+        self.assertEqual(args.security_mode, 'isolated')
+        self.assertIsNone(args.sandbox_image)
+
+        defaults = agentic.build_parser().parse_args(['init'])
+        self.assertEqual(defaults.security_mode, 'trusted')
+
+    def test_init_can_select_isolated_security_mode(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            sh('git', 'init', '--initial-branch=main', str(repo), cwd=repo.parent)
+            (repo / 'go.mod').write_text('module example.test/demo\n')
+            self.assertEqual(
+                agentic.init_repository(
+                    repo, security_mode='isolated', sandbox_image='test-image'
+                ), 0
+            )
+            config = agentic.load_config(repo / 'agent_config.json')
+        self.assertEqual(config['security_mode'], 'isolated')
+        self.assertTrue(config['sandbox']['enabled'])
+        self.assertEqual(config['sandbox']['image'], 'test-image')
+
+    def test_isolated_init_requires_a_sandbox_image(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            sh('git', 'init', '--initial-branch=main', str(repo), cwd=repo.parent)
+            with self.assertRaisesRegex(ValueError, 'sandbox-image'):
+                agentic.init_repository(repo, security_mode='isolated')
 
     def test_invalid_review_result_is_marked_as_tooling_error(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -785,7 +816,7 @@ class PureTests(unittest.TestCase):
             ))
             self.assertFalse((root / 'new.txt').exists())
             self.assertIn('exit 0', agentic._openrouter_tool_call(
-                root, 'run_command', {'argv': [sys.executable, '-c', 'print("ok")']}, readonly=False
+                root, 'run_command', {'argv': ['pwd']}, readonly=False
             ))
             self.assertIn('ERROR:', agentic._openrouter_tool_call(
                 root, 'list_files', {'path': 'src/main.go'}, readonly=True
@@ -806,7 +837,11 @@ class PureTests(unittest.TestCase):
 
     def test_openrouter_command_policy_rejects_shell_network_and_review_mutations(self):
         for argv in ([], ['bash', '-c', 'echo unsafe'], ['curl', 'https://example.test'],
-                     ['git', 'push'], ['git', 'checkout', 'main']):
+                     ['git', 'push'], ['git', 'checkout', 'main'],
+                     ['git', '-C', '../other', 'status'],
+                     ['git', '-c', 'core.sshCommand=ssh', 'status'],
+                     ['python', '-c', 'print(1)'],
+                     ['node', '--eval', 'process.exit(1)']):
             allowed, reason = agentic._openrouter_command_allowed(argv, readonly=False)
             self.assertFalse(allowed, argv)
             self.assertTrue(reason)
@@ -822,6 +857,34 @@ class PureTests(unittest.TestCase):
             allowed, reason = agentic._openrouter_command_allowed(argv, readonly=True)
             self.assertFalse(allowed, argv)
             self.assertTrue(reason)
+
+        allowed, reason = agentic._openrouter_command_allowed(
+            ['python', '-m', 'unittest'], readonly=False
+        )
+        self.assertTrue(allowed, reason)
+
+    def test_openrouter_commands_use_configured_sandbox(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            settings = {
+                'enabled': True, 'engine': 'docker', 'image': 'test-image',
+                'allow_network': False, 'pass_env': ['OPENAI_API_KEY'],
+            }
+            with (patch.dict(agentic.os.environ, {'OPENAI_API_KEY': 'secret'}, clear=True),
+                  patch('agentic.subprocess.run', return_value=CompletedProcess(
+                      ['docker'], 0, stdout='sandboxed\n'
+                  )) as run):
+                result = agentic._openrouter_tool_call(
+                    root, 'run_command', {'argv': ['python', '-m', 'unittest']},
+                    readonly=False, sandbox=settings,
+                )
+            self.assertIn('sandboxed', result)
+            process_argv = run.call_args.args[0]
+            self.assertEqual(process_argv[:2], ['docker', 'run'])
+            self.assertIn('--network', process_argv)
+            self.assertEqual(process_argv[process_argv.index('--network') + 1], 'none')
+            self.assertNotIn('OPENAI_API_KEY', process_argv)
+            self.assertNotIn('secret', process_argv)
 
     def test_openrouter_request_translates_http_network_and_payload_errors(self):
         from io import BytesIO
@@ -905,11 +968,12 @@ class PureTests(unittest.TestCase):
 
     def test_openrouter_tool_command_timeout_is_reported(self):
         with tempfile.TemporaryDirectory() as temp:
-            result = agentic._openrouter_tool_call(
-                Path(temp), 'run_command',
-                {'argv': [sys.executable, '-c', 'import time; time.sleep(2)']},
-                readonly=False, command_timeout=1,
-            )
+            with patch('agentic.subprocess.run', side_effect=subprocess.TimeoutExpired('python', 1)):
+                result = agentic._openrouter_tool_call(
+                    Path(temp), 'run_command',
+                    {'argv': [sys.executable, '-m', 'unittest']},
+                    readonly=False, command_timeout=1,
+                )
         self.assertIn('timed out after 1s', result)
 
     def test_secret_values_are_redacted_from_output(self):
@@ -934,6 +998,7 @@ class PureTests(unittest.TestCase):
             ({'developer': {'model': ' '}}, 'model'),
             ({'developer': {'provider': 'openrouter', 'model': 'x', 'base_url': 'ftp://router'}}, 'base_url'),
             ({'developer': {'provider': 'gemini', 'api_key_env': 'KEY'}}, 'only valid for openrouter'),
+            ({'security_mode': 'unsafe'}, 'security_mode'),
         ]
         with tempfile.TemporaryDirectory() as temp:
             for extra, expected in invalid:
@@ -959,6 +1024,34 @@ class PureTests(unittest.TestCase):
         self.assertEqual(settings['max_tool_turns'], 12)
         self.assertEqual(settings['command_timeout_seconds'], 7)
         self.assertTrue(settings['allow_network'])
+
+    def test_isolated_security_mode_requires_sandbox_and_supports_openrouter(self):
+        with tempfile.TemporaryDirectory() as temp:
+            missing = Path(temp) / 'missing.json'
+            missing.write_text(json.dumps({
+                'test_commands': [['go', 'test', './...']],
+                'security_mode': 'isolated',
+            }))
+            with self.assertRaisesRegex(ValueError, 'requires sandbox'):
+                agentic.load_config(missing)
+
+            isolated = Path(temp) / 'isolated.json'
+            isolated.write_text(json.dumps({
+                'test_commands': [['go', 'test', './...']],
+                'security_mode': 'isolated',
+                'sandbox': {'enabled': True, 'engine': 'docker', 'image': 'test-image'},
+                'developer': {'provider': 'openrouter', 'model': 'openai/test'},
+            }))
+            config = agentic.load_config(isolated)
+        self.assertEqual(config['security_mode'], 'isolated')
+
+    def test_preflight_security_fails_closed_when_sandbox_engine_is_missing(self):
+        with patch('agentic.shutil.which', return_value=None):
+            with self.assertRaisesRegex(RuntimeError, 'unavailable'):
+                agentic.preflight_security(
+                    'isolated', {'enabled': True, 'engine': 'docker'}
+                )
+        agentic.preflight_security('trusted', {'enabled': False})
 
     def test_legacy_codex_settings_are_applied_to_both_roles(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -988,6 +1081,44 @@ class PureTests(unittest.TestCase):
             agentic.preflight_agent_settings(
                 {'provider': 'codex'}, {'provider': 'codex'}
             )
+
+    def test_isolated_preflight_uses_tools_from_the_sandbox_image(self):
+        sandbox = {'enabled': True, 'engine': 'docker', 'image': 'test-image'}
+        with patch('agentic.shutil.which', return_value=None):
+            agentic.preflight_test_commands(Path('/tmp/repo'), [['missing-tool', '--check']], sandbox=sandbox)
+            agentic.preflight_agent_settings({'provider': 'gemini'}, sandbox=sandbox)
+
+    def test_sandbox_preflight_requires_configured_credentials_to_exist(self):
+        sandbox = {
+            'enabled': True, 'engine': 'docker', 'image': 'test-image',
+            'pass_env': ['GEMINI_API_KEY'],
+        }
+        with patch.dict(agentic.os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, 'GEMINI_API_KEY'):
+                agentic.preflight_agent_settings({'provider': 'gemini'}, sandbox=sandbox)
+        with patch.dict(agentic.os.environ, {'GEMINI_API_KEY': 'present'}, clear=True):
+            agentic.preflight_agent_settings({'provider': 'gemini'}, sandbox=sandbox)
+
+    def test_sandbox_credentials_are_selected_per_provider(self):
+        sandbox = {
+            'enabled': True, 'engine': 'docker', 'image': 'test-image',
+            'pass_env': ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY'],
+        }
+        self.assertEqual(
+            agentic.sandbox_env_for_provider('codex', sandbox), ['OPENAI_API_KEY']
+        )
+        self.assertEqual(
+            agentic.sandbox_env_for_provider('claude', sandbox), ['ANTHROPIC_API_KEY']
+        )
+        self.assertEqual(agentic.sandbox_env_for_provider('openrouter', sandbox), [])
+
+    def test_sandbox_image_and_environment_validation_is_strict(self):
+        with self.assertRaisesRegex(ValueError, 'sandbox.image'):
+            agentic.validate_sandbox({'enabled': True})
+        with self.assertRaisesRegex(ValueError, 'pass_env'):
+            agentic.validate_sandbox({
+                'enabled': True, 'image': 'test-image', 'pass_env': ['bad-name'],
+            })
 
     def test_doctor_reports_repository_config_and_provider_health(self):
         from io import StringIO

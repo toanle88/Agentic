@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import agentic
 from agentic_sandbox import sandbox_command, validate_sandbox
@@ -46,9 +47,71 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
         settings = validate_sandbox({"enabled": True, "engine": "docker", "image": "test-image"})
         command = sandbox_command(["python", "-m", "unittest"], Path("/tmp/worktree"), settings)
         self.assertEqual(command[0:2], ["docker", "run"])
+        self.assertIn("--read-only", command)
+        self.assertIn("--tmpfs", command)
         self.assertIn("--network", command)
         self.assertEqual(command[command.index("--network") + 1], "none")
         self.assertIn("test-image", command)
+
+    def test_sandbox_review_forces_network_off(self):
+        settings = validate_sandbox({
+            "enabled": True, "engine": "docker", "image": "test-image",
+            "allow_network": True,
+        })
+        command = sandbox_command(["rg", "needle", "."], Path("/tmp/worktree"), settings, read_only=True)
+        self.assertEqual(command[command.index("--network") + 1], "none")
+        self.assertIn("/tmp/worktree:/workspace:ro", command)
+
+    def test_sandbox_mounts_linked_worktree_git_metadata(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp)
+            worktree = parent / "worktree"
+            common = parent / "repo" / ".git"
+            git_dir = common / "worktrees" / "task"
+            worktree.mkdir()
+            git_dir.mkdir(parents=True)
+            (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+            (git_dir / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+            (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+            settings = validate_sandbox({
+                "enabled": True, "engine": "docker", "image": "test-image",
+            })
+            command = sandbox_command(["git", "status"], worktree, settings)
+        self.assertIn(f"{common}:/agentic-git-common:ro", command)
+        self.assertIn(f"{git_dir}:/agentic-git-worktree:rw", command)
+        self.assertIn("GIT_DIR=/agentic-git-worktree", command)
+        self.assertIn("GIT_COMMON_DIR=/agentic-git-common", command)
+        self.assertIn("GIT_WORK_TREE=/workspace", command)
+
+    def test_sandbox_ignores_unrelated_git_pointer(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp)
+            worktree = parent / "worktree"
+            common = parent / "other-repo" / ".git"
+            git_dir = common / "worktrees" / "task"
+            worktree.mkdir()
+            git_dir.mkdir(parents=True)
+            (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+            (git_dir / "gitdir").write_text(f"{parent / 'other-worktree' / '.git'}\n", encoding="utf-8")
+            (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+            settings = validate_sandbox({
+                "enabled": True, "engine": "docker", "image": "test-image",
+            })
+            command = sandbox_command(["git", "status"], worktree, settings)
+        self.assertNotIn("/agentic-git-common", command)
+        self.assertNotIn("/agentic-git-worktree", command)
+
+    def test_sandbox_passes_only_named_environment_credentials(self):
+        settings = validate_sandbox({
+            "enabled": True, "engine": "docker", "image": "test-image",
+            "pass_env": ["OPENAI_API_KEY"],
+        })
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "secret-value"}, clear=True):
+            command = sandbox_command(["codex", "--version"], Path("/tmp/worktree"), settings)
+        self.assertIn("--env", command)
+        env_index = command.index("--env")
+        self.assertEqual(command[env_index + 1], "OPENAI_API_KEY")
+        self.assertNotIn("secret-value", command)
 
     def test_worktree_lock_rejects_duplicate_worker(self):
         with tempfile.TemporaryDirectory() as temp:

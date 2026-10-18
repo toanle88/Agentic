@@ -6,25 +6,40 @@ model-generated tool arguments are treated as untrusted input.
 
 ## Execution modes
 
-By default, configured tests and native provider CLIs run under the account
-that launched Agentic. Git worktrees isolate repository changes, but they do
-not isolate host files, credentials, processes, or networking. Use a trusted
-or disposable checkout and do not expose production credentials.
+Existing and newly initialized configurations default to
+`security_mode: "trusted"` for compatibility with host-installed providers.
+Trusted mode runs configured tests and native
+provider CLIs under the account that launched Agentic. Git worktrees isolate
+repository changes, but they do not isolate host files, credentials,
+processes, or networking. Use trusted mode only for a trusted or disposable
+checkout and do not expose production credentials.
+
+Set `security_mode: "isolated"`, configure a project-specific image, and
+enable the Docker/Podman sandbox for untrusted repositories or issue text.
+Isolated runs fail closed when the configured container engine, image, or
+explicitly configured credential environment is unavailable; they do not
+silently fall back to host execution.
 
 The developer is write-capable inside its assigned worktree. The reviewer is
 read-only and uses restricted provider/tool policies. Agentic blocks commits,
 pushes, publication, protected files, secret-like files, and GitHub workflow
 changes during normal development.
 
-Optional Docker/Podman sandboxing can isolate native provider and test
-processes. It requires an image containing the provider CLI and project tools.
-OpenRouter is not supported in sandbox mode because its API adapter runs in
-the host Python process. See the configuration guide for the exact limits.
+Docker/Podman sandboxing mounts the task worktree, the required linked-worktree
+Git metadata, and run-output directory, uses a read-only container root, drops
+Linux capabilities, limits resources, and disables networking by default.
+Native providers and configured checks run inside it. Credentials are passed
+only for environment names explicitly listed in `sandbox.pass_env`.
+OpenRouter's API request and scoped file inspection remain in the host Python
+process, but OpenRouter command tools are also routed through the configured
+sandbox.
 
 ## Credentials and logs
 
-Credentials must be supplied through environment variables. Do not put API
-keys in `agent_config.json`, issue descriptions, prompts, or repository files.
+Credentials passed from the host must be supplied through environment
+variables. Do not put API keys in `agent_config.json`, issue descriptions,
+prompts, or repository files. A sandbox image may contain its own provider
+authentication, but that image must be treated as sensitive and project-owned.
 Agentic redacts known environment values before writing provider output,
 test output, and dashboards, but redaction cannot identify every possible
 secret. Treat logs as sensitive and keep them out of public issue comments.

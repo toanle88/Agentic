@@ -89,6 +89,14 @@ agentic init --agents  # optional starter AGENTS.md
 
 Review `agent_config.json` and replace the detected command with the target project's real fast checks. See the [configuration guide](docs/configuration.md).
 
+Initialization defaults to trusted host execution so it works with the
+provider authentication already installed on the host. To use isolation,
+provide an image containing the provider and project tools:
+
+```bash
+agentic init --security-mode isolated --sandbox-image your-project-agentic-runner:latest
+```
+
 Provider-ready templates are in [`examples/provider-configs/`](examples/provider-configs/). Copy one to the target repository, or let initialization create it:
 
 ```bash
@@ -203,7 +211,7 @@ Running the same issue again resumes its existing worktree. Use `--new` only whe
 | `agentic --runs` | List existing Agentic worktrees. |
 | `agentic status --json` | Emit machine-readable worktree status. |
 | `agentic runs --json` | Alias for `status --json`. |
-| `agentic init [--provider NAME]` | Create ignored target configuration and detect a starter check. |
+| `agentic init [--provider NAME] [--security-mode MODE] [--sandbox-image IMAGE]` | Create ignored target configuration and detect a starter check. |
 | `agentic doctor` | Diagnose Git, GitHub CLI, selected provider CLIs/API key, config, and check prerequisites. |
 | `agentic --state-dir PATH ...` | Store worktrees and runtime artifacts in a chosen location. |
 | `agentic cleanup --issue N` | Preview removal of a clean issue worktree; add `--yes` to confirm. |
@@ -262,7 +270,14 @@ already been reviewed and should run without a prompt. See
 
 ## Safety summary
 
-Agentic runs configured checks under the host account, so use a trusted or disposable checkout and never expose production credentials. The developer and reviewer are separate processes; the reviewer uses the provider's read-only or restricted mode. Agentic does not replace CI, security review, or human approval.
+Existing and newly initialized configurations use trusted host execution by
+default for compatibility with host-installed providers. Use isolated mode for
+untrusted repositories or issue text by supplying a project-specific
+Docker/Podman image; isolated runs fail closed when the engine, image, or
+configured credentials are unavailable. Never expose production credentials.
+The developer and reviewer are separate processes; the reviewer uses the
+provider's read-only or restricted mode. Agentic does not replace CI, security
+review, or human approval.
 
 See the [workflow](docs/workflow.md), [architecture](docs/architecture.md), and [troubleshooting](docs/troubleshooting.md) guides for details.
 
