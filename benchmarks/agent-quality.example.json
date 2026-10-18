@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "tasks": [
+    {
+      "id": "add-subtract",
+      "name": "Add subtract with regression coverage",
+      "repository": "tasks/add-subtract/repository",
+      "task_file": "tasks/add-subtract/task.md",
+      "checks": [["python", "-m", "unittest", "discover", "-s", "tests", "-q"]],
+      "defects": []
+    }
+  ],
+  "runners": {
+    "agent-alone": [
+      "python",
+      "{benchmark_root}/adapters/agent-alone.py",
+      "{repo}",
+      "{task_file}",
+      "{result_file}"
+    ],
+    "agentic": [
+      "python",
+      "{benchmark_root}/adapters/agentic.py",
+      "{repo}",
+      "{task_file}",
+      "{state_dir}",
+      "{result_file}"
+    ]
+  }
+}

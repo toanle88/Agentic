@@ -107,7 +107,10 @@ def sandbox_command(
         "--pids-limit", "256", "--memory", "2g", "--cpus", "2",
         "--read-only",
         "--tmpfs", "/tmp:rw,nosuid,size=256m",
-        "--network", "bridge" if policy["allow_network"] and not read_only else "none",
+        # Read-only is a filesystem/provider-capability policy. It must not
+        # implicitly disable provider API access: native reviewers may need
+        # outbound networking even though their worktree remains read-only.
+        "--network", "bridge" if policy["allow_network"] else "none",
         "-v", f"{root}:/workspace:{'ro' if read_only else 'rw'}", "-w", "/workspace",
     ]
     replacements: list[tuple[Path, str]] = [(root, "/workspace")]

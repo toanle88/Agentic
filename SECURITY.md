@@ -34,6 +34,14 @@ OpenRouter's API request and scoped file inspection remain in the host Python
 process, but OpenRouter command tools are also routed through the configured
 sandbox.
 
+Read-only filesystem access and networking are separate controls. If
+`sandbox.allow_network` is enabled, outbound networking is available to both
+developer and reviewer processes, including a read-only reviewer that needs to
+contact its native provider. This is a broad capability that can allow source
+data to leave the container, so keep it disabled unless the repository,
+provider, and credentials are trusted. `agentic doctor` reports when this
+network policy is enabled.
+
 ## Credentials and logs
 
 Credentials passed from the host must be supplied through environment

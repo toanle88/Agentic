@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Compile Python sources
-        run: python -m py_compile agentic.py agentic_models.py agentic_security.py agentic_dashboard.py agentic_shell.py
+        run: python -m py_compile agentic.py agentic_config.py agentic_models.py agentic_security.py agentic_dashboard.py agentic_shell.py
       - name: Run tests
         run: python -m unittest discover -s tests -q
 
@@ -72,7 +72,7 @@ jobs:
       - name: Install static checkers
         run: python -m pip install --upgrade "ruff>=0.8" "pyright>=1.1.390"
       - name: Run Ruff
-        run: ruff check agentic.py agentic_models.py agentic_security.py agentic_dashboard.py agentic_shell.py tests
+        run: ruff check agentic.py agentic_config.py agentic_models.py agentic_security.py agentic_dashboard.py agentic_shell.py tests
       - name: Run Pyright
         run: pyright
 
@@ -87,6 +87,6 @@ jobs:
         with:
           python-version: "3.12"
       - name: Compile Python sources
-        run: python -m py_compile agentic.py agentic_models.py agentic_security.py agentic_dashboard.py agentic_shell.py
+        run: python -m py_compile agentic.py agentic_config.py agentic_models.py agentic_security.py agentic_dashboard.py agentic_shell.py
       - name: Run tests
         run: python -m unittest discover -s tests -q

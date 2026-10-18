@@ -53,11 +53,22 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
         self.assertEqual(command[command.index("--network") + 1], "none")
         self.assertIn("test-image", command)
 
-    def test_sandbox_review_forces_network_off(self):
+    def test_sandbox_read_only_and_network_policies_are_independent(self):
         settings = validate_sandbox({
             "enabled": True, "engine": "docker", "image": "test-image",
             "allow_network": True,
         })
+        developer_command = sandbox_command(
+            ["python", "-c", "pass"], Path("/tmp/worktree"), settings,
+        )
+        self.assertEqual(developer_command[developer_command.index("--network") + 1], "bridge")
+        self.assertIn(f"{Path('/tmp/worktree').resolve()}:/workspace:rw", developer_command)
+
+        command = sandbox_command(["rg", "needle", "."], Path("/tmp/worktree"), settings, read_only=True)
+        self.assertEqual(command[command.index("--network") + 1], "bridge")
+        self.assertIn(f"{Path('/tmp/worktree').resolve()}:/workspace:ro", command)
+
+        settings["allow_network"] = False
         command = sandbox_command(["rg", "needle", "."], Path("/tmp/worktree"), settings, read_only=True)
         self.assertEqual(command[command.index("--network") + 1], "none")
         self.assertIn(f"{Path('/tmp/worktree').resolve()}:/workspace:ro", command)
