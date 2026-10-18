@@ -116,11 +116,7 @@ def repository_state_key(repo: Path) -> str:
 
 
 def state_paths(repo: Path, state_dir: Path | None = None) -> StatePaths:
-    # Keep the configured spelling of the state root. Resolving symlinks here
-    # can make Windows' Path.is_relative_to disagree with the path supplied by
-    # the caller, even though the worktree is physically inside that root.
-    configured_root = (state_dir or default_state_dir()).expanduser()
-    root = Path(os.path.abspath(os.fspath(configured_root))) / repository_state_key(repo)
+    root = (state_dir or default_state_dir()).expanduser().resolve() / repository_state_key(repo)
     return StatePaths(root, root / "worktrees", root / "runs", root / "shell", root / "dashboards")
 
 
@@ -379,7 +375,7 @@ def create_worktree(repo: Path, base: str, issue_number: int,
         print("[GIT] Using relative worktree paths for WSL/Windows compatibility")
     else:
         print("[GIT] Relative worktree paths unavailable; using absolute paths")
-    return Run(issue_number, branch, Path(os.path.abspath(os.fspath(worktree))))
+    return Run(issue_number, branch, worktree.resolve())
 
 
 def _task_slug(title: str) -> str:
@@ -405,7 +401,7 @@ def create_local_worktree(repo: Path, base: str, issue: Issue,
         print("[GIT] Using relative worktree paths for WSL/Windows compatibility")
     else:
         print("[GIT] Relative worktree paths unavailable; using absolute paths")
-    return Run(None, branch, Path(os.path.abspath(os.fspath(worktree))), issue.task_key)
+    return Run(None, branch, worktree.resolve(), issue.task_key)
 
 
 def logs_path(repo: Path, run: Run, state_dir: Path | None = None) -> Path:
@@ -481,6 +477,21 @@ def _console_text(value: Any, stream: Any = None) -> str:
     except (LookupError, UnicodeEncodeError):
         return text.encode(encoding, errors="replace").decode(encoding, errors="replace")
     return text
+
+
+def _absolute_path(path: Path) -> Path:
+    """Make a path absolute without resolving Windows short-name aliases."""
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _paths_equal(left: Path, right: Path) -> bool:
+    """Compare paths by filesystem identity when possible, including Windows aliases."""
+    try:
+        return left.samefile(right)
+    except (OSError, ValueError):
+        return os.path.normcase(os.path.abspath(os.fspath(left))) == os.path.normcase(
+            os.path.abspath(os.fspath(right))
+        )
 
 
 def _console_print(*values: Any, sep: str = " ", end: str = "\n",
@@ -2183,9 +2194,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def execute(args: argparse.Namespace) -> None:
-    repo = Path(args.repo).resolve()
-    root = Path(git(repo, "rev-parse", "--show-toplevel")).resolve()
-    if repo != root:
+    repo = _absolute_path(Path(args.repo))
+    root = _absolute_path(Path(git(repo, "rev-parse", "--show-toplevel")))
+    if not _paths_equal(repo, root):
         raise RuntimeError("Run agentic.py from the project root or pass --repo pointing to that root")
     if args.runs:
         show_runs(repo)
@@ -2358,18 +2369,18 @@ def main(argv: list[str] | None = None) -> int:
                 json_output=args.json,
             )
         if args.command in {"status", "runs"}:
-            repo = Path(args.repo).resolve()
-            root = Path(git(repo, "rev-parse", "--show-toplevel")).resolve()
-            if repo != root:
+            repo = _absolute_path(Path(args.repo))
+            root = _absolute_path(Path(git(repo, "rev-parse", "--show-toplevel")))
+            if not _paths_equal(repo, root):
                 raise RuntimeError("Run status from the project root or pass --repo pointing to that root")
             show_runs(repo, json_output=args.json)
             return 0
         if args.command == "cleanup":
             if args.issue is not None and args.all_runs:
                 parser.error("cleanup accepts either --issue N or --all, not both")
-            repo = Path(args.repo).resolve()
-            root = Path(git(repo, "rev-parse", "--show-toplevel")).resolve()
-            if repo != root:
+            repo = _absolute_path(Path(args.repo))
+            root = _absolute_path(Path(git(repo, "rev-parse", "--show-toplevel")))
+            if not _paths_equal(repo, root):
                 raise RuntimeError("Run cleanup from the project root or pass --repo pointing to that root")
             with repository_lock(repo):
                 return cleanup(

@@ -66,9 +66,10 @@ class GitTest(unittest.TestCase):
     def test_central_state_dir_keeps_runtime_artifacts_outside_repository(self):
         state_dir = self.repo.parent / 'agentic-state'
         run = agentic.create_worktree(self.repo, 'main', 43, state_dir)
-        self.assertTrue(run.worktree.is_relative_to(state_dir))
+        canonical_state_dir = state_dir.resolve()
+        self.assertTrue(run.worktree.is_relative_to(canonical_state_dir))
         folder = agentic.logs_path(self.repo, run, state_dir)
-        self.assertTrue(folder.is_relative_to(state_dir))
+        self.assertTrue(folder.is_relative_to(canonical_state_dir))
         self.assertFalse(run.worktree.is_relative_to(self.repo.parent / f'.{self.repo.name}-agent-worktrees'))
         agentic.cleanup(self.repo, issue=43, confirm=True, state_dir=state_dir)
 
