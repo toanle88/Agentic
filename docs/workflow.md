@@ -32,7 +32,7 @@ Available commands:
 /ps [--all]                            Show current or persisted job status
 /logs JOB [LINES]                      Show recent output for a job
 /stop JOB                              Stop a running job
-/dashboard [OUTPUT]                    Generate the HTML dashboard
+/dashboard [OUTPUT]                    Generate and open the HTML dashboard
 /status [--json]                       Show worktree status
 /help                                  Show command help
 /quit                                  Leave the shell; jobs continue running
@@ -117,7 +117,10 @@ agentic dashboard \
   --output /path/to/agentic-dashboard.html
 ```
 
-Regenerate the dashboard after a run to refresh its contents.
+In the interactive shell, `/dashboard` generates the snapshot and opens it with
+the host operating system's default browser. Use `/dashboard PATH` to choose a
+specific output file. Regenerate the dashboard after a run to refresh its
+contents.
 
 For scripts and external dashboards, use the read-only status command instead
 of parsing terminal output:
