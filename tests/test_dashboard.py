@@ -53,6 +53,42 @@ class DashboardTests(unittest.TestCase):
             snapshot = agentic_dashboard.collect_runs(run.parent)
             self.assertEqual(snapshot[0]["review"]["status"], "approved")
 
+    def test_invalid_review_output_is_visible_as_invalid_not_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            run = root / "agent-issue-9-deadbeef"
+            run.mkdir(parents=True)
+            (run / "review-001.json").write_text(
+                '[REVIEW] invalid JSON: Expecting comma delimiter'
+            )
+            snapshot = agentic_dashboard.collect_runs(root)[0]
+            self.assertEqual(snapshot["review"]["status"], "invalid")
+            self.assertIn("not valid JSON", snapshot["review"]["summary"])
+            self.assertEqual(snapshot["review"]["findings"], [])
+
+    def test_dashboard_statuses_distinguish_active_tests_and_empty_runs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            active = root / "agent-issue-1-aaaaaaaa"
+            active.mkdir(parents=True)
+            (active / "developer-001.log").write_text('[DEVELOPER] Started\n')
+            failed = root / "agent-issue-2-bbbbbbbb"
+            failed.mkdir(parents=True)
+            (failed / "test-command-001.txt").write_text('[TESTS] exit 1 FAILED\n')
+            waiting = root / "agent-issue-3-cccccccc"
+            waiting.mkdir(parents=True)
+            (waiting / "developer-001.txt").write_text('Implementation finished\n')
+            empty = root / "agent-issue-4-dddddddd"
+            empty.mkdir(parents=True)
+            statuses = {
+                snapshot["issue"]: snapshot["status"]
+                for snapshot in agentic_dashboard.collect_runs(root)
+            }
+            self.assertEqual(statuses[1], "in-progress")
+            self.assertEqual(statuses[2], "tests-failed")
+            self.assertEqual(statuses[3], "awaiting-review")
+            self.assertEqual(statuses[4], "no-activity")
+
     def test_collect_runs_supports_local_task_logs(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / ".demo-agent-runs"
@@ -95,6 +131,33 @@ class DashboardTests(unittest.TestCase):
             html = agentic_dashboard.render_dashboard(agentic_dashboard.collect_runs(root), "demo", root.name)
             self.assertIn("Recurring findings", html)
             self.assertIn("Fix wiring", html)
+
+    def test_collect_runs_from_roots_prefers_centralized_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            centralized = root / 'centralized'
+            legacy = root / 'legacy'
+            for location, summary in ((centralized, 'central'), (legacy, 'legacy')):
+                run = location / 'agent-issue-7-deadbeef'
+                run.mkdir(parents=True)
+                (run / 'review-001.json').write_text(json.dumps({
+                    'approved': False, 'summary': summary, 'findings': [],
+                }))
+            runs = agentic_dashboard.collect_runs_from_roots([centralized, legacy])
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0]['review']['summary'], 'central')
+
+    def test_dashboard_main_writes_requested_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            logs = root / 'logs'
+            logs.mkdir()
+            output = root / 'nested' / 'dashboard.html'
+            self.assertEqual(agentic_dashboard.main([
+                '--repo', str(root), '--logs', str(logs), '--output', str(output),
+            ]), 0)
+            self.assertTrue(output.is_file())
+            self.assertIn('Agentic run dashboard', output.read_text())
 
 
 if __name__ == "__main__":

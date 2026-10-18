@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agentic-runner"
 dynamic = ["version"]
-description = "A resumable Codex and GitHub issue coding-agent runner"
+description = "A resumable multi-provider coding-agent runner"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {file = "LICENSE"}

@@ -3,7 +3,7 @@
 [![CI](https://github.com/toanle88/Agentic/actions/workflows/ci.yml/badge.svg)](https://github.com/toanle88/Agentic/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Agentic is a resumable, issue-driven coding workflow for GitHub repositories. It gives a Codex developer an isolated Git worktree, runs the target repository's checks, asks an independent read-only reviewer to inspect the patch, and preserves evidence when work needs to be resumed.
+Agentic is a resumable, issue-driven coding workflow for GitHub repositories. It gives a configurable coding agent an isolated Git worktree, runs the target repository's checks, asks an independent reviewer to inspect the patch, and preserves evidence when work needs to be resumed.
 
 Agentic is designed for human-supervised development. It does not silently commit, push, or open pull requests during development.
 
@@ -23,7 +23,7 @@ Agentic is designed for human-supervised development. It does not silently commi
 - Python 3.10 or newer
 - Git
 - [GitHub CLI](https://cli.github.com/) (`gh`)
-- [Codex CLI](https://developers.openai.com/codex/cli/)
+- At least one supported coding provider: [Codex CLI](https://developers.openai.com/codex/cli/), [Gemini CLI](https://github.com/google-gemini/gemini-cli), [Claude Code](https://docs.anthropic.com/en/docs/claude-code/cli-usage), [GitHub Copilot CLI](https://docs.github.com/en/copilot/concepts/copilot-surfaces/copilot-cli), or OpenRouter API access
 - A GitHub repository with an `origin` remote and a resolvable default branch
 - Tools required by the target repository's configured checks
 
@@ -33,7 +33,12 @@ Authenticate before the first run:
 
 ```bash
 gh auth login
-codex login
+# Authenticate the provider selected in agent_config.json.
+codex login       # Codex
+# gemini           # Gemini CLI's authentication flow
+# claude           # Claude Code's authentication flow
+# copilot          # Copilot CLI's authentication flow
+# export OPENROUTER_API_KEY='...'
 ```
 
 ## Installation
@@ -81,6 +86,42 @@ agentic init --agents  # optional starter AGENTS.md
 ```
 
 Review `agent_config.json` and replace the detected command with the target project's real fast checks. See the [configuration guide](docs/configuration.md).
+
+Provider-ready templates are in [`examples/provider-configs/`](examples/provider-configs/). Copy one to the target repository, or let initialization create it:
+
+```bash
+agentic init --provider codex
+agentic init --provider gemini
+agentic init --provider claude
+agentic init --provider copilot
+agentic init --provider openrouter
+# Use another provider for review:
+agentic init --provider codex --reviewer-provider openrouter
+```
+
+Provider selection is configured independently for the developer and reviewer:
+
+```json
+{
+  "developer": {
+    "provider": "codex",
+    "model": null,
+    "reasoning_effort": "max",
+    "timeout_seconds": null
+  },
+  "reviewer": {
+    "provider": "codex",
+    "model": null,
+    "reasoning_effort": "max",
+    "timeout_seconds": null
+  }
+}
+```
+
+Supported providers are `codex`, `gemini`, `claude`, `copilot`, and
+`openrouter`. For OpenRouter, set `model`, keep `api_key_env` pointing to an
+environment variable such as `OPENROUTER_API_KEY`, and export the key before
+running Agentic. Do not put API keys in `agent_config.json`.
 
 Run the environment diagnostic before the first issue:
 
@@ -152,8 +193,8 @@ Running the same issue again resumes its existing worktree. Use `--new` only whe
 | `agentic --issue N --new` | Create a separate worktree for the issue. |
 | `agentic --list` | List open GitHub issues. |
 | `agentic --runs` | List existing Agentic worktrees. |
-| `agentic init` | Create ignored target configuration and detect a starter check. |
-| `agentic doctor` | Diagnose Git, GitHub CLI, Codex CLI, config, and check prerequisites. |
+| `agentic init [--provider NAME]` | Create ignored target configuration and detect a starter check. |
+| `agentic doctor` | Diagnose Git, GitHub CLI, selected provider CLIs/API key, config, and check prerequisites. |
 | `agentic --state-dir PATH ...` | Store worktrees and runtime artifacts in a chosen location. |
 | `agentic cleanup --issue N` | Preview removal of a clean issue worktree; add `--yes` to confirm. |
 | `agentic dashboard` | Generate the HTML run dashboard. |
@@ -187,7 +228,7 @@ pull-request and release process.
 
 ## Safety summary
 
-Agentic runs configured checks under the host account, so use a trusted or disposable checkout and never expose production credentials. The developer and reviewer are separate processes; the reviewer is read-only. Agentic does not replace CI, security review, or human approval.
+Agentic runs configured checks under the host account, so use a trusted or disposable checkout and never expose production credentials. The developer and reviewer are separate processes; the reviewer uses the provider's read-only or restricted mode. Agentic does not replace CI, security review, or human approval.
 
 See the [workflow](docs/workflow.md), [architecture](docs/architecture.md), and [troubleshooting](docs/troubleshooting.md) guides for details.
 

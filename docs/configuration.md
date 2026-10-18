@@ -2,7 +2,20 @@
 
 Agentic reads the personal, target-specific `agent_config.json` from the target repository unless `--config` points to another file. The repository contains [`agent_config.example.json`](../agent_config.example.json) as a structural example; it is not a universal configuration.
 
-The easiest setup is `agentic init`. It creates an ignored config with a detected starter check. Treat that check as a starting point and review it before running an issue.
+The easiest setup is `agentic init`. It creates an ignored config with a detected starter check. Choose a provider during initialization when needed:
+
+```bash
+agentic init --provider codex
+agentic init --provider gemini
+agentic init --provider claude
+agentic init --provider copilot
+agentic init --provider openrouter
+```
+
+The same complete templates are available under
+[`examples/provider-configs/`](../examples/provider-configs/). Treat the
+detected `test_commands` as a starting point and replace them with the target
+project's real checks before running an issue.
 
 Runtime state is controlled separately from project configuration. Use `--state-dir PATH` or `AGENTIC_STATE_DIR` for worktrees, logs, shell records, and dashboards. This is especially useful in WSL when Windows Git must open the worktree from a shared mounted drive.
 
@@ -23,10 +36,19 @@ Runtime state is controlled separately from project configuration. Use `--state-
   ],
   "max_retries": 3,
   "max_files": null,
-  "codex_model": null,
-  "codex_reasoning_effort": null,
-  "codex_timeout_seconds": null,
-  "test_timeout_seconds": null
+  "test_timeout_seconds": null,
+  "developer": {
+    "provider": "codex",
+    "model": null,
+    "reasoning_effort": null,
+    "timeout_seconds": null
+  },
+  "reviewer": {
+    "provider": "codex",
+    "model": null,
+    "reasoning_effort": null,
+    "timeout_seconds": null
+  }
 }
 ```
 
@@ -45,6 +67,65 @@ Use commands that are actually supported by the target repository. Agentic does 
 | `codex_reasoning_effort` | string or `null` | `null` | Reasoning setting passed to Codex, such as `max`. `null` inherits the Codex CLI configuration. |
 | `codex_timeout_seconds` | integer or `null` | `null` | Developer/reviewer timeout. `null` means unlimited. |
 | `test_timeout_seconds` | integer or `null` | `null` | Per-test-command timeout. `null` means unlimited. |
+| `developer` | object | Codex defaults | Provider settings for the coding agent. |
+| `reviewer` | object | Codex defaults | Provider settings for the independent reviewer. |
+
+Each provider object supports these fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `provider` | string | `codex`, `gemini`, `claude`, `copilot`, or `openrouter`. |
+| `model` | string or `null` | Provider model; `null` uses the native CLI default. OpenRouter requires a model. |
+| `reasoning_effort` | string or `null` | Optional reasoning setting used by Codex/OpenRouter, such as `max`; native CLIs use their own options. |
+| `timeout_seconds` | integer or `null` | Per developer/reviewer invocation limit; `null` means unlimited. |
+| `api_key_env` | string | OpenRouter only: environment variable containing the API key. |
+| `base_url` | URL | OpenRouter only: API base URL, defaulting to the public OpenRouter endpoint. |
+
+### Providers
+
+`developer.provider` and `reviewer.provider` may be `codex`, `gemini`,
+`claude`, `copilot`, or `openrouter`. The developer and reviewer can use
+different providers. Native providers use their own CLI installation and
+authentication; Agentic never stores their credentials.
+
+For OpenRouter, provide a model and an environment-variable name, never the
+secret itself:
+
+```json
+{
+  "developer": {
+    "provider": "openrouter",
+    "model": "openai/gpt-5.4",
+    "reasoning_effort": "max",
+    "timeout_seconds": null,
+    "api_key_env": "OPENROUTER_API_KEY",
+    "base_url": "https://openrouter.ai/api/v1"
+  },
+  "reviewer": {
+    "provider": "openrouter",
+    "model": "anthropic/claude-sonnet-4.5",
+    "api_key_env": "OPENROUTER_API_KEY",
+    "base_url": "https://openrouter.ai/api/v1"
+  }
+}
+```
+
+Then export the key in the shell that runs Agentic:
+
+```bash
+export OPENROUTER_API_KEY='your-key'
+```
+
+OpenRouter receives scoped function tools for listing and reading files,
+running argv commands, and (for the developer only) writing files. Commits,
+pushes, and shell wrappers are blocked by the adapter; file-tool paths stay
+inside the worktree. Native developer CLIs run in the isolated Agentic
+worktree; their provider approval modes are set to allow autonomous edits,
+while reviewer modes are read-only where the provider supports that capability.
+
+The legacy `codex_*` settings remain supported for existing configurations.
+When a `developer` or `reviewer` object supplies the same setting, the nested
+value wins. New configurations should use the nested provider objects.
 
 Timeout values must be between 1 second and 24 hours when set. `max_retries` is limited to 0 through 3 by the configuration validator.
 

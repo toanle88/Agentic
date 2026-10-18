@@ -9,7 +9,7 @@ Install or make available:
 - Python 3.10 or newer
 - Git
 - [GitHub CLI](https://cli.github.com/) (`gh`)
-- [Codex CLI](https://developers.openai.com/codex/cli/)
+- One supported provider: [Codex CLI](https://developers.openai.com/codex/cli/), [Gemini CLI](https://github.com/google-gemini/gemini-cli), [Claude Code](https://docs.anthropic.com/en/docs/claude-code/cli-usage), [GitHub Copilot CLI](https://docs.github.com/en/copilot/concepts/copilot-surfaces/copilot-cli), or OpenRouter API access.
 - The tools required by the target repository's test commands
 
 The target must be an existing GitHub repository with an `origin` remote and a resolvable default branch.
@@ -18,7 +18,12 @@ Authenticate once:
 
 ```bash
 gh auth login
-codex login
+# Authenticate the provider selected in agent_config.json, for example:
+codex login       # Codex
+# gemini           # Gemini CLI
+# claude           # Claude Code
+# copilot          # GitHub Copilot CLI
+# export OPENROUTER_API_KEY='your-key'
 ```
 
 ## Install Agentic
@@ -60,7 +65,7 @@ From the target repository root, let Agentic create the personal configuration:
 agentic init
 ```
 
-The command detects a conservative starter check, adds `agent_config.json` to the target repository's `.gitignore`, and never overwrites an existing config by default. Review the generated file and replace the starter command with the target project's real checks. Use `agentic init --agents` if the repository also needs a starter `AGENTS.md`; existing files are preserved. Start with the [configuration guide](configuration.md).
+The command detects a conservative starter check, adds `agent_config.json` to the target repository's `.gitignore`, and never overwrites an existing config by default. Select a provider with `agentic init --provider gemini` (supported values are `codex`, `gemini`, `claude`, `copilot`, and `openrouter`). Review the generated file and replace the starter command with the target project's real checks. Use `agentic init --agents` if the repository also needs a starter `AGENTS.md`; existing files are preserved. Start with the [configuration guide](configuration.md).
 
 For shared repository guidance, copy [`AGENTS.example.md`](../AGENTS.example.md) to the target repository as `AGENTS.md` and customize it. See the [agent instructions guide](agent-instructions.md).
 

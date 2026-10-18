@@ -6,10 +6,10 @@ Each issue or local-task run follows this sequence:
 
 1. Resolve the repository's base branch; GitHub mode also loads the GitHub issue.
 2. Create or reuse an isolated worktree for the issue or deterministic local task.
-3. Give the task and repository instructions to the Codex developer.
+3. Give the task and repository instructions to the configured developer provider.
 4. Run every configured test command.
 5. Stage and inspect the proposed patch.
-6. Ask an independent read-only Codex reviewer for a structured verdict.
+6. Ask an independent read-only configured reviewer for a structured verdict.
 7. Approve, retry with evidence, or preserve the worktree for resume.
 
 The base checkout is not the development worktree. This keeps unfinished changes isolated from the user's main checkout.
@@ -61,7 +61,7 @@ Use `--profile slow` when the issue needs the configured integration, browser, o
 agentic --issue 119 --profile slow
 ```
 
-Agentic preserves code, commits, test output, reviewer output, and structured evidence after failures, timeouts, rejected reviews, and exhausted retries. On resume, the latest failed test and review evidence is supplied to the developer as untrusted feedback.
+Agentic preserves code, commits, test output, reviewer output, and structured evidence after failures, timeouts, rejected reviews, and exhausted retries. On resume, the latest failed test and review evidence is supplied to the developer as untrusted feedback, regardless of provider.
 
 Use `--new` only when you intentionally want a second worktree:
 
@@ -100,7 +100,7 @@ Durable artifacts are stored in the centralized Agentic state directory:
 ~/.local/state/agentic/my-project-<identity>/shell/job-001.log
 ```
 
-Run logs include developer and reviewer progress, Codex event traces, test output, structured review results, and resume evidence. They are outside the worktree so they cannot accidentally become part of the patch.
+Run logs include developer and reviewer progress, provider event traces, test output, structured review results, and resume evidence. They are outside the worktree so they cannot accidentally become part of the patch.
 
 Generate a read-only HTML snapshot:
 
