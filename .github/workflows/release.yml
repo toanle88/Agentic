@@ -33,7 +33,7 @@ jobs:
           git fetch --no-tags origin main
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
       - name: Compile runtime modules
-        run: python -m py_compile agentic.py agentic_config.py agentic_models.py agentic_security.py agentic_sandbox.py agentic_telemetry.py agentic_dashboard.py agentic_shell.py
+        run: python -m py_compile agentic.py agentic_config.py agentic_models.py agentic_security.py agentic_sandbox.py agentic_telemetry.py agentic_providers.py agentic_review.py agentic_dashboard.py agentic_shell.py
       - name: Run offline test suite
         run: python -m unittest discover -s tests -q
       - name: Install build tooling
