@@ -1403,7 +1403,7 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
     try:
         diff_check = command(
             ["git", "diff", "--check"], worktree,
-            timeout=_remaining_timeout(deadline, 180), check=False,
+            timeout=_remaining_timeout(deadline, 180) or 1, check=False,
         )
     except RuntimeError as exc:
         return False, "\n\n".join(results) + f"\ngit diff --check failed: {exc}"
