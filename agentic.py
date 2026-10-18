@@ -564,9 +564,14 @@ def _short(value: Any, limit: int = 180) -> str:
     return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
-def _safe_output(value: Any) -> str:
-    """Escape control characters before emitting diagnostic output."""
-    return str(value).replace("\\", "\\\\").replace("\r", "\\r").replace("\n", "\\n")
+def _doctor_public_detail(label: str, ok: bool, required: bool) -> str:
+    """Return only fixed, non-sensitive details for doctor output."""
+    if label == "Sandbox network":
+        return (
+            "enabled for developer and read-only reviewer; disable unless outbound access is required"
+            if not ok else "disabled for developer and read-only reviewer"
+        )
+    return "passed" if ok else ("required check failed" if required else "warning")
 
 
 def _remaining_timeout(deadline: float | None, maximum: int | None) -> int | None:
@@ -2352,17 +2357,17 @@ def doctor(repo: Path, config_path: Path | None = None, *, json_output: bool = F
                     "ok": ok,
                     "required": required,
                     "status": "ok" if ok else ("fail" if required else "warn"),
-                    "detail": _safe_output(detail),
+                    "detail": _doctor_public_detail(label, ok, required),
                 }
-                for label, ok, detail, required in checks
+                for label, ok, _detail, required in checks
             ],
         }, indent=2))
     else:
         print("Agentic doctor")
         print(f"Repository: {repo}")
-        for label, ok, detail, required in checks:
+        for label, ok, _detail, required in checks:
             state = "OK" if ok else ("FAIL" if required else "WARN")
-            print(f"[{state:<4}] {label}: {_safe_output(detail)}")
+            print(f"[{state:<4}] {label}: {_doctor_public_detail(label, ok, required)}")
     return 0 if success else 1
 
 
