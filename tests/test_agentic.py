@@ -349,14 +349,27 @@ class PureTests(unittest.TestCase):
         with (patch.object(agentic, 'installed_git_version',
                            side_effect=[(2, 48, 0), (2, 48, 0)]),
               patch.object(agentic.shutil, 'which', return_value='git.exe'),
+              patch.object(agentic.os, 'name', 'posix'),
               patch.dict(agentic.os.environ, {'WSL_DISTRO_NAME': 'Ubuntu'})):
             self.assertTrue(agentic.relative_worktree_paths_supported())
 
         with (patch.object(agentic, 'installed_git_version',
                            side_effect=[(2, 48, 0), (2, 47, 0)]),
               patch.object(agentic.shutil, 'which', return_value='git.exe'),
+              patch.object(agentic.os, 'name', 'posix'),
               patch.dict(agentic.os.environ, {'WSL_DISTRO_NAME': 'Ubuntu'})):
             self.assertFalse(agentic.relative_worktree_paths_supported())
+
+    def test_run_summary_uses_ascii_on_legacy_console_encoding(self):
+        class LegacyConsole(io.StringIO):
+            encoding = 'cp1252'
+
+        output = LegacyConsole()
+        run = agentic.Run(1, 'agent/issue-1-test', Path('C:/agentic-worktree'))
+        with patch.object(agentic.sys, 'stdout', output):
+            agentic.print_run_summary(run, 'APPROVED', 'continue')
+        self.assertIn('-' * 72, output.getvalue())
+        self.assertNotIn('─', output.getvalue())
 
     def test_relative_worktree_configuration_is_not_written_when_unsupported(self):
         with (patch('agentic.relative_worktree_paths_supported', return_value=False),

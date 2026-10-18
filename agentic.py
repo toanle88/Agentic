@@ -9,6 +9,7 @@ Python packages are required by the runner itself.
 from __future__ import annotations
 
 import argparse
+import builtins
 from contextlib import contextmanager
 import datetime
 import os
@@ -115,7 +116,11 @@ def repository_state_key(repo: Path) -> str:
 
 
 def state_paths(repo: Path, state_dir: Path | None = None) -> StatePaths:
-    root = (state_dir or default_state_dir()).expanduser().resolve() / repository_state_key(repo)
+    # Keep the configured spelling of the state root. Resolving symlinks here
+    # can make Windows' Path.is_relative_to disagree with the path supplied by
+    # the caller, even though the worktree is physically inside that root.
+    configured_root = (state_dir or default_state_dir()).expanduser()
+    root = Path(os.path.abspath(os.fspath(configured_root))) / repository_state_key(repo)
     return StatePaths(root, root / "worktrees", root / "runs", root / "shell", root / "dashboards")
 
 
@@ -374,7 +379,7 @@ def create_worktree(repo: Path, base: str, issue_number: int,
         print("[GIT] Using relative worktree paths for WSL/Windows compatibility")
     else:
         print("[GIT] Relative worktree paths unavailable; using absolute paths")
-    return Run(issue_number, branch, worktree.resolve())
+    return Run(issue_number, branch, Path(os.path.abspath(os.fspath(worktree))))
 
 
 def _task_slug(title: str) -> str:
@@ -400,7 +405,7 @@ def create_local_worktree(repo: Path, base: str, issue: Issue,
         print("[GIT] Using relative worktree paths for WSL/Windows compatibility")
     else:
         print("[GIT] Relative worktree paths unavailable; using absolute paths")
-    return Run(None, branch, worktree.resolve(), issue.task_key)
+    return Run(None, branch, Path(os.path.abspath(os.fspath(worktree))), issue.task_key)
 
 
 def logs_path(repo: Path, run: Run, state_dir: Path | None = None) -> Path:
@@ -466,6 +471,36 @@ def _short(value: Any, limit: int = 180) -> str:
     return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
+def _console_text(value: Any, stream: Any = None) -> str:
+    """Make human-facing output safe for legacy Windows console encodings."""
+    text = str(value)
+    target = stream or sys.stdout
+    encoding = getattr(target, "encoding", None) or "utf-8"
+    try:
+        text.encode(encoding)
+    except (LookupError, UnicodeEncodeError):
+        return text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+    return text
+
+
+def _console_print(*values: Any, sep: str = " ", end: str = "\n",
+                   file: Any = None, flush: bool = False) -> None:
+    """Print without allowing provider or issue text to crash a Windows console."""
+    target = file or sys.stdout
+    builtins.print(*[_console_text(value, target) for value in values],
+                   sep=sep, end=end, file=target, flush=flush)
+
+
+def _unicode_or_ascii(unicode_text: str, ascii_text: str, stream: Any = None) -> str:
+    target = stream or sys.stdout
+    encoding = getattr(target, "encoding", None) or "utf-8"
+    try:
+        unicode_text.encode(encoding)
+    except (LookupError, UnicodeEncodeError):
+        return ascii_text
+    return unicode_text
+
+
 def _paint(text: str, code: str) -> str:
     """Use color only for interactive output; logs remain plain text."""
     if os.environ.get("NO_COLOR") or not getattr(sys.stdout, "isatty", lambda: False)():
@@ -475,43 +510,45 @@ def _paint(text: str, code: str) -> str:
 
 def print_run_header(issue: Issue, run: Run, fresh: bool) -> None:
     state = "NEW" if fresh else "RESUME"
-    print("\n" + "─" * 72)
-    print(f"AGENTIC  |  {issue.reference}  |  {_paint(state, '36' if fresh else '33')}")
-    print(f"Title:    {_short(issue.title, 100)}")
-    print(f"Branch:   {run.branch}")
-    print(f"Worktree: {run.worktree}")
-    print("─" * 72, flush=True)
+    separator = _unicode_or_ascii("─" * 72, "-" * 72)
+    _console_print("\n" + separator)
+    _console_print(f"AGENTIC  |  {issue.reference}  |  {_paint(state, '36' if fresh else '33')}")
+    _console_print(f"Title:    {_short(issue.title, 100)}")
+    _console_print(f"Branch:   {run.branch}")
+    _console_print(f"Worktree: {run.worktree}")
+    _console_print(separator, flush=True)
 
 
 def print_review_summary(verdict: dict[str, Any]) -> None:
     approved = bool(verdict.get("approved"))
     status = _paint("APPROVED", "32") if approved else _paint("REJECTED", "31")
-    print(f"[REVIEW] {status}")
+    _console_print(f"[REVIEW] {status}")
     summary = str(verdict.get("summary", "")).strip()
     if summary:
-        print(f"[REVIEW] {_short(summary, 500)}")
+        _console_print(f"[REVIEW] {_short(summary, 500)}")
     findings = verdict.get("findings", [])
     if isinstance(findings, list):
         for finding in findings[:3]:
-            print(f"  • {_short(finding, 260)}")
+            _console_print(f"  - {_short(finding, 260)}")
         if len(findings) > 3:
-            print(f"  • ... and {len(findings) - 3} more; see the review JSON log")
+            _console_print(f"  - ... and {len(findings) - 3} more; see the review JSON log")
     repeated = verdict.get("_repeated_findings", [])
     if isinstance(repeated, list) and repeated:
-        print(f"[REVIEW] Repeated findings from earlier attempts: {len(repeated)}")
+        _console_print(f"[REVIEW] Repeated findings from earlier attempts: {len(repeated)}")
         for item in repeated[:3]:
             if isinstance(item, dict):
-                print(f"  ↻ [{item.get('severity', 'UNSPECIFIED')}] {_short(item.get('text', ''), 240)}")
+                _console_print(f"  * [{item.get('severity', 'UNSPECIFIED')}] {_short(item.get('text', ''), 240)}")
 
 
 def print_run_summary(run: Run, status: str, next_action: str) -> None:
     color = "32" if status in {"APPROVED", "VALIDATED"} else "33"
-    print("\n" + "─" * 72)
-    print(f"RESULT:   {_paint(status, color)}")
-    print(f"Branch:   {run.branch}")
-    print(f"Worktree: {run.worktree}")
-    print(f"Next:     {next_action}")
-    print("─" * 72, flush=True)
+    separator = _unicode_or_ascii("─" * 72, "-" * 72)
+    _console_print("\n" + separator)
+    _console_print(f"RESULT:   {_paint(status, color)}")
+    _console_print(f"Branch:   {run.branch}")
+    _console_print(f"Worktree: {run.worktree}")
+    _console_print(f"Next:     {next_action}")
+    _console_print(separator, flush=True)
 
 
 def _codex_progress(line: str) -> str | None:
@@ -605,7 +642,7 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                 colored_label = _paint(f"[{label}]", {
                     "DEVELOPER": "36", "REVIEW": "35", "TESTS": "34",
                 }.get(label, "37"))
-                print(f"[{now}] {colored_label} {message}", flush=True)
+                _console_print(f"[{now}] {colored_label} {message}", flush=True)
                 human_log.write(formatted + "\n")
                 last_notice = time.monotonic()
 
@@ -916,7 +953,7 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                 return f"ERROR: {relative!r} is not a directory"
             paths = []
             for item in sorted(target.rglob("*")):
-                relative_item = str(item.relative_to(worktree.resolve()))
+                relative_item = item.relative_to(worktree.resolve()).as_posix()
                 if sensitive_read(relative_item):
                     continue
                 if item.is_file():
@@ -1029,7 +1066,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
     def emit(message: str) -> None:
         now = datetime.datetime.now().strftime("%H:%M:%S")
         line = f"[{now}] [{label}] {message}"
-        print(line, flush=True)
+        _console_print(line, flush=True)
         with log_file.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
 
