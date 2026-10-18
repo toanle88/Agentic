@@ -1144,6 +1144,7 @@ class ResumeIntegrationTests(GitTest):
               patch('agentic.create_worktree') as create_new,
               patch('agentic.refresh_base') as refresh_base,
               patch('agentic.preflight_test_commands'),
+              patch('agentic.preflight_agent_settings'),
               patch('agentic.develop', return_value=True) as develop):
             agentic.execute(args)
             create_new.assert_not_called()
