@@ -1,148 +1,45 @@
-# Agentic v3.2 — live-progress, no-label, resumable GitHub coding runner
+# Agentic
 
-**Place `agentic.py` and `agent_config.json` in the root of your Git repository.** It detects that project's Git root from the script location. A Codex CLI login via your existing ChatGPT subscription works; you do **not** need to supply an OpenAI API key.
+Agentic runs a Codex developer and an independent read-only reviewer against GitHub issues. It uses Git worktrees so unfinished work can be resumed safely.
 
-### Requirements
-
-- Python 3.10+, Git, GitHub CLI (`gh`), Codex CLI (`codex`). This runner has no third-party Python dependencies.
-- `gh auth login` and `codex login` completed.
-- An `origin` remote targeting a GitHub repo; the default branch must be available on `origin`.
-- Issue is **open** (GitHub issue status, not a label). There are **no required or excluded labels**. The task list is limited to the first 100 open issues returned by `gh`.
-- Appropriate test tools and project dependencies installed for a **separate Git worktree**. For example, use a shared project-independent virtual environment or a local dependency manager (`uv run`) configured to install/respect that worktree. Avoid an editable install that imports your original checkout.
-- Start in a trusted/disposable repository without production credentials. Worktrees isolate Git changes but **do not sandbox arbitrary execution**.
-
-### Usage
+The runner itself has no third-party Python dependencies. It requires Python 3.10+, Git, GitHub CLI (`gh`), and Codex CLI (`codex`). Authenticate first:
 
 ```bash
-python agentic.py --list           # list open issues, oldest first, with [RESUME] markers
-python agentic.py --runs           # show existing agent worktrees (no GitHub request)
-python agentic.py                  # choose an open issue interactively
-python agentic.py --issue 42       # create worktree or RESUME prior worktree for #42
-python agentic.py --issue 42 --review  # rerun tests and independent read-only review
-python agentic.py --issue 42 --publish # rerun checks and request approval for draft PR
-python agentic.py --issue 42 --new # explicitly start a SECOND worktree for #42
-python agentic.py --repo /path/to/project --config /path/to/project/agent_config.json --issue 42
+gh auth login
+codex login
 ```
 
-> `--publish` is **not** a development command. It only accepts an **existing** worktree, runs fresh validation and a fresh review, and asks you to type `publish`. It never merges or marks the PR ready. If publication fails after the commit/push, rerun `--publish`: it can detect the committed branch patch and retry PR creation. If a PR already exists for the branch, it prints its link rather than creating a duplicate.
+The target repository must have an `origin` remote and a GitHub default branch.
 
-### Live progress, heartbeat, and logging (new in v3.2)
+## Quick start
 
-Codex output is no longer hidden until completion. The runner uses `codex exec --json`,
-reads structured JSONL events as they arrive, and renders readable progress messages.
-Review runs use a separate read-only Codex process and stream their own status.
+The commands below use WSL paths. Windows `D:\Dev\Projects\Tally` is `/mnt/d/Dev/Projects/Tally` in WSL.
 
-Example (illustrative, not an actual run against your repository):
-
-```text
-[RESUME] Using existing worktree: .../.Tally-agent-worktrees/issue-119-5802a6ff
-[DEVELOPER] Working on issue #119, attempt 1
-[07:50:02] [DEVELOPER] Started (PID 12345); progress log: .../developer-002.log
-[07:50:05] [DEVELOPER] Codex session started
-[07:50:11] [DEVELOPER] Running command: ls src
-[07:50:13] [DEVELOPER] Command finished (exit 0)
-[07:50:28] [DEVELOPER] Still running (26s elapsed)...
-[07:51:02] [DEVELOPER] Modified files: src/billing/invoices.py
-[07:51:20] [DEVELOPER] Finished in 78s (exit 0)
-[TESTS] Running: python -m pytest -q
-[TESTS] PASSED
-[REVIEW] Launching independent read-only Codex process
-[REVIEW] { "approved": true, ... }
+```bash
+python /mnt/d/dev/projects/agentic/agentic.py \
+  --repo /mnt/d/Dev/Projects/Tally \
+  --issue 119
 ```
 
-Each agent session writes two logs under `../.<project>-agent-runs/<branch>/`:
+The runner reads `/mnt/d/Dev/Projects/Tally/agent_config.json` by default. To use another file:
 
-- `developer-001.log` / `review-001.log`: human-readable progress, ideal for `tail -f`.
-- `developer-001.jsonl` / `review-001.jsonl`: raw Codex event stream for debugging.
-- `developer-001.txt` / `review-001.json`: Codex final message / structured verdict.
-- `test-command-001.txt`, `tests-001.txt`: test process output and verification summary.
-
-New invocations automatically increment the log number. Test commands print their
-output live. When an agent is quiet, a **15-second heartbeat** confirms that the
-subprocess has not terminated; a heartbeat does *not* prove forward progress.
-Codex and test commands run without a time limit by default. You can set finite
-timeouts in `agent_config.json`; these limits are intentionally independent of
-retries.
-
-**Upgrading while an old run is active:** stop the old invocation normally
-(e.g. Ctrl+C), ensure it has exited, replace `agentic.py` with the updated script,
-and run `python agentic.py --issue 119` again. It reuses the existing worktree
-and refreshes `origin/<base>` before validation. A per-repository lock rejects
-simultaneous mutating runs.
-
-### Workflow (no stages to track)
-
-1. Load open GitHub issues with no label requirements; list them by issue number (oldest first). Select an issue.
-2. Discover an existing worktree from `git worktree list --porcelain`, or create a new worktree based on the remote default branch. **No run-state JSON, DB or checkpoint stage machine is required.**
-3. The developer runs in a Codex process with `workspace-write`. Its prompt explicitly says to inspect `git status`, both staged/unstaged diffs, recent commits, source and tests, then decide what remains.
-4. Python runs configured test commands. It stages the *proposed Git diff* (ordinary Git staging, **not** a workflow stage), limits changed files and prevents sensitive/config paths from being included.
-5. A **new** Codex process runs with `--sandbox read-only`, independently inspecting the proposed change and returning a structured JSON review.
-6. If tests or review fail, Python supplies the observed feedback to the developer on another run. On error or after bounded retries, the worktree stays in place so the next `--issue 42` can resume.
-7. `--publish` always runs fresh tests and review. A SHA-256 fingerprint of the complete proposed patch must remain the same between verification and explicit approval. A draft PR is created only after you type `publish`.
-
-### Project files
-
-```text
-my-project/
-├── .git/
-├── src/
-├── tests/
-├── AGENTS.md           # commit this project-specific guidance (optional)
-├── agentic.py          # the orchestration script
-└── agent_config.json   # test commands and bounded retry limits
+```bash
+python /mnt/d/dev/projects/agentic/agentic.py \
+  --repo /mnt/d/Dev/Projects/Tally \
+  --config /path/to/agent_config.json \
+  --issue 119
 ```
 
-Worktrees and logs are created **next to** the root checkout:
+If the target configuration is missing, the runner stops before starting Codex. It never silently falls back to the Agentic repository's test configuration.
 
-```text
-../.my-project-agent-worktrees/issue-42-XXXXXXXX/
-../.my-project-agent-runs/agent-issue-42-XXXXXXXX/
-```
+## Configuration
 
-Those directories are deliberately outside the main checkout. Logs are for troubleshooting only; task progress comes from inspecting the repository and Git. If several worktrees exist for one issue, you are prompted which one to resume.
-
-### Configuration
-
-```json
-{
-  "test_commands": [["python", "-m", "pytest", "-q"]],
-  "max_retries": 3,
-  "max_files": 30,
-  "codex_model": null,
-  "codex_reasoning_effort": null,
-  "codex_timeout_seconds": null,
-  "test_timeout_seconds": null
-}
-```
-
-By default, the runner loads `agent_config.json` from the target repository. Use
-`--config` when the configuration is stored elsewhere. The runner validates
-configured executables and Python `-m` modules before starting Codex, so a
-missing dependency fails immediately instead of consuming retries.
-
-Test commands are argv arrays, not shell strings. They run in the worktree.
-The Python command above is only an example; change it for your project. For a
-Go project, for example:
-
-```json
-{
-  "test_commands": [["go", "test", "./..."]],
-  "max_retries": 3,
-  "max_files": 30,
-  "codex_model": null,
-  "codex_reasoning_effort": null,
-  "codex_timeout_seconds": null,
-  "test_timeout_seconds": null
-}
-```
-
-For projects using `uv`, an alternative is:
+Create `agent_config.json` in the target project. For Tally, use the project's actual Go checks:
 
 ```json
 {
   "test_commands": [
-    ["uv", "run", "--no-sync", "pytest", "-q"],
-    ["uv", "run", "--no-sync", "ruff", "check", "."]
+    ["go", "test", "./..."]
   ],
   "max_retries": 3,
   "max_files": 30,
@@ -153,66 +50,66 @@ For projects using `uv`, an alternative is:
 }
 ```
 
-These `uv` examples require packages already installed/available in that worktree environment; adjust for your actual project setup.
+Settings:
 
-Clearly environmental failures such as missing modules, unavailable commands,
-port-binding conflicts, and missing files are not retried because changing
-source code cannot repair them.
+- `test_commands`: required list of argument arrays. Commands run inside the worktree. Do not use shell strings.
+- `max_retries`: extra developer attempts after the first. `3` means up to 4 total attempts.
+- `max_files`: maximum number of distinct files in the proposed patch. It is checked before review/publication; it does not limit lines or files the developer may inspect.
+- `codex_model`: model override. `null` inherits your Codex CLI setting.
+- `codex_reasoning_effort`: reasoning override such as `max`. `null` inherits your Codex CLI setting.
+- `codex_timeout_seconds`: developer/reviewer limit. `null` means unlimited; a positive integer sets seconds.
+- `test_timeout_seconds`: test-process limit. `null` means unlimited; a positive integer sets seconds.
 
-Leave `codex_model` and `codex_reasoning_effort` as `null` to inherit the
-Codex CLI configuration already selected for your account, such as a
-configured Luna model and Max reasoning effort. Set them explicitly when a
-repository needs reproducible model settings. Set timeout values to positive
-seconds for limits, or `null` for no time limit.
+Commands are checked before development starts. Missing executables and missing Python `-m` modules fail immediately instead of consuming retries. Clearly environmental failures such as missing dependencies, unavailable commands, port conflicts, and missing files are not retried.
 
-### No-label behavior
-
-The only issue-selection filter is GitHub's built-in **Open** status. You can select any open issue, with no extra setup or labels. The script does not request label metadata, does not score issues from labels, and does not block tasks because they carry particular labels. It presents up to 100 open issues by issue number (oldest first); use `--issue N` to choose an issue directly.
-
-The normal checks still apply before publishing: deterministic tests, an independent code review, change-file limits, and your explicit confirmation. A closed issue cannot start a new run or be published.
-
-### What separate review means
-
-Developer invocation (can modify workspace, within Codex permission settings):
+## Commands
 
 ```bash
-codex exec --sandbox workspace-write --output-last-message /path/out.txt "Implement issue..."
+python agentic.py --list                 # list open GitHub issues
+python agentic.py --runs                 # list existing worktrees
+python agentic.py --issue 119            # create or resume issue 119
+python agentic.py --issue 119 --review   # rerun tests and review only
+python agentic.py --issue 119 --publish  # validate, then offer draft-PR publication
+python agentic.py --issue 119 --new      # explicitly create a second worktree
 ```
 
-Reviewer invocation (fresh session with read-only permissions):
+Running the same `--issue` command again resumes the existing worktree. Changes and commits are preserved. Use `--new` only when you intentionally want another worktree.
 
-```bash
-codex exec --sandbox read-only --output-schema /path/review-schema.json \
-  --output-last-message /path/review-001.json "Review the proposed PR diff..."
+The developer does not commit or push. `--publish` reruns tests and review, checks that the patch has not changed, and asks you to type `publish` before committing, pushing, and opening a draft PR.
+
+## Worktrees and logs
+
+For a project named `Tally`, worktrees and logs are created next to the checkout:
+
+```text
+../.Tally-agent-worktrees/issue-119-XXXXXXXX/
+../.Tally-agent-runs/agent-issue-119-XXXXXXXX/
 ```
 
-The two calls share the worktree files but **not the developer conversation**. They use the same subscription login and usage allowance. The reviewer receives the full issue description and test report as untrusted context. A review is helpful but cannot prove a patch is bug-free.
+The worktree is preserved after failure, timeout, or exhausted retries. Logs contain developer/reviewer progress, test output, and the final review result.
 
-### Important boundaries and trade-offs
+Only one mutating runner process can use a repository at a time. A lock prevents concurrent runs from corrupting shared Git metadata.
 
-- An AI agent can infer much of the engineering state from Git but **cannot infer trustworthy facts such as whether tests really passed or a human approved publication**. Python must enforce those rules. Without label gates, be deliberate about which issue you choose.
-- Project root's uncommitted changes do **not** automatically appear in the remote-based worktree. Commit/push relevant project instructions (`AGENTS.md`) and dependencies to the target base branch before starting an issue. The script files themselves can remain untracked locally in the *runner* checkout.
-- `AGENTS.md`, `agentic.py`, `agent_config.json`, `.env*`, private keys, `.gitmodules`, `.codex/`, and `.github/workflows/` are blocked from automated proposed patches. Inspect and apply such changes manually if needed.
-- The runner runs unit tests **outside the Codex sandbox** under the current operating-system account; a malicious test can access that account's secrets. For untrusted issues or contributors, use a locked-down container or disposable VM with minimal credentials. Even a read-only agent is not a complete security boundary.
-- `codex exec` options may evolve; check `codex exec --help` for your installed version. Windows users may prefer WSL. Codex availability and subscription limits depend on your plan.
-- This is a supervised single-user prototype, not a queue/multi-worker service. A per-repository lock prevents concurrent mutating runner processes, but separate worktrees for the same issue still require deliberate coordination. PR creation isn't the same as CI passing. CI and human code review are still required.
-- The runner **does not** automatically delete worktrees. Manage them with `git worktree list` and, when truly finished, `git worktree remove /path/to/worktree` after reviewing/preserving any changes.
+## WSL and Windows Git
 
-### WSL and Windows Git
+When both WSL Git and Windows Git are version 2.48 or newer, Agentic uses relative worktree paths for cross-platform compatibility. Older installations use the compatible fallback behavior.
 
-Git worktree metadata can contain absolute paths. If the runner creates a worktree with WSL Git and it is later opened with Windows Git, a Linux path such as `/mnt/d/...` may not be recognized by Windows Git. The runner checks the WSL Git and, when running under WSL, the available `git.exe`; when both are Git 2.48 or newer, it enables relative worktree paths for new worktrees and repairs the selected worktree when resuming it. If either installation is older or unavailable, it keeps the compatible absolute-path behavior.
-
-To repair an existing worktree manually after upgrading both Git installations, run this from the main repository in WSL:
+Manual repair from WSL, after upgrading both Git installations:
 
 ```bash
 git config worktree.useRelativePaths true
 git worktree repair --relative-paths /mnt/d/Dev/Projects/.Tally-agent-worktrees/issue-119-5802a6ff
 ```
 
-### Verify the runner offline
+## Safety boundaries
+
+- Test commands run under the host account, outside the Codex sandbox. Use a trusted or disposable checkout without production credentials.
+- The runner blocks changes to `agentic.py`, `agent_config.json`, `AGENTS.md`, secrets, private keys, `.codex/`, and GitHub workflows.
+- GitHub issue text, repository files, and test output are treated as untrusted input to Codex.
+- A reviewer is useful but cannot replace CI or human review.
+
+## Test the runner itself
 
 ```bash
-python -m unittest discover -s tests -v
+python -m unittest discover -s tests -q
 ```
-
-The included tests use temporary Git repositories, test worktree discovery and patch hashing, and mock Codex/GitHub calls where necessary. They don't authenticate or run Codex for real.
