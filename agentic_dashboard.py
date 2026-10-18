@@ -399,6 +399,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", nargs="?", choices=("help",), help="Show this help message and exit")
     parser.add_argument("--repo", type=Path, default=Path.cwd(), help="Target repository root")
     parser.add_argument("--logs", type=Path, help="Run-log directory (default: sibling .<repo>-agent-runs)")
     parser.add_argument("--output", type=Path, help="HTML output path (default: sibling .<repo>-agent-dashboard.html)")
@@ -406,7 +407,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
+    if args.command == "help":
+        parser.print_help()
+        return 0
     repo = args.repo.resolve()
     logs_root = (args.logs or default_logs_root(repo)).resolve()
     output = (args.output or repo.parent / f".{repo.name}-agent-dashboard.html").resolve()

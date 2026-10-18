@@ -63,6 +63,8 @@ Commands are checked before development starts. Missing executables and missing 
 ## Commands
 
 ```bash
+python agentic.py --help                 # show all runner options
+python agentic.py help                   # equivalent help command
 python agentic.py --list                 # list open GitHub issues
 python agentic.py --runs                 # list existing worktrees
 python agentic.py --issue 119            # create or resume issue 119
@@ -85,6 +87,13 @@ Generate a searchable, self-contained status page from the run logs. It shows ea
 
 ```bash
 python agentic_dashboard.py --repo /path/to/project
+```
+
+Use either standard help form:
+
+```bash
+python agentic_dashboard.py --help
+python agentic_dashboard.py help
 ```
 
 By default, the dashboard is written next to the project as `.project-agent-dashboard.html`. Choose another location when needed:

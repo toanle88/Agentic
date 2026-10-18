@@ -328,10 +328,12 @@ class PureTests(unittest.TestCase):
 
     def test_cli_options(self):
         args = agentic.build_parser().parse_args(['--issue', '42', '--publish'])
+        self.assertIsNone(args.command)
         self.assertEqual(args.issue, 42)
         self.assertTrue(args.publish)
         self.assertEqual(Path(args.repo), agentic.SCRIPT_DIR)
         self.assertIsNone(args.config)
+        self.assertEqual(agentic.build_parser().parse_args(['help']).command, 'help')
 
 
 if __name__ == '__main__':

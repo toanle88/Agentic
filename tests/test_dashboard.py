@@ -9,6 +9,9 @@ import agentic_dashboard
 
 
 class DashboardTests(unittest.TestCase):
+    def test_help_command_is_available(self):
+        self.assertEqual(agentic_dashboard.build_parser().parse_args(['help']).command, 'help')
+
     def test_collect_runs_extracts_review_tests_and_developer_status(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / ".demo-agent-runs"

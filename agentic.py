@@ -886,6 +886,7 @@ def select_issue(issues: list[Issue]) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", nargs="?", choices=("help",), help="Show this help message and exit")
     parser.add_argument("--repo", default=str(SCRIPT_DIR), help="Project root (default: script directory)")
     parser.add_argument(
         "--config", default=None,
@@ -989,8 +990,13 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> None:
 
 
 def main() -> int:
+    parser = build_parser()
     try:
-        execute(build_parser().parse_args())
+        args = parser.parse_args()
+        if args.command == "help":
+            parser.print_help()
+            return 0
+        execute(args)
         return 0
     except (RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
