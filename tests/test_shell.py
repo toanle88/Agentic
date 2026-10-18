@@ -67,6 +67,39 @@ class ShellTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             agentic_shell._parse_job_command(['/run', '119', '--unknown'])
 
+    def test_completion_suggests_commands_options_and_job_ids(self):
+        self.assertEqual(
+            agentic_shell._completion_candidates('/r'),
+            ['/run'],
+        )
+        self.assertEqual(
+            agentic_shell._completion_candidates('/run --p'),
+            ['--profile', '--publish'],
+        )
+        self.assertEqual(
+            agentic_shell._completion_candidates('/run --profile s'),
+            ['slow'],
+        )
+        self.assertEqual(
+            agentic_shell._completion_candidates('/logs ', job_numbers=(2, 1)),
+            ['1', '2'],
+        )
+        self.assertEqual(
+            agentic_shell._completion_candidates('/status '),
+            ['--json'],
+        )
+        self.assertEqual(agentic_shell._completion_candidates('run '), [])
+
+    def test_completion_replaces_only_the_current_token(self):
+        self.assertEqual(
+            agentic_shell._replace_current_token('/run --prof', '--profile'),
+            '/run --profile',
+        )
+        self.assertEqual(
+            agentic_shell._replace_current_token('/run ', '--review'),
+            '/run --review',
+        )
+
     def test_local_task_capture_writes_a_reusable_task_file(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
