@@ -1,8 +1,11 @@
 {
   "include": [
     "agentic.py",
+    "agentic_config.py",
     "agentic_models.py",
     "agentic_security.py",
+    "agentic_sandbox.py",
+    "agentic_telemetry.py",
     "agentic_dashboard.py",
     "agentic_shell.py"
   ],

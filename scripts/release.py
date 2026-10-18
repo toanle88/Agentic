@@ -21,8 +21,11 @@ ROOT = Path(__file__).resolve().parents[1]
 VERSION_PATTERN = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 RUNTIME_MODULES = (
     "agentic.py",
+    "agentic_config.py",
     "agentic_models.py",
     "agentic_security.py",
+    "agentic_sandbox.py",
+    "agentic_telemetry.py",
     "agentic_dashboard.py",
     "agentic_shell.py",
 )
