@@ -64,11 +64,21 @@ The package version is defined by `agentic.__version__` and exposed by:
 agentic --version
 ```
 
-For a release, update the version in a pull request, merge it, and create a semantic-version tag from the resulting `main` commit:
+For a release, update the version in a pull request and merge it. Then run the
+release helper from the repository checkout:
 
 ```bash
-git tag v0.1.1
-git push origin v0.1.1
+python scripts/release.py --dry-run
+python scripts/release.py
 ```
 
-The release workflow verifies that the tag matches the package version, builds the source distribution and wheel, and creates a GitHub release.
+The helper fetches `origin/main`, requires a clean and synchronized local
+`main`, runs the offline test and compile checks, verifies that the generated
+tag is unused, and asks for confirmation before creating and pushing it. The
+current package version is read from `agentic.__version__`, so version `0.2.0`
+produces tag `v0.2.0`.
+
+The release workflow verifies that the tag matches the package version, builds
+the source distribution and wheel, and creates a GitHub release. It does not
+publish to PyPI. If pushing the tag fails after local tag creation, rerun the
+printed `git push origin <tag>` command after fixing the remote issue.
