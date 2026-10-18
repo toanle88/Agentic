@@ -9,6 +9,8 @@ Agentic is intentionally small and uses the Python standard library at runtime.
 | `agentic.py` | Repository validation, GitHub/local task intake, worktree lifecycle, developer/reviewer orchestration, checks, retries, and publication. |
 | `agentic_shell.py` | Interactive supervisor for background jobs and terminal log tails. |
 | `agentic_dashboard.py` | Read-only parser and renderer for durable run logs. |
+| `agentic_models.py` | Immutable task, run, state, and provider configuration models. |
+| `agentic_security.py` | Shared credential redaction for logs and dashboard output. |
 | `agent_config.json` | Target-repository checks and per-run policy settings. |
 | Git worktrees | Isolate issue or local-task changes from the base checkout and preserve unfinished work. |
 | GitHub CLI | Read issues and publish an explicitly approved branch/PR. |
@@ -55,9 +57,11 @@ Set `AGENTIC_STATE_DIR` or pass `--state-dir PATH` to choose another root. A sha
 - Native provider CLIs receive provider-specific non-interactive permissions. Gemini and Claude use their read-only review modes; Copilot is restricted to its available read/review tools and denied common Git mutations. OpenRouter uses an Agentic-owned scoped tool loop.
 - The runner refuses protected changes including Agentic configuration, agent instructions, secrets, private keys, `.codex/`, and GitHub workflows.
 - Issue text, repository files, and test output are untrusted input to the selected provider.
+- Provider and test output is redacted before it is persisted or shown in the dashboard; use a trusted checkout because redaction cannot identify every possible secret.
 - GitHub issue intake is the default; local task intake is opt-in through `task_source: "local"`.
 - The developer does not commit or push. Publication requires a separate validation step and explicit human confirmation.
 - A repository lock prevents concurrent mutating runs from corrupting shared Git metadata.
+- `agentic status --json` exposes stable worktree records for scripts without parsing terminal output.
 
 ## WSL and Windows Git compatibility
 

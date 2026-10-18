@@ -23,7 +23,15 @@ python -m unittest discover -s tests -q
 Compile all Python modules:
 
 ```bash
-python -m py_compile agentic.py agentic_dashboard.py agentic_shell.py
+python -m py_compile agentic.py agentic_models.py agentic_security.py agentic_dashboard.py agentic_shell.py
+```
+
+Run the static checks used by CI:
+
+```bash
+python -m pip install -e '.[dev]'
+ruff check agentic.py agentic_models.py agentic_security.py agentic_dashboard.py agentic_shell.py tests
+pyright
 ```
 
 Build the source distribution and wheel:

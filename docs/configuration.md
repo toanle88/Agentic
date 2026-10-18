@@ -2,6 +2,8 @@
 
 Agentic reads the personal, target-specific `agent_config.json` from the target repository unless `--config` points to another file. The repository contains [`agent_config.example.json`](../agent_config.example.json) as a structural example; it is not a universal configuration.
 
+For editor validation, use the checked-in [`agent_config.schema.json`](../agent_config.schema.json) as the JSON Schema. The schema is a convenience for editors; Agentic remains the source of truth and validates configuration before a run.
+
 The easiest setup is `agentic init`. It creates an ignored config with a detected starter check. Choose a provider during initialization when needed:
 
 ```bash
@@ -80,6 +82,9 @@ Each provider object supports these fields:
 | `timeout_seconds` | integer or `null` | Per developer/reviewer invocation limit; `null` means unlimited. |
 | `api_key_env` | string | OpenRouter only: environment variable containing the API key. |
 | `base_url` | URL | OpenRouter only: API base URL, defaulting to the public OpenRouter endpoint. |
+| `max_tool_turns` | integer or `null` | OpenRouter only: maximum number of model/tool rounds; default `80`. |
+| `command_timeout_seconds` | integer or `null` | OpenRouter only: maximum duration of one tool command; `null` means unlimited. |
+| `allow_network` | boolean | OpenRouter only: allow explicitly network-capable commands. Defaults to `false`. This is not an OS-level network sandbox. |
 
 ### Providers
 
@@ -122,6 +127,12 @@ pushes, and shell wrappers are blocked by the adapter; file-tool paths stay
 inside the worktree. Native developer CLIs run in the isolated Agentic
 worktree; their provider approval modes are set to allow autonomous edits,
 while reviewer modes are read-only where the provider supports that capability.
+
+OpenRouter tool commands have a per-command timeout and network-command deny
+list by default. Set `allow_network` only for a trusted repository and model;
+the setting permits selected network-capable executables but cannot prevent a
+programming language runtime from opening a socket. Use OS/container sandboxing
+when untrusted code must be run.
 
 The legacy `codex_*` settings remain supported for existing configurations.
 When a `developer` or `reviewer` object supplies the same setting, the nested

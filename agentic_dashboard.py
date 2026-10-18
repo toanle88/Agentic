@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from agentic import default_state_dir, legacy_runs_dir, state_paths
+from agentic_security import redact_secrets
 
 
 RUN_NAME = re.compile(
@@ -70,8 +71,8 @@ def _read(path: Path, limit: int = MAX_TEXT) -> str:
     except OSError as exc:
         return f"Could not read {path.name}: {exc}"
     if len(text) > limit:
-        return f"[… earlier output omitted; showing the last {limit:,} characters …]\n" + text[-limit:]
-    return text
+        text = f"[… earlier output omitted; showing the last {limit:,} characters …]\n" + text[-limit:]
+    return redact_secrets(text)
 
 
 def _timestamp(path: Path) -> str:

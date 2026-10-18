@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/toanle88/Agentic/blob/main/agent_config.schema.json",
+  "title": "Agentic target configuration",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "task_source": { "enum": ["github", "local"] },
+    "test_commands": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+    },
+    "slow_test_commands": {
+      "type": "array",
+      "items": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+    },
+    "max_retries": { "type": "integer", "minimum": 0, "maximum": 3 },
+    "max_files": { "type": ["integer", "null"], "minimum": 1, "maximum": 100 },
+    "test_timeout_seconds": { "type": ["integer", "null"], "minimum": 1, "maximum": 86400 },
+    "developer": { "$ref": "#/$defs/agent" },
+    "reviewer": { "$ref": "#/$defs/agent" },
+    "agent": { "$ref": "#/$defs/agent" }
+  },
+  "$defs": {
+    "agent": {
+      "type": "object",
+      "properties": {
+        "provider": { "enum": ["codex", "gemini", "claude", "copilot", "openrouter"] },
+        "model": { "type": ["string", "null"] },
+        "reasoning_effort": { "type": ["string", "null"] },
+        "timeout_seconds": { "type": ["integer", "null"], "minimum": 1, "maximum": 86400 },
+        "api_key_env": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+        "base_url": { "type": "string", "format": "uri" },
+        "max_tool_turns": { "type": ["integer", "null"], "minimum": 1, "maximum": 200 },
+        "command_timeout_seconds": { "type": ["integer", "null"], "minimum": 1, "maximum": 86400 },
+        "allow_network": { "type": "boolean" }
+      }
+    }
+  }
+}

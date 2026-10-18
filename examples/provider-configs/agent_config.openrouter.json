@@ -13,7 +13,10 @@
     "reasoning_effort": null,
     "timeout_seconds": null,
     "api_key_env": "OPENROUTER_API_KEY",
-    "base_url": "https://openrouter.ai/api/v1"
+    "base_url": "https://openrouter.ai/api/v1",
+    "max_tool_turns": 80,
+    "command_timeout_seconds": null,
+    "allow_network": false
   },
   "reviewer": {
     "provider": "openrouter",
@@ -21,6 +24,9 @@
     "reasoning_effort": null,
     "timeout_seconds": null,
     "api_key_env": "OPENROUTER_API_KEY",
-    "base_url": "https://openrouter.ai/api/v1"
+    "base_url": "https://openrouter.ai/api/v1",
+    "max_tool_turns": 80,
+    "command_timeout_seconds": null,
+    "allow_network": false
   }
 }

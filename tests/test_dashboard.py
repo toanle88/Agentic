@@ -116,6 +116,15 @@ class DashboardTests(unittest.TestCase):
             self.assertNotIn("</script><script>", html)
             self.assertIn("\\u003c/script\\u003e", html)
 
+    def test_dashboard_redacts_credentials_from_log_content(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            run = root / "agent-issue-7-deadbeef"
+            run.mkdir(parents=True)
+            (run / "developer-001.txt").write_text("api_key=dashboard-secret-value")
+            snapshot = agentic_dashboard.collect_runs(root)
+            self.assertNotIn("dashboard-secret-value", snapshot[0]["developer"]["summary"])
+
     def test_dashboard_renders_recurring_findings(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / ".demo-agent-runs"
