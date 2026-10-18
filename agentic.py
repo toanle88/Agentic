@@ -52,12 +52,17 @@ from agentic_config import (
     test_commands_for_profile,
 )
 from agentic_models import AgentSettings, Issue, Run, StatePaths
+from agentic_providers import cli_provider_command, codex_command
+from agentic_review import (
+    parse_review_result,
+    record_review_findings, review_history_feedback,
+)
 from agentic_sandbox import DEFAULT_SANDBOX_IMAGE, sandbox_command, validate_sandbox
 from agentic_security import redact_secrets
 from agentic_telemetry import combine_usage, extract_jsonl_usage, normalize_usage, record_usage
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.0.9"
+__version__ = "1.1.0"
 # Keep the configuration constants available from the historical runner module
 # while the implementation lives in agentic_config.
 DEFAULT_SECURITY_MODE = _agentic_config.DEFAULT_SECURITY_MODE
@@ -854,14 +859,10 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
               reasoning_effort: str | None = None,
               sandbox: dict[str, Any] | None = None) -> tuple[bool, str]:
     # Each invocation creates a fresh session. The repository is the memory.
-    args = ["codex", "exec", "--json", "--sandbox", "read-only" if readonly else "workspace-write"]
-    if model:
-        args += ["--model", model]
-    if reasoning_effort:
-        args += ["--config", f"model_reasoning_effort={json.dumps(reasoning_effort)}"]
-    if schema:
-        args += ["--output-schema", str(schema)]
-    args += ["--output-last-message", str(output), prompt]
+    args = codex_command(
+        prompt, readonly=readonly, schema=schema, output=output,
+        model=model, reasoning_effort=reasoning_effort,
+    )
     label = "REVIEW" if readonly else "DEVELOPER"
     result = streamed_command(args, worktree, label=label, log_file=output.with_suffix(".log"),
                               timeout=timeout, codex_json=True, sandbox=sandbox,
@@ -965,39 +966,7 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
                      model: str | None = None,
                      sandbox: dict[str, Any] | None = None) -> tuple[bool, str]:
     """Run a locally installed coding CLI in its non-interactive mode."""
-    if provider == "gemini":
-        args = [
-            "gemini", "-p", prompt, "--output-format", "stream-json",
-            "--approval-mode", "plan" if readonly else "yolo",
-        ]
-        if model:
-            args += ["--model", model]
-        structured = True
-    elif provider == "claude":
-        args = ["claude", "-p", prompt, "--output-format", "stream-json"]
-        if readonly:
-            args += ["--permission-mode", "plan"]
-        else:
-            args += ["--dangerously-skip-permissions"]
-        if model:
-            args += ["--model", model]
-        structured = True
-    elif provider == "copilot":
-        args = ["copilot", "-p", prompt, "-s"]
-        if model:
-            args += ["--model", model]
-        if readonly:
-            # Copilot has no universal read-only mode; omit its shell tool and
-            # expose only file-inspection capabilities for review.
-            args += [
-                "--available-tools", "view,grep,glob",
-                "--deny-tool", "shell(*)",
-            ]
-        else:
-            args += ["--allow-all-tools", "--allow-all-paths"]
-        structured = False
-    else:
-        raise ValueError(f"Unsupported CLI provider: {provider}")
+    args, structured = cli_provider_command(provider, prompt, readonly=readonly, model=model)
 
     label = "REVIEW" if readonly else "DEVELOPER"
     result = streamed_command(
@@ -1606,126 +1575,6 @@ def prepare_patch(worktree: Path, base: str, max_files: int | None) -> tuple[str
     digest = hashlib.sha256(diff.encode("utf-8")).hexdigest()
     summary = git(worktree, "diff", "--cached", "--stat", base_sha)
     return base_sha, digest, summary
-
-
-def parse_review_result(text: str) -> dict[str, Any] | None:
-    """Parse strict or lightly wrapped JSON returned by the reviewer.
-
-    Providers are asked for schema-constrained output where supported, but a CLI wrapper or a
-    platform-specific transport can still add Markdown fences or a short
-    prefix/suffix. Recovering the object here avoids treating a reviewer
-    formatting problem as a code rejection.
-    """
-    candidates = [text.strip()]
-    candidates.extend(
-        match.group(1)
-        for match in re.finditer(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text, re.IGNORECASE)
-    )
-    start = text.find("{")
-    if start >= 0:
-        candidates.append(text[start:])
-    decoder = json.JSONDecoder()
-    for candidate in candidates:
-        try:
-            value, _ = decoder.raw_decode(candidate)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            return value
-    return None
-
-
-def finding_severity(finding: str) -> str:
-    """Extract a conventional severity prefix while tolerating reviewer prose."""
-    upper = finding.upper().strip()
-    for severity in FINDING_SEVERITIES:
-        if re.match(rf"^\[?{severity}\]?\s*(?:[-:—]|\b)", upper):
-            return severity
-    match = re.match(r"^P([0-3])\b", upper)
-    if match:
-        return {"0": "BLOCKER", "1": "HIGH", "2": "MEDIUM", "3": "LOW"}[match.group(1)]
-    return "UNSPECIFIED"
-
-
-def finding_fingerprint(finding: str) -> str:
-    """Create a stable short key for the same review finding across attempts."""
-    normalized = finding.lower()
-    normalized = re.sub(r"\[[^\]]+\]", " ", normalized)
-    normalized = re.sub(r"\b(?:blocker|critical|major|high|medium|minor|low|p[0-3])\b", " ", normalized)
-    normalized = re.sub(r"(?:/|\\)[^\s,:;()]+", " path ", normalized)
-    normalized = re.sub(r"\b\d+(?:-\d+)?\b", " ", normalized)
-    normalized = re.sub(r"[^a-z0-9]+", " ", normalized).strip()
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
-
-
-def analyze_findings(findings: list[str]) -> list[dict[str, str]]:
-    return [
-        {
-            "severity": finding_severity(finding),
-            "fingerprint": finding_fingerprint(finding),
-            "text": finding,
-        }
-        for finding in findings
-    ]
-
-
-def record_review_findings(folder: Path, verdict: dict[str, Any]) -> dict[str, Any]:
-    """Persist finding history and annotate recurring findings for the next attempt."""
-    history_path = folder / "review-history.json"
-    try:
-        history = json.loads(history_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        history = []
-    if not isinstance(history, list):
-        history = []
-    findings = verdict.get("findings", [])
-    details = analyze_findings([item for item in findings if isinstance(item, str)])
-    previous_counts: dict[str, int] = {}
-    for entry in history:
-        if not isinstance(entry, dict):
-            continue
-        for item in entry.get("findings", []):
-            if isinstance(item, dict) and isinstance(item.get("fingerprint"), str):
-                key = item["fingerprint"]
-                previous_counts[key] = previous_counts.get(key, 0) + 1
-    repeated = [item for item in details if previous_counts.get(item["fingerprint"], 0) > 0]
-    history.append({
-        "timestamp": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
-        "approved": bool(verdict.get("approved")),
-        "findings": details,
-    })
-    history_path.write_text(json.dumps(history[-50:], indent=2), encoding="utf-8")
-    verdict["_finding_analysis"] = details
-    verdict["_repeated_findings"] = repeated
-    return verdict
-
-
-def review_history_feedback(folder: Path) -> str:
-    path = folder / "review-history.json"
-    try:
-        history = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return ""
-    if not isinstance(history, list) or len(history) < 2:
-        return ""
-    counts: dict[str, tuple[int, str, str]] = {}
-    for entry in history:
-        if not isinstance(entry, dict):
-            continue
-        for item in entry.get("findings", []):
-            if not isinstance(item, dict):
-                continue
-            key = item.get("fingerprint")
-            if not isinstance(key, str):
-                continue
-            count, severity, text = counts.get(
-                key, (0, str(item.get("severity", "UNSPECIFIED")), str(item.get("text", "")))
-            )
-            counts[key] = (count + 1, severity, text)
-    repeated = [f"[{severity}] ({count} reviews) {text}" for count, severity, text in counts.values() if count > 1]
-    if not repeated:
-        return ""
-    return "Recurring review findings from earlier attempts (prioritize resolving these):\n" + "\n".join(repeated[-8:])
 
 
 def investigate_issue(worktree: Path, issue: Issue, folder: Path, *,
