@@ -79,6 +79,24 @@ The developer does not commit or push. `--publish` reruns tests and review, chec
 
 The terminal view shows a compact run banner, colored status labels when output is interactive, the top review findings, and a final next-action summary. Full JSON/JSONL details remain in the run logs.
 
+## HTML run dashboard
+
+Generate a searchable, self-contained status page from the run logs. It shows each issue's attempts, test result, review summary/findings, developer result, and expandable log contents:
+
+```bash
+python agentic_dashboard.py --repo /path/to/project
+```
+
+By default, the dashboard is written next to the project as `.project-agent-dashboard.html`. Choose another location when needed:
+
+```bash
+python agentic_dashboard.py \
+  --repo /path/to/project \
+  --output /path/to/agentic-dashboard.html
+```
+
+The generator is read-only and uses only the Python standard library. Regenerate the page after a run to refresh its snapshot.
+
 ## Worktrees and logs
 
 For a project named `my-project`, worktrees and logs are created next to the checkout:
