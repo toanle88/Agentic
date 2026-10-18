@@ -75,8 +75,8 @@ python scripts/release.py
 The helper fetches `origin/main`, requires a clean and synchronized local
 `main`, runs the offline test and compile checks, verifies that the generated
 tag is unused, and asks for confirmation before creating and pushing it. The
-current package version is read from `agentic.__version__`, so version `0.2.0`
-produces tag `v0.2.0`.
+current package version is read from `agentic.__version__`, so version `1.0.0`
+produces tag `v1.0.0`.
 
 The release workflow verifies that the tag matches the package version, builds
 the source distribution and wheel, and creates a GitHub release. It does not

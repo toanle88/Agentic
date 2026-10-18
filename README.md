@@ -229,7 +229,7 @@ Run the local checks with:
 python -m unittest discover -s tests -q
 ```
 
-Release tags use semantic versioning, such as `v0.2.0`. After the version
+Release tags use semantic versioning, such as `v1.0.0`. After the version
 change has been merged to `main`, run the release helper from this checkout:
 
 ```bash

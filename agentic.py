@@ -34,7 +34,7 @@ from agentic_models import AgentSettings, Issue, Run, StatePaths
 from agentic_security import redact_secrets
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "0.2.0"
+__version__ = "1.0.0"
 SUPPORTED_PROVIDERS = ("codex", "gemini", "claude", "copilot", "openrouter")
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MAX_TURNS = 80
