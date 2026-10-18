@@ -1336,6 +1336,22 @@ class StreamingTests(unittest.TestCase):
             self.assertFalse(passed)
             self.assertIn('git diff --check failed', report)
 
+    def test_test_runner_stops_when_deadline_expires_between_commands(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            sh('git', 'init', cwd=root)
+            with patch('agentic.streamed_command', return_value=CompletedProcess([], 0, stdout='ok')) as streamed, \
+                 patch('agentic.time.monotonic', side_effect=[100, 100, 102]):
+                passed, report = agentic.run_tests(
+                    root,
+                    [[sys.executable, '-c', 'print("one")'], [sys.executable, '-c', 'print("two")']],
+                    timeout=300,
+                    deadline=101,
+                )
+            self.assertFalse(passed)
+            self.assertIn('deadline', report.lower())
+            streamed.assert_called_once()
+
     def test_stream_timeout_does_not_hang(self):
         from io import StringIO
         with tempfile.TemporaryDirectory() as dirname:

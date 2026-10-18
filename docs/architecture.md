@@ -11,6 +11,8 @@ Agentic is intentionally small and uses the Python standard library at runtime.
 | `agentic_dashboard.py` | Read-only parser and renderer for durable run logs. |
 | `agentic_models.py` | Immutable task, run, state, and provider configuration models. |
 | `agentic_security.py` | Shared credential redaction for logs and dashboard output. |
+| `agentic_telemetry.py` | Optional provider usage normalization and durable cost records. |
+| `agentic_sandbox.py` | Optional Docker/Podman command wrapping for native providers and checks. |
 | `agent_config.json` | Target-repository checks and per-run policy settings. |
 | Git worktrees | Isolate issue or local-task changes from the base checkout and preserve unfinished work. |
 | GitHub CLI | Read issues and publish an explicitly approved branch/PR. |
@@ -43,6 +45,7 @@ target-repository/
 ├── worktrees/issue-119-XXXXXXXX/        # GitHub issue
 ├── worktrees/task-add-export-XXXXXXXXXXXX/ # local task
 ├── runs/agent-issue-119-XXXXXXXX/
+├── locks/                               # repository/worktree coordination locks
 ├── shell/job-001.log
 ├── shell/job-001.json
 └── dashboards/dashboard.html
@@ -61,6 +64,9 @@ Set `AGENTIC_STATE_DIR` or pass `--state-dir PATH` to choose another root. A sha
 - GitHub issue intake is the default; local task intake is opt-in through `task_source: "local"`.
 - The developer does not commit or push. Publication requires a separate validation step and explicit human confirmation.
 - A repository lock prevents concurrent mutating runs from corrupting shared Git metadata.
+- Repository metadata operations use a shared lock while independent worktrees use separate locks.
+- Provider usage and cost are recorded only when the provider reports them; missing usage remains unknown.
+- Optional container mode mounts the task worktree and output directory only, with networking disabled by default.
 - `agentic status --json` exposes stable worktree records for scripts without parsing terminal output.
 
 ## WSL and Windows Git compatibility

@@ -216,11 +216,14 @@ Running the same issue again resumes its existing worktree. Use `--new` only whe
 | Guide | Contents |
 | --- | --- |
 | [Getting started](docs/getting-started.md) | Installation, authentication, first run, and target repository setup. |
+| [Five-minute quickstart](docs/quickstart.md) | A disposable local-task walkthrough. |
+| [Offline benchmarking](docs/benchmarking.md) | Deterministic argv-only benchmark cases and result format. |
 | [Configuration](docs/configuration.md) | `agent_config.json`, test commands, model settings, retries, and timeouts. |
 | [Agent instructions](docs/agent-instructions.md) | How to create and maintain a target repository's `AGENTS.md`. |
 | [Workflow](docs/workflow.md) | Worktrees, resume behavior, reviews, publication, logs, and dashboard usage. |
 | [Troubleshooting](docs/troubleshooting.md) | Missing tools, failed checks, repeated rejections, and WSL/Git issues. |
 | [Architecture](docs/architecture.md) | Components, lifecycle, filesystem layout, and safety boundaries. |
+| [Security policy](SECURITY.md) | Threat model, credentials, logs, and sandbox limitations. |
 | [Development](docs/development.md) | Local development, tests, CI, releases, and contribution workflow. |
 | [`agent_config.schema.json`](agent_config.schema.json) | JSON Schema for editor-assisted configuration validation. |
 

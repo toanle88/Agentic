@@ -6,27 +6,28 @@
   "slow_test_commands": [],
   "max_retries": 3,
   "max_files": null,
-  "test_timeout_seconds": null,
+  "test_timeout_seconds": 300,
+  "task_timeout_seconds": 1800,
   "developer": {
     "provider": "openrouter",
     "model": "openai/gpt-5.4",
     "reasoning_effort": null,
-    "timeout_seconds": null,
+    "timeout_seconds": 600,
     "api_key_env": "OPENROUTER_API_KEY",
     "base_url": "https://openrouter.ai/api/v1",
     "max_tool_turns": 80,
-    "command_timeout_seconds": null,
+    "command_timeout_seconds": 300,
     "allow_network": false
   },
   "reviewer": {
     "provider": "openrouter",
     "model": "openai/gpt-5.4",
     "reasoning_effort": null,
-    "timeout_seconds": null,
+    "timeout_seconds": 300,
     "api_key_env": "OPENROUTER_API_KEY",
     "base_url": "https://openrouter.ai/api/v1",
     "max_tool_turns": 80,
-    "command_timeout_seconds": null,
+    "command_timeout_seconds": 300,
     "allow_network": false
   }
 }

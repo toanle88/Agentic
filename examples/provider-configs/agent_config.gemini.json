@@ -6,17 +6,18 @@
   "slow_test_commands": [],
   "max_retries": 3,
   "max_files": null,
-  "test_timeout_seconds": null,
+  "test_timeout_seconds": 300,
+  "task_timeout_seconds": 1800,
   "developer": {
     "provider": "gemini",
     "model": null,
     "reasoning_effort": null,
-    "timeout_seconds": null
+    "timeout_seconds": 600
   },
   "reviewer": {
     "provider": "gemini",
     "model": null,
     "reasoning_effort": null,
-    "timeout_seconds": null
+    "timeout_seconds": 300
   }
 }
