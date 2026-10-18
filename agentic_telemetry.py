@@ -37,7 +37,8 @@ def normalize_usage(raw: Any, *, provider: str | None = None) -> dict[str, Any]:
     """Normalize common provider usage shapes without inventing values."""
     if not isinstance(raw, dict):
         return {"provider": provider, **{key: None for key in USAGE_KEYS}, "estimated_cost_usd": None}
-    usage = raw.get("usage") if isinstance(raw.get("usage"), dict) else raw
+    nested_usage = raw.get("usage")
+    usage = nested_usage if isinstance(nested_usage, dict) else raw
     prompt = _number(usage.get("prompt_tokens", usage.get("input_tokens")))
     completion = _number(usage.get("completion_tokens", usage.get("output_tokens")))
     total = _number(usage.get("total_tokens"))
