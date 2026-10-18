@@ -528,16 +528,21 @@ def print_review_summary(verdict: dict[str, Any]) -> None:
         _console_print(f"[REVIEW] {_short(summary, 500)}")
     findings = verdict.get("findings", [])
     if isinstance(findings, list):
+        bullet = _unicode_or_ascii("•", "-")
         for finding in findings[:3]:
-            _console_print(f"  - {_short(finding, 260)}")
+            _console_print(f"  {bullet} {_short(finding, 260)}")
         if len(findings) > 3:
-            _console_print(f"  - ... and {len(findings) - 3} more; see the review JSON log")
+            _console_print(f"  {bullet} ... and {len(findings) - 3} more; see the review JSON log")
     repeated = verdict.get("_repeated_findings", [])
     if isinstance(repeated, list) and repeated:
         _console_print(f"[REVIEW] Repeated findings from earlier attempts: {len(repeated)}")
+        repeat_marker = _unicode_or_ascii("↻", "*")
         for item in repeated[:3]:
             if isinstance(item, dict):
-                _console_print(f"  * [{item.get('severity', 'UNSPECIFIED')}] {_short(item.get('text', ''), 240)}")
+                _console_print(
+                    f"  {repeat_marker} [{item.get('severity', 'UNSPECIFIED')}] "
+                    f"{_short(item.get('text', ''), 240)}"
+                )
 
 
 def print_run_summary(run: Run, status: str, next_action: str) -> None:
