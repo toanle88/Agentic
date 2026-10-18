@@ -15,7 +15,7 @@ dependencies = []
 [project.optional-dependencies]
 dev = [
     "build>=1.2",
-    "pyright>=1.1.390",
+    "pyright>=1.1.414",
     "ruff>=0.8",
 ]
 
