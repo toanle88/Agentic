@@ -52,7 +52,7 @@ Settings:
 
 - `test_commands`: required list of argument arrays. Commands run inside the worktree. Do not use shell strings.
 - `max_retries`: extra developer attempts after the first. `3` means up to 4 total attempts.
-- `max_files`: maximum number of distinct files in the proposed patch. It is checked before review/publication; it does not limit lines or files the developer may inspect.
+- `max_files`: maximum number of distinct files in the proposed patch. It is checked before review/publication; it does not limit lines or files the developer may inspect. Set it to `null` to disable this limit.
 - `codex_model`: model override. `null` inherits your Codex CLI setting.
 - `codex_reasoning_effort`: reasoning override such as `max`. `null` inherits your Codex CLI setting.
 - `codex_timeout_seconds`: developer/reviewer limit. `null` means unlimited; a positive integer sets seconds.

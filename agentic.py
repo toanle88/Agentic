@@ -619,7 +619,7 @@ def base_revision(worktree: Path, base: str) -> str:
     return git(worktree, "merge-base", "HEAD", f"refs/remotes/origin/{base}")
 
 
-def prepare_patch(worktree: Path, base: str, max_files: int) -> tuple[str, str, str]:
+def prepare_patch(worktree: Path, base: str, max_files: int | None) -> tuple[str, str, str]:
     """Stage pending edits and return (base SHA, patch digest, diff summary).
 
     The digest covers the complete proposed PR (commits + staged files), not just
@@ -638,7 +638,7 @@ def prepare_patch(worktree: Path, base: str, max_files: int) -> tuple[str, str, 
         raise RuntimeError(f"Forbidden changes found in proposed PR: {disallowed}")
     if not names:
         raise RuntimeError("No code changes compared to base branch")
-    if len(names) > max_files:
+    if max_files is not None and len(names) > max_files:
         raise RuntimeError(f"Patch modifies {len(names)} files; max_files={max_files}")
     git(worktree, "diff", "--cached", "--check", base_sha)
     diff = command(["git", "diff", "--cached", "--binary", base_sha], worktree).stdout
@@ -835,8 +835,8 @@ def load_config(path: Path) -> dict[str, Any]:
     reasoning_effort = data.get("codex_reasoning_effort")
     if type(retries) is not int or not 0 <= retries <= 3:
         raise ValueError("max_retries must be an integer from 0 to 3")
-    if type(max_files) is not int or not 1 <= max_files <= 100:
-        raise ValueError("max_files must be an integer from 1 to 100")
+    if max_files is not None and (type(max_files) is not int or not 1 <= max_files <= 100):
+        raise ValueError("max_files must be null or an integer from 1 to 100")
     if codex_timeout is not None and (type(codex_timeout) is not int or not 1 <= codex_timeout <= 86400):
         raise ValueError("codex_timeout_seconds must be null or an integer from 1 to 86400")
     if test_timeout is not None and (type(test_timeout) is not int or not 1 <= test_timeout <= 86400):

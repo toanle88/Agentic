@@ -63,6 +63,15 @@ class GitTest(unittest.TestCase):
         (run.worktree / 'second.py').write_text('print(99)\n')
         self.assertNotEqual(agentic.prepare_patch(run.worktree, 'main', 10)[1], digest1)
 
+    def test_prepare_patch_allows_unlimited_file_count(self):
+        run = agentic.create_worktree(self.repo, 'main', 17)
+        for index in range(11):
+            (run.worktree / f'file-{index}.txt').write_text(f'{index}\n')
+        base, digest, summary = agentic.prepare_patch(run.worktree, 'main', None)
+        self.assertTrue(base)
+        self.assertEqual(len(digest), 64)
+        self.assertEqual(summary.count('file-'), 11)
+
     def test_sensitive_files_refused_before_index(self):
         run = agentic.create_worktree(self.repo, 'main', 9)
         (run.worktree / '.env.production').write_text('SECRET=oops\n')
@@ -301,12 +310,21 @@ class PureTests(unittest.TestCase):
         folder = Path(__file__).resolve().parents[1]
         config = agentic.load_config(folder / 'agent_config.json')
         self.assertEqual(config['max_retries'], 3)
+        self.assertEqual(config['max_files'], 30)
         self.assertIsNone(config['codex_model'])
         self.assertIsNone(config['codex_reasoning_effort'])
         self.assertIsNone(config['codex_timeout_seconds'])
         self.assertIsNone(config['test_timeout_seconds'])
         self.assertTrue(agentic.forbidden('.env'))
         self.assertFalse(agentic.forbidden('src/main.py'))
+
+        with tempfile.TemporaryDirectory() as temp:
+            unlimited = Path(temp) / 'agent_config.json'
+            unlimited.write_text(json.dumps({
+                'test_commands': [['go', 'test', './...']],
+                'max_files': None,
+            }))
+            self.assertIsNone(agentic.load_config(unlimited)['max_files'])
 
     def test_cli_options(self):
         args = agentic.build_parser().parse_args(['--issue', '42', '--publish'])
