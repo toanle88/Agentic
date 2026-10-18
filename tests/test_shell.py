@@ -1,7 +1,9 @@
+import os
 import sys
 import tempfile
 import threading
 import unittest
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -99,6 +101,184 @@ class ShellTests(unittest.TestCase):
             agentic_shell._replace_current_token('/run ', '--review'),
             '/run --review',
         )
+
+    def test_completion_items_include_descriptions(self):
+        items = dict(agentic_shell._completion_items('/'))
+        self.assertIn('/run', items)
+        self.assertEqual(items['/run'], 'start a background job or local task')
+        self.assertIn('/ps', items)
+        self.assertEqual(items['/ps'], 'show running or persisted background jobs')
+        self.assertIn('/dashboard', items)
+        self.assertEqual(items['/dashboard'], 'generate and open the HTML dashboard')
+
+        run_options = dict(agentic_shell._completion_items('/run --'))
+        self.assertIn('--profile', run_options)
+        self.assertIn('--review', run_options)
+        self.assertIn('--publish', run_options)
+        self.assertEqual(run_options['--profile'], 'execution profile (fast or slow)')
+
+        profiles = dict(agentic_shell._completion_items('/run --profile '))
+        self.assertEqual(profiles.get('fast'), 'run lightweight checks and fast model')
+        self.assertEqual(profiles.get('slow'), 'run comprehensive checks and full reasoning')
+
+    def test_interactive_input_tab_completes_candidate(self):
+        keys = [('CHAR', '/'), ('CHAR', 'r'), ('TAB', '\t'), ('ENTER', '\n')]
+        reader = _create_mock_reader(keys)
+        with patch('sys.stdout', new_callable=StringIO):
+            result = agentic_shell._interactive_input(
+                'agentic> ',
+                agentic_shell._completion_items,
+                key_reader_factory=reader,
+            )
+        self.assertEqual(result, '/run ')
+
+    def test_interactive_input_enter_completes_partial_candidate(self):
+        keys = [('CHAR', '/'), ('CHAR', 'r'), ('ENTER', '\n'), ('ENTER', '\n')]
+        reader = _create_mock_reader(keys)
+        with patch('sys.stdout', new_callable=StringIO):
+            result = agentic_shell._interactive_input(
+                'agentic> ',
+                agentic_shell._completion_items,
+                key_reader_factory=reader,
+            )
+        self.assertEqual(result, '/run ')
+
+    def test_interactive_input_arrow_navigation_selects_candidate(self):
+        keys = [('CHAR', '/'), ('DOWN', ''), ('ENTER', '\r'), ('ENTER', '\r')]
+        reader = _create_mock_reader(keys)
+        with patch('sys.stdout', new_callable=StringIO):
+            result = agentic_shell._interactive_input(
+                'agentic> ',
+                agentic_shell._completion_items,
+                key_reader_factory=reader,
+            )
+        self.assertEqual(result, '/ps')
+
+    def test_interactive_input_escape_dismisses_dropdown(self):
+        keys = [('CHAR', '/'), ('ESCAPE', '\x1b'), ('CHAR', 'q'), ('CHAR', 'u'),
+                ('CHAR', 'i'), ('CHAR', 't'), ('ENTER', '\n')]
+        reader = _create_mock_reader(keys)
+        with patch('sys.stdout', new_callable=StringIO):
+            result = agentic_shell._interactive_input(
+                'agentic> ',
+                agentic_shell._completion_items,
+                key_reader_factory=reader,
+            )
+        self.assertEqual(result, '/quit')
+
+    def test_interactive_input_history_navigation(self):
+        keys = [('UP', ''), ('ENTER', '\n')]
+        reader = _create_mock_reader(keys)
+        with patch('sys.stdout', new_callable=StringIO):
+            result = agentic_shell._interactive_input(
+                'agentic> ',
+                agentic_shell._completion_items,
+                history=['/ps', '/status'],
+                key_reader_factory=reader,
+            )
+        self.assertEqual(result, '/status')
+
+    def test_interactive_input_line_editing_and_backspace(self):
+        # Backspace: type /px, backspace, s -> /ps
+        keys = [('CHAR', '/'), ('CHAR', 'p'), ('CHAR', 'x'), ('BACKSPACE', '\b'),
+                ('CHAR', 's'), ('ENTER', '\n')]
+        reader = _create_mock_reader(keys)
+        with patch('sys.stdout', new_callable=StringIO):
+            result = agentic_shell._interactive_input(
+                'agentic> ',
+                agentic_shell._completion_items,
+                key_reader_factory=reader,
+            )
+        self.assertEqual(result, '/ps')
+
+        # Cursor movement: type /un, left, left, r, right, right -> /run
+        keys = [('CHAR', '/'), ('CHAR', 'u'), ('CHAR', 'n'), ('LEFT', ''),
+                ('LEFT', ''), ('CHAR', 'r'), ('RIGHT', ''), ('RIGHT', ''), ('ENTER', '\n')]
+        reader = _create_mock_reader(keys)
+        with patch('sys.stdout', new_callable=StringIO):
+            result = agentic_shell._interactive_input(
+                'agentic> ',
+                agentic_shell._completion_items,
+                key_reader_factory=reader,
+            )
+        self.assertEqual(result, '/run')
+
+    def test_interactive_input_completion_preserves_suffix_and_cursor(self):
+        keys = [
+            ('CHAR', '/'), ('CHAR', 'r'), ('CHAR', ' '),
+            ('CHAR', 'f'), ('CHAR', 'o'), ('CHAR', 'o'),
+            ('LEFT', ''), ('LEFT', ''), ('LEFT', ''), ('LEFT', ''),
+            ('DOWN', ''), ('ENTER', '\n'), ('CHAR', 'X'), ('ENTER', '\n'),
+        ]
+        reader = _create_mock_reader(keys)
+        with patch('sys.stdout', new_callable=StringIO):
+            result = agentic_shell._interactive_input(
+                'agentic> ',
+                agentic_shell._completion_items,
+                key_reader_factory=reader,
+            )
+        self.assertEqual(result, '/runX foo')
+
+    def test_interactive_input_ctrl_c_and_ctrl_d(self):
+        reader_c = _create_mock_reader([('CTRL_C', '\003')])
+        with patch('sys.stdout', new_callable=StringIO):
+            with self.assertRaises(KeyboardInterrupt):
+                agentic_shell._interactive_input(
+                    'agentic> ',
+                    agentic_shell._completion_items,
+                    key_reader_factory=reader_c,
+                )
+
+        reader_d = _create_mock_reader([('CTRL_D', '\004')])
+        with patch('sys.stdout', new_callable=StringIO):
+            with self.assertRaises(EOFError):
+                agentic_shell._interactive_input(
+                    'agentic> ',
+                    agentic_shell._completion_items,
+                    key_reader_factory=reader_d,
+                )
+
+    def test_interactive_terminal_detection(self):
+        with patch.dict('os.environ', {'AGENTIC_PLAIN': '1'}):
+            self.assertFalse(agentic_shell._is_interactive_terminal())
+
+    def test_parse_ansi_sequence_handles_arrows_and_special_keys(self):
+        cases = [
+            (['[', 'A'], ('UP', '')),
+            (['[', 'B'], ('DOWN', '')),
+            (['[', 'C'], ('RIGHT', '')),
+            (['[', 'D'], ('LEFT', '')),
+            (['[', 'H'], ('HOME', '')),
+            (['[', 'F'], ('END', '')),
+            (['[', 'Z'], ('UP', '')),
+            (['[', '3', '~'], ('DELETE', '')),
+            (['O', 'A'], ('UP', '')),
+            (['O', 'B'], ('DOWN', '')),
+            ([None], ('ESCAPE', '\x1b')),
+        ]
+        for seq, expected in cases:
+            iterator = iter(seq)
+            result = agentic_shell._parse_ansi_sequence(lambda: next(iterator, None))
+            self.assertEqual(result, expected)
+
+    @unittest.skipUnless(os.name != 'nt', 'POSIX terminal behavior only')
+    def test_posix_key_reader_does_not_leak_buffered_ansi_sequences(self):
+        import io
+        import pty
+
+        master, slave = pty.openpty()
+        raw = os.fdopen(slave, 'rb', buffering=0)
+        stream = io.TextIOWrapper(raw, encoding='utf-8')
+        try:
+            with patch.object(agentic_shell.sys, 'stdin', stream):
+                with agentic_shell._KeyReader() as reader:
+                    os.write(master, b'\x1b[B')
+                    self.assertEqual(reader.read_key(), ('DOWN', ''))
+        finally:
+            stream.close()
+            os.close(master)
+
+
 
     def test_local_task_capture_writes_a_reusable_task_file(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -233,6 +413,29 @@ def _capture_ps(shell, parts=None):
     with redirect_stdout(output):
         shell.show_processes(parts)
     return output.getvalue()
+
+
+class _MockKeyReader:
+    def __init__(self, keys):
+        self.keys = list(keys)
+        self.idx = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+    def read_key(self):
+        if self.idx < len(self.keys):
+            key = self.keys[self.idx]
+            self.idx += 1
+            return key
+        return ('ENTER', '\n')
+
+
+def _create_mock_reader(keys):
+    return lambda: _MockKeyReader(keys)
 
 
 if __name__ == '__main__':
