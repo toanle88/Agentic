@@ -1,0 +1,7 @@
+{
+  "test_commands": [
+    ["python", "-m", "pytest", "-q"]
+  ],
+  "max_retries": 2,
+  "max_files": 30
+}
