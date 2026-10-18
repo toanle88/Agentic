@@ -325,7 +325,7 @@ def _codex_progress(line: str) -> str | None:
 
 
 def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
-                     timeout: int, codex_json: bool = False,
+                     timeout: int | None, codex_json: bool = False,
                      heartbeat: int = 15) -> subprocess.CompletedProcess[str]:
     """Stream a subprocess to terminal + durable log; print heartbeats when quiet.
 
@@ -372,7 +372,7 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
             display(f"Started (PID {proc.pid}); progress log: {log_file}")
             while True:
                 now = time.monotonic()
-                if now - started > timeout:
+                if timeout is not None and now - started > timeout:
                     timed_out = True
                     display(f"Time limit reached ({timeout}s). Stopping process.")
                     if os.name != "nt":
@@ -416,7 +416,7 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
 
 
 def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = False,
-              schema: Path | None = None, timeout: int = 1200,
+              schema: Path | None = None, timeout: int | None = None,
               model: str | None = None,
               reasoning_effort: str | None = None) -> tuple[bool, str]:
     # Each invocation creates a fresh session. The repository is the memory.
@@ -436,7 +436,7 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
 
 
 def run_tests(worktree: Path, test_commands: list[list[str]],
-              folder: Path | None = None, timeout: int = 360) -> tuple[bool, str]:
+              folder: Path | None = None, timeout: int | None = None) -> tuple[bool, str]:
     results: list[str] = []
     for argv in test_commands:
         display_command = " ".join(argv)
@@ -526,7 +526,8 @@ def prepare_patch(worktree: Path, base: str, max_files: int) -> tuple[str, str, 
 
 def review(worktree: Path, issue: Issue, folder: Path, base_sha: str,
            test_report: str = "", *, model: str | None = None,
-           reasoning_effort: str | None = None) -> dict[str, Any]:
+           reasoning_effort: str | None = None,
+           timeout: int | None = None) -> dict[str, Any]:
     schema = folder / "review-schema.json"
     schema.write_text(json.dumps(REVIEW_SCHEMA, indent=2), encoding="utf-8")
     output = next_log(folder, "review", "json")
@@ -552,7 +553,7 @@ Reject substantive bugs or missing coverage; explain exact reasons.
     print("[REVIEW] Launching independent read-only Codex process")
     ok, message = run_codex(
         worktree, prompt, readonly=True, schema=schema, output=output,
-        model=model, reasoning_effort=reasoning_effort,
+        model=model, reasoning_effort=reasoning_effort, timeout=timeout,
     )
     if not ok:
         return {"approved": False, "summary": "Review command failed", "findings": [message[-1500:]]}
@@ -592,7 +593,7 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
                       folder: Path) -> tuple[bool, str, dict[str, Any], str, str]:
     passed, report = run_tests(
         run.worktree, config["test_commands"], folder,
-        timeout=config.get("test_timeout_seconds", 360),
+        timeout=config.get("test_timeout_seconds"),
     )
     next_log(folder, "tests").write_text(report, encoding="utf-8")
     if not passed:
@@ -604,6 +605,7 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
         run.worktree, issue, folder, base_sha, test_report=report,
         model=config.get("codex_model"),
         reasoning_effort=config.get("codex_reasoning_effort"),
+        timeout=config.get("codex_timeout_seconds"),
     )
     print("[REVIEW] " + json.dumps(verdict, indent=2))
     # Reject if the worktree was changed during the review; review cannot authorize new changes.
@@ -661,7 +663,7 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
         output = next_log(folder, "developer")
         ok, message = run_codex(
             run.worktree, agent_prompt(issue, feedback), output=output,
-            timeout=config.get("codex_timeout_seconds", 1200),
+            timeout=config.get("codex_timeout_seconds"),
             model=config.get("codex_model"),
             reasoning_effort=config.get("codex_reasoning_effort"),
         )
@@ -698,18 +700,18 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError("test_commands must be a nonempty list of argv arrays")
     retries = data.get("max_retries", 2)
     max_files = data.get("max_files", 30)
-    codex_timeout = data.get("codex_timeout_seconds", 1200)
-    test_timeout = data.get("test_timeout_seconds", 360)
+    codex_timeout = data.get("codex_timeout_seconds")
+    test_timeout = data.get("test_timeout_seconds")
     codex_model = data.get("codex_model")
     reasoning_effort = data.get("codex_reasoning_effort")
     if type(retries) is not int or not 0 <= retries <= 3:
         raise ValueError("max_retries must be an integer from 0 to 3")
     if type(max_files) is not int or not 1 <= max_files <= 100:
         raise ValueError("max_files must be an integer from 1 to 100")
-    if type(codex_timeout) is not int or not 1 <= codex_timeout <= 86400:
-        raise ValueError("codex_timeout_seconds must be an integer from 1 to 86400")
-    if type(test_timeout) is not int or not 1 <= test_timeout <= 86400:
-        raise ValueError("test_timeout_seconds must be an integer from 1 to 86400")
+    if codex_timeout is not None and (type(codex_timeout) is not int or not 1 <= codex_timeout <= 86400):
+        raise ValueError("codex_timeout_seconds must be null or an integer from 1 to 86400")
+    if test_timeout is not None and (type(test_timeout) is not int or not 1 <= test_timeout <= 86400):
+        raise ValueError("test_timeout_seconds must be null or an integer from 1 to 86400")
     for name, value in (("codex_model", codex_model), ("codex_reasoning_effort", reasoning_effort)):
         if value is not None and (not isinstance(value, str) or not value.strip()):
             raise ValueError(f"{name} must be a nonempty string or null")

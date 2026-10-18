@@ -254,8 +254,8 @@ class PureTests(unittest.TestCase):
         self.assertEqual(config['max_retries'], 2)
         self.assertIsNone(config['codex_model'])
         self.assertIsNone(config['codex_reasoning_effort'])
-        self.assertEqual(config['codex_timeout_seconds'], 1200)
-        self.assertEqual(config['test_timeout_seconds'], 360)
+        self.assertIsNone(config['codex_timeout_seconds'])
+        self.assertIsNone(config['test_timeout_seconds'])
         self.assertTrue(agentic.forbidden('.env'))
         self.assertFalse(agentic.forbidden('src/main.py'))
 
@@ -332,6 +332,17 @@ class StreamingTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             self.assertIn('Still running', out.getvalue())
             self.assertIn('ok', out.getvalue())
+
+    def test_streamed_command_allows_no_timeout(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            result = agentic.streamed_command(
+                [sys.executable, '-c', 'print("ok")'],
+                root, label='TESTS', log_file=root / 'tests.log',
+                timeout=None,
+            )
+            self.assertEqual(result.returncode, 0)
+            self.assertIn('ok', result.stdout)
 
     def test_test_runner_writes_logs_outside_worktree(self):
         with tempfile.TemporaryDirectory() as dirname:

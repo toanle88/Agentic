@@ -59,9 +59,9 @@ Each agent session writes two logs under `../.<project>-agent-runs/<branch>/`:
 New invocations automatically increment the log number. Test commands print their
 output live. When an agent is quiet, a **15-second heartbeat** confirms that the
 subprocess has not terminated; a heartbeat does *not* prove forward progress.
-Codex defaults to a 20-minute per-invocation timeout, and each test command
-defaults to a 6-minute timeout. These limits are configurable and intentionally
-independent of retries.
+Codex and test commands run without a time limit by default. You can set finite
+timeouts in `agent_config.json`; these limits are intentionally independent of
+retries.
 
 **Upgrading while an old run is active:** stop the old invocation normally
 (e.g. Ctrl+C), ensure it has exited, replace `agentic.py` with the updated script,
@@ -109,8 +109,8 @@ Those directories are deliberately outside the main checkout. Logs are for troub
   "max_files": 30,
   "codex_model": null,
   "codex_reasoning_effort": null,
-  "codex_timeout_seconds": 1200,
-  "test_timeout_seconds": 360
+  "codex_timeout_seconds": null,
+  "test_timeout_seconds": null
 }
 ```
 
@@ -126,8 +126,8 @@ Test commands are argv arrays, not shell strings. They run in the worktree. Chan
   "max_files": 30,
   "codex_model": null,
   "codex_reasoning_effort": null,
-  "codex_timeout_seconds": 1200,
-  "test_timeout_seconds": 360
+  "codex_timeout_seconds": null,
+  "test_timeout_seconds": null
 }
 ```
 
@@ -136,7 +136,8 @@ These `uv` examples require packages already installed/available in that worktre
 Leave `codex_model` and `codex_reasoning_effort` as `null` to inherit the
 Codex CLI configuration already selected for your account, such as a
 configured Luna model and Max reasoning effort. Set them explicitly when a
-repository needs reproducible model settings. Timeout values are in seconds.
+repository needs reproducible model settings. Set timeout values to positive
+seconds for limits, or `null` for no time limit.
 
 ### No-label behavior
 
