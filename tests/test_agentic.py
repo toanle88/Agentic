@@ -387,7 +387,7 @@ class GitTest(unittest.TestCase):
         self.assertIn('Add CSV export', task.body)
         self.assertEqual(develop.call_args.args[1], task)
 
-    def test_blocked_investigation_returns_nonzero_exit_status(self):
+    def test_rejected_investigation_does_not_block_development(self):
         config_path = self.repo / 'local-agent-config.json'
         config_path.write_text(json.dumps({
             'task_source': 'local',
@@ -405,11 +405,11 @@ class GitTest(unittest.TestCase):
               patch('agentic._run_investigation', return_value={
                   'status': 'reject', 'summary': 'Not actionable', 'findings': [],
               }),
-              patch('agentic._investigation_allows_development', return_value=False),
-              patch('agentic.print_run_summary') as print_summary):
+              patch('agentic.run_tests', return_value=(True, 'ok')),
+              patch('agentic.develop', return_value=True) as develop):
             result = agentic.execute_locked(args, self.repo)
-        self.assertEqual(result, agentic.INVESTIGATION_BLOCKED_EXIT)
-        self.assertEqual(print_summary.call_args.args[1], 'INVESTIGATION BLOCKED')
+        self.assertEqual(result, 0)
+        develop.assert_called_once()
 
 
 class PureTests(unittest.TestCase):
@@ -657,15 +657,15 @@ class PureTests(unittest.TestCase):
             }))
         input_mock.assert_not_called()
 
-    def test_rejected_investigation_requires_explicit_continue(self):
-        with patch('builtins.input', return_value='continue'):
+    def test_nonpass_investigation_continues_without_confirmation(self):
+        with patch('builtins.input') as input_mock:
             self.assertTrue(agentic._investigation_allows_development({
                 'status': 'reject', 'summary': 'Not valid', 'findings': [],
             }))
-        with patch('builtins.input', return_value='no'):
-            self.assertFalse(agentic._investigation_allows_development({
-                'status': 'reject', 'summary': 'Not valid', 'findings': [],
+            self.assertTrue(agentic._investigation_allows_development({
+                'status': 'needs_input', 'summary': 'Needs detail', 'findings': [],
             }))
+        input_mock.assert_not_called()
 
     def test_investigation_retry_recomputes_remaining_timeout(self):
         with tempfile.TemporaryDirectory() as temp:
