@@ -11,6 +11,8 @@ codex login
 
 The target repository must have an `origin` remote and a GitHub default branch.
 
+`main` is protected. Changes to Agentic itself are made through pull requests; CI runs on every pull request and the `main` branch.
+
 ## Install in WSL
 
 Install the CLI once with `pipx`; the target repositories no longer need copies of the Python files:
@@ -100,6 +102,7 @@ Commands are checked before development starts. Missing executables and missing 
 
 ```bash
 agentic --help                           # show all runner options
+agentic --version                        # show the installed package version
 agentic help                             # equivalent help command
 agentic shell                            # open the background-job shell
 agentic dashboard                        # generate the HTML dashboard
@@ -167,6 +170,16 @@ agentic dashboard \
 ```
 
 The generator is read-only and uses only the Python standard library. Regenerate the page after a run to refresh its snapshot.
+
+## Development and releases
+
+Run the local checks with:
+
+```bash
+python -m unittest discover -s tests -q
+```
+
+Release tags use semantic versioning, such as `v0.1.1`. The release workflow verifies the tag against `agentic --version`, builds the package artifacts, and creates a GitHub release. See [CONTRIBUTING.md](CONTRIBUTING.md) for the pull-request and release process.
 
 ## Worktrees and logs
 

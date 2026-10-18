@@ -336,6 +336,7 @@ class PureTests(unittest.TestCase):
         self.assertEqual(agentic.build_parser().parse_args(['help']).command, 'help')
         self.assertEqual(agentic.build_parser().parse_args(['shell']).command, 'shell')
         self.assertEqual(agentic.build_parser().parse_args(['dashboard']).command, 'dashboard')
+        self.assertEqual(agentic.__version__, '0.1.0')
 
 
 if __name__ == '__main__':
