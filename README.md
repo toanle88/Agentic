@@ -248,8 +248,8 @@ python scripts/release.py            # check, confirm, tag, and push
 ```
 
 The second helper verifies that `main` is clean and synchronized with
-`origin/main`, runs the offline tests and compile checks, and prevents reuse of
-an existing tag. The GitHub Actions release workflow then builds the package
+`origin/main`, runs the compile checks, and prevents reuse of an existing
+tag. The GitHub Actions release workflow then builds the package
 artifacts and creates the GitHub release. Use `--yes` only when the release has
 already been reviewed and should run without a prompt. See
 [Development](docs/development.md) for the complete release process.

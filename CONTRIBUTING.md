@@ -36,7 +36,7 @@ python scripts/release.py --dry-run
 python scripts/release.py
 ```
 
-The helper verifies the clean, synchronized branch, runs the test and compile
+The helper verifies the clean, synchronized branch, runs the compile
 checks, prevents reuse of an existing tag, and asks for confirmation before
 creating and pushing it. The release workflow verifies that the tag matches the
 package version, builds the source distribution and wheel, and attaches them to

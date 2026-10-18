@@ -51,18 +51,16 @@ class ReleaseScriptTests(unittest.TestCase):
             self.assertNotIn(("git", "tag", "-a", "v0.2.0", "-m", "Release v0.2.0"), calls)
             self.assertNotIn(("git", "push", "origin", "v0.2.0"), calls)
 
-    def test_local_checks_hide_successful_agent_output(self):
+    def test_local_checks_compile_runtime_modules_without_running_unit_tests(self):
         from contextlib import redirect_stdout
         from io import StringIO
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            recorded_commands = []
 
             def fake_run(argv, *, root, capture_output=False):
-                if "unittest" in argv:
-                    return release.subprocess.CompletedProcess(
-                        argv, 0, "[DEVELOPER] noisy output\nRan 124 tests in 9.2s\n\nOK\n", ""
-                    )
+                recorded_commands.append(tuple(argv))
                 return release.subprocess.CompletedProcess(argv, 0, "", "")
 
             output = StringIO()
@@ -70,9 +68,21 @@ class ReleaseScriptTests(unittest.TestCase):
                 release._run_local_checks(root)
 
             rendered = output.getvalue()
-            self.assertIn("Unit tests passed: Ran 124 tests in 9.2s", rendered)
             self.assertIn("Compile checks passed", rendered)
-            self.assertNotIn("[DEVELOPER] noisy output", rendered)
+            self.assertFalse(any("unittest" in argv for argv in recorded_commands))
+            self.assertTrue(any("py_compile" in argv for argv in recorded_commands))
+
+    def test_local_checks_raise_on_compile_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+
+            def fake_run(argv, *, root, capture_output=False):
+                return release.subprocess.CompletedProcess(argv, 1, "", "SyntaxError: invalid syntax")
+
+            with patch.object(release, "_run", side_effect=fake_run):
+                with self.assertRaises(release.ReleaseError) as cm:
+                    release._run_local_checks(root)
+            self.assertIn("Python compilation failed with exit 1", str(cm.exception))
 
 
 if __name__ == "__main__":

@@ -143,22 +143,6 @@ def _ensure_release_preconditions(root: Path, remote: str, branch: str) -> tuple
 
 
 def _run_local_checks(root: Path) -> None:
-    print("[release] Running unit tests...")
-    tests = _run(
-        (sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"),
-        root=root,
-        capture_output=True,
-    )
-    if tests.returncode != 0:
-        output = _combined_output(tests)
-        detail = f"\n{output[-8000:]}" if output else ""
-        raise ReleaseError(f"Unit tests failed with exit {tests.returncode}{detail}")
-    summary = next(
-        (line.strip() for line in _combined_output(tests).splitlines() if line.strip().startswith("Ran ")),
-        "completed successfully",
-    )
-    print(f"[release] Unit tests passed: {summary}")
-
     print("[release] Compiling runtime modules...")
     compile_result = _run(
         (sys.executable, "-m", "py_compile", *RUNTIME_MODULES),

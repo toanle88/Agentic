@@ -73,7 +73,7 @@ python scripts/prepare_release.py 1.0.1
 ```
 
 The preparation helper requires a new `MAJOR.MINOR.PATCH` version greater than
-the current one. It updates `agentic.__version__`, runs the unit and compile
+the current one. It updates `agentic.__version__`, runs the compile
 checks, creates `codex/release-vVERSION`, commits the change, pushes the branch,
 and opens a normal GitHub pull request using the `gh` CLI. Authenticate first
 with `gh auth login`. Use `--dry-run` to validate the starting branch and run
@@ -87,8 +87,8 @@ python scripts/release.py
 ```
 
 The tag helper fetches `origin/main`, requires a clean and synchronized local
-`main`, runs the offline test and compile checks, verifies that the generated
-tag is unused, and asks for confirmation before creating and pushing it. The
+`main`, runs the compile checks, verifies that the generated tag is
+unused, and asks for confirmation before creating and pushing it. The
 current package version is read from `agentic.__version__`, so version `1.0.1`
 produces tag `v1.0.1`.
 

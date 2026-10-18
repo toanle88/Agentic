@@ -78,6 +78,21 @@ class PrepareReleaseTests(unittest.TestCase):
             self.assertIn(("git", "push", "--set-upstream", "origin", "codex/release-v1.0.1"), checked_calls)
             self.assertTrue(any(command[:3] == ("gh", "pr", "create") for command in checked_calls))
 
+    def test_prepare_release_checks_do_not_run_unit_tests(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            recorded_commands = []
+
+            def fake_run(argv, *, root, capture_output=False):
+                recorded_commands.append(tuple(argv))
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            with patch("scripts.release._run", side_effect=fake_run), redirect_stdout(StringIO()):
+                prepare_release._run_local_checks(root)
+
+            self.assertFalse(any("unittest" in argv for argv in recorded_commands))
+            self.assertTrue(any("py_compile" in argv for argv in recorded_commands))
+
 
 if __name__ == "__main__":
     unittest.main()
