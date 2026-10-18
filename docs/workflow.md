@@ -1,0 +1,119 @@
+# Workflow
+
+## Run lifecycle
+
+Each issue run follows this sequence:
+
+1. Resolve the repository's GitHub remote and default branch.
+2. Create or reuse an isolated worktree for the issue.
+3. Give the issue and repository instructions to the Codex developer.
+4. Run every configured test command.
+5. Stage and inspect the proposed patch.
+6. Ask an independent read-only Codex reviewer for a structured verdict.
+7. Approve, retry with evidence, or preserve the worktree for resume.
+
+The base checkout is not the development worktree. This keeps unfinished changes isolated from the user's main checkout.
+
+## Interactive shell
+
+Run `agentic` with no action flags to open the interactive supervisor:
+
+```bash
+agentic
+```
+
+Available commands:
+
+```text
+/run ISSUE [--profile fast|slow]       Start a background job
+     [--review|--publish|--new]
+/ps [--all]                            Show current or persisted job status
+/logs JOB [LINES]                      Show recent output for a job
+/stop JOB                              Stop a running job
+/dashboard [OUTPUT]                    Generate the HTML dashboard
+/help                                  Show command help
+/quit                                  Leave the shell; jobs continue running
+```
+
+`/run` starts a child process and returns immediately. `/ps` shows jobs started in the current shell; `/ps --all` also discovers job records from previous shell sessions. The child runner's durable logs remain available after the shell exits, and `/logs JOB` works for persisted jobs too.
+
+The default `fast` profile uses `test_commands`. Use `/run 119 --profile slow` to run the fast checks followed by `slow_test_commands`.
+
+## Resume and retries
+
+Run the same issue again to resume its existing worktree:
+
+```bash
+agentic --issue 119
+```
+
+Use `--profile slow` when the issue needs the configured integration, browser, or release checks:
+
+```bash
+agentic --issue 119 --profile slow
+```
+
+Agentic preserves code, commits, test output, reviewer output, and structured evidence after failures, timeouts, rejected reviews, and exhausted retries. On resume, the latest failed test and review evidence is supplied to the developer as untrusted feedback.
+
+Use `--new` only when you intentionally want a second worktree:
+
+```bash
+agentic --issue 119 --new
+```
+
+`--new` does not continue the existing worktree's repair history.
+
+## Review behavior
+
+The reviewer is a separate read-only process. It sees the current staged patch, issue requirements, and test evidence, then returns an approval or rejection with findings. A rejection does not discard the worktree. The developer receives the findings on the next retry, up to the configured retry limit.
+
+Repeated rejection usually indicates an unresolved requirement, missing integration coverage, or an issue that is too broad. Increasing retries does not lower the review standard.
+
+## Publication
+
+The developer does not commit, push, or open pull requests. After tests and review approve the current patch, publish explicitly:
+
+```bash
+agentic --issue 119 --publish
+```
+
+Agentic revalidates the patch, checks that it did not change, and asks for the exact confirmation word `publish`. Only after confirmation does it commit, push the issue branch, and open a draft pull request. The draft state leaves a final human review step before merging.
+
+## Logs and dashboard
+
+Durable artifacts are stored in the centralized Agentic state directory:
+
+```text
+~/.local/state/agentic/my-project-<identity>/worktrees/issue-119-XXXXXXXX/
+~/.local/state/agentic/my-project-<identity>/runs/agent-issue-119-XXXXXXXX/
+~/.local/state/agentic/my-project-<identity>/shell/job-001.log
+```
+
+Run logs include developer and reviewer progress, Codex event traces, test output, structured review results, and resume evidence. They are outside the worktree so they cannot accidentally become part of the patch.
+
+Generate a read-only HTML snapshot:
+
+```bash
+agentic dashboard --repo /path/to/target-repository
+```
+
+The default output is `dashboards/dashboard.html` in that state namespace. Choose another location with `--output`:
+
+```bash
+agentic dashboard \
+  --repo /path/to/target-repository \
+  --output /path/to/agentic-dashboard.html
+```
+
+Regenerate the dashboard after a run to refresh its contents.
+
+## Cleanup
+
+Preview clean, no-longer-needed issue worktrees before removing them:
+
+```bash
+agentic cleanup --issue 119
+agentic cleanup --issue 119 --yes
+```
+
+Cleanup skips worktrees with uncommitted changes and keeps run logs by default. Add `--remove-logs` only when the evidence is no longer needed. Use `--all` carefully to select every clean Agentic worktree.

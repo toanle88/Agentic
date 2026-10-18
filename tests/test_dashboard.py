@@ -29,6 +29,10 @@ class DashboardTests(unittest.TestCase):
             # structured review result.
             (run / "review-001.log").write_text("[REVIEW] Finished in 1s (exit 0)\n")
             (run / "review-001.jsonl").write_text('{"type":"turn.completed"}\n')
+            (run / "review-history.json").write_text(json.dumps([
+                {"findings": [{"fingerprint": "same", "severity": "HIGH", "text": "Fix wiring"}]},
+                {"findings": [{"fingerprint": "same", "severity": "HIGH", "text": "Fix wiring"}]},
+            ]))
             snapshots = agentic_dashboard.collect_runs(root)
             self.assertEqual(len(snapshots), 1)
             snapshot = snapshots[0]
@@ -37,6 +41,7 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(snapshot["tests"]["status"], "passed")
             self.assertEqual(snapshot["attempts"], 1)
             self.assertIn("persistence", snapshot["review"]["summary"])
+            self.assertEqual(snapshot["review"]["recurring"][0]["count"], 2)
 
     def test_review_parser_accepts_json_code_fence(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -62,6 +67,22 @@ class DashboardTests(unittest.TestCase):
             html = agentic_dashboard.render_dashboard(snapshot, "demo", root.name)
             self.assertNotIn("</script><script>", html)
             self.assertIn("\\u003c/script\\u003e", html)
+
+    def test_dashboard_renders_recurring_findings(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            run = root / "agent-issue-7-deadbeef"
+            run.mkdir(parents=True)
+            (run / "review-001.json").write_text(json.dumps({
+                "approved": False, "summary": "Needs work", "findings": ["Fix wiring"],
+            }))
+            (run / "review-history.json").write_text(json.dumps([
+                {"findings": [{"fingerprint": "same", "severity": "HIGH", "text": "Fix wiring"}]},
+                {"findings": [{"fingerprint": "same", "severity": "HIGH", "text": "Fix wiring"}]},
+            ]))
+            html = agentic_dashboard.render_dashboard(agentic_dashboard.collect_runs(root), "demo", root.name)
+            self.assertIn("Recurring findings", html)
+            self.assertIn("Fix wiring", html)
 
 
 if __name__ == "__main__":

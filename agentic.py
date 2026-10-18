@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """A stage-free, resumable coding-agent runner.
 
-Place this and agent_config.json in an existing Git repository root. Codex is
-responsible for understanding progress; Git worktrees supply durable context.
-No API key or third-party Python packages are required.
+Install Agentic once, then place a target-specific agent_config.json in the
+repository being worked on. Codex is responsible for understanding progress;
+Git worktrees supply durable context. No API key or third-party Python
+packages are required by the runner itself.
 """
 from __future__ import annotations
 
@@ -42,6 +43,26 @@ REVIEW_SCHEMA = {
     "additionalProperties": False,
 }
 
+FINDING_SEVERITIES = (
+    "BLOCKER", "CRITICAL", "MAJOR", "HIGH", "MEDIUM", "MINOR", "LOW",
+)
+AGENT_CONFIG_FILENAME = "agent_config.json"
+AGENTS_FILENAME = "AGENTS.md"
+DEFAULT_AGENTS = """# Agent instructions
+
+## Working agreement
+
+- Read the issue and existing code before making changes.
+- Keep changes focused on the requested behavior.
+- Add or update regression tests for behavior changes.
+- Run the configured fast checks before handing work back.
+- Do not commit, push, or publish from inside an Agentic developer run.
+
+## Project-specific notes
+
+Add architecture, testing, generated-file, and local-development notes here.
+"""
+
 
 @dataclass(frozen=True)
 class Issue:
@@ -65,6 +86,64 @@ class Run:
     issue_number: int
     branch: str
     worktree: Path
+
+
+@dataclass(frozen=True)
+class StatePaths:
+    root: Path
+    worktrees: Path
+    runs: Path
+    shell: Path
+    dashboards: Path
+
+
+def default_state_dir() -> Path:
+    """Return the user-level state root, overridable for shared WSL/Windows storage."""
+    configured = os.environ.get("AGENTIC_STATE_DIR")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    if os.name == "nt":
+        local = os.environ.get("LOCALAPPDATA")
+        return (Path(local) if local else Path.home() / "AppData" / "Local") / "Agentic"
+    xdg = os.environ.get("XDG_STATE_HOME")
+    return (Path(xdg) if xdg else Path.home() / ".local" / "state") / "agentic"
+
+
+def _portable_path_text(value: str) -> str:
+    """Normalize WSL and Windows spellings of the same path for state identity."""
+    text = value.replace("\\", "/").rstrip("/").lower()
+    match = re.match(r"^/mnt/([a-z])/(.*)$", text)
+    if match:
+        return f"{match.group(1)}:/{match.group(2)}"
+    return text
+
+
+def repository_state_key(repo: Path) -> str:
+    """Create a stable, filesystem-safe namespace for one Git checkout."""
+    ok, common_dir = probe(["git", "rev-parse", "--git-common-dir"], repo)
+    if ok and common_dir:
+        common_path = Path(common_dir)
+        if not common_path.is_absolute():
+            common_path = repo / common_path
+        identity = _portable_path_text(str(common_path.resolve()))
+    else:
+        identity = _portable_path_text(str(repo.resolve()))
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", repo.name) or "repository"
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+    return f"{slug}-{digest}"
+
+
+def state_paths(repo: Path, state_dir: Path | None = None) -> StatePaths:
+    root = (state_dir or default_state_dir()).expanduser().resolve() / repository_state_key(repo)
+    return StatePaths(root, root / "worktrees", root / "runs", root / "shell", root / "dashboards")
+
+
+def legacy_worktrees_dir(repo: Path) -> Path:
+    return repo.parent / f".{repo.name}-agent-worktrees"
+
+
+def legacy_runs_dir(repo: Path) -> Path:
+    return repo.parent / f".{repo.name}-agent-runs"
 
 
 def eligible(issue: Issue) -> bool:
@@ -104,6 +183,20 @@ def installed_git_version(executable: str = "git") -> tuple[int, int, int] | Non
     if result.returncode or not match:
         return None
     return tuple(int(part or 0) for part in match.groups())  # type: ignore[return-value]
+
+
+def probe(argv: list[str], cwd: Path, *, timeout: int = 10) -> tuple[bool, str]:
+    """Run a small diagnostic command without turning its output into an exception."""
+    try:
+        result = subprocess.run(
+            argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace", timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+    output = result.stdout.strip()
+    return result.returncode == 0, output
 
 
 def relative_worktree_paths_supported() -> bool:
@@ -244,12 +337,15 @@ def choose_existing(runs: list[Run]) -> Run:
     return runs[int(choice) - 1]
 
 
-def create_worktree(repo: Path, base: str, issue_number: int) -> Run:
+def create_worktree(repo: Path, base: str, issue_number: int,
+                    state_dir: Path | None = None) -> Run:
     refresh_base(repo, base)
     relative_paths = configure_relative_worktree_paths(repo)
     ident = uuid.uuid4().hex[:8]
     branch = f"agent/issue-{issue_number}-{ident}"
-    parent = repo.parent / f".{repo.name}-agent-worktrees"
+    # ``state_dir`` is supplied by the CLI. The legacy fallback keeps this
+    # low-level helper compatible for callers that intentionally manage paths.
+    parent = state_paths(repo, state_dir).worktrees if state_dir else legacy_worktrees_dir(repo)
     parent.mkdir(parents=True, exist_ok=True)
     worktree = parent / f"issue-{issue_number}-{ident}"
     git(repo, "worktree", "add", "-b", branch, str(worktree), f"origin/{base}")
@@ -260,8 +356,11 @@ def create_worktree(repo: Path, base: str, issue_number: int) -> Run:
     return Run(issue_number, branch, worktree.resolve())
 
 
-def logs_path(repo: Path, run: Run) -> Path:
-    folder = repo.parent / f".{repo.name}-agent-runs" / run.branch.replace("/", "-")
+def logs_path(repo: Path, run: Run, state_dir: Path | None = None) -> Path:
+    """Return preferred run logs, falling back to the pre-centralized location."""
+    preferred = (state_paths(repo, state_dir).runs if state_dir else legacy_runs_dir(repo)) / run.branch.replace("/", "-")
+    legacy = legacy_runs_dir(repo) / run.branch.replace("/", "-")
+    folder = legacy if state_dir and legacy.is_dir() and not preferred.exists() else preferred
     folder.mkdir(parents=True, exist_ok=True)
     return folder
 
@@ -308,6 +407,9 @@ def load_resume_feedback(folder: Path) -> str:
         raw = test_log.read_text(encoding="utf-8", errors="replace")
         if raw.strip():
             chunks.append("Previous test evidence (untrusted output):\n" + raw)
+    recurring = review_history_feedback(folder)
+    if recurring:
+        chunks.append(recurring)
     return "\n\n".join(chunks)[-9000:]
 
 
@@ -347,6 +449,12 @@ def print_review_summary(verdict: dict[str, Any]) -> None:
             print(f"  • {_short(finding, 260)}")
         if len(findings) > 3:
             print(f"  • ... and {len(findings) - 3} more; see the review JSON log")
+    repeated = verdict.get("_repeated_findings", [])
+    if isinstance(repeated, list) and repeated:
+        print(f"[REVIEW] Repeated findings from earlier attempts: {len(repeated)}")
+        for item in repeated[:3]:
+            if isinstance(item, dict):
+                print(f"  ↻ [{item.get('severity', 'UNSPECIFIED')}] {_short(item.get('text', ''), 240)}")
 
 
 def print_run_summary(run: Run, status: str, next_action: str) -> None:
@@ -648,6 +756,126 @@ def prepare_patch(worktree: Path, base: str, max_files: int | None) -> tuple[str
     return base_sha, digest, summary
 
 
+def parse_review_result(text: str) -> dict[str, Any] | None:
+    """Parse strict or lightly wrapped JSON returned by the reviewer.
+
+    Codex is asked for schema-constrained output, but a CLI wrapper or a
+    platform-specific transport can still add Markdown fences or a short
+    prefix/suffix. Recovering the object here avoids treating a reviewer
+    formatting problem as a code rejection.
+    """
+    candidates = [text.strip()]
+    candidates.extend(
+        match.group(1)
+        for match in re.finditer(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text, re.IGNORECASE)
+    )
+    start = text.find("{")
+    if start >= 0:
+        candidates.append(text[start:])
+    decoder = json.JSONDecoder()
+    for candidate in candidates:
+        try:
+            value, _ = decoder.raw_decode(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def finding_severity(finding: str) -> str:
+    """Extract a conventional severity prefix while tolerating reviewer prose."""
+    upper = finding.upper().strip()
+    for severity in FINDING_SEVERITIES:
+        if re.match(rf"^\[?{severity}\]?\s*(?:[-:—]|\b)", upper):
+            return severity
+    match = re.match(r"^P([0-3])\b", upper)
+    if match:
+        return {"0": "BLOCKER", "1": "HIGH", "2": "MEDIUM", "3": "LOW"}[match.group(1)]
+    return "UNSPECIFIED"
+
+
+def finding_fingerprint(finding: str) -> str:
+    """Create a stable short key for the same review finding across attempts."""
+    normalized = finding.lower()
+    normalized = re.sub(r"\[[^\]]+\]", " ", normalized)
+    normalized = re.sub(r"\b(?:blocker|critical|major|high|medium|minor|low|p[0-3])\b", " ", normalized)
+    normalized = re.sub(r"(?:/|\\)[^\s,:;()]+", " path ", normalized)
+    normalized = re.sub(r"\b\d+(?:-\d+)?\b", " ", normalized)
+    normalized = re.sub(r"[^a-z0-9]+", " ", normalized).strip()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
+
+
+def analyze_findings(findings: list[str]) -> list[dict[str, str]]:
+    return [
+        {
+            "severity": finding_severity(finding),
+            "fingerprint": finding_fingerprint(finding),
+            "text": finding,
+        }
+        for finding in findings
+    ]
+
+
+def record_review_findings(folder: Path, verdict: dict[str, Any]) -> dict[str, Any]:
+    """Persist finding history and annotate recurring findings for the next attempt."""
+    history_path = folder / "review-history.json"
+    try:
+        history = json.loads(history_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        history = []
+    if not isinstance(history, list):
+        history = []
+    findings = verdict.get("findings", [])
+    details = analyze_findings([item for item in findings if isinstance(item, str)])
+    previous_counts: dict[str, int] = {}
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        for item in entry.get("findings", []):
+            if isinstance(item, dict) and isinstance(item.get("fingerprint"), str):
+                key = item["fingerprint"]
+                previous_counts[key] = previous_counts.get(key, 0) + 1
+    repeated = [item for item in details if previous_counts.get(item["fingerprint"], 0) > 0]
+    history.append({
+        "timestamp": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "approved": bool(verdict.get("approved")),
+        "findings": details,
+    })
+    history_path.write_text(json.dumps(history[-50:], indent=2), encoding="utf-8")
+    verdict["_finding_analysis"] = details
+    verdict["_repeated_findings"] = repeated
+    return verdict
+
+
+def review_history_feedback(folder: Path) -> str:
+    path = folder / "review-history.json"
+    try:
+        history = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return ""
+    if not isinstance(history, list) or len(history) < 2:
+        return ""
+    counts: dict[str, tuple[int, str, str]] = {}
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        for item in entry.get("findings", []):
+            if not isinstance(item, dict):
+                continue
+            key = item.get("fingerprint")
+            if not isinstance(key, str):
+                continue
+            count, severity, text = counts.get(
+                key, (0, str(item.get("severity", "UNSPECIFIED")), str(item.get("text", "")))
+            )
+            counts[key] = (count + 1, severity, text)
+    repeated = [f"[{severity}] ({count} reviews) {text}" for count, severity, text in counts.values() if count > 1]
+    if not repeated:
+        return ""
+    return "Recurring review findings from earlier attempts (prioritize resolving these):\n" + "\n".join(repeated[-8:])
+
+
 def review(worktree: Path, issue: Issue, folder: Path, base_sha: str,
            test_report: str = "", *, model: str | None = None,
            reasoning_effort: str | None = None,
@@ -680,14 +908,33 @@ Reject substantive bugs or missing coverage; explain exact reasons.
         model=model, reasoning_effort=reasoning_effort, timeout=timeout,
     )
     if not ok:
-        return {"approved": False, "summary": "Review command failed", "findings": [message[-1500:]]}
-    try:
-        data = json.loads(message)
-        if not isinstance(data["approved"], bool) or not isinstance(data["summary"], str) or not isinstance(data["findings"], list) or not all(isinstance(x, str) for x in data["findings"]):
-            raise ValueError("Reviewer JSON has wrong types")
-        return data
-    except (KeyError, TypeError, ValueError):
-        return {"approved": False, "summary": "Invalid reviewer result", "findings": [message[-1500:]]}
+        return {
+            "approved": False,
+            "summary": "Review command failed; no code verdict is available",
+            "findings": [message[-1500:]],
+            "_tooling_error": True,
+        }
+    data = parse_review_result(message)
+    if not isinstance(data, dict):
+        return {
+            "approved": False,
+            "summary": "Reviewer output was invalid; no code verdict is available",
+            "findings": [message[-1500:]],
+            "_tooling_error": True,
+        }
+    if (
+        not isinstance(data.get("approved"), bool)
+        or not isinstance(data.get("summary"), str)
+        or not isinstance(data.get("findings"), list)
+        or not all(isinstance(item, str) for item in data["findings"])
+    ):
+        return {
+            "approved": False,
+            "summary": "Reviewer JSON has the wrong shape; no code verdict is available",
+            "findings": [message[-1500:]],
+            "_tooling_error": True,
+        }
+    return data
 
 
 def agent_prompt(issue: Issue, feedback: str = "") -> str:
@@ -714,9 +961,11 @@ Explain the actual changes, what you verified, and what remains unresolved.
 
 
 def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
-                      folder: Path) -> tuple[bool, str, dict[str, Any], str, str]:
+                      folder: Path, test_commands: list[list[str]] | None = None
+                      ) -> tuple[bool, str, dict[str, Any], str, str]:
+    commands = test_commands if test_commands is not None else config["test_commands"]
     passed, report = run_tests(
-        run.worktree, config["test_commands"], folder,
+        run.worktree, commands, folder,
         timeout=config.get("test_timeout_seconds"),
     )
     next_log(folder, "tests").write_text(report, encoding="utf-8")
@@ -731,6 +980,20 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
         reasoning_effort=config.get("codex_reasoning_effort"),
         timeout=config.get("codex_timeout_seconds"),
     )
+    if verdict.get("_tooling_error"):
+        print("[REVIEW] Reviewer result was invalid; retrying read-only review")
+        verdict = review(
+            run.worktree, issue, folder, base_sha, test_report=report,
+            model=config.get("codex_model"),
+            reasoning_effort=config.get("codex_reasoning_effort"),
+            timeout=config.get("codex_timeout_seconds"),
+        )
+    if verdict.get("_tooling_error"):
+        raise RuntimeError(
+            "Reviewer did not return valid structured JSON after a retry; "
+            "inspect the review log and resume later"
+        )
+    record_review_findings(folder, verdict)
     print_review_summary(verdict)
     # Reject if the worktree was changed during the review; review cannot authorize new changes.
     if prepare_patch(run.worktree, base, config["max_files"])[1] != digest:
@@ -746,7 +1009,8 @@ def check_existing_pr(repo: Path, github_repo: str, branch: str) -> list[dict[st
 
 
 def publish(run: Run, issue: Issue, github_repo: str, base: str,
-            config: dict[str, Any], folder: Path) -> None:
+            config: dict[str, Any], folder: Path,
+            test_commands: list[list[str]] | None = None) -> None:
     """Fresh tests + fresh review every time: no stale approval state to trust."""
     if not eligible(issue):
         raise RuntimeError("Issue is closed; publication blocked")
@@ -754,7 +1018,9 @@ def publish(run: Run, issue: Issue, github_repo: str, base: str,
     if prs:
         print(f"Existing PR for this branch: {prs[0]['url']}. No duplicate PR created.")
         return
-    passed, report, verdict, digest, _base_sha = verify_and_review(run, issue, base, config, folder)
+    passed, report, verdict, digest, _base_sha = verify_and_review(
+        run, issue, base, config, folder, test_commands=test_commands
+    )
     if not passed:
         raise RuntimeError("Tests/reviewer did not approve current code; nothing published")
     confirm = input("\nCommit, PUSH and open a DRAFT PR? Type 'publish' to approve: ").strip()
@@ -781,7 +1047,8 @@ def publish(run: Run, issue: Issue, github_repo: str, base: str,
 
 
 def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: Path,
-            initial_feedback: str = "") -> bool:
+            initial_feedback: str = "",
+            test_commands: list[list[str]] | None = None) -> bool:
     feedback = initial_feedback
     for attempt in range(config["max_retries"] + 1):
         print(f"\n[DEVELOPER] Working on issue #{issue.number}, attempt {attempt + 1}")
@@ -797,7 +1064,9 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
             print(feedback[-1000:])
             continue
         try:
-            passed, test_output, verdict, _, _ = verify_and_review(run, issue, base, config, folder)
+            passed, test_output, verdict, _, _ = verify_and_review(
+                run, issue, base, config, folder, test_commands=test_commands
+            )
         except RuntimeError:
             # Policy violations, malformed diff, or mid-review mutation are not model-retryable.
             raise
@@ -828,8 +1097,14 @@ def load_config(path: Path) -> dict[str, Any]:
         for c in commands
     ):
         raise ValueError("test_commands must be a nonempty list of argv arrays")
+    slow_commands = data.get("slow_test_commands", [])
+    if not isinstance(slow_commands, list) or not all(
+        isinstance(c, list) and c and all(isinstance(part, str) and part for part in c)
+        for c in slow_commands
+    ):
+        raise ValueError("slow_test_commands must be a list of argv arrays")
     retries = data.get("max_retries", 3)
-    max_files = data.get("max_files", 30)
+    max_files = data.get("max_files")
     codex_timeout = data.get("codex_timeout_seconds")
     test_timeout = data.get("test_timeout_seconds")
     codex_model = data.get("codex_model")
@@ -847,6 +1122,7 @@ def load_config(path: Path) -> dict[str, Any]:
             raise ValueError(f"{name} must be a nonempty string or null")
     return {
         "test_commands": commands,
+        "slow_test_commands": slow_commands,
         "max_retries": retries,
         "max_files": max_files,
         "codex_timeout_seconds": codex_timeout,
@@ -854,6 +1130,200 @@ def load_config(path: Path) -> dict[str, Any]:
         "codex_model": codex_model,
         "codex_reasoning_effort": reasoning_effort,
     }
+
+
+def test_commands_for_profile(config: dict[str, Any], profile: str) -> list[list[str]]:
+    """Return fast checks or fast checks plus the opt-in slow checks."""
+    if profile == "fast":
+        return config["test_commands"]
+    if profile != "slow":
+        raise ValueError(f"Unknown test profile: {profile}")
+    slow = config.get("slow_test_commands", [])
+    if not slow:
+        raise RuntimeError(
+            "The slow test profile is not configured; add slow_test_commands "
+            "to the target agent_config.json"
+        )
+    return config["test_commands"] + slow
+
+
+def detect_test_commands(repo: Path) -> tuple[list[list[str]], str]:
+    """Choose a conservative starter check for ``agentic init``."""
+    if (repo / "go.mod").is_file():
+        return [["go", "test", "./..."]], "Detected Go module"
+    if (repo / "Cargo.toml").is_file():
+        return [["cargo", "test"]], "Detected Rust crate"
+    package_json = repo / "package.json"
+    if package_json.is_file():
+        try:
+            package = json.loads(package_json.read_text(encoding="utf-8"))
+            has_test = isinstance(package, dict) and isinstance(package.get("scripts"), dict) and "test" in package["scripts"]
+        except (OSError, json.JSONDecodeError):
+            has_test = False
+        if has_test:
+            if (repo / "pnpm-lock.yaml").is_file():
+                return [["pnpm", "test"]], "Detected package.json test script and pnpm lockfile"
+            if (repo / "yarn.lock").is_file():
+                return [["yarn", "test"]], "Detected package.json test script and yarn lockfile"
+            return [["npm", "test"]], "Detected package.json test script"
+    makefile = next((repo / name for name in ("Makefile", "makefile") if (repo / name).is_file()), None)
+    if makefile:
+        content = makefile.read_text(encoding="utf-8", errors="replace")
+        for target in ("check", "test"):
+            if re.search(rf"(?m)^{re.escape(target)}\s*:", content):
+                return [["make", target]], f"Detected Makefile {target} target"
+    if (repo / "pyproject.toml").is_file() or (repo / "setup.py").is_file():
+        if (repo / "tests").is_dir():
+            return [["python", "-m", "unittest", "discover", "-s", "tests", "-q"]], "Detected Python tests directory"
+    return [["git", "diff", "--check"]], "No test framework detected; using Git whitespace validation"
+
+
+def _append_gitignore_entry(repo: Path, entry: str) -> bool:
+    path = repo / ".gitignore"
+    try:
+        content = path.read_text(encoding="utf-8") if path.exists() else ""
+    except OSError as exc:
+        raise RuntimeError(f"Could not read {path}: {exc}") from exc
+    lines = {line.strip() for line in content.splitlines()}
+    if entry in lines:
+        return False
+    prefix = "" if not content or content.endswith("\n") else "\n"
+    path.write_text(content + prefix + f"# Agentic local configuration\n{entry}\n", encoding="utf-8")
+    return True
+
+
+def init_repository(repo: Path, *, force: bool = False, create_agents: bool = False) -> int:
+    """Create personal target-repository setup without overwriting it by default."""
+    repo = repo.resolve()
+    root_result = probe(["git", "rev-parse", "--show-toplevel"], repo)
+    if not root_result[0]:
+        raise RuntimeError(f"{repo} is not a Git repository")
+    root = Path(root_result[1].splitlines()[-1]).resolve()
+    if root != repo:
+        raise RuntimeError(f"Run init from the repository root or pass --repo {root}")
+    config_path = repo / AGENT_CONFIG_FILENAME
+    commands, detection = detect_test_commands(repo)
+    config = {
+        "test_commands": commands,
+        "slow_test_commands": [],
+        "max_retries": 3,
+        "max_files": None,
+        "codex_model": None,
+        "codex_reasoning_effort": None,
+        "codex_timeout_seconds": None,
+        "test_timeout_seconds": None,
+    }
+    if config_path.exists() and not force:
+        print(f"[INIT] Keeping existing {config_path}")
+    else:
+        config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        print(f"[INIT] Wrote {config_path}")
+    if _append_gitignore_entry(repo, AGENT_CONFIG_FILENAME):
+        print(f"[INIT] Added {AGENT_CONFIG_FILENAME} to {repo / '.gitignore'}")
+    agents_path = repo / AGENTS_FILENAME
+    if create_agents:
+        if agents_path.exists() and not force:
+            print(f"[INIT] Keeping existing {agents_path}")
+        else:
+            agents_path.write_text(DEFAULT_AGENTS, encoding="utf-8")
+            print(f"[INIT] Wrote {agents_path}")
+    print(f"[INIT] {detection}: {' '.join(commands[0])}")
+    if commands == [["git", "diff", "--check"]]:
+        print("[INIT] Warning: replace the starter check with the project's real test/build commands")
+    print("[INIT] Review agent_config.json before the first issue run")
+    return 0
+
+
+def doctor(repo: Path, config_path: Path | None = None) -> int:
+    """Report local prerequisites and return nonzero when a required item is missing."""
+    repo = repo.resolve()
+    checks: list[tuple[str, bool, str, bool]] = []
+    git_version = installed_git_version()
+    checks.append(("Git", git_version is not None, ".".join(map(str, git_version)) if git_version else "not found", True))
+    root_ok, root_output = probe(["git", "rev-parse", "--show-toplevel"], repo)
+    checks.append(("Git repository", root_ok, root_output.splitlines()[-1] if root_output else "not a repository", True))
+    if root_ok:
+        origin_ok, origin = probe(["git", "remote", "get-url", "origin"], repo)
+        checks.append(("origin remote", origin_ok, origin or "missing origin remote", True))
+    else:
+        checks.append(("origin remote", False, "skipped", True))
+    gh_path = shutil.which("gh")
+    gh_ok, gh_output = probe([gh_path or "gh", "auth", "status"], repo) if gh_path else (False, "gh not found")
+    checks.append(("GitHub CLI auth", gh_ok, _short(gh_output or "not authenticated", 180), True))
+    codex_path = shutil.which("codex")
+    codex_ok, codex_output = probe([codex_path or "codex", "--version"], repo) if codex_path else (False, "codex not found")
+    checks.append(("Codex CLI", codex_ok, _short(codex_output or "not found", 180), True))
+    target_config = (config_path or repo / AGENT_CONFIG_FILENAME).resolve()
+    if target_config.is_file():
+        try:
+            loaded = load_config(target_config)
+            preflight_test_commands(repo, loaded["test_commands"] + loaded["slow_test_commands"])
+            checks.append(("Agentic config", True, str(target_config), True))
+            checks.append(("Configured checks", True, f"{len(loaded['test_commands'])} fast / {len(loaded['slow_test_commands'])} slow", True))
+        except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+            checks.append(("Agentic config", False, str(exc), True))
+    else:
+        checks.append(("Agentic config", False, f"missing: {target_config} (run agentic init)", True))
+    if git_version is not None and os.environ.get("WSL_DISTRO_NAME"):
+        if relative_worktree_paths_supported():
+            checks.append(("WSL/Windows worktree paths", True, "relative paths supported", False))
+        else:
+            checks.append(("WSL/Windows worktree paths", False, "Git 2.48+ is required in WSL and Windows Git", False))
+    print("Agentic doctor")
+    print(f"Repository: {repo}")
+    for label, ok, detail, required in checks:
+        state = "OK" if ok else ("FAIL" if required else "WARN")
+        print(f"[{state:<4}] {label}: {detail}")
+    return 0 if all(ok or not required for _, ok, _, required in checks) else 1
+
+
+def _run_log_folder(repo: Path, run: Run, state_dir: Path | None = None) -> Path:
+    preferred = (state_paths(repo, state_dir).runs if state_dir else legacy_runs_dir(repo)) / run.branch.replace("/", "-")
+    legacy = legacy_runs_dir(repo) / run.branch.replace("/", "-")
+    return legacy if state_dir and legacy.is_dir() and not preferred.exists() else preferred
+
+
+def cleanup(repo: Path, *, issue: int | None = None, all_runs: bool = False,
+            confirm: bool = False, remove_logs: bool = False,
+            state_dir: Path | None = None) -> int:
+    """Preview or remove clean Agentic worktrees while preserving dirty ones."""
+    if issue is None and not all_runs:
+        raise RuntimeError("cleanup requires --issue N or --all")
+    if remove_logs and not confirm:
+        raise RuntimeError("--remove-logs requires --yes; cleanup is a dry run by default")
+    runs = discover_runs(repo)
+    if issue is not None:
+        runs = [run for run in runs if run.issue_number == issue]
+    if not runs:
+        print("No matching Agentic worktrees.")
+        return 0
+    removed = 0
+    for run in runs:
+        dirty = bool(git(run.worktree, "status", "--porcelain", "--untracked-files=all", "--ignored"))
+        folder = _run_log_folder(repo, run, state_dir)
+        if dirty:
+            print(f"[SKIP] {run.branch}: worktree has uncommitted changes ({run.worktree})")
+            continue
+        if not confirm:
+            print(f"[DRY RUN] would remove clean worktree: {run.worktree}")
+            if remove_logs:
+                print(f"[DRY RUN] would remove logs: {folder}")
+            continue
+        try:
+            git(repo, "worktree", "remove", str(run.worktree))
+        except RuntimeError as exc:
+            print(f"[SKIP] {run.branch}: {exc}")
+            continue
+        if remove_logs and folder.is_dir():
+            shutil.rmtree(folder)
+            print(f"[CLEAN] removed logs: {folder}")
+        print(f"[CLEAN] removed worktree: {run.worktree}")
+        removed += 1
+    if not confirm:
+        print("Nothing removed. Re-run with --yes after inspecting the list.")
+    else:
+        print(f"Removed {removed} worktree(s); uncommitted work was preserved.")
+    return 0
 
 
 def show_runs(repo: Path) -> None:
@@ -889,19 +1359,32 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
-        "command", nargs="?", choices=("help", "shell", "dashboard"),
+        "command", nargs="?", choices=("help", "shell", "dashboard", "init", "doctor", "cleanup"),
         help="Show help or route to a built-in subcommand",
     )
     parser.add_argument("--repo", default=str(Path.cwd()), help="Project root (default: current directory)")
+    parser.add_argument(
+        "--state-dir", default=None,
+        help="Agentic state root (default: user state directory; use a shared /mnt drive for WSL/Windows)",
+    )
     parser.add_argument("--interactive", action="store_true", help="Open the interactive background-job shell")
     parser.add_argument(
         "--config", default=None,
         help="Configuration file (default: agent_config.json in the target repository)",
     )
+    parser.add_argument(
+        "--profile", choices=("fast", "slow"), default="fast",
+        help="Test profile: fast checks by default, or fast plus slow_test_commands",
+    )
     parser.add_argument("--issue", type=int, help="GitHub issue number")
     parser.add_argument("--list", action="store_true", help="List open issues")
     parser.add_argument("--runs", action="store_true", help="List existing worktrees without contacting GitHub")
     parser.add_argument("--new", action="store_true", help="Make another worktree even if one already exists")
+    parser.add_argument("--force", action="store_true", help="Allow init to replace generated setup files")
+    parser.add_argument("--agents", action="store_true", help="With init, create a starter AGENTS.md")
+    parser.add_argument("--yes", action="store_true", help="Confirm a cleanup operation")
+    parser.add_argument("--remove-logs", action="store_true", help="With cleanup, also delete matching run logs")
+    parser.add_argument("--all", dest="all_runs", action="store_true", help="With cleanup, select all clean Agentic worktrees")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--review", action="store_true", help="Rerun tests + fresh review; do not code")
     mode.add_argument("--publish", action="store_true", help="Revalidate, then request approval to draft PR")
@@ -924,6 +1407,13 @@ def execute(args: argparse.Namespace) -> None:
 def execute_locked(args: argparse.Namespace, repo: Path) -> None:
     if args.new and (args.review or args.publish):
         raise RuntimeError("--new cannot be combined with --review or --publish")
+    if args.runs:
+        show_runs(repo)
+        return
+    if args.list:
+        github_repo, _ = github_metadata(repo)
+        show_issues(repo, fetch_issues(repo, github_repo))
+        return
     config_path = Path(args.config).resolve() if args.config else repo / "agent_config.json"
     if not config_path.is_file():
         raise RuntimeError(
@@ -931,12 +1421,10 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> None:
             "agent_config.json or pass --config explicitly"
         )
     config = load_config(config_path)
-    if not args.list:
-        preflight_test_commands(repo, config["test_commands"])
+    test_commands = test_commands_for_profile(config, args.profile)
+    preflight_test_commands(repo, test_commands)
+    state_dir = Path(args.state_dir).expanduser().resolve() if args.state_dir else default_state_dir()
     github_repo, base = github_metadata(repo)
-    if args.list:
-        show_issues(repo, fetch_issues(repo, github_repo))
-        return
     if args.issue is None:
         issues = fetch_issues(repo, github_repo)
         show_issues(repo, issues)
@@ -948,7 +1436,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> None:
     if args.new:
         if not eligible(issue):
             raise RuntimeError("Only open issues can start a new worktree")
-        run = create_worktree(repo, base, number)
+        run = create_worktree(repo, base, number, state_dir)
         fresh = True
     elif previous:
         run = choose_existing(previous)
@@ -961,18 +1449,23 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> None:
             raise RuntimeError("No existing worktree for this issue; first run --issue N")
         if not eligible(issue):
             raise RuntimeError("Only open issues can start a new worktree")
-        run = create_worktree(repo, base, number)
+        run = create_worktree(repo, base, number, state_dir)
         fresh = True
-    folder = logs_path(repo, run)
+    folder = logs_path(repo, run, state_dir)
     print_run_header(issue, run, fresh)
     if args.review:
-        passed, *_ = verify_and_review(run, issue, base, config, folder)
+        passed, *_ = verify_and_review(
+            run, issue, base, config, folder, test_commands=test_commands
+        )
         if not passed:
             raise RuntimeError("Review or tests did not approve current changes")
         print_run_summary(run, "VALIDATED", f"python agentic.py --issue {issue.number} --publish")
         return
     if args.publish:
-        publish(run, issue, github_repo, base, config, folder)
+        publish(
+            run, issue, github_repo, base, config, folder,
+            test_commands=test_commands,
+        )
         return
     if not eligible(issue):
         raise RuntimeError("Issue is closed; development blocked")
@@ -983,7 +1476,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> None:
     if fresh:
         print("[BASELINE] Verifying untouched base before development")
         passed, report = run_tests(
-            run.worktree, config["test_commands"], folder,
+            run.worktree, test_commands, folder,
             timeout=config["test_timeout_seconds"],
         )
         if not passed:
@@ -991,7 +1484,10 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> None:
     resume_feedback = load_resume_feedback(folder) if not fresh else ""
     if resume_feedback:
         print("[RESUME] Loaded previous review/test feedback for the developer")
-    if not develop(run, issue, base, config, folder, initial_feedback=resume_feedback):
+    if not develop(
+        run, issue, base, config, folder,
+        initial_feedback=resume_feedback, test_commands=test_commands,
+    ):
         raise RuntimeError("Unable to complete the task; resume later with --issue N")
 
 
@@ -1009,12 +1505,44 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "help":
             parser.print_help()
             return 0
-        if args.interactive:
+        if args.command == "init":
+            return init_repository(Path(args.repo), force=args.force, create_agents=args.agents)
+        if args.command == "doctor":
+            return doctor(Path(args.repo), Path(args.config) if args.config else None)
+        if args.command == "cleanup":
+            if args.issue is not None and args.all_runs:
+                parser.error("cleanup accepts either --issue N or --all, not both")
+            repo = Path(args.repo).resolve()
+            root = Path(git(repo, "rev-parse", "--show-toplevel")).resolve()
+            if repo != root:
+                raise RuntimeError("Run cleanup from the project root or pass --repo pointing to that root")
+            with repository_lock(repo):
+                return cleanup(
+                    repo, issue=args.issue, all_runs=args.all_runs,
+                    confirm=args.yes, remove_logs=args.remove_logs,
+                    state_dir=Path(args.state_dir).expanduser().resolve() if args.state_dir else default_state_dir(),
+                )
+        if args.profile != "fast" and args.issue is None:
+            parser.error("--profile requires --issue; use /run ISSUE --profile slow in the interactive shell")
+        # The interactive supervisor is the natural entry point when no
+        # runner action was requested.  Keep explicit issue/list/run modes
+        # unchanged, while making `agentic` and `agentic --repo ...` useful
+        # without requiring a special flag.
+        default_interactive = (
+            args.issue is None
+            and not args.list
+            and not args.runs
+            and not args.new
+            and not args.review
+            and not args.publish
+        )
+        if args.interactive or default_interactive:
             if any((args.issue is not None, args.list, args.runs, args.new, args.review, args.publish)):
                 parser.error("--interactive cannot be combined with --issue, --list, --runs, --new, --review, or --publish")
             from agentic_shell import run_shell
             config = Path(args.config).resolve() if args.config else None
-            return run_shell(Path(args.repo), Path(__file__).resolve(), config)
+            state_dir = Path(args.state_dir).expanduser().resolve() if args.state_dir else default_state_dir()
+            return run_shell(Path(args.repo), Path(__file__).resolve(), config, state_dir=state_dir)
         execute(args)
         return 0
     except (RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:

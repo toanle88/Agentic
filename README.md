@@ -1,219 +1,160 @@
 # Agentic
 
-Agentic runs a Codex developer and an independent read-only reviewer against GitHub issues. It uses Git worktrees so unfinished work can be resumed safely.
+[![CI](https://github.com/toanle88/Agentic/actions/workflows/ci.yml/badge.svg)](https://github.com/toanle88/Agentic/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-The runner itself has no third-party Python dependencies. It requires Python 3.10+, Git, GitHub CLI (`gh`), and Codex CLI (`codex`). Authenticate first:
+Agentic is a resumable, issue-driven coding workflow for GitHub repositories. It gives a Codex developer an isolated Git worktree, runs the target repository's checks, asks an independent read-only reviewer to inspect the patch, and preserves evidence when work needs to be resumed.
+
+Agentic is designed for human-supervised development. It does not silently commit, push, or open pull requests during development.
+
+## Highlights
+
+- One isolated Git worktree per GitHub issue.
+- Resume support for unfinished or rejected work.
+- Configurable project checks using safe argument arrays.
+- Independent read-only review before publication.
+- Interactive background shell with `/ps` and `/logs`.
+- Self-contained HTML dashboard for run history.
+- Centralized user-level state so target repositories stay clean.
+- WSL/Windows Git worktree compatibility when supported by both Git installations.
+
+## Requirements
+
+- Python 3.10 or newer
+- Git
+- [GitHub CLI](https://cli.github.com/) (`gh`)
+- [Codex CLI](https://developers.openai.com/codex/cli/)
+- A GitHub repository with an `origin` remote and a resolvable default branch
+- Tools required by the target repository's configured checks
+
+Agentic itself has no third-party Python runtime dependencies.
+
+Authenticate before the first run:
 
 ```bash
 gh auth login
 codex login
 ```
 
-The target repository must have an `origin` remote and a GitHub default branch.
+## Installation
 
-`main` is protected. Changes to Agentic itself are made through pull requests; CI runs on every pull request and the `main` branch.
-
-## Install in WSL
-
-Install the CLI once with `pipx`; the target repositories no longer need copies of the Python files:
+On Debian, Ubuntu, or WSL, install with `pipx`:
 
 ```bash
 sudo apt update
-sudo apt install pipx
+sudo apt install -y pipx
 pipx ensurepath
+```
+
+Restart the shell if `pipx` changed your `PATH`, then install Agentic:
+
+```bash
 pipx install git+https://github.com/toanle88/Agentic.git
 ```
 
-After a new Agentic release:
+Upgrade or uninstall it with:
 
 ```bash
 pipx upgrade agentic-runner
-```
-
-Remove it with:
-
-```bash
 pipx uninstall agentic-runner
 ```
 
-For local development, use an editable install instead:
+For local development, use an editable installation:
 
 ```bash
-pipx install --editable /path/to/agentic
+git clone https://github.com/toanle88/Agentic.git
+cd Agentic
+pipx install --editable .
 ```
 
 ## Quick start
 
-```bash
-python /path/to/agentic.py \
-  --repo /path/to/project \
-  --issue 119
-```
-
-After installation, run it from the target repository:
+From the root of the target repository, initialize the personal configuration. Agentic detects a conservative starter check and never overwrites an existing configuration unless `--force` is supplied:
 
 ```bash
-cd /path/to/project
-agentic --issue 119
+cd /path/to/target-repository
+agentic init
+agentic init --agents  # optional starter AGENTS.md
 ```
 
-The runner reads `agent_config.json` from the target repository by default. To use another file:
+Review `agent_config.json` and replace the detected command with the target project's real fast checks. See the [configuration guide](docs/configuration.md).
+
+Run the environment diagnostic before the first issue:
 
 ```bash
-python /path/to/agentic.py \
-  --repo /path/to/project \
-  --config /path/to/agent_config.json \
-  --issue 119
+agentic doctor
 ```
 
-If the target configuration is missing, the runner stops before starting Codex. It never silently falls back to the Agentic repository's test configuration.
-
-## Configuration
-
-Create `agent_config.json` in the target project. Replace the example test command with the project's actual checks:
-
-```json
-{
-  "test_commands": [
-    ["go", "test", "./..."]
-  ],
-  "max_retries": 3,
-  "max_files": 30,
-  "codex_model": null,
-  "codex_reasoning_effort": null,
-  "codex_timeout_seconds": null,
-  "test_timeout_seconds": null
-}
-```
-
-Settings:
-
-- `test_commands`: required list of argument arrays. Commands run inside the worktree. Do not use shell strings.
-- `max_retries`: extra developer attempts after the first. `3` means up to 4 total attempts.
-- `max_files`: maximum number of distinct files in the proposed patch. It is checked before review/publication; it does not limit lines or files the developer may inspect. Set it to `null` to disable this limit.
-- `codex_model`: model override. `null` inherits your Codex CLI setting.
-- `codex_reasoning_effort`: reasoning override such as `max`. `null` inherits your Codex CLI setting.
-- `codex_timeout_seconds`: developer/reviewer limit. `null` means unlimited; a positive integer sets seconds.
-- `test_timeout_seconds`: test-process limit. `null` means unlimited; a positive integer sets seconds.
-
-Commands are checked before development starts. Missing executables and missing Python `-m` modules fail immediately instead of consuming retries. Clearly environmental failures such as missing dependencies, unavailable commands, port conflicts, and missing files are not retried.
-
-## Commands
+By default, worktrees, logs, shell records, and dashboards live under the user-level Agentic state directory, not beside the target repository. In WSL, use a shared Windows-mounted location when you need to open worktrees with Windows Git:
 
 ```bash
-agentic --help                           # show all runner options
-agentic --version                        # show the installed package version
-agentic help                             # equivalent help command
-agentic shell                            # open the background-job shell
-agentic dashboard                        # generate the HTML dashboard
-agentic --list                           # list open GitHub issues
-agentic --runs                           # list existing worktrees
-agentic --issue 119                      # create or resume issue 119
-agentic --issue 119 --review              # rerun tests and review only
-agentic --issue 119 --publish             # validate, then offer draft-PR publication
-agentic --issue 119 --new                 # explicitly create a second worktree
+agentic --state-dir /mnt/d/Dev/AgenticState --issue 119
 ```
 
-The direct source form remains available when running without installation: replace `agentic` with `python agentic.py`. `agentic-shell` and `agentic-dashboard` are also installed as compatibility aliases.
-
-Running the same `--issue` command again resumes the existing worktree. Changes and commits are preserved. Use `--new` only when you intentionally want another worktree.
-
-When resuming, the runner loads the latest failed review and test evidence from the run logs and gives it to Codex as untrusted feedback. This lets a new invocation continue fixing the previous rejection.
-
-The developer does not commit or push. `--publish` reruns tests and review, checks that the patch has not changed, and asks you to type `publish` before committing, pushing, and opening a draft PR.
-
-The terminal view shows a compact run banner, colored status labels when output is interactive, the top review findings, and a final next-action summary. Full JSON/JSONL details remain in the run logs.
-
-## Interactive shell
-
-Use the optional supervisor when you want one terminal for multiple background jobs:
+Start the interactive shell:
 
 ```bash
-agentic shell --repo /path/to/project
+agentic
 ```
 
-It keeps the main prompt responsive while each runner executes in a separate child process. Jobs have no additional timeout; configured runner timeouts still apply.
+Then run and monitor an issue:
 
 ```text
 agentic> /run 119
 agentic> /ps
 agentic> /logs 1 80
-agentic> /stop 1
-agentic> /dashboard
-agentic> /help
-agentic> /quit
 ```
 
-Interactive-shell output is saved next to the project in `.project-agentic-shell/`; the runner's normal durable logs remain in `.project-agent-runs/`.
+The shell shows a compact welcome banner with the repository, state directory,
+configuration, and job status. Set `AGENTIC_ASCII=1` for terminals that do not
+render box-drawing characters, or `AGENTIC_PLAIN=1` for plain, uncolored output.
 
-## HTML run dashboard
-
-Generate a searchable, self-contained status page from the run logs. It shows each issue's attempts, test result, review summary/findings, developer result, and expandable log contents:
+For direct foreground execution:
 
 ```bash
-agentic dashboard --repo /path/to/project
+agentic --issue 119
 ```
 
-Use either standard help form:
+Running the same issue again resumes its existing worktree. Use `--new` only when you intentionally want a separate worktree.
 
-```bash
-agentic dashboard --help
-agentic dashboard help
-```
+## Common commands
 
-By default, the dashboard is written next to the project as `.project-agent-dashboard.html`. Choose another location when needed:
+| Command | Purpose |
+| --- | --- |
+| `agentic` | Open the interactive background-job shell. |
+| `agentic --issue N` | Create or resume issue `N` in the foreground. |
+| `agentic --issue N --profile slow` | Run the fast checks plus configured slow checks. |
+| `agentic --issue N --review` | Re-run checks and review an existing worktree without coding. |
+| `agentic --issue N --publish` | Revalidate, request confirmation, then publish a draft PR. |
+| `agentic --issue N --new` | Create a separate worktree for the issue. |
+| `agentic --list` | List open GitHub issues. |
+| `agentic --runs` | List existing Agentic worktrees. |
+| `agentic init` | Create ignored target configuration and detect a starter check. |
+| `agentic doctor` | Diagnose Git, GitHub CLI, Codex CLI, config, and check prerequisites. |
+| `agentic --state-dir PATH ...` | Store worktrees and runtime artifacts in a chosen location. |
+| `agentic cleanup --issue N` | Preview removal of a clean issue worktree; add `--yes` to confirm. |
+| `agentic dashboard` | Generate the HTML run dashboard. |
+| `agentic --help` | Show CLI help. |
+| `agentic --version` | Show the installed version. |
 
-```bash
-agentic dashboard \
-  --repo /path/to/project \
-  --output /path/to/agentic-dashboard.html
-```
+## Documentation
 
-The generator is read-only and uses only the Python standard library. Regenerate the page after a run to refresh its snapshot.
+| Guide | Contents |
+| --- | --- |
+| [Getting started](docs/getting-started.md) | Installation, authentication, first run, and target repository setup. |
+| [Configuration](docs/configuration.md) | `agent_config.json`, test commands, model settings, retries, and timeouts. |
+| [Agent instructions](docs/agent-instructions.md) | How to create and maintain a target repository's `AGENTS.md`. |
+| [Workflow](docs/workflow.md) | Worktrees, resume behavior, reviews, publication, logs, and dashboard usage. |
+| [Troubleshooting](docs/troubleshooting.md) | Missing tools, failed checks, repeated rejections, and WSL/Git issues. |
+| [Architecture](docs/architecture.md) | Components, lifecycle, filesystem layout, and safety boundaries. |
+| [Development](docs/development.md) | Local development, tests, CI, releases, and contribution workflow. |
 
-## Development and releases
+## Safety summary
 
-Run the local checks with:
+Agentic runs configured checks under the host account, so use a trusted or disposable checkout and never expose production credentials. The developer and reviewer are separate processes; the reviewer is read-only. Agentic does not replace CI, security review, or human approval.
 
-```bash
-python -m unittest discover -s tests -q
-```
+See the [workflow](docs/workflow.md), [architecture](docs/architecture.md), and [troubleshooting](docs/troubleshooting.md) guides for details.
 
-Release tags use semantic versioning, such as `v0.1.1`. The release workflow verifies the tag against `agentic --version`, builds the package artifacts, and creates a GitHub release. See [CONTRIBUTING.md](CONTRIBUTING.md) for the pull-request and release process.
+## License
 
-## Worktrees and logs
-
-For a project named `my-project`, worktrees and logs are created next to the checkout:
-
-```text
-../.my-project-agent-worktrees/issue-119-XXXXXXXX/
-../.my-project-agent-runs/agent-issue-119-XXXXXXXX/
-```
-
-The worktree is preserved after failure, timeout, or exhausted retries. Logs contain developer/reviewer progress, test output, and the final review result.
-
-Only one mutating runner process can use a repository at a time. A lock prevents concurrent runs from corrupting shared Git metadata.
-
-## WSL and Windows Git
-
-When both WSL Git and Windows Git are version 2.48 or newer, Agentic uses relative worktree paths for cross-platform compatibility. Older installations use the compatible fallback behavior.
-
-Manual repair from WSL, after upgrading both Git installations:
-
-```bash
-git config worktree.useRelativePaths true
-git worktree repair --relative-paths /path/to/.my-project-agent-worktrees/issue-119-XXXXXXXX
-```
-
-## Safety boundaries
-
-- Test commands run under the host account, outside the Codex sandbox. Use a trusted or disposable checkout without production credentials.
-- The runner blocks changes to `agentic.py`, `agent_config.json`, `AGENTS.md`, secrets, private keys, `.codex/`, and GitHub workflows.
-- GitHub issue text, repository files, and test output are treated as untrusted input to Codex.
-- A reviewer is useful but cannot replace CI or human review.
-
-## Test the runner itself
-
-```bash
-python -m unittest discover -s tests -q
-```
+Agentic is released under the [MIT License](LICENSE).
