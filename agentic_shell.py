@@ -20,7 +20,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, TextIO
+from typing import Callable, TextIO, cast
 
 
 HELP = """Commands:
@@ -38,7 +38,139 @@ HELP = """Commands:
 
 Jobs have no supervisor timeout. The configured Agentic test/Codex timeouts,
 if any, still apply inside the child runner.
+
+Press Tab after / to complete commands. Supported options and known job IDs
+are completed where applicable.
 """
+
+
+SHELL_COMMANDS = (
+    "/run",
+    "/ps",
+    "/logs",
+    "/stop",
+    "/status",
+    "/dashboard",
+    "/help",
+    "/quit",
+    "/exit",
+    "/?",
+)
+SHELL_OPTIONS = {
+    "/run": ("--profile", "--review", "--publish", "--new"),
+    "/ps": ("--all",),
+    "/status": ("--json",),
+}
+
+
+def _completion_candidates(line: str, cursor: int | None = None,
+                           job_numbers: tuple[int, ...] = ()) -> list[str]:
+    """Return safe slash-command completions for the current input buffer."""
+    cursor = len(line) if cursor is None else max(0, min(cursor, len(line)))
+    before_cursor = line[:cursor]
+    stripped = before_cursor.lstrip()
+    if not stripped.startswith("/"):
+        return []
+
+    trailing_space = bool(before_cursor and before_cursor[-1].isspace())
+    try:
+        tokens = shlex.split(before_cursor)
+    except ValueError:
+        # An unfinished quote should not make completion fail. The shell will
+        # still report the syntax error when the user submits the line.
+        tokens = before_cursor.split()
+    if not tokens:
+        return list(SHELL_COMMANDS)
+
+    command = tokens[0].lower()
+    if len(tokens) == 1 and not trailing_space:
+        partial = tokens[0].lower()
+        return [candidate for candidate in SHELL_COMMANDS if candidate.startswith(partial)]
+
+    current = "" if trailing_space else tokens[-1]
+    previous = tokens[-2] if len(tokens) > 1 else ""
+    if command == "/run" and (previous == "--profile" or current == "--profile"):
+        values = ("fast", "slow")
+        partial = "" if current == "--profile" else current
+        return [value for value in values if value.startswith(partial)]
+
+    if command in {"/logs", "/stop"}:
+        values = [str(number) for number in sorted(job_numbers)]
+        return [value for value in values if value.startswith(current)]
+
+    options = SHELL_OPTIONS.get(command, ())
+    return [option for option in options if option.startswith(current)]
+
+
+def _replace_current_token(line: str, replacement: str) -> str:
+    """Replace the whitespace-delimited token at the cursor's end."""
+    start = len(line)
+    while start and not line[start - 1].isspace():
+        start -= 1
+    return line[:start] + replacement
+
+
+def _windows_input(prompt: str, completer: Callable[[str, int], list[str]]) -> str:
+    """Read one editable line with Tab completion on native Windows consoles."""
+    import msvcrt
+
+    # Pyright's bundled msvcrt stubs do not expose getwch, although it is
+    # available in the Windows runtime. Keep the dynamic lookup local to the
+    # Windows-only fallback and give the call its actual signature.
+    getwch = cast(Callable[[], str], getattr(msvcrt, "getwch"))
+    line = ""
+    print(prompt, end="", flush=True)
+    while True:
+        character = getwch()
+        if character in {"\r", "\n"}:
+            print()
+            return line
+        if character == "\003":
+            print()
+            raise KeyboardInterrupt
+        if character == "\b":
+            if line:
+                line = line[:-1]
+                print("\b \b", end="", flush=True)
+            continue
+        if character == "\t":
+            matches = completer(line, len(line))
+            if not matches:
+                continue
+            current_start = len(line)
+            while current_start and not line[current_start - 1].isspace():
+                current_start -= 1
+            current = line[current_start:]
+            common = matches[0]
+            for match in matches[1:]:
+                common_length = 0
+                for left, right in zip(common, match):
+                    if left != right:
+                        break
+                    common_length += 1
+                common = common[:common_length]
+            if len(common) > len(current):
+                line = _replace_current_token(line, common)
+                print("\r" + prompt + line, end="", flush=True)
+            else:
+                print("\n" + "  ".join(matches), end="\n" + prompt + line, flush=True)
+            continue
+        if character in {"\x00", "\xe0"}:
+            # Consume the second byte of a Windows special key (arrows,
+            # function keys, etc.) without corrupting the current line.
+            getwch()
+            continue
+        line += character
+        print(character, end="", flush=True)
+
+
+def _readline_module():
+    """Load the optional stdlib readline module where the platform provides it."""
+    try:
+        import readline
+    except ImportError:
+        return None
+    return readline
 
 
 def _shell_paint(text: str, code: str) -> str:
@@ -305,6 +437,53 @@ class AgenticShell:
         self.jobs: dict[int, Job] = {}
         self._load_persisted_jobs()
         self.next_number = max(self.jobs, default=0) + 1
+
+    def _completion_matches(self, line: str, cursor: int | None = None) -> list[str]:
+        return _completion_candidates(line, cursor, tuple(self.jobs))
+
+    def _readline_completer(self, text: str, state: int) -> str | None:
+        """Adapter for GNU/libedit readline's stateful completion API."""
+        readline = _readline_module()
+        if readline is None:
+            return None
+        if state == 0:
+            self._readline_matches = self._completion_matches(
+                readline.get_line_buffer(), readline.get_endidx()
+            )
+        matches = getattr(self, "_readline_matches", [])
+        return matches[state] if state < len(matches) else None
+
+    def _configure_completion(self):
+        """Enable Tab completion and return readline state for restoration."""
+        readline = _readline_module()
+        if readline is None:
+            return None
+        previous = (
+            readline.get_completer(),
+            readline.get_completer_delims(),
+        )
+        readline.set_completer(self._readline_completer)
+        # Keep '/' and '-' inside a completion word so both command and option
+        # completion replace the full token.
+        readline.set_completer_delims(" \t")
+        readline.parse_and_bind("tab: complete")
+        return readline, previous
+
+    @staticmethod
+    def _restore_completion(state) -> None:
+        if state is None:
+            return
+        readline, (completer, delimiters) = state
+        readline.set_completer(completer)
+        readline.set_completer_delims(delimiters)
+
+    def _input(self, prompt: str) -> str:
+        """Read a shell line with completion where the terminal supports it."""
+        if _readline_module() is not None:
+            return input(prompt)
+        if os.name == "nt" and getattr(sys.stdin, "isatty", lambda: False)():
+            return _windows_input(prompt, self._completion_matches)
+        return input(prompt)
 
     def _record_path(self, number: int) -> Path:
         return self.session_dir / f"job-{number:03d}.json"
@@ -621,15 +800,19 @@ class AgenticShell:
         )
         print("Available commands:")
         print(HELP.rstrip())
-        while True:
-            self.refresh()
-            try:
-                line = input("agentic> ")
-            except (EOFError, KeyboardInterrupt):
-                print()
-                break
-            if not self.execute(line):
-                break
+        completion_state = self._configure_completion()
+        try:
+            while True:
+                self.refresh()
+                try:
+                    line = self._input("agentic> ")
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
+                if not self.execute(line):
+                    break
+        finally:
+            self._restore_completion(completion_state)
         running = [job.number for job in self.jobs.values()
                    if job.running and job.session_id == self.session_id]
         if running:
