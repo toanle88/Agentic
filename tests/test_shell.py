@@ -135,6 +135,17 @@ class ShellTests(unittest.TestCase):
                 self.assertIn('doctor', run.call_args.args[0])
                 self.assertIn('--json', run.call_args.args[0])
 
+                shell.run_doctor([
+                    '/doctor', '--commands', '--profile', 'slow',
+                    '--worktree', str(root),
+                ])
+                doctor_argv = run.call_args.args[0]
+                self.assertIn('--commands', doctor_argv)
+                self.assertIn('--profile', doctor_argv)
+                self.assertIn('slow', doctor_argv)
+                self.assertIn('--worktree', doctor_argv)
+                self.assertIn(str(root), doctor_argv)
+
                 shell.run_cleanup(['/cleanup', '--issue', '12', '--yes'])
                 cleanup_argv = run.call_args.args[0]
                 self.assertIn('cleanup', cleanup_argv)
@@ -340,6 +351,25 @@ class ShellTests(unittest.TestCase):
                 key_reader_factory=reader,
             )
         self.assertEqual(result, '/listX foo')
+
+    def test_interactive_input_clips_long_lines_instead_of_wrapping(self):
+        line = '/doctor --commands --worktree /home/toanl/.local/state/agentic/Tally-ba6fd564a347/worktrees/issue-119-5802a6ff'
+        visible, cursor = agentic_shell._clip_input_line(
+            line, len(line), len('agentic> '), 40,
+        )
+        self.assertLessEqual(len('agentic> ') + len(visible), 39)
+        self.assertEqual(cursor, len(visible))
+
+        keys = [('CHAR', char) for char in line] + [('ENTER', '\n')]
+        reader = _create_mock_reader(keys)
+        with patch('agentic_shell.shutil.get_terminal_size', return_value=os.terminal_size((40, 24))), \
+             patch('sys.stdout', new_callable=StringIO):
+            result = agentic_shell._interactive_input(
+                'agentic> ',
+                agentic_shell._completion_items,
+                key_reader_factory=reader,
+            )
+        self.assertEqual(result, line)
 
     def test_interactive_input_ctrl_c_and_ctrl_d(self):
         reader_c = _create_mock_reader([('CTRL_C', '\003')])

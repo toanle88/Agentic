@@ -1,4 +1,5 @@
 """Offline tests: no GitHub or Codex credentials needed."""
+from contextlib import nullcontext
 import json
 import io
 import subprocess
@@ -11,6 +12,7 @@ from unittest.mock import call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import agentic
+import agentic_diagnostics
 import agentic_execution
 
 
@@ -822,6 +824,124 @@ class PureTests(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertTrue(payload['ok'])
         self.assertTrue(any(item['name'] == 'Agentic config' for item in payload['checks']))
+
+    def test_doctor_commands_runs_from_selected_worktree(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            worktree = root / 'selected-worktree'
+            worktree.mkdir()
+            config = root / 'agent_config.json'
+            config.write_text(json.dumps({
+                'test_commands': [[
+                    sys.executable, '-c',
+                    'import os, sys; sys.exit(0 if os.getcwd() == sys.argv[1] else 1)',
+                    str(worktree),
+                ]],
+            }))
+
+            def fake_probe(argv, cwd, **kwargs):
+                if argv[:3] == ['git', 'rev-parse', '--git-common-dir']:
+                    return True, str(root / '.git')
+                if argv[:2] == ['git', 'rev-parse']:
+                    return True, str(cwd)
+                return True, 'ok'
+
+            with (patch('agentic.installed_git_version', return_value=(2, 48, 0)),
+                  patch('agentic.probe', side_effect=fake_probe),
+                  patch('agentic.shutil.which', return_value='/usr/bin/tool'),
+                  patch('agentic.worktree_path_lock', return_value=nullcontext()) as lock,
+                  patch('sys.stdout', new_callable=io.StringIO) as output):
+                result = agentic.doctor(
+                    root, config, json_output=True, run_commands=True,
+                    worktree=worktree,
+                )
+
+        self.assertEqual(result, 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload['command_results'][0]['status'], 'passed')
+        self.assertEqual(payload['command_results'][0]['exit_code'], 0)
+        worktree_check = next(item for item in payload['checks'] if item['name'] == 'Command worktree')
+        self.assertTrue(worktree_check['ok'])
+        lock.assert_called_once_with(root, worktree)
+
+    def test_doctor_commands_reports_command_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / 'agent_config.json'
+            config.write_text(json.dumps({
+                'test_commands': [[sys.executable, '-c', 'import sys; sys.exit(3)']],
+            }))
+
+            def fake_probe(argv, cwd, **kwargs):
+                if argv[:3] == ['git', 'rev-parse', '--git-common-dir']:
+                    return True, str(root / '.git')
+                if argv[:2] == ['git', 'rev-parse']:
+                    return True, str(root)
+                return True, 'ok'
+
+            with (patch('agentic.installed_git_version', return_value=(2, 48, 0)),
+                  patch('agentic.probe', side_effect=fake_probe),
+                  patch('agentic.shutil.which', return_value='/usr/bin/tool'),
+                  patch('agentic.worktree_path_lock', return_value=nullcontext()),
+                  patch('sys.stdout', new_callable=io.StringIO) as output):
+                result = agentic.doctor(root, config, json_output=True, run_commands=True)
+
+        self.assertEqual(result, 1)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload['command_results'][0]['status'], 'failed')
+        self.assertEqual(payload['command_results'][0]['exit_code'], 3)
+        execution = next(item for item in payload['checks'] if item['name'] == 'Configured command execution')
+        self.assertFalse(execution['ok'])
+
+    def test_doctor_commands_reject_unrelated_worktree(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            worktree = root / 'other-repository'
+            worktree.mkdir()
+            config = root / 'agent_config.json'
+            config.write_text(json.dumps({
+                'test_commands': [[sys.executable, '-c', 'raise SystemExit(99)']],
+            }))
+
+            def fake_probe(argv, cwd, **kwargs):
+                if argv[:3] == ['git', 'rev-parse', '--git-common-dir']:
+                    common = root / ('.git' if cwd == root else 'other.git')
+                    return True, str(common)
+                if argv[:2] == ['git', 'rev-parse']:
+                    return True, str(cwd)
+                return True, 'ok'
+
+            with (patch('agentic.installed_git_version', return_value=(2, 48, 0)),
+                  patch('agentic.probe', side_effect=fake_probe),
+                  patch('agentic.shutil.which', return_value='/usr/bin/tool'),
+                  patch('sys.stdout', new_callable=io.StringIO) as output):
+                result = agentic.doctor(
+                    root, config, json_output=True, run_commands=True,
+                    worktree=worktree,
+                )
+
+        self.assertEqual(result, 1)
+        payload = json.loads(output.getvalue())
+        worktree_check = next(item for item in payload['checks'] if item['name'] == 'Command worktree')
+        self.assertFalse(worktree_check['ok'])
+        self.assertEqual(payload['command_results'], [])
+
+    def test_doctor_sandboxed_commands_do_not_receive_credentials(self):
+        sandbox = {
+            'enabled': True,
+            'engine': 'docker',
+            'image': 'test-image',
+            'pass_env': ['OPENAI_API_KEY'],
+        }
+        with (patch('agentic_diagnostics.sandbox_command', return_value=['tool']) as sandbox_command,
+              patch('agentic_diagnostics.subprocess.run', return_value=CompletedProcess([], 0))):
+            result = agentic_diagnostics._run_configured_command(
+                ['tool'], Path('/tmp/worktree'), timeout=1, sandbox=sandbox,
+            )
+        self.assertEqual(result['status'], 'passed')
+        sandbox_command.assert_called_once_with(
+            ['tool'], Path('/tmp/worktree'), sandbox, pass_env=[],
+        )
 
     def test_doctor_reports_network_policy_for_read_only_reviewers(self):
         with tempfile.TemporaryDirectory() as temp:

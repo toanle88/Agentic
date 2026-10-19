@@ -229,6 +229,22 @@ This prevents task text or filenames from becoming shell syntax and makes comman
 
 Agentic validates executables and Python `-m` modules before development starts. Missing dependencies, unavailable commands, port conflicts, and missing files are environmental failures; they should be fixed in the environment or configuration rather than retried as code defects.
 
+`agentic doctor` performs the same lightweight executable preflight without
+running project checks. To verify that the configured commands actually run,
+use the explicit command mode:
+
+```bash
+agentic doctor --commands --worktree /path/to/worktree
+agentic doctor --commands --profile slow --json
+```
+
+The `/doctor` shell command accepts the same `--commands`, `--profile`, and
+`--worktree` options. Command mode is opt-in because installs, builds, browser
+setup, generated files, services, and network access can be expensive or
+mutating. Without `--worktree`, checks run from the repository passed with
+`--repo` (normally the current checkout). Results identify each command and
+its exit status; command output is not included in JSON diagnostics.
+
 ## Choosing checks
 
 Use a fast, deterministic set for normal iteration. Include the checks needed to prove the issue, for example:

@@ -47,7 +47,7 @@ HELP = """Commands:
 
   Setup and cleanup
     /init [OPTIONS]                     initialize target-repository configuration
-    /doctor [--json]                    diagnose local prerequisites
+    /doctor [--json] [--commands]      diagnose prerequisites; optionally run checks
     /cleanup --issue N [OPTIONS]        preview or remove clean worktrees
     /version                            show the Agentic version
 
@@ -97,7 +97,7 @@ SHELL_OPTIONS = {
     "/ps": ("--all",),
     "/runs": ("--json",),
     "/status": ("--json",),
-    "/doctor": ("--json",),
+    "/doctor": ("--json", "--commands", "--profile", "--worktree"),
     "/cleanup": ("--issue", "--all", "--yes", "--remove-logs"),
     "/stop": ("--all",),
     "/init": ("--provider", "--reviewer-provider", "--security-mode", "--sandbox-image", "--agents", "--force"),
@@ -129,6 +129,8 @@ OPTION_DESCRIPTIONS: dict[str, str] = {
     "--new": "start fresh worktree, ignoring cached state",
     "--all": "show jobs across all shell sessions",
     "--json": "output status in JSON format",
+    "--commands": "run configured doctor checks (may mutate the worktree)",
+    "--worktree": "worktree used by doctor checks",
     "--task-file": "use an existing local task file",
     "--issue": "select one issue worktree",
     "--remove-logs": "also remove matching run logs",
@@ -172,7 +174,7 @@ def _completion_candidates(line: str, cursor: int | None = None,
 
     current = "" if trailing_space else tokens[-1]
     previous = tokens[-1] if trailing_space else (tokens[-2] if len(tokens) > 1 else "")
-    if command == "/run" and previous == "--profile":
+    if command in {"/run", "/doctor"} and previous == "--profile":
         values = ("fast", "slow")
         return [value for value in values if value.startswith(current)]
 
@@ -220,6 +222,17 @@ def _apply_completion(line: str, cursor: int, replacement: str,
         updated += " "
         new_cursor += 1
     return updated, new_cursor
+
+
+def _clip_input_line(line: str, cursor: int, prompt_width: int,
+                     columns: int) -> tuple[str, int]:
+    """Keep the editable line on one physical terminal row while scrolling."""
+    available = max(1, columns - prompt_width - 1)
+    if len(line) <= available:
+        return line, cursor
+    start = min(max(0, cursor - available), len(line) - available)
+    visible = line[start:start + available]
+    return visible, cursor - start
 
 
 def _describe_candidate(candidate: str, command: str = "",
@@ -533,7 +546,10 @@ def _interactive_input(
 
         buf: list[str] = []
         display_prompt = _shell_paint(prompt, "1;36")
-        buf.append(f"\r\033[2K{display_prompt}{line}")
+        display_line, display_cursor = _clip_input_line(
+            line, cursor_pos, len(prompt), columns,
+        )
+        buf.append(f"\r\033[2K{display_prompt}{display_line}")
         for s in dropdown_strings:
             buf.append(f"\n\033[2K{s}")
         if prev_dropdown_lines > new_dropdown_lines:
@@ -542,7 +558,7 @@ def _interactive_input(
         total_down = max(new_dropdown_lines, prev_dropdown_lines)
         if total_down > 0:
             buf.append(f"\033[{total_down}A")
-        cursor_col = len(prompt) + cursor_pos + 1
+        cursor_col = len(prompt) + display_cursor + 1
         buf.append(f"\033[{cursor_col}G")
 
         sys.stdout.write("".join(buf))
@@ -557,8 +573,12 @@ def _interactive_input(
                 buf.append("\n\033[2K")
             buf.append(f"\033[{prev_dropdown_lines}A")
             display_prompt = _shell_paint(prompt, "1;36")
-            buf.append(f"\r\033[2K{display_prompt}{line}")
-            cursor_col = len(prompt) + cursor_pos + 1
+            columns = shutil.get_terminal_size(fallback=(80, 24)).columns
+            display_line, display_cursor = _clip_input_line(
+                line, cursor_pos, len(prompt), columns,
+            )
+            buf.append(f"\r\033[2K{display_prompt}{display_line}")
+            cursor_col = len(prompt) + display_cursor + 1
             buf.append(f"\033[{cursor_col}G")
             sys.stdout.write("".join(buf))
             sys.stdout.flush()
@@ -1600,7 +1620,10 @@ class AgenticShell:
 
     def run_doctor(self, parts: list[str]) -> None:
         flags = _parse_options(
-            parts, usage="/doctor [--json]", value_options=set(), boolean_options={"--json"},
+            parts,
+            usage="/doctor [--json] [--commands] [--profile fast|slow] [--worktree PATH]",
+            value_options={"--profile", "--worktree"},
+            boolean_options={"--json", "--commands"},
         )
         self._run_runner_command(self._subcommand_args("doctor", flags))
 
