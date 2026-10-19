@@ -865,7 +865,13 @@ class PureTests(unittest.TestCase):
         self.assertEqual(payload['command_results'][0]['exit_code'], 0)
         worktree_check = next(item for item in payload['checks'] if item['name'] == 'Command worktree')
         self.assertTrue(worktree_check['ok'])
-        lock.assert_called_once_with(root, worktree)
+        lock.assert_called_once()
+        locked_repo, locked_worktree = lock.call_args.args
+        normalize_path = lambda value: os.path.normcase(
+            os.path.realpath(os.path.abspath(os.fspath(value)))
+        )
+        self.assertEqual(normalize_path(locked_repo), normalize_path(root))
+        self.assertEqual(normalize_path(locked_worktree), normalize_path(worktree))
 
     def test_doctor_commands_reports_command_failure(self):
         with tempfile.TemporaryDirectory() as temp:
