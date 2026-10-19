@@ -291,7 +291,12 @@ def record_guidance_loads(folder: Path, loads: list[dict[str, Any]]) -> None:
         role = load.get("role")
         phase = load.get("phase")
         digest = load.get("sha256")
-        if not all(isinstance(value, str) and value for value in (relative, role, phase, digest)):
+        if (
+            not isinstance(relative, str) or not relative
+            or not isinstance(role, str) or not role
+            or not isinstance(phase, str) or not phase
+            or not isinstance(digest, str) or not digest
+        ):
             continue
         try:
             size = max(0, int(load.get("size", 0)))
