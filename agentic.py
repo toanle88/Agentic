@@ -82,7 +82,7 @@ from agentic_security import redact_secrets
 from agentic_telemetry import record_security_policy
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.13"
+__version__ = "1.1.14"
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module
 # while the implementation lives in agentic_config.
@@ -535,12 +535,18 @@ def next_log(folder: Path, kind: str, ext: str = "txt") -> Path:
 
 
 MANUAL_APPROVAL_FILENAME = "manual-approval.json"
+REVIEW_APPROVAL_FILENAME = "review-approval.json"
 BLOCKED_FILENAME = "blocked.json"
 
 
 def manual_approval_path(folder: Path) -> Path:
     """Return the durable human-completion record for a run."""
     return folder / MANUAL_APPROVAL_FILENAME
+
+
+def review_approval_path(folder: Path) -> Path:
+    """Return the durable automated-review approval record for a run."""
+    return folder / REVIEW_APPROVAL_FILENAME
 
 
 def blocked_path(folder: Path) -> Path:
@@ -624,6 +630,64 @@ def record_manual_approval(run: Run, issue: Issue, base: str, config: dict[str, 
     print(f"[MANUAL] Marked complete: {summary.strip() or '(patch recorded)'}")
     print(f"[MANUAL] Approval record: {path}")
     return approval
+
+
+def record_review_approval(run: Run, issue: Issue, base: str, base_sha: str,
+                           patch_digest: str, verdict: dict[str, Any],
+                           config: dict[str, Any], folder: Path) -> dict[str, Any]:
+    """Persist automated approval for the exact patch that was reviewed."""
+    approval = {
+        "status": "approved",
+        "kind": "automated",
+        "issue": issue.reference,
+        "issue_digest": issue_fingerprint(issue),
+        "branch": run.branch,
+        "base": base,
+        "base_sha": base_sha,
+        "patch_digest": patch_digest,
+        "summary": str(verdict.get("summary", "")),
+        "skipped": [item for item in verdict.get("skipped", []) if isinstance(item, str)],
+        "reviewer_provider": config.get("reviewer_agent", {}).get("provider", "codex"),
+        "approved_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    path = review_approval_path(folder)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(json.dumps(approval, indent=2) + "\n", encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return approval
+
+
+def load_review_approval(folder: Path) -> dict[str, Any] | None:
+    """Load an automated approval, rejecting corrupt approval state."""
+    path = review_approval_path(folder)
+    if not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Automated review approval is unreadable: {path}") from exc
+    if not isinstance(value, dict) or value.get("status") != "approved":
+        raise RuntimeError(f"Automated review approval is invalid: {path}")
+    required = ("branch", "issue_digest", "base_sha", "patch_digest")
+    if any(not isinstance(value.get(key), str) or not value[key].strip() for key in required):
+        raise RuntimeError(f"Automated review approval is incomplete: {path}")
+    return value
+
+
+def load_publication_approval(folder: Path) -> dict[str, Any] | None:
+    """Load the newest human or automated approval available for publication."""
+    candidates: list[tuple[float, dict[str, Any]]] = []
+    manual = load_manual_approval(folder)
+    if manual is not None:
+        manual["kind"] = "manual"
+        candidates.append((manual_approval_path(folder).stat().st_mtime, manual))
+    automated = load_review_approval(folder)
+    if automated is not None:
+        candidates.append((review_approval_path(folder).stat().st_mtime, automated))
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
 
 def _latest_numbered_log(folder: Path, kind: str, ext: str) -> Path | None:
@@ -1218,6 +1282,9 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
                       deadline: float | None = None,
                       developer_report: str = ""
                       ) -> tuple[bool, str, dict[str, Any], str, str]:
+    # A new validation attempt supersedes any prior automated approval. A
+    # successful review below records a fresh approval for its exact patch.
+    review_approval_path(folder).unlink(missing_ok=True)
     commands = test_commands if test_commands is not None else config["test_commands"]
     passed, report = run_tests(
         run.worktree, commands, folder,
@@ -1266,45 +1333,25 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
     # Reject if the worktree was changed during the review; review cannot authorize new changes.
     if prepare_patch(run.worktree, base, config["max_files"])[1] != digest:
         raise RuntimeError("Files changed during review; rerun checks and review")
+    if verdict.get("approved") is True:
+        record_review_approval(
+            run, issue, base, base_sha, digest, verdict, config, folder,
+        )
     return bool(verdict.get("approved")), report, verdict, digest, base_sha
 
 
-def verify_manual_approval(run: Run, issue: Issue, base: str, config: dict[str, Any],
-                           folder: Path, approval: dict[str, Any],
-                           test_commands: list[list[str]] | None = None,
-                           deadline: float | None = None
-                           ) -> tuple[bool, str, dict[str, Any], str, str]:
-    """Validate a human approval without invoking the independent reviewer."""
+def validate_publication_approval(run: Run, issue: Issue, base: str,
+                                  config: dict[str, Any], approval: dict[str, Any]) -> tuple[str, str, str]:
+    """Validate approval metadata without running tests or a reviewer."""
     if approval.get("branch") != run.branch:
-        raise RuntimeError("Manual completion approval belongs to a different branch")
+        raise RuntimeError("Publication approval belongs to a different branch")
     if approval.get("issue_digest") != issue_fingerprint(issue):
-        raise RuntimeError("Issue changed since manual completion; rerun --mark-done")
-    commands = test_commands if test_commands is not None else config["test_commands"]
-    passed, report = run_tests(
-        run.worktree, commands, folder,
-        timeout=_remaining_timeout(
-            deadline,
-            config.get("effective_test_timeout_seconds", config.get("test_timeout_seconds")),
-        ),
-        sandbox=config.get("sandbox"),
-        deadline=deadline,
-    )
-    next_log(folder, "tests").write_text(report, encoding="utf-8")
-    if not passed:
-        print("[TESTS] Failed\n" + report[-2500:])
-        return False, report, {}, "", ""
+        raise RuntimeError("Issue changed since approval; rerun development or review")
     base_sha, digest, summary = prepare_patch(run.worktree, base, config["max_files"])
     if base_sha != approval.get("base_sha") or digest != approval.get("patch_digest"):
-        raise RuntimeError("Patch changed since --mark-done; rerun --mark-done before publishing")
+        raise RuntimeError("Patch changed since approval; rerun development or review before publishing")
     print("[PATCH] Proposed changes:\n" + summary)
-    print("[REVIEW] Automated review bypassed by recorded manual completion approval")
-    verdict = {
-        "approved": True,
-        "summary": f"Manual completion approval: {approval['reason']}",
-        "findings": [],
-        "manual": True,
-    }
-    return True, report, verdict, digest, base_sha
+    return base_sha, digest, summary
 
 
 def check_existing_pr(repo: Path, github_repo: str, branch: str) -> list[dict[str, Any]]:
@@ -1326,8 +1373,15 @@ def _clean_terminal_output(text: str) -> str:
                     if character in "\n\t" or ord(character) >= 32)
 
 
-def _validation_summary(report: str, test_commands: list[list[str]]) -> str:
+def _validation_summary(report: str, test_commands: list[list[str]], *, checks_ran: bool = True) -> str:
     """Format concise, safe validation evidence for a pull-request body."""
+    if not checks_ran:
+        return (
+            "Configured checks were not run during publication.\n\n"
+            "This patch was published with explicit human completion approval.\n\n"
+            "- `git diff --check` — passed\n\n"
+            "CI and human review are still required."
+        )
     lines = ["All configured checks passed.", ""]
     for argv in test_commands:
         display_command = html.escape(" ".join(str(value) for value in argv)).replace(
@@ -1366,25 +1420,23 @@ def publish(run: Run, issue: Issue, github_repo: str, base: str,
             test_commands: list[list[str]] | None = None,
             deadline: float | None = None,
             manual_approval: dict[str, Any] | None = None) -> None:
-    """Fresh tests plus either a fresh review or an exact manual approval."""
+    """Publish the exact patch covered by an existing approval."""
     if not eligible(issue):
         raise RuntimeError("Issue is closed; publication blocked")
     prs = check_existing_pr(run.worktree, github_repo, run.branch)
     if prs:
         print(f"Existing PR for this branch: {prs[0]['url']}. No duplicate PR created.")
         return
-    if manual_approval is not None:
-        passed, report, verdict, digest, _base_sha = verify_manual_approval(
-            run, issue, base, config, folder, manual_approval,
-            test_commands=test_commands, deadline=deadline,
+    approval = dict(manual_approval) if manual_approval is not None else load_publication_approval(folder)
+    if approval is not None and manual_approval is not None:
+        approval.setdefault("kind", "manual")
+    if approval is None:
+        raise RuntimeError(
+            "No approval recorded for the current patch; run --review or complete development first"
         )
-    else:
-        passed, report, verdict, digest, _base_sha = verify_and_review(
-            run, issue, base, config, folder, test_commands=test_commands,
-            deadline=deadline,
-        )
-    if not passed:
-        raise RuntimeError("Tests/reviewer did not approve current code; nothing published")
+    _base_sha, digest, _summary = validate_publication_approval(
+        run, issue, base, config, approval,
+    )
     confirm = input("\nCommit, PUSH and open a DRAFT PR? Type 'publish' to approve: ").strip()
     if confirm != "publish":
         print("Publication cancelled; branch/worktree kept intact")
@@ -1401,18 +1453,20 @@ def publish(run: Run, issue: Issue, github_repo: str, base: str,
     git(run.worktree, "push", "-u", "origin", run.branch)
     task_section = (f"## Local task\n\n{_issue_context(issue.body, 8000)}\n\n"
                     if issue.is_local else f"Closes #{issue.number}\n\n")
-    if verdict.get("manual"):
+    checks_ran = approval.get("kind") != "manual"
+    report_path = _latest_numbered_log(folder, "tests", "txt") if checks_ran else None
+    report = report_path.read_text(encoding="utf-8", errors="replace") if report_path else ""
+    if not checks_ran:
         review_section = ("## Review status\n\n"
-                          f"{verdict.get('summary', '')}\n\n"
-                          "This draft was published with explicit human completion "
-                          "approval; automated review was not run for this publication.")
+                          f"Manual completion approval: {approval.get('reason', '')}\n\n"
+                          "Automated review was not run during publication.")
     else:
-        reviewer_provider = config.get("reviewer_agent", {}).get("provider", "codex")
+        reviewer_provider = approval.get("reviewer_provider", "codex")
         review_section = (f"## Independent {reviewer_provider.title()} review\n\n"
-                          f"{verdict.get('summary', '')}")
+                          f"{approval.get('summary', '')}")
     validation_commands = test_commands if test_commands is not None else config["test_commands"]
     body = (f"{task_section}## Independent validation\n\n"
-            f"{_validation_summary(report, validation_commands)}\n\n"
+            f"{_validation_summary(report, validation_commands, checks_ran=checks_ran)}\n\n"
             f"{review_section}\n\n"
             "Draft PR: CI and human review still required.")
     title_prefix = "Task" if issue.is_local else f"Issue #{issue.number}"
@@ -1821,7 +1875,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--all", dest="all_runs", action="store_true", help="With cleanup, select all clean Agentic worktrees")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--review", action="store_true", help="Rerun tests + fresh review; do not code")
-    mode.add_argument("--publish", action="store_true", help="Revalidate, then request approval to draft PR")
+    mode.add_argument("--publish", action="store_true", help="Publish the existing approved patch as a draft PR")
     mode.add_argument(
         "--mark-done", action="store_true",
         help="Record explicit human completion for the current patch",
@@ -1867,10 +1921,14 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
             "agent_config.json or pass --config explicitly"
         )
     config = load_config(config_path)
-    test_commands = test_commands_for_profile(config, args.profile)
-    preflight_test_commands(repo, test_commands, sandbox=config["sandbox"])
-    # Manual completion and publication from an existing manual approval do not
-    # need provider credentials. The normal development/review path still does.
+    test_commands = (
+        config["test_commands"] if args.publish
+        else test_commands_for_profile(config, args.profile)
+    )
+    if not args.publish:
+        preflight_test_commands(repo, test_commands, sandbox=config["sandbox"])
+    # Manual completion and publication use recorded state and do not need
+    # provider credentials. The normal development/review path still does.
     if not args.mark_done and not args.publish:
         preflight_agent_settings(
             config["developer_agent"], config["reviewer_agent"], sandbox=config["sandbox"]
@@ -1949,7 +2007,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
         fresh = True
     folder = logs_path(repo, run, state_dir)
     record_security_policy(folder, config)
-    manual_approval = load_manual_approval(folder)
+    manual_approval = load_publication_approval(folder)
     print_run_header(issue, run, fresh)
     print(
         f"Providers: developer={config['developer_agent']['provider']} "
@@ -1971,10 +2029,6 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
     if args.publish:
         if not github_repo:
             raise RuntimeError("Publishing requires a GitHub origin remote and GitHub CLI access")
-        if manual_approval is None:
-            preflight_agent_settings(
-                config["developer_agent"], config["reviewer_agent"], sandbox=config["sandbox"]
-            )
         with worktree_lock(repo, run, state_dir):
             publish(
                 run, issue, github_repo, base, config, folder,

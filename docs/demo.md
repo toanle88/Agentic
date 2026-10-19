@@ -40,8 +40,9 @@ agentic --task-file task.md --publish
 
 The developer never publishes. A rejected review leaves the worktree and
 evidence in the Agentic state directory; rerunning the same task resumes from
-that state. `--publish` performs fresh checks and review, then requires the
-human to type `publish` before committing, pushing, and opening a draft PR.
+that state. `--review` performs fresh checks and review; after it approves,
+`--publish` only verifies the recorded approval and requires the human to type
+`publish` before committing, pushing, and opening a draft PR.
 
 For a deterministic provider-free check of the benchmark corpus, use:
 

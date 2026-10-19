@@ -157,6 +157,11 @@ The developer does not commit, push, or open pull requests. After tests and revi
 agentic --issue 119 --publish
 ```
 
+`--review` establishes the approval by running the configured checks and the
+independent reviewer. `--publish` does not run checks or review; it verifies
+that the current patch still matches the recorded approval, asks for the exact
+`publish` confirmation, and then creates the draft PR.
+
 If the automated review is repeatedly rejecting a finding that a human has
 explicitly judged out of scope, mark the existing worktree complete with an
 auditable reason, then publish normally:
@@ -169,19 +174,25 @@ agentic --issue 119 --publish
 `--mark-done` does not close the GitHub issue and does not publish anything. It
 records the current patch digest outside the repository. The `--reason` option
 is optional; when omitted, Agentic records `Manually marked done by user`.
-Publication still
-runs the configured tests, refuses any patch changed after the mark, asks for
-the exact `publish` confirmation, and opens only a draft PR. If the code or
-issue changes, mark it done again with a new reason.
+Publication uses the recorded approval, refuses any patch changed after the
+approval, asks for the exact `publish` confirmation, and opens only a draft PR.
+It does not run tests or an automated review. If the code or issue changes,
+rerun development or `--review` first; for a manual completion, mark it done
+again with a new reason.
 
 In the interactive shell, `/run ... --publish` runs in the foreground so the
 shell can receive the exact publication confirmation. Other `/run` operations
-remain background jobs.
+remain background jobs. If no valid approval is recorded, publication stops
+and asks you to run development or `--review` first.
 
 For a local task, use `agentic --task-file task.md --publish` or resume from
 the saved task file created by the interactive shell.
 
-Agentic revalidates the patch, checks that it did not change, and asks for the exact confirmation word `publish`. Only after confirmation does it commit, push the issue branch, and open a draft pull request. The draft state leaves a final human review step before merging.
+Agentic verifies that the patch still matches its recorded approval and asks
+for the exact confirmation word `publish`. It does not run tests or review
+during publication. Only after confirmation does it commit, push the issue
+branch, and open a draft pull request. The draft state leaves a final human
+review step before merging.
 
 ## Logs and dashboard
 
