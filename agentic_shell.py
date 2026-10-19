@@ -1469,7 +1469,8 @@ class AgenticShell:
                 raise ValueError("GitHub mode requires /run ISSUE; set task_source to local to paste tasks")
             task_file = (
                 Path(task_file_value).expanduser().resolve()
-                if task_file_value is not None else self._capture_local_task()
+                if task_file_value is not None
+                else self._capture_local_task().expanduser().resolve()
             )
         runner_flags = list(flags)
         if task_file is not None and task_file_value is not None:
