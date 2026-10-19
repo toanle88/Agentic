@@ -82,7 +82,7 @@ from agentic_security import redact_secrets
 from agentic_telemetry import record_security_policy
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.14"
+__version__ = "1.1.15"
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module
 # while the implementation lives in agentic_config.
@@ -1240,7 +1240,9 @@ does not apply, or state the concrete blocker; do not silently ignore feedback
 or repeat an unchanged implementation.
 
 Make focused changes and appropriate tests. Do not weaken tests, alter secrets,
-change agentic.py/agent_config.json/AGENTS.md, commit, push, publish, or access the network.
+change agent_config.json or AGENTS.md, commit, push, publish, or access the
+network. The runner source itself may be changed when it is part of the target
+repository and the issue requires that change.
 At the end, explicitly report:
 - Implemented: what changed in this attempt.
 - Verified: checks that actually ran and their results.
