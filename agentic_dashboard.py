@@ -178,6 +178,17 @@ def _review(folder: Path) -> tuple[dict[str, Any], Path | None]:
     }, path
 
 
+def _blocked(folder: Path) -> dict[str, Any] | None:
+    path = folder / "blocked.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict) or value.get("status") != "blocked":
+        return None
+    return value
+
+
 def _investigation(folder: Path) -> tuple[dict[str, Any], Path | None]:
     path = _latest(path for path in _numbered_files(folder, ["investigation"])
                    if path.suffix == ".json")
@@ -265,6 +276,7 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
         return None
     investigation, investigation_path = _investigation(folder)
     review, review_path = _review(folder)
+    blocked = _blocked(folder)
     tests, tests_path = _tests(folder)
     developer, developer_paths = _latest_developer(folder)
     all_files = _all_log_files(folder)
@@ -276,6 +288,8 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
         status = "investigation-invalid"
     elif investigation["state"] == "recorded" and not developer_paths and review["status"] == "not-run":
         status = "awaiting-development"
+    elif blocked is not None:
+        status = "blocked"
     elif review["status"] == "approved":
         status = "approved"
     elif review["status"] == "rejected":
@@ -312,6 +326,7 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
         "attempts": developer["attempts"],
         "last_activity": _timestamp(last_activity) if last_activity else "unknown",
         "review": review,
+        "blocked": blocked,
         "tests": tests,
         "developer": developer,
         "files": file_records,
@@ -393,7 +408,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
     .badge {{ display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 3px 9px; font-size: 12px; font-weight: 700; white-space: nowrap; }}
     .badge::before {{ content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }}
     .approved {{ color: var(--green); background: color-mix(in srgb, var(--green) 15%, transparent); }}
-    .needs-fix, .tests-failed, .investigation-invalid {{ color: var(--red); background: color-mix(in srgb, var(--red) 15%, transparent); }}
+    .needs-fix, .tests-failed, .investigation-invalid, .blocked {{ color: var(--red); background: color-mix(in srgb, var(--red) 15%, transparent); }}
     .awaiting-development {{ color: var(--yellow); background: color-mix(in srgb, var(--yellow) 15%, transparent); }}
     .in-progress {{ color: var(--blue); background: color-mix(in srgb, var(--blue) 15%, transparent); }}
     .awaiting-review {{ color: var(--yellow); background: color-mix(in srgb, var(--yellow) 15%, transparent); }}
@@ -435,7 +450,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
           <label class="sr-only" for="search">Search runs</label>
           <input id="search" type="search" placeholder="Search issue, task, or branch…">
           <label class="sr-only" for="status">Filter status</label>
-          <select id="status"><option value="all">All statuses</option><option value="needs-fix">Needs fix</option><option value="investigation-invalid">Investigation invalid</option><option value="awaiting-development">Awaiting development</option><option value="approved">Approved</option><option value="in-progress">In progress</option><option value="tests-failed">Tests failed</option><option value="awaiting-review">Awaiting review</option></select>
+          <select id="status"><option value="all">All statuses</option><option value="blocked">Blocked</option><option value="needs-fix">Needs fix</option><option value="investigation-invalid">Investigation invalid</option><option value="awaiting-development">Awaiting development</option><option value="approved">Approved</option><option value="in-progress">In progress</option><option value="tests-failed">Tests failed</option><option value="awaiting-review">Awaiting review</option></select>
         </div>
         <div class="run-list" id="run-list" aria-live="polite"></div>
       </div>
@@ -447,7 +462,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
     const state = {{ selected: DATA.runs[0]?.id || null, query: "", status: "all" }};
     const labels = {{
       "approved": "Approved", "needs-fix": "Needs fix", "in-progress": "In progress",
-      "tests-failed": "Tests failed", "awaiting-review": "Awaiting review", "no-activity": "No activity",
+      "tests-failed": "Tests failed", "awaiting-review": "Awaiting review", "no-activity": "No activity", "blocked": "Blocked",
       "investigation-invalid": "Investigation invalid", "awaiting-development": "Awaiting development"
     }};
     const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}}[char]));
@@ -495,10 +510,12 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
       if (!run) {{ detail.innerHTML = `<div class="empty">No run selected.</div>`; return; }}
       const findings = run.review.findings?.length ? `<ul class="findings">${{run.review.findings.map(item => `<li>${{esc(item)}}</li>`).join("")}}</ul>` : `<p class="subtle">No findings recorded.</p>`;
       const skipped = run.review.skipped?.length ? `<section class="callout"><strong>Skipped validation</strong><ul class="findings">${{run.review.skipped.map(item => `<li>${{esc(item)}}</li>`).join("")}}</ul></section>` : "";
+      const blocked = run.blocked ? `<section class="callout rejected"><strong>Blocked</strong><p>${{esc(run.blocked.reason || "Repeated unchanged review blocker")}}</p></section>` : "";
       const investigationFindings = run.investigation.findings?.length ? `<ul class="findings">${{run.investigation.findings.map(item => `<li>${{esc(item)}}</li>`).join("")}}</ul>` : `<p class="subtle">No findings recorded.</p>`;
       const recurring = run.review.recurring?.length ? `<section class="callout rejected"><strong>Recurring findings</strong><ul class="findings">${{run.review.recurring.map(item => `<li>[${{esc(item.severity)}}] ${{esc(item.text)}} <span class="meta">(${{esc(item.count)}} reviews)</span></li>`).join("")}}</ul></section>` : "";
       const files = run.files.length ? run.files.map(file => `<details><summary>${{esc(file.kind)}} · ${{esc(file.name)}} <span class="meta">${{esc(file.updated)}}</span></summary><pre>${{esc(file.content)}}</pre></details>`).join("") : `<div class="empty">No log files recorded.</div>`;
       detail.innerHTML = `<div class="detail-top"><div><h2>${{esc(run.label)}}</h2><div class="branch">${{esc(run.branch)}}</div></div>${{badge(run.status)}}</div>
+        ${{blocked}}
         <div class="meta" style="margin-top:12px"><span>${{esc(run.attempts)}} developer attempt${{run.attempts === 1 ? "" : "s"}}</span><span>Last activity: ${{esc(run.last_activity)}}</span><span>${{esc(run.file_count)}} log files</span></div>
         <section class="callout"><strong>Run metrics</strong><p>${{esc(run.usage.total_tokens == null ? "Provider usage unavailable" : `${{run.usage.total_tokens.toLocaleString()}} tokens`)}}${{run.usage.estimated_cost_usd == null ? "" : ` · $${{Number(run.usage.estimated_cost_usd).toFixed(4)}} estimated`}} · ${{esc(runDuration(run))}} · ${{esc(run.usage?.metrics?.operation_count || 0)}} operations</p></section>
         <section class="callout"><strong>Investigation feedback</strong><p>${{esc(run.investigation.summary)}}</p>${{investigationFindings}}</section>
