@@ -123,7 +123,7 @@ COMMAND_DESCRIPTIONS: dict[str, str] = {
 OPTION_DESCRIPTIONS: dict[str, str] = {
     "--profile": "execution profile (fast or slow)",
     "--review": "request read-only review",
-    "--publish": "open draft PR on success",
+    "--publish": "publish the existing approved patch as a draft PR",
     "--mark-done": "record human completion for the current patch",
     "--reason": "reason recorded with manual completion",
     "--new": "start fresh worktree, ignoring cached state",

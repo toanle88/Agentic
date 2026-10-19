@@ -111,13 +111,16 @@ agentic --state-dir /path/to/shared-agentic-state --issue 119
 
 ## `--publish` refuses to publish
 
-Publication requires current tests and review to approve the exact staged patch. Resolve any rejection, rerun:
+Publication requires a recorded approval for the exact staged patch. Resolve
+any rejection, rerun:
 
 ```bash
 agentic --issue 119 --review
 ```
 
-Then retry `--publish`. If the patch changed after validation, Agentic refuses to publish and requires a fresh validation pass.
+Then retry `--publish`. Publication does not run tests or review; if the patch
+changed after approval, Agentic refuses to publish and requires a fresh
+approval.
 
 ## Local task mode does not start
 

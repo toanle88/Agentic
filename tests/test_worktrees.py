@@ -133,9 +133,9 @@ class GitTest(unittest.TestCase):
             run, issue, 'main', config, folder, 'Human approved the current patch',
         )
         (run.worktree / 'fix.py').write_text('after\n')
-        with self.assertRaisesRegex(RuntimeError, 'Patch changed since --mark-done'):
-            agentic.verify_manual_approval(
-                run, issue, 'main', config, folder, approval,
+        with self.assertRaisesRegex(RuntimeError, 'Patch changed since approval'):
+            agentic.validate_publication_approval(
+                run, issue, 'main', config, approval,
             )
 
     def test_cleanup_previews_and_removes_only_clean_worktrees(self):
@@ -202,20 +202,43 @@ class GitTest(unittest.TestCase):
         self.assertIn('Do not reject for style preferences', calls[1][-1])
         self.assertIn('if no blocker remains, set approved to true', calls[1][-1])
 
-    def test_publish_requires_new_verification_and_confirmation(self):
+    def test_publish_uses_existing_approval_and_confirmation(self):
         run = agentic.create_worktree(self.repo, 'main', 15)
         (run.worktree / 'fix.py').write_text('fixed=True\n')
         issue = agentic.Issue(15, 'Fix feature', '')
         folder = agentic.logs_path(self.repo, run)
         cfg = {'test_commands': [[sys.executable, '-c', 'print("ok")']], 'max_retries': 1, 'max_files': 10}
+        base_sha, digest, _ = agentic.prepare_patch(run.worktree, 'main', 10)
+        agentic.record_review_approval(
+            run, issue, 'main', base_sha, digest,
+            {'approved': True, 'summary': 'Good', 'findings': [], 'skipped': []},
+            cfg, folder,
+        )
         with (patch('agentic.check_existing_pr', return_value=[]),
-              patch('agentic.review', return_value={'approved': True, 'summary': 'Good', 'findings': []}),
+              patch('agentic.verify_and_review') as verify,
+              patch('agentic.run_tests') as tests,
               patch('builtins.input', return_value='no'),
               patch('agentic.command', wraps=agentic.command) as mock_command):
             agentic.publish(run, issue, 'fake/repo', 'main', cfg, folder)
+            verify.assert_not_called()
+            tests.assert_not_called()
             self.assertFalse(any(c.args[0][:2] == ['gh', 'pr'] for c in mock_command.call_args_list))
             self.assertFalse(any(c.args[0][:3] == ['git', 'push', '-u'] for c in mock_command.call_args_list))
         self.assertIn('fix.py', agentic.git(run.worktree, 'diff', '--cached', '--name-only'))
+
+    def test_publish_requires_existing_approval(self):
+        run = agentic.create_worktree(self.repo, 'main', 15)
+        (run.worktree / 'fix.py').write_text('fixed=True\n')
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(15, 'Fix feature', '')
+        config = {'test_commands': [['missing-test-command']], 'max_files': 10}
+        with (patch('agentic.check_existing_pr', return_value=[]),
+              patch('agentic.verify_and_review') as verify,
+              patch('agentic.run_tests') as tests):
+            with self.assertRaisesRegex(RuntimeError, 'No approval recorded'):
+                agentic.publish(run, issue, 'fake/repo', 'main', config, folder)
+        verify.assert_not_called()
+        tests.assert_not_called()
 
     def test_pub_blocks_mutation_after_approval(self):
         run = agentic.create_worktree(self.repo, 'main', 16)
@@ -223,13 +246,18 @@ class GitTest(unittest.TestCase):
         folder = agentic.logs_path(self.repo, run)
         (run.worktree / 'fix.py').write_text('before\n')
         cfg = {'test_commands': [[sys.executable, '-c', 'print("ok")']], 'max_retries': 1, 'max_files': 10}
+        base_sha, digest, _ = agentic.prepare_patch(run.worktree, 'main', 10)
+        agentic.record_review_approval(
+            run, issue, 'main', base_sha, digest,
+            {'approved': True, 'summary': 'Good', 'findings': [], 'skipped': []},
+            cfg, folder,
+        )
 
         def mutate_on_confirm(*args):
             (run.worktree / 'fix.py').write_text('after\n')
             return 'publish'
 
         with (patch('agentic.check_existing_pr', return_value=[]),
-              patch('agentic.review', return_value={'approved': True, 'summary': 'Good', 'findings': []}),
               patch('builtins.input', side_effect=mutate_on_confirm)):
             with self.assertRaisesRegex(RuntimeError, 'Patch changed'):
                 agentic.publish(run, issue, 'fake/repo', 'main', cfg, folder)
@@ -245,6 +273,16 @@ class GitTest(unittest.TestCase):
             'max_files': None,
             'reviewer_agent': {'provider': 'gemini'},
         }
+        agentic.record_review_approval(
+            run, issue, 'main', 'base-sha', 'digest',
+            {'approved': True, 'summary': 'Good', 'findings': [], 'skipped': []},
+            config, folder,
+        )
+        agentic.next_log(folder, 'tests').write_text(
+            '\x1b[32mTest Files 2 passed (2)\x1b[0m\n'
+            '\x1b[32mTests 4 passed <img src=x> `[details]`\x1b[0m',
+            encoding='utf-8',
+        )
         commands = []
 
         def fake_command(argv, cwd, **kwargs):
@@ -254,12 +292,6 @@ class GitTest(unittest.TestCase):
             return CompletedProcess(argv, 0, stdout='https://github.test/pr/30')
 
         with (patch('agentic.check_existing_pr', return_value=[]),
-              patch('agentic.verify_and_review', return_value=(
-                  True, '\x1b[32mTest Files 2 passed (2)\x1b[0m\n'
-                       '\x1b[32mTests 4 passed <img src=x> `[details]`\x1b[0m',
-                  {'approved': True, 'summary': 'Good', 'findings': []},
-                  'digest', 'base-sha',
-              )),
               patch('agentic.prepare_patch', return_value=('base-sha', 'digest', 'summary')),
               patch('agentic.git') as git_mock,
               patch('agentic.command', side_effect=fake_command),
@@ -301,12 +333,8 @@ class GitTest(unittest.TestCase):
             return CompletedProcess(argv, 0, stdout='https://github.test/pr/33')
 
         with (patch('agentic.check_existing_pr', return_value=[]),
-              patch('agentic.verify_manual_approval', return_value=(
-                  True, 'tests passed',
-                  {'approved': True, 'summary': 'Manual', 'findings': [], 'manual': True},
-                  approval['patch_digest'], approval['base_sha'],
-              )) as manual_verify,
               patch('agentic.verify_and_review') as automated_verify,
+              patch('agentic.run_tests') as tests,
               patch('agentic.prepare_patch', return_value=(
                   approval['base_sha'], approval['patch_digest'], 'summary',
               )),
@@ -317,11 +345,13 @@ class GitTest(unittest.TestCase):
                 run, issue, 'owner/repo', 'main', config, folder,
                 manual_approval=approval,
             )
-        manual_verify.assert_called_once()
         automated_verify.assert_not_called()
+        tests.assert_not_called()
         pr_command = next(argv for argv in commands if argv[:3] == ['gh', 'pr', 'create'])
         self.assertIn('## Review status', pr_command[-1])
-        self.assertIn('automated review was not run', pr_command[-1])
+        self.assertIn('Automated review was not run during publication', pr_command[-1])
+        self.assertIn('Configured checks were not run during publication', pr_command[-1])
+        self.assertNotIn('All configured checks passed', pr_command[-1])
 
     def test_publish_skips_existing_pr_and_rejects_closed_issue(self):
         run = agentic.create_worktree(self.repo, 'main', 35)
