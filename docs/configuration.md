@@ -40,6 +40,7 @@ Runtime state is controlled separately from project configuration. Use `--state-
   "max_files": null,
   "test_timeout_seconds": 300,
   "task_timeout_seconds": 1800,
+  "system_prompt": "Follow our development standards and add tests for behavior changes.",
   "developer": {
     "provider": "codex",
     "model": null,
@@ -71,6 +72,7 @@ Use commands that are actually supported by the target repository. Agentic does 
 | `codex_timeout_seconds` | integer or `null` | `null` | Legacy developer/reviewer timeout. `null` uses the safe provider default. |
 | `test_timeout_seconds` | integer or `null` | `300` when omitted | Per-test-command timeout. Explicit `null` disables the per-test-command limit. |
 | `task_timeout_seconds` | integer | `1800` | Maximum wall-clock time for one task invocation, including checks and review. |
+| `system_prompt` | nonempty string or `null` | `null` | Optional persistent project guidance included as bounded, untrusted context in developer and reviewer prompts. |
 | `security_mode` | `trusted` or `isolated` | `trusted` | `isolated` requires the configured Docker/Podman engine and image and fails closed when either is unavailable. |
 | `sandbox` | object | disabled | Optional Docker/Podman isolation for provider, OpenRouter tool, and test processes. `pass_env` names explicit credential variables to pass into the container. |
 | `developer` | object | Codex defaults | Provider settings for the coding agent. |
@@ -211,6 +213,19 @@ When a `developer` or `reviewer` object supplies the same setting, the nested
 value wins. New configurations should use the nested provider objects.
 
 Timeout values must be between 1 second and 24 hours when set. `max_retries` is limited to 0 through 3 by the configuration validator.
+
+### Prompt guidance
+
+`system_prompt` is persistent project guidance for the developer and
+independent read-only reviewer. Agentic bounds and escapes it, passes it as
+plain prompt data to every configured provider, and never turns it into shell
+syntax or a provider-native authority level. Repository safety rules,
+`AGENTS.md`, and the developer/reviewer separation take precedence over it.
+
+The setting is read again on each invocation, including resumes, so changing
+the target configuration changes future prompts without rewriting older run
+records. It is not copied into run metadata; the per-run `--instruction` value
+is the prompt data that is persisted and shown in the dashboard.
 
 ## Test command rules
 
