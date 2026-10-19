@@ -574,7 +574,9 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
       if (!run) {{ detail.innerHTML = `<div class="empty">No run selected.</div>`; return; }}
       const findings = run.review.findings?.length ? `<ul class="findings">${{run.review.findings.map(item => `<li>${{esc(item)}}</li>`).join("")}}</ul>` : `<p class="subtle">No findings recorded.</p>`;
       const skipped = run.review.skipped?.length ? `<section class="callout"><strong>Skipped validation</strong><ul class="findings">${{run.review.skipped.map(item => `<li>${{esc(item)}}</li>`).join("")}}</ul></section>` : "";
-      const blocked = run.blocked ? `<section class="callout rejected"><strong>Blocked</strong><p>${{esc(run.blocked.reason || "Repeated unchanged review blocker")}}</p></section>` : "";
+      const blockedSummary = run.blocked?.developer_summary ? `<p><strong>Developer blocker:</strong> ${{esc(run.blocked.developer_summary)}}</p>` : "";
+      const blockedLogs = run.blocked?.logs_path ? `<p><strong>Run logs:</strong> ${{esc(run.blocked.logs_path)}}</p>` : "";
+      const blocked = run.blocked ? `<section class="callout rejected"><strong>Blocked</strong><p>${{esc(run.blocked.reason || "Repeated unchanged review blocker")}}</p>${{blockedSummary}}${{blockedLogs}}</section>` : "";
       const investigationFindings = run.investigation.findings?.length ? `<ul class="findings">${{run.investigation.findings.map(item => `<li>${{esc(item)}}</li>`).join("")}}</ul>` : `<p class="subtle">No findings recorded.</p>`;
       const recurring = run.review.recurring?.length ? `<section class="callout rejected"><strong>Recurring findings</strong><ul class="findings">${{run.review.recurring.map(item => `<li>[${{esc(item.severity)}}] ${{esc(item.text)}} <span class="meta">(${{esc(item.count)}} reviews)</span></li>`).join("")}}</ul></section>` : "";
       const policy = run.usage?.security_policy;

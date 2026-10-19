@@ -477,6 +477,48 @@ class GitTest(unittest.TestCase):
                 agentic.develop(run, issue, 'main', config, folder)
         run_agent.assert_called_once()
 
+    def test_develop_blocks_passing_checks_without_code_changes(self):
+        from io import StringIO
+
+        run = agentic.create_worktree(self.repo, 'main', 37)
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(37, 'No patch blocker', 'Implement the blocked task')
+        config = {
+            'max_retries': 3,
+            'max_files': None,
+            'developer_agent': {'provider': 'codex'},
+        }
+        developer_report = 'Blocked: the required upstream service is unavailable.'
+
+        def fake_developer(_worktree, _prompt, *, output, **_kwargs):
+            output.write_text(developer_report, encoding='utf-8')
+            return True, developer_report
+
+        with (patch('agentic.run_agent', side_effect=fake_developer),
+              patch('agentic.run_tests', return_value=(True, 'All configured checks passed')),
+              patch('agentic.review') as review,
+              patch('sys.stdout', new_callable=StringIO) as output):
+            result = agentic.develop(
+                run, issue, 'main', config, folder,
+                test_commands=[['python', '-c', 'print("ok")']],
+            )
+
+        self.assertTrue(result)
+        self.assertIn('RESULT:   BLOCKED', output.getvalue())
+        self.assertIn('Checks passed, but the developer produced no code changes', output.getvalue())
+        self.assertIn(developer_report, output.getvalue())
+        self.assertIn(str(folder), output.getvalue())
+        review.assert_not_called()
+        blocked = json.loads((folder / 'blocked.json').read_text(encoding='utf-8'))
+        self.assertEqual(blocked['kind'], 'no-code-changes')
+        self.assertEqual(blocked['developer_summary'], developer_report)
+        self.assertEqual(blocked['developer_log'], 'developer-001.txt')
+        self.assertEqual(blocked['logs_path'], str(folder))
+
+        with patch('agentic.run_agent') as resumed_agent:
+            self.assertTrue(agentic.develop(run, issue, 'main', config, folder))
+        resumed_agent.assert_not_called()
+
     def test_develop_blocks_repeated_review_without_patch_change(self):
         run = agentic.create_worktree(self.repo, 'main', 35)
         folder = agentic.logs_path(self.repo, run)

@@ -147,6 +147,24 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(snapshot["status"], "blocked")
             self.assertEqual(snapshot["blocked"]["status"], "blocked")
 
+    def test_no_code_changes_blocker_shows_summary_and_logs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            run = root / "agent-issue-36-deadbeef"
+            run.mkdir(parents=True)
+            (run / "blocked.json").write_text(json.dumps({
+                "status": "blocked",
+                "kind": "no-code-changes",
+                "reason": "Developer reported a blocker without producing code changes",
+                "patch_digest": "",
+                "developer_summary": "The upstream service is unavailable.",
+                "logs_path": str(run),
+            }))
+            snapshot = agentic_dashboard.collect_runs(root)[0]
+            html = agentic_dashboard.render_dashboard([snapshot], "demo", root.name)
+            self.assertIn("The upstream service is unavailable.", html)
+            self.assertIn(str(run), html)
+
     def test_investigation_feedback_is_visible_before_development(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / ".demo-agent-runs"

@@ -140,6 +140,12 @@ future developer attempts for that unchanged patch. A later resume is allowed
 only after the proposed patch changes. A blocked run is not approved and cannot
 be published.
 
+If configured checks pass but the developer reports a blocker without producing
+any code changes, Agentic also marks the run `blocked` without invoking the
+reviewer. The result includes the bounded developer blocker summary and the
+durable run-log directory; resolve the blocker, add the required patch, and
+resume the run.
+
 Use `--new` only when you intentionally want a second worktree:
 
 ```bash
