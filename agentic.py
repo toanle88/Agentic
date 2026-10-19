@@ -87,7 +87,7 @@ from agentic_telemetry import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.14"
+__version__ = "1.1.16"
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 INSTRUCTION_CONTEXT_CHARS = _INSTRUCTION_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module
@@ -911,6 +911,33 @@ def pending_files(worktree: Path) -> list[str]:
     return names
 
 
+def _common_repository_root(path: Path) -> Path | None:
+    """Return the shared checkout root for a normal checkout or worktree."""
+    ok, common_dir = probe(["git", "rev-parse", "--git-common-dir"], path)
+    if not ok or not common_dir:
+        return None
+    common_path = Path(common_dir)
+    if not common_path.is_absolute():
+        common_path = path / common_path
+    return common_path.resolve().parent
+
+
+def _runner_source_change_allowed(worktree: Path, filename: str) -> bool:
+    """Allow only Agentic's own runner source during self-hosted development."""
+    if filename != "agentic.py":
+        return False
+    target_root = _common_repository_root(worktree)
+    runner_root = _common_repository_root(SCRIPT_DIR)
+    return target_root is not None and runner_root is not None and _paths_equal(
+        target_root, runner_root,
+    )
+
+
+def _publication_forbidden(worktree: Path, filename: str) -> bool:
+    """Apply protected-path policy while supporting Agentic self-development."""
+    return forbidden(filename) and not _runner_source_change_allowed(worktree, filename)
+
+
 def base_revision(worktree: Path, base: str) -> str:
     return git(worktree, "merge-base", "HEAD", f"refs/remotes/origin/{base}")
 
@@ -922,14 +949,14 @@ def prepare_patch(worktree: Path, base: str, max_files: int | None) -> tuple[str
     edits made during this particular invocation.
     """
     pending = pending_files(worktree)
-    disallowed = [p for p in pending if forbidden(p)]
+    disallowed = [p for p in pending if _publication_forbidden(worktree, p)]
     if disallowed:
         raise RuntimeError(f"Sensitive files changed, publication blocked: {disallowed}")
     git(worktree, "add", "-A")
     base_sha = base_revision(worktree, base)
     raw_names = command(["git", "diff", "--cached", "--name-only", "-z", base_sha], worktree).stdout
     names = [p for p in raw_names.split("\x00") if p]
-    disallowed = [p for p in names if forbidden(p)]
+    disallowed = [p for p in names if _publication_forbidden(worktree, p)]
     if disallowed:
         raise RuntimeError(f"Forbidden changes found in proposed PR: {disallowed}")
     if not names:
@@ -1266,7 +1293,9 @@ does not apply, or state the concrete blocker; do not silently ignore feedback
 or repeat an unchanged implementation.
 
 Make focused changes and appropriate tests. Do not weaken tests, alter secrets,
-change agentic.py/agent_config.json/AGENTS.md, commit, push, publish, or access the network.
+change agent_config.json or AGENTS.md, commit, push, publish, or access the
+network. The runner source itself may be changed when it is part of the target
+repository and the issue requires that change.
 At the end, explicitly report:
 - Implemented: what changed in this attempt.
 - Verified: checks that actually ran and their results.

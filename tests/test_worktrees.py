@@ -152,6 +152,17 @@ class GitTest(unittest.TestCase):
             agentic.prepare_patch(run.worktree, 'main', 10)
         self.assertEqual(agentic.git(run.worktree, 'diff', '--cached', '--name-only'), '')
 
+    def test_runner_source_allowed_only_for_agentic_self_development(self):
+        run = agentic.create_worktree(self.repo, 'main', 10)
+        (run.worktree / 'agentic.py').write_text('print("runner change")\n')
+        with self.assertRaisesRegex(RuntimeError, 'Sensitive'):
+            agentic.prepare_patch(run.worktree, 'main', 10)
+
+        with patch.object(agentic, 'SCRIPT_DIR', self.repo):
+            _base, _digest, summary = agentic.prepare_patch(run.worktree, 'main', 10)
+        self.assertIn('agentic.py', summary)
+        self.assertEqual(agentic.git(run.worktree, 'diff', '--cached', '--name-only'), 'agentic.py')
+
     def test_blocked_change_from_previous_commit_cannot_publish(self):
         run = agentic.create_worktree(self.repo, 'main', 13)
         (run.worktree / 'AGENTS.md').write_text('unexpected instructions\n')
