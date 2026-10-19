@@ -149,7 +149,8 @@ class ShellTests(unittest.TestCase):
             root = Path(temp)
             config = root / 'agent_config.json'
             config.write_text('{"task_source":"local"}')
-            task = root / 'task.md'
+            (root / 'nested').mkdir()
+            task = root / 'nested' / '..' / 'task.md'
             task.write_text('Implement export\n')
             shell = agentic_shell.AgenticShell(
                 root, Path(sys.executable), config=config, session_dir=root / 'logs'

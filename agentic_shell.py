@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import codecs
+from collections.abc import Sequence
 import json
 import os
 import shlex
@@ -1355,7 +1356,7 @@ class AgenticShell:
         if result.returncode:
             raise RuntimeError(f"command failed with exit {result.returncode}")
 
-    def _subcommand_args(self, command: str, flags: list[str] = ()) -> list[str]:
+    def _subcommand_args(self, command: str, flags: Sequence[str] = ()) -> list[str]:
         argv = [
             sys.executable, "-u", str(self.runner), command,
             "--repo", str(self.repo), "--state-dir", str(self.state_dir),
@@ -1407,7 +1408,11 @@ class AgenticShell:
                 Path(task_file_value).expanduser().resolve()
                 if task_file_value is not None else self._capture_local_task()
             )
-        argv = self._runner_args(issue, flags)
+        runner_flags = list(flags)
+        if task_file is not None and task_file_value is not None:
+            task_file_index = runner_flags.index("--task-file")
+            runner_flags[task_file_index + 1] = str(task_file)
+        argv = self._runner_args(issue, runner_flags)
         if task_file and task_file_value is None:
             argv.extend(["--task-file", str(task_file)])
         if "--publish" in flags:
