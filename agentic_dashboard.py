@@ -390,7 +390,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
     .button, input, select {{ border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--text); padding: 9px 12px; }}
     .button:hover, select:hover, input:focus {{ border-color: var(--blue); }}
     .button {{ white-space: nowrap; }}
-    .metrics {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px; }}
+    .metrics {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 12px; margin-bottom: 20px; }}
     .metric, .panel {{ background: color-mix(in srgb, var(--surface) 94%, transparent); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); }}
     .metric {{ padding: 16px 18px; }}
     .metric strong {{ display: block; font-size: 30px; line-height: 1; margin-top: 5px; font-variant-numeric: tabular-nums; }}
@@ -416,6 +416,21 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
     .summary {{ margin: 10px 0 8px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }}
     .meta {{ display: flex; flex-wrap: wrap; gap: 8px 14px; font-size: 12px; }}
     .detail {{ padding: 22px; min-height: 420px; }}
+    .chart-panel {{ padding: 20px; margin-bottom: 18px; }}
+    .panel-heading {{ display: flex; justify-content: space-between; gap: 18px; align-items: flex-start; margin-bottom: 18px; }}
+    .panel-heading h2 {{ font-size: 18px; }}
+    .token-chart {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(74px, 1fr)); gap: 10px; align-items: end; min-height: 190px; overflow-x: auto; padding: 12px 4px 0; border-bottom: 1px solid var(--line); }}
+    .token-column {{ min-width: 0; display: grid; grid-template-rows: 22px 132px 34px; gap: 4px; align-items: end; text-align: center; }}
+    .token-value {{ color: var(--text); font-size: 11px; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+    .token-bar-track {{ height: 132px; display: flex; align-items: end; justify-content: center; }}
+    .token-bar {{ width: min(42px, 72%); min-height: 4px; border-radius: 7px 7px 0 0; background: linear-gradient(180deg, var(--purple), var(--blue)); box-shadow: 0 5px 18px color-mix(in srgb, var(--blue) 25%, transparent); }}
+    .token-bar.unknown {{ height: 4px; background: repeating-linear-gradient(135deg, var(--line) 0 5px, transparent 5px 10px); box-shadow: none; }}
+    .token-label {{ color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+    .token-legend {{ color: var(--muted); font-size: 12px; white-space: nowrap; }}
+    .token-breakdown {{ margin-top: 10px; }}
+    .token-breakdown table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
+    .token-breakdown th, .token-breakdown td {{ padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left; }}
+    .token-breakdown th {{ color: var(--muted); font-weight: 600; }}
     .detail h2 {{ font-size: 25px; }}
     .detail h3 {{ margin: 24px 0 9px; font-size: 15px; }}
     .detail .branch {{ color: var(--muted); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; }}
@@ -431,7 +446,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
     .empty {{ padding: 38px 20px; text-align: center; color: var(--muted); }}
     .sr-only {{ position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }}
     @media (max-width: 880px) {{ .workspace {{ grid-template-columns: 1fr; }} .run-list {{ max-height: none; }} }}
-    @media (max-width: 620px) {{ .shell {{ padding: 18px 12px; }} header {{ display: block; }} .actions {{ margin-top: 14px; }} .metrics {{ grid-template-columns: repeat(2, 1fr); }} .toolbar {{ flex-wrap: wrap; }} .toolbar input {{ flex-basis: 100%; }} }}
+    @media (max-width: 620px) {{ .shell {{ padding: 18px 12px; }} header {{ display: block; }} .actions {{ margin-top: 14px; }} .toolbar {{ flex-wrap: wrap; }} .toolbar input {{ flex-basis: 100%; }} .panel-heading {{ display: block; }} .token-legend {{ display: block; margin-top: 5px; }} }}
   </style>
 </head>
 <body>
@@ -444,6 +459,13 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
       <div class="actions"><button class="button" id="theme" type="button">Toggle theme</button></div>
     </header>
     <section class="metrics" aria-label="Run summary" id="metrics"></section>
+    <section class="panel chart-panel" aria-labelledby="token-chart-title">
+      <div class="panel-heading">
+        <div><h2 id="token-chart-title">Token usage by run</h2><p class="subtle">Known totals for each provider invocation, ordered from oldest to newest. The highest run number is the latest.</p></div>
+        <span class="token-legend">Striped bars = usage unavailable</span>
+      </div>
+      <div class="token-chart" id="token-chart" role="img" aria-label="Token usage chart"></div>
+    </section>
     <section class="workspace">
       <div class="panel">
         <div class="toolbar">
@@ -467,6 +489,11 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
     }};
     const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}}[char]));
     const badge = status => `<span class="badge ${{esc(status)}}">${{esc(labels[status] || status)}}</span>`;
+    const tokenValue = entry => {{
+      const value = Number(entry?.total_tokens ?? entry?.usage?.total_tokens);
+      return Number.isFinite(value) && value >= 0 ? value : null;
+    }};
+    const formatTokens = value => value == null ? "unknown" : Number(value).toLocaleString();
     const formatDuration = seconds => {{
       if (seconds == null || !Number.isFinite(Number(seconds))) return "duration unavailable";
       const value = Number(seconds);
@@ -486,13 +513,46 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
     }};
     function renderMetrics() {{
       const runs = DATA.runs;
+      const observedTokens = runs.reduce((total, run) => total + (tokenValue(run) ?? 0), 0);
+      const tokenRuns = runs.filter(run => tokenValue(run) != null).length;
       const values = [
         ["Total runs", runs.length, ""],
         ["Approved", runs.filter(run => run.status === "approved").length, "approved"],
         ["Needs attention", runs.filter(run => ["needs-fix", "tests-failed"].includes(run.status)).length, "needs-fix"],
-        ["In progress", runs.filter(run => run.status === "in-progress").length, "in-progress"]
+        ["In progress", runs.filter(run => run.status === "in-progress").length, "in-progress"],
+        ["Tokens observed", tokenRuns ? formatTokens(observedTokens) : "unknown", ""]
       ];
       document.querySelector("#metrics").innerHTML = values.map(([label, value, kind]) => `<div class="metric"><span class="label">${{esc(label)}}</span><strong class="${{kind}}">${{esc(value)}}</strong></div>`).join("");
+    }}
+    function renderTokenChart() {{
+      const chart = document.querySelector("#token-chart");
+      if (!DATA.runs.length) {{ chart.innerHTML = `<div class="empty">No runs recorded.</div>`; return; }}
+      const entries = [...DATA.runs].reverse().flatMap(run => {{
+        const invocations = Array.isArray(run.usage?.by_invocation)
+          ? run.usage.by_invocation.filter(item => item && typeof item === "object") : [];
+        if (!invocations.length) return [{{ run, invocation: null }}];
+        return invocations.map((invocation, index) => ({{ run, invocation, index }}));
+      }});
+      const known = entries.map(entry => tokenValue(entry.invocation || entry.run.usage)).filter(value => value != null);
+      const max = Math.max(...known, 1);
+      chart.setAttribute("aria-label", `Token usage chart for ${{entries.length}} executions`);
+      chart.innerHTML = entries.map((entry, index) => {{
+        const run = entry.run;
+        const invocation = entry.invocation;
+        const tokens = tokenValue(invocation || run.usage);
+        const runNumber = index + 1;
+        const latest = index === entries.length - 1;
+        const runTag = `Run ${{runNumber}}${{latest ? " · latest" : ""}}`;
+        const runLabel = run.issue == null ? run.label.replace(/^Local task: /, "") : `#${{run.issue}}`;
+        const invocationLabel = invocation ? (invocation.name || invocation.role || `run ${{entry.index + 1}}`) : runLabel;
+        const label = `${{runTag}} · ${{runLabel}}${{invocation ? ` · ${{invocationLabel}}` : ""}}`;
+        const height = tokens == null ? 4 : Math.max(4, Math.round(tokens / max * 132));
+        return `<div class="token-column" title="${{esc(runTag)}} · ${{esc(run.label)}} · ${{esc(invocationLabel)}}: ${{esc(formatTokens(tokens))}} tokens">
+          <div class="token-value">${{esc(formatTokens(tokens))}}</div>
+          <div class="token-bar-track"><div class="token-bar ${{tokens == null ? "unknown" : ""}}" style="height:${{height}}px"></div></div>
+          <div class="token-label">${{esc(label)}}</div>
+        </div>`;
+      }}).join("");
     }}
     function renderList() {{
       const visible = filtered();
@@ -500,7 +560,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
       document.querySelector("#run-list").innerHTML = visible.length ? visible.map(run => `<button class="run-card ${{run.id === state.selected ? "selected" : ""}}" data-run="${{esc(run.id)}}" type="button">
         <div class="run-top"><span class="run-title">${{esc(run.label)}}</span>${{badge(run.status)}}</div>
         <div class="summary">${{esc(runSummary(run))}}</div>
-        <div class="meta"><span>${{esc(run.attempts)}} attempt${{run.attempts === 1 ? "" : "s"}}</span><span>Tests: ${{esc(run.tests.status)}}</span><span>${{esc(runDuration(run))}}</span><span>${{esc(run.last_activity)}}</span></div>
+        <div class="meta"><span>${{esc(run.attempts)}} attempt${{run.attempts === 1 ? "" : "s"}}</span><span>Tokens: ${{esc(formatTokens(tokenValue(run)))}}</span><span>Tests: ${{esc(run.tests.status)}}</span><span>${{esc(runDuration(run))}}</span><span>${{esc(run.last_activity)}}</span></div>
       </button>`).join("") : `<div class="empty">No runs match this filter.</div>`;
       document.querySelectorAll("[data-run]").forEach(button => button.addEventListener("click", () => {{ state.selected = button.dataset.run; renderList(); renderDetail(); }}));
     }}
@@ -513,11 +573,17 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
       const blocked = run.blocked ? `<section class="callout rejected"><strong>Blocked</strong><p>${{esc(run.blocked.reason || "Repeated unchanged review blocker")}}</p></section>` : "";
       const investigationFindings = run.investigation.findings?.length ? `<ul class="findings">${{run.investigation.findings.map(item => `<li>${{esc(item)}}</li>`).join("")}}</ul>` : `<p class="subtle">No findings recorded.</p>`;
       const recurring = run.review.recurring?.length ? `<section class="callout rejected"><strong>Recurring findings</strong><ul class="findings">${{run.review.recurring.map(item => `<li>[${{esc(item.severity)}}] ${{esc(item.text)}} <span class="meta">(${{esc(item.count)}} reviews)</span></li>`).join("")}}</ul></section>` : "";
+      const invocations = Array.isArray(run.usage?.by_invocation) ? run.usage.by_invocation.filter(item => item && typeof item === "object") : [];
+      const invocationRows = invocations.map((item, index) => {{
+        const runLabel = `Run ${{index + 1}}${{index === invocations.length - 1 ? " · latest" : ""}}`;
+        return `<tr><td>${{esc(runLabel)}}</td><td>${{esc(item.name || "unknown")}}</td><td>${{esc(item.role || "unknown")}}</td><td>${{esc(formatTokens(item.prompt_tokens))}}</td><td>${{esc(formatTokens(item.completion_tokens))}}</td><td>${{esc(formatTokens(item.total_tokens))}}</td></tr>`;
+      }}).join("");
+      const tokenBreakdown = invocations.length ? `<div class="token-breakdown"><table><thead><tr><th>Run</th><th>Invocation</th><th>Role</th><th>Prompt</th><th>Completion</th><th>Total</th></tr></thead><tbody>${{invocationRows}}</tbody></table></div>` : "";
       const files = run.files.length ? run.files.map(file => `<details><summary>${{esc(file.kind)}} · ${{esc(file.name)}} <span class="meta">${{esc(file.updated)}}</span></summary><pre>${{esc(file.content)}}</pre></details>`).join("") : `<div class="empty">No log files recorded.</div>`;
       detail.innerHTML = `<div class="detail-top"><div><h2>${{esc(run.label)}}</h2><div class="branch">${{esc(run.branch)}}</div></div>${{badge(run.status)}}</div>
         ${{blocked}}
         <div class="meta" style="margin-top:12px"><span>${{esc(run.attempts)}} developer attempt${{run.attempts === 1 ? "" : "s"}}</span><span>Last activity: ${{esc(run.last_activity)}}</span><span>${{esc(run.file_count)}} log files</span></div>
-        <section class="callout"><strong>Run metrics</strong><p>${{esc(run.usage.total_tokens == null ? "Provider usage unavailable" : `${{run.usage.total_tokens.toLocaleString()}} tokens`)}}${{run.usage.estimated_cost_usd == null ? "" : ` · $${{Number(run.usage.estimated_cost_usd).toFixed(4)}} estimated`}} · ${{esc(runDuration(run))}} · ${{esc(run.usage?.metrics?.operation_count || 0)}} operations</p></section>
+        <section class="callout"><strong>Run metrics</strong><p>${{esc(tokenValue(run) == null ? "Provider usage unavailable" : `${{formatTokens(tokenValue(run))}} tokens`)}}${{run.usage.estimated_cost_usd == null ? "" : ` · $${{Number(run.usage.estimated_cost_usd).toFixed(4)}} estimated`}} · ${{esc(runDuration(run))}} · ${{esc(run.usage?.metrics?.operation_count || 0)}} operations</p>${{tokenBreakdown}}</section>
         <section class="callout"><strong>Investigation feedback</strong><p>${{esc(run.investigation.summary)}}</p>${{investigationFindings}}</section>
         <section class="callout ${{esc(run.review.status)}}"><strong>Review · ${{esc(labels[run.review.status] || run.review.status)}}</strong><p>${{esc(run.review.summary)}}</p>${{findings}}</section>
         ${{skipped}}
@@ -530,7 +596,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
     document.querySelector("#search").addEventListener("input", event => {{ state.query = event.target.value; renderList(); renderDetail(); }});
     document.querySelector("#status").addEventListener("change", event => {{ state.status = event.target.value; renderList(); renderDetail(); }});
     document.querySelector("#theme").addEventListener("click", () => {{ document.documentElement.dataset.theme = document.documentElement.dataset.theme === "light" ? "dark" : "light"; }});
-    renderMetrics(); renderList(); renderDetail();
+    renderMetrics(); renderTokenChart(); renderList(); renderDetail();
   </script>
 </body>
 </html>

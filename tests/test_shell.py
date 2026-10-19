@@ -31,6 +31,9 @@ class ShellTests(unittest.TestCase):
         self.assertIn('/ps', output.getvalue())
         self.assertIn('/logs JOB', output.getvalue())
         self.assertIn('/list', output.getvalue())
+        self.assertIn('/runs', output.getvalue())
+        self.assertIn('/doctor', output.getvalue())
+        self.assertIn('/cleanup', output.getvalue())
         self.assertIn('/status', output.getvalue())
 
     def test_welcome_banner_does_not_emit_color_when_output_is_not_a_terminal(self):
@@ -51,6 +54,9 @@ class ShellTests(unittest.TestCase):
         self.assertIn('Run', output.getvalue())
         self.assertIn('/dashboard [OUTPUT]', output.getvalue())
         self.assertIn('/list', output.getvalue())
+        self.assertIn('/runs [--json]', output.getvalue())
+        self.assertIn('/stop JOB|--all', output.getvalue())
+        self.assertIn('/init [OPTIONS]', output.getvalue())
         self.assertNotIn('\033[', output.getvalue())
 
     def test_help_uses_color_on_a_terminal(self):
@@ -85,6 +91,10 @@ class ShellTests(unittest.TestCase):
             ('119', ['--profile', 'slow']),
         )
         self.assertEqual(
+            agentic_shell._parse_job_command(['/run', '--task-file', 'task.md']),
+            (None, ['--task-file', 'task.md']),
+        )
+        self.assertEqual(
             agentic_shell._parse_job_command([
                 '/run', '119', '--mark-done', '--reason', 'human reviewed',
             ]),
@@ -101,10 +111,62 @@ class ShellTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             agentic_shell._parse_job_command(['/run', '119', '--unknown'])
 
+    def test_runner_subcommands_use_argv_and_shell_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state = root / 'state'
+            shell = agentic_shell.AgenticShell(
+                root, Path(__file__).resolve().parents[1] / 'agentic.py',
+                state_dir=state, session_dir=root / 'logs',
+            )
+            result = type('Result', (), {'returncode': 0, 'stdout': 'ok\n'})()
+            with patch('agentic_shell.subprocess.run', return_value=result) as run:
+                shell.show_runs(['/runs', '--json'])
+                runs_argv = run.call_args.args[0]
+                self.assertIn('runs', runs_argv)
+                self.assertIn('--json', runs_argv)
+                self.assertIn(str(state.resolve()), runs_argv)
+
+                shell.run_init(['/init', '--provider', 'codex', '--force'])
+                self.assertIn('init', run.call_args.args[0])
+                self.assertIn('--provider', run.call_args.args[0])
+
+                shell.run_doctor(['/doctor', '--json'])
+                self.assertIn('doctor', run.call_args.args[0])
+                self.assertIn('--json', run.call_args.args[0])
+
+                shell.run_cleanup(['/cleanup', '--issue', '12', '--yes'])
+                cleanup_argv = run.call_args.args[0]
+                self.assertIn('cleanup', cleanup_argv)
+                self.assertIn('--issue', cleanup_argv)
+                self.assertIn('12', cleanup_argv)
+
+                shell.show_version(['/version'])
+                self.assertEqual(run.call_args.args[0][-1], '--version')
+
+    def test_run_accepts_existing_local_task_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / 'agent_config.json'
+            config.write_text('{"task_source":"local"}')
+            (root / 'nested').mkdir()
+            task = root / 'nested' / '..' / 'task.md'
+            task.write_text('Implement export\n')
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), config=config, session_dir=root / 'logs'
+            )
+            with (patch.object(shell, '_capture_local_task') as capture,
+                  patch.object(shell, '_launch') as launch):
+                shell.run_issue(['/run', '--task-file', str(task)])
+            capture.assert_not_called()
+            argv = launch.call_args.args[0]
+            self.assertIn('--task-file', argv)
+            self.assertIn(str(task.resolve()), argv)
+
     def test_completion_suggests_commands_options_and_job_ids(self):
         self.assertEqual(
             agentic_shell._completion_candidates('/r'),
-            ['/run'],
+            ['/run', '/runs'],
         )
         self.assertEqual(
             agentic_shell._completion_candidates('/li'),
@@ -143,6 +205,10 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(
             agentic_shell._completion_candidates('/status '),
             ['--json'],
+        )
+        self.assertEqual(
+            agentic_shell._completion_candidates('/stop '),
+            ['--all'],
         )
         self.assertEqual(agentic_shell._completion_candidates('run '), [])
 
@@ -261,7 +327,7 @@ class ShellTests(unittest.TestCase):
 
     def test_interactive_input_completion_preserves_suffix_and_cursor(self):
         keys = [
-            ('CHAR', '/'), ('CHAR', 'r'), ('CHAR', ' '),
+            ('CHAR', '/'), ('CHAR', 'l'), ('CHAR', ' '),
             ('CHAR', 'f'), ('CHAR', 'o'), ('CHAR', 'o'),
             ('LEFT', ''), ('LEFT', ''), ('LEFT', ''), ('LEFT', ''),
             ('DOWN', ''), ('ENTER', '\n'), ('CHAR', 'X'), ('ENTER', '\n'),
@@ -273,7 +339,7 @@ class ShellTests(unittest.TestCase):
                 agentic_shell._completion_items,
                 key_reader_factory=reader,
             )
-        self.assertEqual(result, '/runX foo')
+        self.assertEqual(result, '/listX foo')
 
     def test_interactive_input_ctrl_c_and_ctrl_d(self):
         reader_c = _create_mock_reader([('CTRL_C', '\003')])
@@ -554,6 +620,20 @@ class ShellTests(unittest.TestCase):
             self.assertIn('Could not read', agentic_shell._tail(root / 'missing.log', 5))
             with self.assertRaisesRegex(ValueError, 'unknown job'):
                 shell.show_logs(['/logs', '999'])
+
+    def test_shell_stop_all_requests_termination_for_running_jobs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            first = shell._launch([sys.executable, '-c', 'import time; time.sleep(5)'])
+            second = shell._launch([sys.executable, '-c', 'import time; time.sleep(5)'])
+            with patch('sys.stdout'):
+                shell.stop(['/stop', '--all'])
+            first.process.wait(timeout=5)
+            second.process.wait(timeout=5)
+            shell.refresh()
+            self.assertIsNotNone(first.exit_code)
+            self.assertIsNotNone(second.exit_code)
 
     def test_shell_ignores_malformed_persisted_job_records(self):
         with tempfile.TemporaryDirectory() as temp:

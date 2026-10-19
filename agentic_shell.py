@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import codecs
+from collections.abc import Sequence
 import json
 import os
 import shlex
@@ -34,16 +35,24 @@ HELP = """Commands:
                                       start a background job
     /run [--profile fast|slow] [--review|--publish|--mark-done|--new]
                                       local mode: paste a task, finish with /done
+    /run --task-file PATH [OPTIONS]    local mode: use an existing task file
 
   Inspect
     /ps [--all]                         show current or persisted jobs
     /logs JOB|PID [LINES]               follow or show captured terminal output
     /list                               list open GitHub issues
+    /runs [--json]                      list existing Agentic worktrees
     /status [--json]                    show Agentic worktree status
     /dashboard [OUTPUT]                 generate and open the HTML dashboard
 
+  Setup and cleanup
+    /init [OPTIONS]                     initialize target-repository configuration
+    /doctor [--json]                    diagnose local prerequisites
+    /cleanup --issue N [OPTIONS]        preview or remove clean worktrees
+    /version                            show the Agentic version
+
   Session
-    /stop JOB                           stop a running job
+    /stop JOB|--all                     stop one or all running jobs
     /help                               show this help
     /quit                               leave the shell; running jobs continue
 
@@ -70,27 +79,42 @@ SHELL_COMMANDS = (
     "/ps",
     "/logs",
     "/list",
+    "/runs",
     "/stop",
     "/status",
     "/dashboard",
+    "/init",
+    "/doctor",
+    "/cleanup",
+    "/version",
     "/help",
     "/quit",
     "/exit",
     "/?",
 )
 SHELL_OPTIONS = {
-    "/run": ("--profile", "--review", "--publish", "--mark-done", "--reason", "--new"),
+    "/run": ("--profile", "--review", "--publish", "--mark-done", "--reason", "--new", "--task-file"),
     "/ps": ("--all",),
+    "/runs": ("--json",),
     "/status": ("--json",),
+    "/doctor": ("--json",),
+    "/cleanup": ("--issue", "--all", "--yes", "--remove-logs"),
+    "/stop": ("--all",),
+    "/init": ("--provider", "--reviewer-provider", "--security-mode", "--sandbox-image", "--agents", "--force"),
 }
 COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/run": "start a background job or local task",
     "/ps": "show running or persisted background jobs",
     "/logs": "follow or show captured terminal output",
     "/list": "list open GitHub issues",
-    "/stop": "stop a running background job",
+    "/runs": "list existing Agentic worktrees",
+    "/stop": "stop one or all running background jobs",
     "/status": "show Agentic worktree and git status",
     "/dashboard": "generate and open the HTML dashboard",
+    "/init": "initialize target-repository configuration",
+    "/doctor": "diagnose local prerequisites",
+    "/cleanup": "preview or remove clean worktrees",
+    "/version": "show the Agentic version",
     "/help": "show available commands and usage",
     "/quit": "leave the shell; running jobs continue",
     "/exit": "leave the shell; running jobs continue",
@@ -105,6 +129,16 @@ OPTION_DESCRIPTIONS: dict[str, str] = {
     "--new": "start fresh worktree, ignoring cached state",
     "--all": "show jobs across all shell sessions",
     "--json": "output status in JSON format",
+    "--task-file": "use an existing local task file",
+    "--issue": "select one issue worktree",
+    "--remove-logs": "also remove matching run logs",
+    "--yes": "confirm cleanup changes",
+    "--provider": "developer provider for initialization",
+    "--reviewer-provider": "independent reviewer provider",
+    "--security-mode": "trusted or isolated execution",
+    "--sandbox-image": "container image for isolated execution",
+    "--agents": "create a starter AGENTS.md",
+    "--force": "replace generated setup files",
     "fast": "run the configured fast checks",
     "slow": "run fast checks plus configured slow checks",
 }
@@ -142,6 +176,10 @@ def _completion_candidates(line: str, cursor: int | None = None,
         values = ("fast", "slow")
         return [value for value in values if value.startswith(current)]
 
+    if command == "/stop" and (current.startswith("-") or not job_numbers):
+        options = SHELL_OPTIONS["/stop"]
+        return [option for option in options if option.startswith(current)]
+
     if command in {"/logs", "/stop"}:
         numbers = sorted(
             job_numbers,
@@ -150,6 +188,8 @@ def _completion_candidates(line: str, cursor: int | None = None,
             ),
         )
         values = [str(number) for number in numbers]
+        if command == "/stop":
+            values.insert(0, "--all")
         return [value for value in values if value.startswith(current)]
 
     options = SHELL_OPTIONS.get(command, ())
@@ -1025,7 +1065,7 @@ def _parse_job_command(parts: list[str]) -> tuple[str | None, list[str]]:
         flags = parts[1:]
     else:
         raise ValueError("usage: /run ISSUE [--profile fast|slow] [--review|--publish|--mark-done|--new]")
-    value_options = {"--profile", "--reason"}
+    value_options = {"--profile", "--reason", "--task-file"}
     boolean_options = {"--review", "--publish", "--mark-done", "--new"}
     index = 0
     while index < len(flags):
@@ -1044,6 +1084,8 @@ def _parse_job_command(parts: list[str]) -> tuple[str | None, list[str]]:
         raise ValueError("/run accepts --profile only once")
     if flags.count("--reason") > 1:
         raise ValueError("/run accepts --reason only once")
+    if flags.count("--task-file") > 1:
+        raise ValueError("/run accepts --task-file only once")
     if "--review" in flags and "--publish" in flags:
         raise ValueError("/run cannot combine --review and --publish")
     if "--mark-done" in flags and "--publish" in flags:
@@ -1051,6 +1093,35 @@ def _parse_job_command(parts: list[str]) -> tuple[str | None, list[str]]:
     if "--mark-done" not in flags and "--reason" in flags:
         raise ValueError("/run --reason requires --mark-done")
     return issue, flags
+
+
+def _option_value(flags: list[str], option: str) -> str | None:
+    try:
+        index = flags.index(option)
+    except ValueError:
+        return None
+    return flags[index + 1]
+
+
+def _parse_options(parts: list[str], *, usage: str,
+                   value_options: set[str], boolean_options: set[str]) -> list[str]:
+    flags = parts[1:]
+    seen: set[str] = set()
+    index = 0
+    while index < len(flags):
+        flag = flags[index]
+        if flag in value_options:
+            if flag in seen:
+                raise ValueError(f"{flag} accepts one value")
+            if index + 1 >= len(flags) or flags[index + 1].startswith("--"):
+                raise ValueError(f"{flag} requires a value")
+            seen.add(flag)
+            index += 2
+            continue
+        if flag not in boolean_options:
+            raise ValueError(f"usage: {usage}")
+        index += 1
+    return flags
 
 
 class AgenticShell:
@@ -1275,6 +1346,26 @@ class AgenticShell:
         if result.returncode:
             raise RuntimeError(f"command failed with exit {result.returncode}")
 
+    def _run_runner_command(self, argv: list[str]) -> None:
+        result = subprocess.run(
+            argv, cwd=self.repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace", check=False,
+        )
+        if result.stdout:
+            print(result.stdout.rstrip())
+        if result.returncode:
+            raise RuntimeError(f"command failed with exit {result.returncode}")
+
+    def _subcommand_args(self, command: str, flags: Sequence[str] = ()) -> list[str]:
+        argv = [
+            sys.executable, "-u", str(self.runner), command,
+            "--repo", str(self.repo), "--state-dir", str(self.state_dir),
+        ]
+        if self.config and command == "doctor":
+            argv.extend(["--config", str(self.config)])
+        argv.extend(flags)
+        return argv
+
     def _task_source(self) -> str:
         config_path = self.config or (self.repo / "agent_config.json")
         try:
@@ -1307,12 +1398,22 @@ class AgenticShell:
     def run_issue(self, parts: list[str]) -> None:
         issue, flags = _parse_job_command(parts)
         task_file: Path | None = None
+        task_file_value = _option_value(flags, "--task-file")
+        if issue is not None and task_file_value is not None:
+            raise ValueError("--task-file is only available for local /run tasks")
         if issue is None:
             if self._task_source() != "local":
                 raise ValueError("GitHub mode requires /run ISSUE; set task_source to local to paste tasks")
-            task_file = self._capture_local_task()
-        argv = self._runner_args(issue, flags)
-        if task_file:
+            task_file = (
+                Path(task_file_value).expanduser().resolve()
+                if task_file_value is not None else self._capture_local_task()
+            )
+        runner_flags = list(flags)
+        if task_file is not None and task_file_value is not None:
+            task_file_index = runner_flags.index("--task-file")
+            runner_flags[task_file_index + 1] = str(task_file)
+        argv = self._runner_args(issue, runner_flags)
+        if task_file and task_file_value is None:
             argv.extend(["--task-file", str(task_file)])
         if "--publish" in flags:
             print("[PUBLISH] Running in the foreground so publication confirmation can be entered")
@@ -1422,16 +1523,11 @@ class AgenticShell:
         except OSError as exc:
             print(f"Could not read {job.log_path}: {exc}")
 
-    def stop(self, parts: list[str]) -> None:
-        if len(parts) != 2 or not parts[1].isdigit():
-            raise ValueError("usage: /stop JOB")
-        job = self.jobs.get(int(parts[1]))
-        if job is None:
-            raise ValueError(f"unknown job: {parts[1]}")
+    def _request_stop(self, job: Job) -> bool:
+        """Request termination for one running job and report the result."""
         self._refresh(job)
         if not job.running:
-            print(f"[JOB {job.number}] already finished with exit {job.exit_code}")
-            return
+            return False
         if os.name != "nt":
             try:
                 os.killpg(os.getpgid(job.pid), signal.SIGTERM)
@@ -1443,6 +1539,23 @@ class AgenticShell:
             else:
                 os.kill(job.pid, signal.SIGTERM)
         print(f"[JOB {job.number}] stop requested")
+        return True
+
+    def stop(self, parts: list[str]) -> None:
+        if len(parts) != 2 or (parts[1] != "--all" and not parts[1].isdigit()):
+            raise ValueError("usage: /stop JOB|--all")
+        if parts[1] == "--all":
+            requested = sum(self._request_stop(job) for job in self.jobs.values())
+            if requested == 0:
+                print("[STOP] no running jobs")
+            else:
+                print(f"[STOP] stop requested for {requested} job(s)")
+            return
+        job = self.jobs.get(int(parts[1]))
+        if job is None:
+            raise ValueError(f"unknown job: {parts[1]}")
+        if not self._request_stop(job):
+            print(f"[JOB {job.number}] already finished with exit {job.exit_code}")
 
     def show_status(self, parts: list[str]) -> None:
         if len(parts) > 2 or (len(parts) == 2 and parts[1] != "--json"):
@@ -1469,6 +1582,46 @@ class AgenticShell:
         print(result.stdout.rstrip())
         if result.returncode:
             raise RuntimeError(f"list command failed with exit {result.returncode}")
+
+    def show_runs(self, parts: list[str]) -> None:
+        flags = _parse_options(
+            parts, usage="/runs [--json]", value_options=set(), boolean_options={"--json"},
+        )
+        self._run_runner_command(self._subcommand_args("runs", flags))
+
+    def run_init(self, parts: list[str]) -> None:
+        flags = _parse_options(
+            parts,
+            usage="/init [--provider NAME] [--reviewer-provider NAME] [--security-mode MODE] [--sandbox-image IMAGE] [--agents] [--force]",
+            value_options={"--provider", "--reviewer-provider", "--security-mode", "--sandbox-image"},
+            boolean_options={"--agents", "--force"},
+        )
+        self._run_runner_command(self._subcommand_args("init", flags))
+
+    def run_doctor(self, parts: list[str]) -> None:
+        flags = _parse_options(
+            parts, usage="/doctor [--json]", value_options=set(), boolean_options={"--json"},
+        )
+        self._run_runner_command(self._subcommand_args("doctor", flags))
+
+    def run_cleanup(self, parts: list[str]) -> None:
+        flags = _parse_options(
+            parts,
+            usage="/cleanup --issue N [--yes] [--remove-logs] | /cleanup --all [--yes] [--remove-logs]",
+            value_options={"--issue"},
+            boolean_options={"--all", "--yes", "--remove-logs"},
+        )
+        issue = _option_value(flags, "--issue")
+        if issue is None and "--all" not in flags:
+            raise ValueError("/cleanup requires --issue N or --all")
+        if issue is not None and (not issue.isdigit() or "--all" in flags):
+            raise ValueError("/cleanup accepts either --issue N or --all")
+        self._run_runner_command(self._subcommand_args("cleanup", flags))
+
+    def show_version(self, parts: list[str]) -> None:
+        if len(parts) != 1:
+            raise ValueError("usage: /version")
+        self._run_runner_command([sys.executable, "-u", str(self.runner), "--version"])
 
     def execute(self, line: str) -> bool:
         stripped = line.strip()
@@ -1498,10 +1651,20 @@ class AgenticShell:
                 self.stop(parts)
             elif command == "/list":
                 self.show_issues(parts)
+            elif command == "/runs":
+                self.show_runs(parts)
             elif command == "/status":
                 self.show_status(parts)
             elif command == "/dashboard":
                 self.run_dashboard(parts)
+            elif command == "/init":
+                self.run_init(parts)
+            elif command == "/doctor":
+                self.run_doctor(parts)
+            elif command == "/cleanup":
+                self.run_cleanup(parts)
+            elif command == "/version":
+                self.show_version(parts)
             elif command in {"/quit", "/exit"}:
                 return False
             else:

@@ -52,12 +52,33 @@ class DashboardTests(unittest.TestCase):
             run.mkdir(parents=True)
             (run / "run.json").write_text(json.dumps({
                 "usage": {"total_tokens": 25, "estimated_cost_usd": 0.02},
+                "usage_by_invocation": [{
+                    "name": "developer-001", "role": "developer",
+                    "prompt_tokens": 10, "completion_tokens": 15,
+                    "total_tokens": 25,
+                }, {
+                    "name": "reviewer-001", "role": "reviewer",
+                    "prompt_tokens": 4, "completion_tokens": 6,
+                    "total_tokens": 10,
+                }],
                 "metrics": {"duration_seconds": 4.5, "operation_count": 2},
             }))
             snapshot = agentic_dashboard.collect_runs(root)[0]
             self.assertEqual(snapshot["usage"]["metrics"]["duration_seconds"], 4.5)
+            self.assertEqual(snapshot["usage"]["by_invocation"][0]["total_tokens"], 25)
             html = agentic_dashboard.render_dashboard([snapshot], "demo", root.name)
             self.assertIn("Run metrics", html)
+            self.assertIn("Token usage by run", html)
+            self.assertIn("Known totals for each provider invocation", html)
+            self.assertIn("The highest run number is the latest", html)
+            self.assertIn("const runNumber = index + 1", html)
+            self.assertIn('latest ? " · latest"', html)
+            self.assertIn("const entries = [...DATA.runs].reverse().flatMap", html)
+            self.assertIn("<th>Run</th><th>Invocation</th>", html)
+            self.assertIn("const invocationRows = invocations.map", html)
+            self.assertIn("Tokens: ${esc(formatTokens(tokenValue(run)))}</span>", html)
+            self.assertIn("developer-001", html)
+            self.assertIn("reviewer-001", html)
 
     def test_review_parser_accepts_json_code_fence(self):
         with tempfile.TemporaryDirectory() as temp:

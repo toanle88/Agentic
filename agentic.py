@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import datetime
+import html
 import os
 import tempfile
 import time
@@ -80,7 +81,7 @@ from agentic_sandbox import DEFAULT_SANDBOX_IMAGE, validate_sandbox
 from agentic_security import redact_secrets
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.10"
+__version__ = "1.1.11"
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module
 # while the implementation lives in agentic_config.
@@ -1305,6 +1306,53 @@ def check_existing_pr(repo: Path, github_repo: str, branch: str) -> list[dict[st
     ], repo).stdout)
 
 
+_ANSI_SEQUENCE_RE = re.compile(
+    r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))"
+)
+
+
+def _clean_terminal_output(text: str) -> str:
+    """Remove terminal styling and control characters before publishing output."""
+    cleaned = _ANSI_SEQUENCE_RE.sub("", text).replace("\r", "")
+    return "".join(character for character in cleaned
+                    if character in "\n\t" or ord(character) >= 32)
+
+
+def _validation_summary(report: str, test_commands: list[list[str]]) -> str:
+    """Format concise, safe validation evidence for a pull-request body."""
+    lines = ["All configured checks passed.", ""]
+    for argv in test_commands:
+        display_command = html.escape(" ".join(str(value) for value in argv)).replace(
+            "`", "&#96;"
+        )
+        lines.append(f"- <code>{display_command}</code> — passed")
+    lines.append("- `git diff --check` — passed")
+
+    highlights: list[str] = []
+    for raw_line in _clean_terminal_output(report).splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if (re.search(r"\bTest Files\b.*\bpassed\b", line, re.IGNORECASE)
+                or re.search(r"\bTests\b.*\bpassed\b", line, re.IGNORECASE)
+                or re.search(r"\bTest Suites\b.*\bpassed\b", line, re.IGNORECASE)
+                or re.search(r"\b(?:built|validated) in\b", line, re.IGNORECASE)
+                or line.startswith("OpenAPI contract validated")
+                or line.startswith("Rejected ")):
+            if line not in highlights:
+                highlights.append(line[:240])
+        if len(highlights) == 8:
+            break
+    if highlights:
+        lines.extend(["", "Key results:"])
+        lines.extend(
+            f"- <code>{html.escape(line).replace('`', '&#96;')}</code>"
+            for line in highlights
+        )
+    lines.extend(["", "Full command output is retained in the Agentic run logs."])
+    return "\n".join(lines)
+
+
 def publish(run: Run, issue: Issue, github_repo: str, base: str,
             config: dict[str, Any], folder: Path,
             test_commands: list[list[str]] | None = None,
@@ -1346,15 +1394,18 @@ def publish(run: Run, issue: Issue, github_repo: str, base: str,
     task_section = (f"## Local task\n\n{_issue_context(issue.body, 8000)}\n\n"
                     if issue.is_local else f"Closes #{issue.number}\n\n")
     if verdict.get("manual"):
-        review_section = ("## Manual completion approval\n\n"
+        review_section = ("## Review status\n\n"
                           f"{verdict.get('summary', '')}\n\n"
-                          "The automated reviewer was bypassed by explicit human approval.")
+                          "This draft was published with explicit human completion "
+                          "approval; automated review was not run for this publication.")
     else:
         reviewer_provider = config.get("reviewer_agent", {}).get("provider", "codex")
         review_section = (f"## Independent {reviewer_provider.title()} review\n\n"
                           f"{verdict.get('summary', '')}")
+    validation_commands = test_commands if test_commands is not None else config["test_commands"]
     body = (f"{task_section}## Independent validation\n\n"
-            f"```text\n{report[-4000:]}\n```\n\n{review_section}\n\n"
+            f"{_validation_summary(report, validation_commands)}\n\n"
+            f"{review_section}\n\n"
             "Draft PR: CI and human review still required.")
     title_prefix = "Task" if issue.is_local else f"Issue #{issue.number}"
     result = command([
@@ -1593,7 +1644,10 @@ def doctor(repo: Path, config_path: Path | None = None, *, json_output: bool = F
     else:
         checks.append(("origin remote", False, "skipped", True))
     gh_path = shutil.which("gh")
-    gh_ok, _ = probe([gh_path or "gh", "auth", "status"], repo) if gh_path else (False, "gh not found")
+    gh_ok, _ = probe(
+        [gh_path or "gh", "auth", "status", "--active", "--hostname", "github.com"],
+        repo, timeout=30,
+    ) if gh_path else (False, "gh not found")
     checks.append(("GitHub CLI auth", gh_ok, "authenticated" if gh_ok else "not authenticated", True))
     target_config = (config_path or repo / AGENT_CONFIG_FILENAME).resolve()
     if target_config.is_file():

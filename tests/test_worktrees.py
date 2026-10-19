@@ -255,7 +255,8 @@ class GitTest(unittest.TestCase):
 
         with (patch('agentic.check_existing_pr', return_value=[]),
               patch('agentic.verify_and_review', return_value=(
-                  True, 'tests passed',
+                  True, '\x1b[32mTest Files 2 passed (2)\x1b[0m\n'
+                       '\x1b[32mTests 4 passed <img src=x> `[details]`\x1b[0m',
                   {'approved': True, 'summary': 'Good', 'findings': []},
                   'digest', 'base-sha',
               )),
@@ -271,6 +272,13 @@ class GitTest(unittest.TestCase):
         self.assertIn('--base', pr_command)
         self.assertIn('main', pr_command)
         self.assertIn('Independent Gemini review', pr_command[-1])
+        self.assertIn(
+            f'- <code>{sys.executable} -c print(&quot;ok&quot;)</code> — passed',
+            pr_command[-1],
+        )
+        self.assertIn('Tests 4 passed &lt;img src=x&gt; &#96;[details]&#96;', pr_command[-1])
+        self.assertNotIn('\x1b', pr_command[-1])
+        self.assertNotIn('```text', pr_command[-1])
 
     def test_publish_uses_manual_approval_without_repeating_reviewer(self):
         run = agentic.create_worktree(self.repo, 'main', 33)
@@ -312,7 +320,8 @@ class GitTest(unittest.TestCase):
         manual_verify.assert_called_once()
         automated_verify.assert_not_called()
         pr_command = next(argv for argv in commands if argv[:3] == ['gh', 'pr', 'create'])
-        self.assertIn('Manual completion approval', pr_command[-1])
+        self.assertIn('## Review status', pr_command[-1])
+        self.assertIn('automated review was not run', pr_command[-1])
 
     def test_publish_skips_existing_pr_and_rejects_closed_issue(self):
         run = agentic.create_worktree(self.repo, 'main', 35)
