@@ -87,12 +87,18 @@ from agentic_telemetry import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.18"
+__version__ = "1.1.19"
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 INSTRUCTION_CONTEXT_CHARS = _INSTRUCTION_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module
 # while the implementation lives in agentic_config.
 DEFAULT_SECURITY_MODE = _agentic_config.DEFAULT_SECURITY_MODE
+
+
+class NoCodeChangesError(RuntimeError):
+    """Signal that validation passed but the developer produced no patch."""
+
+
 PROVIDER_SANDBOX_ENV = _agentic_config.PROVIDER_SANDBOX_ENV
 DEFAULT_OPENROUTER_COMMAND_TIMEOUT = _agentic_config.DEFAULT_OPENROUTER_COMMAND_TIMEOUT
 OPENROUTER_MAX_TOOL_TURNS = _agentic_config.OPENROUTER_MAX_TOOL_TURNS
@@ -585,6 +591,22 @@ def record_blocked(folder: Path, patch_digest: str, findings: list[str]) -> None
     }, indent=2) + "\n", encoding="utf-8")
 
 
+def record_no_code_changes_blocked(folder: Path, developer_report: str) -> None:
+    """Persist a developer blocker for a passing run with no proposed patch."""
+    developer_log = _latest_numbered_log(folder, "developer", "txt")
+    summary = _bounded_text(developer_report, 2_000).strip()
+    blocked_path(folder).write_text(json.dumps({
+        "status": "blocked",
+        "kind": "no-code-changes",
+        "reason": "Developer reported a blocker without producing code changes",
+        "patch_digest": "",
+        "developer_summary": summary or "No developer blocker summary was provided.",
+        "developer_log": developer_log.name if developer_log else "",
+        "logs_path": str(folder),
+        "blocked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }, indent=2) + "\n", encoding="utf-8")
+
+
 def clear_blocked(folder: Path) -> None:
     """Clear a deferred marker after the proposed patch changes."""
     try:
@@ -960,7 +982,7 @@ def prepare_patch(worktree: Path, base: str, max_files: int | None) -> tuple[str
     if disallowed:
         raise RuntimeError(f"Forbidden changes found in proposed PR: {disallowed}")
     if not names:
-        raise RuntimeError("No code changes compared to base branch")
+        raise NoCodeChangesError("No code changes compared to base branch")
     if max_files is not None and len(names) > max_files:
         raise RuntimeError(f"Patch modifies {len(names)} files; max_files={max_files}")
     git(worktree, "-c", "core.whitespace=cr-at-eol", "diff", "--cached", "--check", base_sha)
@@ -1451,7 +1473,11 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
     record_review_findings(folder, verdict)
     print_review_summary(verdict)
     # Reject if the worktree was changed during the review; review cannot authorize new changes.
-    if prepare_patch(run.worktree, base, config["max_files"])[1] != digest:
+    try:
+        current_digest = prepare_patch(run.worktree, base, config["max_files"])[1]
+    except NoCodeChangesError as exc:
+        raise RuntimeError("Files changed during review; rerun checks and review") from exc
+    if current_digest != digest:
         raise RuntimeError("Files changed during review; rerun checks and review")
     if verdict.get("approved") is True:
         record_review_approval(
@@ -1610,11 +1636,23 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
         system_prompt = config.get("system_prompt")
     blocked = load_blocked(folder)
     if blocked is not None:
-        _, current_digest, _ = prepare_patch(run.worktree, base, config["max_files"])
+        try:
+            _, current_digest, _ = prepare_patch(run.worktree, base, config["max_files"])
+        except NoCodeChangesError:
+            current_digest = ""
         if current_digest == blocked["patch_digest"]:
+            if blocked.get("kind") == "no-code-changes":
+                log_hint = blocked.get("logs_path") or str(folder)
+                print(
+                    "[BLOCKED] Developer reported a blocker without producing code changes; "
+                    f"resolve it and see the run logs at {log_hint}"
+                )
+                next_action = "resolve the developer blocker, add the required patch, and resume"
+            else:
+                next_action = "change the patch before resuming this task"
             print_run_summary(
                 run, "BLOCKED",
-                "skipped; change the patch before resuming this task",
+                f"skipped; {next_action}",
             )
             return True
         clear_blocked(folder)
@@ -1683,6 +1721,21 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
                 instruction=instruction,
                 system_prompt=system_prompt,
             )
+        except NoCodeChangesError:
+            record_no_code_changes_blocked(folder, developer_report)
+            developer_summary = _short(
+                developer_report or "No developer blocker summary was provided.", 1_200,
+            )
+            _console_print(
+                "[BLOCKED] Checks passed, but the developer produced no code changes."
+            )
+            _console_print(f"[BLOCKED] Developer blocker: {developer_summary}")
+            _console_print(f"[BLOCKED] Run logs: {folder}")
+            print_run_summary(
+                run, "BLOCKED",
+                f"resolve the blocker and resume; see logs at {folder}",
+            )
+            return True
         except RuntimeError:
             # Policy violations, malformed diff, or mid-review mutation are not model-retryable.
             raise
