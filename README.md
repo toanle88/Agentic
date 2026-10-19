@@ -15,7 +15,7 @@ Agentic is designed for human-supervised development. It does not silently commi
 - Configurable project checks using safe argument arrays.
 - Independent read-only review before publication.
 - Interactive background shell with `/ps` and `/logs`.
-- Self-contained HTML dashboard for run history.
+- Self-contained HTML dashboard for run history, per-invocation token usage, and a visual token chart.
 - Centralized user-level state so target repositories stay clean.
 - WSL/Windows Git worktree compatibility when supported by both Git installations.
 - Secret redaction in provider, test, and dashboard output.
@@ -203,6 +203,11 @@ agentic --issue 119
 ```
 
 Running the same issue again resumes its existing worktree. Use `--new` only when you intentionally want a separate worktree.
+
+Interactive shell commands include `/run`, `/ps`, `/logs`, `/list`, `/runs`,
+`/status`, `/dashboard`, `/init`, `/doctor`, `/cleanup`, `/version`, `/help`,
+and `/quit`. Use `/run --task-file PATH` for a local task already saved in a
+file. `/runs` lists Agentic worktrees; `/ps --all` lists persisted shell jobs.
 
 ## Common commands
 

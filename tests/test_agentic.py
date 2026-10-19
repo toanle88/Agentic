@@ -759,8 +759,10 @@ class PureTests(unittest.TestCase):
             config.write_text(json.dumps({
                 'test_commands': [[sys.executable, '-c', 'pass']],
             }))
+            probed = []
 
             def fake_probe(argv, cwd, **kwargs):
+                probed.append(argv)
                 if argv[:2] == ['git', 'rev-parse']:
                     return True, str(repo)
                 return True, 'ok'
@@ -777,6 +779,10 @@ class PureTests(unittest.TestCase):
         self.assertIn('Agentic doctor', output.getvalue())
         self.assertIn('Agentic config', output.getvalue())
         self.assertIn('provider (codex)', output.getvalue())
+        self.assertIn(
+            ['/usr/bin/gh', 'auth', 'status', '--active', '--hostname', 'github.com'],
+            probed,
+        )
 
     def test_doctor_json_is_machine_readable(self):
         with tempfile.TemporaryDirectory() as temp:

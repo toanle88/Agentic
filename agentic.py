@@ -80,7 +80,7 @@ from agentic_sandbox import DEFAULT_SANDBOX_IMAGE, validate_sandbox
 from agentic_security import redact_secrets
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.10"
+__version__ = "1.1.11"
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module
 # while the implementation lives in agentic_config.
@@ -1593,7 +1593,10 @@ def doctor(repo: Path, config_path: Path | None = None, *, json_output: bool = F
     else:
         checks.append(("origin remote", False, "skipped", True))
     gh_path = shutil.which("gh")
-    gh_ok, _ = probe([gh_path or "gh", "auth", "status"], repo) if gh_path else (False, "gh not found")
+    gh_ok, _ = probe(
+        [gh_path or "gh", "auth", "status", "--active", "--hostname", "github.com"],
+        repo, timeout=30,
+    ) if gh_path else (False, "gh not found")
     checks.append(("GitHub CLI auth", gh_ok, "authenticated" if gh_ok else "not authenticated", True))
     target_config = (config_path or repo / AGENT_CONFIG_FILENAME).resolve()
     if target_config.is_file():

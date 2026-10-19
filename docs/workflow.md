@@ -46,7 +46,12 @@ Available commands:
 /logs JOB|PID [LINES]                  Follow a running job or show recent output
 /stop JOB                              Stop a running job
 /list                                  List open GitHub issues
+/runs [--json]                         List existing Agentic worktrees
 /dashboard [OUTPUT]                    Generate and open the HTML dashboard
+/init [OPTIONS]                        Initialize target-repository configuration
+/doctor [--json]                       Diagnose local prerequisites
+/cleanup --issue N [OPTIONS]           Preview or remove clean worktrees
+/version                               Show the Agentic version
 /status [--json]                       Show worktree status
 /help                                  Show command help
 /quit                                  Leave the shell; jobs continue running
@@ -65,6 +70,12 @@ escapes with zero third-party dependencies.
 `/list` synchronously lists the target repository's open GitHub issues. It uses
 the same GitHub CLI-backed issue listing as `agentic --list` and does not create
 a background job.
+
+`/runs` lists Agentic worktrees, matching `agentic --runs`; `/ps --all` remains
+the command for inspecting persisted interactive-shell jobs. Use
+`/run --task-file PATH` to start a local task from an existing task file. Setup
+and maintenance commands such as `/init`, `/doctor`, and `/cleanup` run
+synchronously so their output and confirmation errors are shown immediately.
 
 The default `fast` profile runs the configured `test_commands`. Use `/run 119 --profile slow` to run those checks followed by the configured `slow_test_commands`. Profiles select which checks run; they do not select the provider model or reasoning setting.
 
@@ -198,7 +209,11 @@ agentic dashboard \
 In the interactive shell, `/dashboard` generates the snapshot and opens it with
 the host operating system's default browser. Use `/dashboard PATH` to choose a
 specific output file. Regenerate the dashboard after a run to refresh its
-contents.
+contents. The dashboard shows the recorded token total for each run and a
+visual token-usage chart with one bar per provider invocation when available.
+This keeps retries and separate developer/reviewer executions visible instead
+of collapsing them into one issue bar. Providers that do not report usage
+remain marked as unknown rather than being estimated.
 
 For scripts and external dashboards, use the read-only status command instead
 of parsing terminal output:
