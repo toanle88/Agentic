@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import agentic
+import agentic_openrouter
 from agentic_sandbox import sandbox_command, validate_sandbox
 
 
@@ -21,24 +22,24 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
             ["rg", "--hostname-bin=sh", "needle", "."],
         )
         for argv in blocked:
-            allowed, reason = agentic._openrouter_command_allowed(argv, readonly=True)
+            allowed, reason = agentic_openrouter._openrouter_command_allowed(argv, readonly=True)
             self.assertFalse(allowed, argv)
             self.assertTrue(reason, argv)
 
     def test_readonly_allows_bounded_inspection(self):
         for argv in (["git", "status"], ["git", "diff"], ["rg", "needle", "."]):
-            allowed, reason = agentic._openrouter_command_allowed(argv, readonly=True)
+            allowed, reason = agentic_openrouter._openrouter_command_allowed(argv, readonly=True)
             self.assertTrue(allowed, reason)
 
     def test_file_tool_resolves_before_sensitive_check(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / ".env").write_text("TOKEN=private\n", encoding="utf-8")
-            result = agentic._openrouter_tool_call(
+            result = agentic_openrouter._openrouter_tool_call(
                 root, "read_file", {"path": "../secret"}, readonly=True
             )
             self.assertIn("ERROR:", result)
-            result = agentic._openrouter_tool_call(
+            result = agentic_openrouter._openrouter_tool_call(
                 root, "read_file", {"path": ".env"}, readonly=True
             )
             self.assertIn("protected file", result)

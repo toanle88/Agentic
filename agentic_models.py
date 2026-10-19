@@ -79,6 +79,7 @@ class AgentSettings:
     max_tool_turns: int | None = None
     command_timeout_seconds: int | None = None
     allow_network: bool = False
+    json_mode: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -91,5 +92,6 @@ class AgentSettings:
             "max_tool_turns": self.max_tool_turns,
             "command_timeout_seconds": self.command_timeout_seconds,
             "allow_network": self.allow_network,
+            "json_mode": self.json_mode,
         }
 

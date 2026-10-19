@@ -130,6 +130,16 @@ class ShellTests(unittest.TestCase):
             agentic_shell._completion_candidates('/logs ', job_numbers=(2, 1)),
             ['1', '2'],
         )
+        jobs = {
+            1: type('JobState', (), {'running': False, 'pid': 101, 'exit_code': 0})(),
+            2: type('JobState', (), {'running': True, 'pid': 102, 'exit_code': None})(),
+        }
+        self.assertEqual(
+            [candidate for candidate, _ in agentic_shell._completion_items(
+                '/logs ', job_numbers=(1, 2), jobs=jobs,
+            )],
+            ['2', '1'],
+        )
         self.assertEqual(
             agentic_shell._completion_candidates('/status '),
             ['--json'],

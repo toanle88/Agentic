@@ -45,6 +45,20 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(snapshot["review"]["skipped"], ["Browser check unavailable"])
             self.assertEqual(snapshot["review"]["recurring"][0]["count"], 2)
 
+    def test_dashboard_exposes_run_metrics(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            run = root / "agent-issue-12-deadbeef"
+            run.mkdir(parents=True)
+            (run / "run.json").write_text(json.dumps({
+                "usage": {"total_tokens": 25, "estimated_cost_usd": 0.02},
+                "metrics": {"duration_seconds": 4.5, "operation_count": 2},
+            }))
+            snapshot = agentic_dashboard.collect_runs(root)[0]
+            self.assertEqual(snapshot["usage"]["metrics"]["duration_seconds"], 4.5)
+            html = agentic_dashboard.render_dashboard([snapshot], "demo", root.name)
+            self.assertIn("Run metrics", html)
+
     def test_review_parser_accepts_json_code_fence(self):
         with tempfile.TemporaryDirectory() as temp:
             run = Path(temp) / "agent-issue-8-cafebabe"

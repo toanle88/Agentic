@@ -452,6 +452,15 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
     }};
     const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}}[char]));
     const badge = status => `<span class="badge ${{esc(status)}}">${{esc(labels[status] || status)}}</span>`;
+    const formatDuration = seconds => {{
+      if (seconds == null || !Number.isFinite(Number(seconds))) return "duration unavailable";
+      const value = Number(seconds);
+      if (value < 60) return `${{value.toFixed(1)}}s`;
+      const minutes = Math.floor(value / 60);
+      const remainder = Math.round(value % 60);
+      return `${{minutes}}m ${{remainder}}s`;
+    }};
+    const runDuration = run => formatDuration(run.usage?.metrics?.duration_seconds);
     const filtered = () => DATA.runs.filter(run =>
       (state.status === "all" || run.status === state.status) &&
       (`${{run.label}} ${{run.branch}}`.toLowerCase().includes(state.query.toLowerCase()))
@@ -476,7 +485,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
       document.querySelector("#run-list").innerHTML = visible.length ? visible.map(run => `<button class="run-card ${{run.id === state.selected ? "selected" : ""}}" data-run="${{esc(run.id)}}" type="button">
         <div class="run-top"><span class="run-title">${{esc(run.label)}}</span>${{badge(run.status)}}</div>
         <div class="summary">${{esc(runSummary(run))}}</div>
-        <div class="meta"><span>${{esc(run.attempts)}} attempt${{run.attempts === 1 ? "" : "s"}}</span><span>Tests: ${{esc(run.tests.status)}}</span><span>${{esc(run.last_activity)}}</span></div>
+        <div class="meta"><span>${{esc(run.attempts)}} attempt${{run.attempts === 1 ? "" : "s"}}</span><span>Tests: ${{esc(run.tests.status)}}</span><span>${{esc(runDuration(run))}}</span><span>${{esc(run.last_activity)}}</span></div>
       </button>`).join("") : `<div class="empty">No runs match this filter.</div>`;
       document.querySelectorAll("[data-run]").forEach(button => button.addEventListener("click", () => {{ state.selected = button.dataset.run; renderList(); renderDetail(); }}));
     }}
@@ -491,7 +500,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
       const files = run.files.length ? run.files.map(file => `<details><summary>${{esc(file.kind)}} · ${{esc(file.name)}} <span class="meta">${{esc(file.updated)}}</span></summary><pre>${{esc(file.content)}}</pre></details>`).join("") : `<div class="empty">No log files recorded.</div>`;
       detail.innerHTML = `<div class="detail-top"><div><h2>${{esc(run.label)}}</h2><div class="branch">${{esc(run.branch)}}</div></div>${{badge(run.status)}}</div>
         <div class="meta" style="margin-top:12px"><span>${{esc(run.attempts)}} developer attempt${{run.attempts === 1 ? "" : "s"}}</span><span>Last activity: ${{esc(run.last_activity)}}</span><span>${{esc(run.file_count)}} log files</span></div>
-        <section class="callout"><strong>Usage and cost</strong><p>${{esc(run.usage.total_tokens == null ? "Provider usage unavailable" : `${{run.usage.total_tokens.toLocaleString()}} tokens`)}}${{run.usage.estimated_cost_usd == null ? "" : ` · $${{Number(run.usage.estimated_cost_usd).toFixed(4)}} estimated`}}</p></section>
+        <section class="callout"><strong>Run metrics</strong><p>${{esc(run.usage.total_tokens == null ? "Provider usage unavailable" : `${{run.usage.total_tokens.toLocaleString()}} tokens`)}}${{run.usage.estimated_cost_usd == null ? "" : ` · $${{Number(run.usage.estimated_cost_usd).toFixed(4)}} estimated`}} · ${{esc(runDuration(run))}} · ${{esc(run.usage?.metrics?.operation_count || 0)}} operations</p></section>
         <section class="callout"><strong>Investigation feedback</strong><p>${{esc(run.investigation.summary)}}</p>${{investigationFindings}}</section>
         <section class="callout ${{esc(run.review.status)}}"><strong>Review · ${{esc(labels[run.review.status] || run.review.status)}}</strong><p>${{esc(run.review.summary)}}</p>${{findings}}</section>
         ${{skipped}}

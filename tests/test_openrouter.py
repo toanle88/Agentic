@@ -1,0 +1,313 @@
+"""OpenRouter policy and tool-loop tests."""
+import json
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from subprocess import CompletedProcess
+from unittest.mock import patch
+
+import agentic
+import agentic_context
+import agentic_openrouter
+
+
+class OpenRouterTests(unittest.TestCase):
+    def test_openrouter_requires_model_and_never_reads_key_from_config(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'agent_config.json'
+            path.write_text(json.dumps({
+                'test_commands': [['go', 'test', './...']],
+                'developer': {'provider': 'openrouter'},
+            }))
+            with self.assertRaisesRegex(ValueError, 'developer.model'):
+                agentic.load_config(path)
+
+    def test_openrouter_tool_loop_can_write_only_inside_worktree(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / 'developer-001.txt'
+            responses = iter([
+                {'choices': [{'message': {
+                    'role': 'assistant', 'content': None,
+                    'tool_calls': [{'id': 'call-1', 'type': 'function', 'function': {
+                        'name': 'write_file',
+                        'arguments': json.dumps({'path': 'hello.txt', 'content': 'hello\n'}),
+                    }}],
+                }}]},
+                {'choices': [{'message': {'role': 'assistant', 'content': 'done'}}]},
+            ])
+    
+            class Response:
+                def __init__(self, value):
+                    self.value = value
+                def __enter__(self):
+                    return self
+                def __exit__(self, *args):
+                    return False
+                def read(self):
+                    return json.dumps(self.value).encode()
+    
+            def fake_urlopen(request, *args, **kwargs):
+                return Response(next(responses))
+    
+            with (patch.dict(agentic.os.environ, {'MY_OPENROUTER_KEY': 'secret'}, clear=False),
+                  patch('agentic_openrouter.urllib.request.urlopen', side_effect=fake_urlopen)):
+                ok, message = agentic.run_openrouter(
+                    root, 'prompt', output=output, model='openai/gpt-5.4',
+                    api_key_env='MY_OPENROUTER_KEY',
+                )
+            self.assertTrue(ok)
+            self.assertEqual(message, 'done')
+            self.assertEqual((root / 'hello.txt').read_text(), 'hello\n')
+            self.assertNotIn('secret', output.with_suffix('.log').read_text())
+            metrics = json.loads((root / 'run.json').read_text())['metrics']
+            self.assertEqual(metrics['operations'][0]['role'], 'developer')
+            self.assertEqual(metrics['operations'][0]['status'], 'completed')
+            with self.assertRaisesRegex(ValueError, 'worktree'):
+                agentic_openrouter._safe_worktree_path(root, '../outside')
+
+    def test_openrouter_tools_cover_readonly_boundaries_and_file_operations(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'src').mkdir()
+            (root / 'src' / 'main.go').write_text('package main\n')
+            (root / '.git').mkdir()
+    
+            names = [item['function']['name'] for item in agentic_openrouter._openrouter_tools(True)]
+            self.assertEqual(names, ['list_files', 'read_file', 'run_command'])
+            self.assertIn('src/main.go', agentic_openrouter._openrouter_tool_call(
+                root, 'list_files', {'path': '.'}, readonly=True
+            ))
+            self.assertEqual(
+                agentic_openrouter._openrouter_tool_call(root, 'read_file', {'path': 'src/main.go'}, readonly=True),
+                'package main\n',
+            )
+            self.assertIn('ERROR: write_file is unavailable', agentic_openrouter._openrouter_tool_call(
+                root, 'write_file', {'path': 'new.txt', 'content': 'nope'}, readonly=True
+            ))
+            self.assertFalse((root / 'new.txt').exists())
+            self.assertIn('exit 0', agentic_openrouter._openrouter_tool_call(
+                root, 'run_command', {'argv': ['pwd']}, readonly=False
+            ))
+            self.assertIn('ERROR:', agentic_openrouter._openrouter_tool_call(
+                root, 'list_files', {'path': 'src/main.go'}, readonly=True
+            ))
+            self.assertIn('ERROR: protected file', agentic_openrouter._openrouter_tool_call(
+                root, 'write_file', {'path': '.env', 'content': 'secret'}, readonly=False
+            ))
+            (root / '.env').write_text('PRIVATE=do-not-send\n')
+            self.assertIn('ERROR: protected file', agentic_openrouter._openrouter_tool_call(
+                root, 'read_file', {'path': '.env'}, readonly=False
+            ))
+            self.assertNotIn('.env', agentic_openrouter._openrouter_tool_call(
+                root, 'list_files', {'path': '.'}, readonly=False
+            ))
+            self.assertIn('ERROR: unknown tool', agentic_openrouter._openrouter_tool_call(
+                root, 'unknown', {}, readonly=False
+            ))
+
+    def test_openrouter_command_policy_rejects_shell_network_and_review_mutations(self):
+        for argv in ([], ['bash', '-c', 'echo unsafe'], ['curl', 'https://example.test'],
+                     ['git', 'push'], ['git', 'checkout', 'main'],
+                     ['git', '-C', '../other', 'status'],
+                     ['git', '-c', 'core.sshCommand=ssh', 'status'],
+                     ['python', '-c', 'print(1)'],
+                     ['node', '--eval', 'process.exit(1)']):
+            allowed, reason = agentic_openrouter._openrouter_command_allowed(argv, readonly=False)
+            self.assertFalse(allowed, argv)
+            self.assertTrue(reason)
+    
+        allowed, reason = agentic_openrouter._openrouter_command_allowed(
+            ['curl', 'https://example.test'], readonly=False, allow_network=True
+        )
+        self.assertTrue(allowed, reason)
+        for argv in (['git', 'status'], ['git', 'diff'], ['rg', 'needle', '.']):
+            allowed, reason = agentic_openrouter._openrouter_command_allowed(argv, readonly=True)
+            self.assertTrue(allowed, reason)
+        for argv in (['python', '-c', 'print(1)'], ['git', 'fetch']):
+            allowed, reason = agentic_openrouter._openrouter_command_allowed(argv, readonly=True)
+            self.assertFalse(allowed, argv)
+            self.assertTrue(reason)
+    
+        allowed, reason = agentic_openrouter._openrouter_command_allowed(
+            ['python', '-m', 'unittest'], readonly=False
+        )
+        self.assertTrue(allowed, reason)
+
+    def test_openrouter_commands_use_configured_sandbox(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            settings = {
+                'enabled': True, 'engine': 'docker', 'image': 'test-image',
+                'allow_network': False, 'pass_env': ['OPENAI_API_KEY'],
+            }
+            with (patch.dict(agentic.os.environ, {'OPENAI_API_KEY': 'secret'}, clear=True),
+                  patch('agentic_openrouter.subprocess.run', return_value=CompletedProcess(
+                      ['docker'], 0, stdout='sandboxed\n'
+                  )) as run):
+                result = agentic_openrouter._openrouter_tool_call(
+                    root, 'run_command', {'argv': ['python', '-m', 'unittest']},
+                    readonly=False, sandbox=settings,
+                )
+            self.assertIn('sandboxed', result)
+            process_argv = run.call_args.args[0]
+            self.assertEqual(process_argv[:2], ['docker', 'run'])
+            self.assertIn('--network', process_argv)
+            self.assertEqual(process_argv[process_argv.index('--network') + 1], 'none')
+            self.assertNotIn('OPENAI_API_KEY', process_argv)
+            self.assertNotIn('secret', process_argv)
+
+    def test_openrouter_request_translates_http_network_and_payload_errors(self):
+        from io import BytesIO
+    
+        class Response:
+            def __init__(self, body):
+                self.body = body
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self):
+                return self.body
+    
+        cases = [
+            (agentic_openrouter.urllib.error.HTTPError(
+                'https://router.test', 401, 'unauthorized', {}, BytesIO(b'bad key')
+            ), '401'),
+            (agentic_openrouter.urllib.error.URLError('offline'), 'offline'),
+            (json.JSONDecodeError('bad json', '!', 0), 'bad json'),
+        ]
+        for error, expected in cases:
+            with self.subTest(expected=expected), patch(
+                'agentic_openrouter.urllib.request.urlopen', side_effect=error
+            ):
+                with self.assertRaisesRegex(RuntimeError, 'OpenRouter request failed') as raised:
+                    agentic_openrouter._openrouter_request(
+                        'https://router.test/chat/completions', 'secret', {}, timeout=2
+                    )
+                self.assertIn(expected, str(raised.exception))
+    
+        for body, message in [(b'[]', 'non-object'), (b'{"error":"quota"}', 'quota')]:
+            with self.subTest(message=message), patch(
+                'agentic_openrouter.urllib.request.urlopen', return_value=Response(body)
+            ):
+                with self.assertRaisesRegex(RuntimeError, message):
+                    agentic_openrouter._openrouter_request(
+                        'https://router.test/chat/completions', 'secret', {}, timeout=None
+                    )
+
+    def test_openrouter_tool_turn_limit_is_reported(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / 'developer.txt'
+            response = {'choices': [{'message': {
+                'role': 'assistant', 'content': None,
+                'tool_calls': [{'id': 'call', 'function': {
+                    'name': 'unknown', 'arguments': '{not-json',
+                }}],
+            }}]}
+            with (patch.dict(agentic.os.environ, {'ROUTER_KEY': 'secret'}, clear=False),
+                  patch.object(agentic_openrouter, 'OPENROUTER_MAX_TURNS', 2),
+                  patch('agentic_openrouter._openrouter_request', return_value=response)):
+                ok, message = agentic.run_openrouter(
+                    root, 'prompt', output=output, model='openai/test',
+                    api_key_env='ROUTER_KEY', timeout=None,
+                )
+            self.assertFalse(ok)
+            self.assertIn('exceeded 2 tool turns', message)
+            self.assertIn('exceeded 2 tool turns', output.read_text())
+
+    def test_openrouter_json_mode_is_opt_in(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bodies = []
+
+            def fake_request(url, api_key, body, timeout):
+                bodies.append(body)
+                return {'choices': [{'message': {'role': 'assistant', 'content': '{}'}}]}
+
+            with (patch.dict(agentic.os.environ, {'ROUTER_KEY': 'secret'}, clear=False),
+                  patch('agentic_openrouter._openrouter_request', side_effect=fake_request)):
+                agentic.run_openrouter(
+                    root, 'prompt', output=root / 'default.txt', model='openai/test',
+                    api_key_env='ROUTER_KEY', schema=root / 'schema.json',
+                )
+                agentic.run_openrouter(
+                    root, 'prompt', output=root / 'json.txt', model='openai/test',
+                    api_key_env='ROUTER_KEY', schema=root / 'schema.json', json_mode=True,
+                )
+        self.assertNotIn('response_format', bodies[0])
+        self.assertEqual(bodies[1]['response_format'], {'type': 'json_object'})
+
+    def test_openrouter_history_compacts_old_tool_results(self):
+        messages = [
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': 'prompt'},
+            {'role': 'assistant', 'content': None, 'tool_calls': [{
+                'id': 'write', 'type': 'function', 'function': {
+                    'name': 'write_file', 'arguments': 'x' * 20_000,
+                },
+            }]},
+            {'role': 'tool', 'tool_call_id': 'one', 'content': 'a' * 20_000},
+            {'role': 'assistant', 'content': None, 'tool_calls': []},
+            {'role': 'tool', 'tool_call_id': 'two', 'content': 'b' * 20_000},
+        ]
+        agentic_context._compact_openrouter_history(messages)
+        self.assertLessEqual(
+            sum(agentic_context._message_context_size(message) for message in messages),
+            agentic_context.OPENROUTER_HISTORY_CHARS,
+        )
+        self.assertEqual(messages[2]['tool_calls'][0]['function']['arguments'], '{}')
+        self.assertIn('omitted to control context size', messages[3]['content'])
+
+    def test_openrouter_read_file_supports_ranges_and_bounds_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'notes.txt').write_text('one\ntwo\nthree\n')
+            ranged = agentic_openrouter._openrouter_tool_call(
+                root, 'read_file', {'path': 'notes.txt', 'start_line': 2, 'end_line': 2},
+                readonly=True,
+            )
+            self.assertEqual(ranged, 'two\n')
+
+            (root / 'large.txt').write_text(
+                'x' * (agentic_openrouter.OPENROUTER_READ_FILE_CHARS + 100)
+            )
+            bounded = agentic_openrouter._openrouter_tool_call(
+                root, 'read_file', {'path': 'large.txt'}, readonly=True,
+            )
+            self.assertLessEqual(len(bounded), agentic_openrouter.OPENROUTER_READ_FILE_CHARS)
+            self.assertIn('use start_line/end_line', bounded)
+
+    def test_openrouter_rejects_symlink_escape_and_invalid_paths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'worktree'
+            outside = Path(temp) / 'outside.txt'
+            root.mkdir()
+            outside.write_text('private')
+            link = root / 'outside-link'
+            try:
+                link.symlink_to(outside)
+            except OSError as exc:
+                self.skipTest(f'symlinks unavailable: {exc}')
+            with self.assertRaisesRegex(ValueError, 'escapes'):
+                agentic_openrouter._safe_worktree_path(root, 'outside-link')
+            with self.assertRaisesRegex(ValueError, 'absolute'):
+                agentic_openrouter._safe_worktree_path(root, str(outside))
+            with self.assertRaisesRegex(ValueError, 'non-empty'):
+                agentic_openrouter._safe_worktree_path(root, '')
+            with self.assertRaisesRegex(ValueError, '\\.git'):
+                agentic_openrouter._safe_worktree_path(root, '.git/config', write=True)
+
+    def test_openrouter_tool_command_timeout_is_reported(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with patch('agentic_openrouter.subprocess.run', side_effect=subprocess.TimeoutExpired('python', 1)):
+                    result = agentic_openrouter._openrouter_tool_call(
+                    Path(temp), 'run_command',
+                    {'argv': [sys.executable, '-m', 'unittest']},
+                    readonly=False, command_timeout=1,
+                )
+        self.assertIn('timed out after 1s', result)
+

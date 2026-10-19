@@ -6,11 +6,33 @@ and missing values are represented as ``None`` rather than guessed.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 
 USAGE_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens")
+
+
+def _timestamp(value: datetime | None = None) -> str:
+    return (value or datetime.now(timezone.utc)).isoformat(timespec="milliseconds")
+
+
+def _load_run_record(folder: Path) -> tuple[Path, dict[str, Any]]:
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "run.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    data.setdefault("schema_version", 1)
+    return path, data
+
+
+def _write_run_record(path: Path, data: dict[str, Any]) -> None:
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def _number(value: Any) -> int | None:
@@ -102,17 +124,10 @@ def combine_usage(records: Iterable[dict[str, Any]], *, provider: str | None = N
     return totals
 
 
-def record_usage(folder: Path, role: str, usage: dict[str, Any]) -> None:
+def record_usage(folder: Path, role: str, usage: dict[str, Any], *,
+                 invocation: dict[str, Any] | None = None) -> None:
     """Add one provider invocation to the backward-compatible run record."""
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / "run.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
-    data.setdefault("schema_version", 1)
+    path, data = _load_run_record(folder)
     by_role = data.setdefault("usage_by_role", {})
     if not isinstance(by_role, dict):
         by_role = {}
@@ -121,7 +136,80 @@ def record_usage(folder: Path, role: str, usage: dict[str, Any]) -> None:
     by_role[role] = combine_usage([existing or {}, usage], provider=usage.get("provider"))
     records = [value for value in by_role.values() if isinstance(value, dict)]
     data["usage"] = combine_usage(records)
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    if invocation is not None:
+        invocations = data.setdefault("usage_by_invocation", [])
+        if not isinstance(invocations, list):
+            invocations = []
+            data["usage_by_invocation"] = invocations
+        entry = {"role": role, **invocation, **usage}
+        invocations.append(entry)
+    _write_run_record(path, data)
+
+
+def record_operation(folder: Path, role: str, name: str, *,
+                     started_at: str | None = None,
+                     finished_at: str | None = None,
+                     duration_seconds: float | None = None,
+                     status: str = "completed",
+                     exit_code: int | None = None) -> None:
+    """Persist bounded timing/status metadata for one run operation.
+
+    Operation records intentionally contain no command arguments or prompt
+    text.  The aggregate duration spans the first recorded operation through
+    the latest completed operation, while each operation keeps its own active
+    duration.
+    """
+    path, data = _load_run_record(folder)
+    metrics = data.setdefault("metrics", {})
+    if not isinstance(metrics, dict):
+        metrics = {}
+        data["metrics"] = metrics
+    operations = metrics.setdefault("operations", [])
+    if not isinstance(operations, list):
+        operations = []
+        metrics["operations"] = operations
+    started = started_at or _timestamp()
+    finished = finished_at or _timestamp()
+    try:
+        bounded_duration = max(0.0, float(duration_seconds or 0.0))
+    except (TypeError, ValueError):
+        bounded_duration = 0.0
+    entry: dict[str, Any] = {
+        "role": role,
+        "name": name,
+        "started_at": started,
+        "finished_at": finished,
+        "duration_seconds": round(bounded_duration, 3),
+        "status": status,
+    }
+    if exit_code is not None:
+        entry["exit_code"] = exit_code
+    operations.append(entry)
+
+    previous_start = metrics.get("started_at")
+    previous_finish = metrics.get("finished_at")
+    metrics["started_at"] = min(
+        [value for value in (previous_start, started) if isinstance(value, str)],
+    )
+    metrics["finished_at"] = max(
+        [value for value in (previous_finish, finished) if isinstance(value, str)],
+    )
+    try:
+        begin = datetime.fromisoformat(metrics["started_at"])
+        end = datetime.fromisoformat(metrics["finished_at"])
+        metrics["duration_seconds"] = round(max(0.0, (end - begin).total_seconds()), 3)
+    except (TypeError, ValueError):
+        durations = []
+        for item in operations:
+            if not isinstance(item, dict):
+                continue
+            try:
+                durations.append(max(0.0, float(item.get("duration_seconds", 0))))
+            except (TypeError, ValueError):
+                continue
+        metrics["duration_seconds"] = round(sum(durations), 3)
+    metrics["operation_count"] = len(operations)
+    _write_run_record(path, data)
 
 
 def read_run_usage(folder: Path) -> dict[str, Any]:
@@ -129,4 +217,16 @@ def read_run_usage(folder: Path) -> dict[str, Any]:
         data = json.loads((folder / "run.json").read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return combine_usage([])
-    return data.get("usage", combine_usage([])) if isinstance(data, dict) else combine_usage([])
+    if not isinstance(data, dict):
+        return combine_usage([])
+    usage = data.get("usage", combine_usage([]))
+    if not isinstance(usage, dict):
+        usage = combine_usage([])
+    result = dict(usage)
+    if isinstance(data.get("usage_by_role"), dict):
+        result["by_role"] = data["usage_by_role"]
+    if isinstance(data.get("usage_by_invocation"), list):
+        result["by_invocation"] = data["usage_by_invocation"]
+    if isinstance(data.get("metrics"), dict):
+        result["metrics"] = data["metrics"]
+    return result

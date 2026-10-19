@@ -112,7 +112,8 @@ OPTION_DESCRIPTIONS: dict[str, str] = {
 
 
 def _completion_candidates(line: str, cursor: int | None = None,
-                           job_numbers: tuple[int, ...] = ()) -> list[str]:
+                           job_numbers: tuple[int, ...] = (),
+                           jobs: dict[int, Any] | None = None) -> list[str]:
     """Return safe slash-command completions for the current input buffer."""
     cursor = len(line) if cursor is None else max(0, min(cursor, len(line)))
     before_cursor = line[:cursor]
@@ -142,7 +143,13 @@ def _completion_candidates(line: str, cursor: int | None = None,
         return [value for value in values if value.startswith(current)]
 
     if command in {"/logs", "/stop"}:
-        values = [str(number) for number in sorted(job_numbers)]
+        numbers = sorted(
+            job_numbers,
+            key=lambda number: (
+                not bool(jobs and number in jobs and jobs[number].running), number,
+            ),
+        )
+        values = [str(number) for number in numbers]
         return [value for value in values if value.startswith(current)]
 
     options = SHELL_OPTIONS.get(command, ())
@@ -193,7 +200,7 @@ def _completion_items(line: str, cursor: int | None = None,
                       job_numbers: tuple[int, ...] = (),
                       jobs: dict[int, Job] | None = None) -> list[tuple[str, str]]:
     """Return candidates paired with descriptions for the dropdown menu."""
-    candidates = _completion_candidates(line, cursor, job_numbers)
+    candidates = _completion_candidates(line, cursor, job_numbers, jobs=jobs)
     tokens = line[:cursor].split() if cursor is not None else line.split()
     command = tokens[0].lower() if tokens else ""
     return [
@@ -1069,7 +1076,7 @@ class AgenticShell:
         self.history: list[str] = []
 
     def _completion_matches(self, line: str, cursor: int | None = None) -> list[str]:
-        return _completion_candidates(line, cursor, tuple(self.jobs))
+        return _completion_candidates(line, cursor, tuple(self.jobs), jobs=self.jobs)
 
     def _completion_items(self, line: str, cursor: int | None = None) -> list[tuple[str, str]]:
         return _completion_items(line, cursor, tuple(self.jobs), jobs=self.jobs)

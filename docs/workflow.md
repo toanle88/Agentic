@@ -115,6 +115,18 @@ rejection does not discard the worktree. The developer receives the findings
 and skipped-validation context on the next retry, up to the configured retry
 limit, and is instructed to reconcile each item explicitly.
 
+The approval threshold is limited to blockers: concrete implementation defects,
+unmet explicit requirements, regressions, security problems, or required
+coverage gaps tied directly to the work item. Style preferences, optional tests,
+speculative risks, future enhancements, and unavailable validation do not justify
+rejection. When no blocker remains, the reviewer approves with an empty
+`findings` list.
+
+Scope is enforced independently of severity: findings must concern behavior
+introduced by the patch and required by the issue. Pre-existing defects,
+unrelated cleanup, refactoring opportunities, and optional improvements are
+omitted from the review rather than turned into rejection reasons.
+
 Repeated rejection usually indicates an unresolved requirement, missing integration coverage, or an issue that is too broad. Increasing retries does not lower the review standard.
 
 ## Publication

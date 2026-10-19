@@ -23,7 +23,7 @@ python -m unittest discover -s tests -q
 Compile all runtime Python modules:
 
 ```bash
-python -m py_compile agentic.py agentic_config.py agentic_models.py agentic_security.py agentic_sandbox.py agentic_telemetry.py agentic_providers.py agentic_review.py agentic_dashboard.py agentic_shell.py
+python -m py_compile agentic.py agentic_config.py agentic_context.py agentic_execution.py agentic_openrouter.py agentic_policy.py agentic_models.py agentic_security.py agentic_sandbox.py agentic_telemetry.py agentic_providers.py agentic_review.py agentic_dashboard.py agentic_shell.py
 ```
 
 Run the static checks used by CI:

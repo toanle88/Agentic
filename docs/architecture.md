@@ -6,7 +6,11 @@ Agentic is intentionally small and uses the Python standard library at runtime.
 
 | Component | Responsibility |
 | --- | --- |
-| `agentic.py` | Repository validation, GitHub/local task intake, worktree lifecycle, developer/reviewer orchestration, checks, retries, and publication. |
+| `agentic.py` | Compatibility-facing CLI entry point and workflow orchestration. |
+| `agentic_context.py` | Bounded issue, feedback, and provider-history context formatting. |
+| `agentic_execution.py` | Provider CLI execution, streamed output, console rendering, and usage recording. |
+| `agentic_openrouter.py` | OpenRouter tool policy, scoped file/command tools, and API agent loop. |
+| `agentic_policy.py` | Protected-path and sensitive-file policy shared by the runner and API tools. |
 | `agentic_config.py` | Target-repository configuration loading, provider validation/preflight, test-command detection, and setup defaults. |
 | `agentic_shell.py` | Interactive supervisor for background jobs and terminal log tails. |
 | `agentic_dashboard.py` | Read-only parser and renderer for durable run logs. |
@@ -26,10 +30,12 @@ Agentic is intentionally small and uses the Python standard library at runtime.
 The main runner remains the compatibility-facing entry point, but cohesive
 boundaries are extracted one at a time. `agentic_config.py` owns configuration
 parsing, provider preflight, test-command detection, and setup defaults;
-`agentic.py` re-exports those names so existing integrations and tests keep
-working. Future extractions should follow the same rule: move one boundary,
-preserve the public entry point, add characterization coverage, and verify the
-full offline suite before changing another subsystem.
+`agentic.py` re-exports extracted names so existing integrations keep working.
+Provider and context tests live in `tests/test_execution.py`,
+`tests/test_openrouter.py`, and `tests/test_worktrees.py`; `tests/test_agentic.py`
+retains workflow and CLI coverage. Future extractions should follow the same
+rule: move one boundary, preserve the public entry point, add characterization
+coverage, and verify the full offline suite before changing another subsystem.
 
 ## Run state
 
@@ -76,7 +82,15 @@ Set `AGENTIC_STATE_DIR` or pass `--state-dir PATH` to choose another root. A sha
 - The developer does not commit or push. Publication requires a separate validation step and explicit human confirmation.
 - A repository lock prevents concurrent mutating runs from corrupting shared Git metadata.
 - Repository metadata operations use a shared lock while independent worktrees use separate locks.
-- Provider usage and cost are recorded only when the provider reports them; missing usage remains unknown.
+- Provider usage and cost are recorded only when the provider reports them; missing usage remains unknown. Each run also records operation-level status, exit code, timestamps, and duration, plus an aggregate elapsed duration. Command arguments and prompt text are not persisted.
+- Prompt context is bounded before provider calls. Issue descriptions, handoffs,
+  test reports, and review feedback are compacted without persisting their full
+  text. OpenRouter file and command results are capped, support line-range file
+  reads, and older tool output is replaced with a reread hint before the next
+  request. `run.json` keeps aggregate usage plus per-invocation metadata such as
+  prompt/completion character counts and tool-turn counts; it also keeps bounded
+  operation timing/status metadata for provider and test commands. It never
+  stores full prompts or command arguments.
 - `security_mode: "isolated"` requires the optional container mode and fails closed when its engine is unavailable.
 - Container mode mounts the task worktree, required linked-worktree Git metadata, and output directory, uses a read-only container root, and disables networking by default. Read-only filesystem access does not implicitly disable networking: when `sandbox.allow_network` is enabled, both developer and reviewer processes can use outbound networking while the reviewer mounts remain read-only. OpenRouter file inspection remains host-side but its command tools use the same container boundary.
 - `agentic status --json` exposes stable worktree records for scripts without parsing terminal output.
