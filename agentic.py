@@ -864,11 +864,36 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
             ["git", "-c", "core.whitespace=cr-at-eol", "diff", "--check"], worktree,
             timeout=_remaining_timeout(deadline, 180) or 1, check=False,
         )
+        if diff_check.returncode == 0:
+            untracked = command(
+                ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+                worktree, timeout=_remaining_timeout(deadline, 180) or 1, check=False,
+            )
+            if untracked.returncode:
+                diff_check = untracked
+            else:
+                for path in filter(None, untracked.stdout.split("\x00")):
+                    candidate = command(
+                        [
+                            "git", "-c", "core.whitespace=cr-at-eol", "diff",
+                            "--no-index", "--check", "--", os.devnull, path,
+                        ],
+                        worktree,
+                        timeout=_remaining_timeout(deadline, 180) or 1,
+                        check=False,
+                    )
+                    # --no-index returns 1 for a clean difference and 3 when
+                    # it reports whitespace errors.
+                    if candidate.returncode not in (0, 1):
+                        diff_check = candidate
+                        break
     except RuntimeError as exc:
         return False, "\n\n".join(results) + f"\ngit diff --check failed: {exc}"
     if diff_check.returncode:
         _status_print("[TESTS] git diff --check FAILED", flush=True)
-        return False, "\n\n".join(results) + "\ngit diff --check failed"
+        details = diff_check.stdout.strip()
+        suffix = f"\n{details}" if details else ""
+        return False, "\n\n".join(results) + f"\ngit diff --check failed{suffix}"
     _status_print("[TESTS] All configured checks passed", flush=True)
     return True, "\n\n".join(results)
 

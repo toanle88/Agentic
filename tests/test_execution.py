@@ -206,6 +206,20 @@ class StreamingTests(unittest.TestCase):
             self.assertFalse(passed)
             self.assertIn('git diff --check failed', report)
 
+    def test_test_runner_checks_untracked_files_for_whitespace(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            sh('git', 'init', cwd=root)
+            (root / 'new.py').write_text('value = 1\n\n')
+
+            passed, report = agentic.run_tests(
+                root, [[sys.executable, '-c', 'print("ok")']]
+            )
+
+            self.assertFalse(passed)
+            self.assertIn('new.py', report)
+            self.assertIn('new blank line at EOF', report)
+
     def test_test_runner_stops_when_deadline_expires_between_commands(self):
         with tempfile.TemporaryDirectory() as dirname:
             root = Path(dirname)
