@@ -1,0 +1,407 @@
+"""Repository identity, locking, and Git worktree lifecycle.
+
+This module owns filesystem/state namespaces and worktree discovery/creation.
+The compatibility-facing agentic module re-exports these helpers.
+"""
+from __future__ import annotations
+
+from contextlib import contextmanager
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import uuid
+from typing import Any
+
+from agentic_execution import _console_print
+from agentic_models import Issue, Run, StatePaths
+from agentic_security import redact_secrets
+from agentic_output import style_text
+
+BRANCH_RE = re.compile(r"^agent/issue-(\d+)-([a-f0-9]{8})$")
+LOCAL_BRANCH_RE = re.compile(
+    r"^agent/task-(?P<slug>[a-z0-9-]+)-(?P<key>[a-f0-9]{12})(?:-(?P<ident>[a-f0-9]{8}))?$"
+)
+RELATIVE_WORKTREE_GIT = (2, 48, 0)
+
+
+def _status_print(message: Any, *, file: Any = None, flush: bool = False) -> None:
+    _console_print(style_text(message, file), file=file, flush=flush)
+
+def default_state_dir() -> Path:
+    """Return the user-level state root, overridable for shared WSL/Windows storage."""
+    configured = os.environ.get("AGENTIC_STATE_DIR")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    if os.name == "nt":
+        local = os.environ.get("LOCALAPPDATA")
+        return (Path(local) if local else Path.home() / "AppData" / "Local") / "Agentic"
+    xdg = os.environ.get("XDG_STATE_HOME")
+    return (Path(xdg) if xdg else Path.home() / ".local" / "state") / "agentic"
+
+
+def _portable_path_text(value: str) -> str:
+    """Normalize WSL and Windows spellings of the same path for state identity."""
+    text = value.replace("\\", "/").rstrip("/").lower()
+    match = re.match(r"^/mnt/([a-z])/(.*)$", text)
+    if match:
+        return f"{match.group(1)}:/{match.group(2)}"
+    return text
+
+
+def repository_state_key(repo: Path) -> str:
+    """Create a stable, filesystem-safe namespace for one Git checkout."""
+    ok, common_dir = probe(["git", "rev-parse", "--git-common-dir"], repo)
+    if ok and common_dir:
+        common_path = Path(common_dir)
+        if not common_path.is_absolute():
+            common_path = repo / common_path
+        identity = _portable_path_text(str(common_path.resolve()))
+    else:
+        identity = _portable_path_text(str(repo.resolve()))
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", repo.name) or "repository"
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+    return f"{slug}-{digest}"
+
+
+def state_paths(repo: Path, state_dir: Path | None = None) -> StatePaths:
+    root = (state_dir or default_state_dir()).expanduser().resolve() / repository_state_key(repo)
+    return StatePaths(root, root / "worktrees", root / "runs", root / "shell", root / "dashboards")
+
+
+def legacy_worktrees_dir(repo: Path) -> Path:
+    return repo.parent / f".{repo.name}-agent-worktrees"
+
+
+def legacy_runs_dir(repo: Path) -> Path:
+    return repo.parent / f".{repo.name}-agent-runs"
+
+
+def eligible(issue: Issue) -> bool:
+    """Local tasks are always eligible; GitHub tasks use the issue state."""
+    return issue.is_local or issue.state.upper() == "OPEN"
+
+
+def issue_fingerprint(issue: Issue) -> str:
+    """Identify the issue content used by a cached investigation result."""
+    payload = json.dumps(
+        [issue.reference, issue.title, issue.body, issue.state, issue.source],
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def command(argv: list[str], cwd: Path, *, timeout: int = 180,
+            check: bool = True) -> subprocess.CompletedProcess[str]:
+    """Subprocess without a shell; issue data never becomes shell code."""
+    try:
+        result = subprocess.run(argv, cwd=cwd, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, timeout=timeout,
+                                check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"Could not execute {argv[0]!r}: {exc}") from exc
+    if check and result.returncode:
+        raise RuntimeError(
+            f"Command failed ({result.returncode}): {argv!r}\n"
+            f"{redact_secrets(result.stdout[-3500:])}"
+        )
+    return result
+
+
+def git(repo: Path, *args: str, check: bool = True) -> str:
+    return command(["git", *args], repo, check=check).stdout.strip()
+
+
+def installed_git_version(executable: str = "git") -> tuple[int, int, int] | None:
+    """Return a Git version, or None when an executable cannot be queried."""
+    try:
+        result = subprocess.run(
+            [executable, "--version"], stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+            errors="replace", timeout=10, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    match = re.search(r"\b(\d+)\.(\d+)(?:\.(\d+))?\b", result.stdout)
+    if result.returncode or not match:
+        return None
+    return tuple(int(part or 0) for part in match.groups())  # type: ignore[return-value]
+
+
+def probe(argv: list[str], cwd: Path, *, timeout: int = 10) -> tuple[bool, str]:
+    """Run a small diagnostic command without turning its output into an exception."""
+    try:
+        result = subprocess.run(
+            argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace", timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+    output = result.stdout.strip()
+    return result.returncode == 0, output
+
+
+def relative_worktree_paths_supported() -> bool:
+    """Check every Git installation that must be able to open the worktree.
+
+    WSL can invoke Windows Git as ``git.exe``. Relative worktrees use a Git
+    repository extension, so enabling them while either installation is too
+    old would make the shared repository incompatible with that installation.
+    """
+    current = installed_git_version()
+    if current is None or current < RELATIVE_WORKTREE_GIT:
+        return False
+    if os.name == "nt" or not os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    windows_git = shutil.which("git.exe")
+    windows_version = installed_git_version(windows_git) if windows_git else None
+    return windows_version is not None and windows_version >= RELATIVE_WORKTREE_GIT
+
+
+def configure_relative_worktree_paths(repo: Path) -> bool:
+    """Enable portable worktree metadata only when all required Git versions support it."""
+    if not relative_worktree_paths_supported():
+        return False
+    git(repo, "config", "worktree.useRelativePaths", "true")
+    return True
+
+
+def repair_relative_worktree(repo: Path, worktree: Path) -> bool:
+    """Convert an existing worktree's Git links to relative paths when safe."""
+    if not configure_relative_worktree_paths(repo):
+        return False
+    git(repo, "worktree", "repair", "--relative-paths", str(worktree))
+    return True
+
+
+def refresh_base(repo: Path, base: str) -> None:
+    """Update the remote-tracking base ref before validating or publishing."""
+    git(repo, "fetch", "origin", base)
+
+
+@contextmanager
+def _exclusive_lock(lock_path: Path, message: str):
+    """Acquire a cross-process lock using only a narrowly scoped state file."""
+    lock_path = lock_path.resolve()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.touch(exist_ok=True)
+
+    with lock_path.open("r+b") as lock_file:
+        if lock_file.seek(0, os.SEEK_END) == 0:
+            lock_file.write(b"0")
+            lock_file.flush()
+        lock_file.seek(0)
+        acquired = False
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+        except (BlockingIOError, OSError) as exc:
+            raise RuntimeError(message) from exc
+        try:
+            yield
+        finally:
+            if acquired:
+                if os.name == "nt":
+                    import msvcrt
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def repository_lock(repo: Path, state_dir: Path | None = None):
+    """Serialize operations that mutate shared Git repository metadata."""
+    lock_path = state_paths(repo, state_dir).root / "locks" / "repository.lock"
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # Read-only test sandboxes and locked-down hosts may not permit the
+        # configured user state root. Keep the operation safe with a narrow
+        # Git-metadata fallback rather than disabling locking.
+        lock_path = Path(git(repo, "rev-parse", "--git-path", "agentic.lock"))
+        if not lock_path.is_absolute():
+            lock_path = repo / lock_path
+    with _exclusive_lock(
+        lock_path,
+        f"Another Agentic repository operation is already active for {repo}; wait for it to finish",
+    ):
+        yield
+
+
+@contextmanager
+def worktree_path_lock(repo: Path, worktree: Path, state_dir: Path | None = None):
+    """Allow independent worktrees to run concurrently, but not one worktree twice."""
+    identity = hashlib.sha256(str(worktree.resolve()).encode("utf-8")).hexdigest()[:16]
+    lock_path = state_paths(repo, state_dir).root / "locks" / f"worktree-{identity}.lock"
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        git_dir = Path(git(repo, "rev-parse", "--git-path", "agentic-worktree-locks"))
+        if not git_dir.is_absolute():
+            git_dir = repo / git_dir
+        lock_path = git_dir / f"{identity}.lock"
+    with _exclusive_lock(
+        lock_path,
+        f"Another Agentic operation is already active for worktree {worktree}; wait for it to finish",
+    ):
+        yield
+
+
+@contextmanager
+def worktree_lock(repo: Path, run: Run, state_dir: Path | None = None):
+    """Allow independent worktrees to run concurrently, but not one worktree twice."""
+    with worktree_path_lock(repo, run.worktree, state_dir):
+        yield
+
+
+def github_metadata(repo: Path) -> tuple[str, str]:
+    data = json.loads(command(["gh", "repo", "view", "--json", "nameWithOwner,defaultBranchRef"], repo).stdout)
+    return data["nameWithOwner"], data["defaultBranchRef"]["name"]
+
+
+def fetch_issues(repo: Path, github_repo: str) -> list[Issue]:
+    raw = json.loads(command([
+        "gh", "issue", "list", "--repo", github_repo, "--state", "open", "--limit", "100",
+        "--json", "number,title,body,state",
+    ], repo).stdout)
+    # No metadata-based filtering or ranking: present oldest issues first.
+    return sorted(
+        (issue for item in raw if eligible(issue := Issue.parse(item))),
+        key=lambda issue: issue.number if issue.number is not None else 0,
+    )
+
+
+def get_issue(repo: Path, github_repo: str, number: int) -> Issue:
+    raw = json.loads(command([
+        "gh", "issue", "view", str(number), "--repo", github_repo,
+        "--json", "number,title,body,state",
+    ], repo).stdout)
+    return Issue.parse(raw)
+
+
+def load_local_task(path: Path) -> Issue:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"Could not read local task file {path}: {exc}") from exc
+    return Issue.from_local_text(text, path.resolve())
+
+
+def github_repo_from_remote(repo: Path) -> str | None:
+    """Extract owner/repository from a GitHub origin without contacting GitHub."""
+    remote = git(repo, "remote", "get-url", "origin", check=False).strip()
+    match = re.search(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?$", remote)
+    return f"{match.group(1)}/{match.group(2)}" if match else None
+
+
+def default_base_branch(repo: Path) -> str:
+    """Resolve the origin base branch without requiring GitHub issue access."""
+    remote_head = git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", check=False)
+    prefix = "refs/remotes/origin/"
+    if remote_head.startswith(prefix):
+        return remote_head.removeprefix(prefix)
+    current = git(repo, "branch", "--show-current", check=False)
+    return current or "main"
+
+
+def discover_runs(repo: Path) -> list[Run]:
+    """Git's worktree records are the source of truth; no run-state JSON."""
+    output = git(repo, "worktree", "list", "--porcelain")
+    runs: list[Run] = []
+    for record in output.split("\n\n"):
+        data: dict[str, str] = {}
+        for line in record.splitlines():
+            if " " in line:
+                key, value = line.split(" ", 1)
+                data[key] = value
+        branch = data.get("branch", "").removeprefix("refs/heads/")
+        match = BRANCH_RE.fullmatch(branch)
+        if match and "worktree" in data:
+            worktree = Path(data["worktree"])
+            if worktree.is_dir():
+                runs.append(Run(int(match.group(1)), branch, worktree.resolve()))
+                continue
+        local_match = LOCAL_BRANCH_RE.fullmatch(branch)
+        if local_match and "worktree" in data:
+            worktree = Path(data["worktree"])
+            if worktree.is_dir():
+                runs.append(Run(None, branch, worktree.resolve(), local_match.group("key")))
+    return sorted(runs, key=lambda r: (r.issue_number is None, r.issue_number or 0, r.branch))
+
+
+def runs_for_issue(repo: Path, number: int) -> list[Run]:
+    return [run for run in discover_runs(repo) if run.issue_number == number]
+
+
+def runs_for_task(repo: Path, task_key: str) -> list[Run]:
+    return [run for run in discover_runs(repo) if run.task_key == task_key]
+
+
+def choose_existing(runs: list[Run]) -> Run:
+    if len(runs) == 1:
+        return runs[0]
+    _status_print("\nMultiple worktrees exist for this issue:")
+    for idx, run in enumerate(runs, 1):
+        _status_print(f" {idx}. {run.branch}  ({run.worktree})")
+    choice = input("Resume which number? ").strip()
+    if not choice.isdigit() or not 1 <= int(choice) <= len(runs):
+        raise RuntimeError("Invalid worktree selection")
+    return runs[int(choice) - 1]
+
+
+def create_worktree(repo: Path, base: str, issue_number: int,
+                    state_dir: Path | None = None) -> Run:
+    with repository_lock(repo, state_dir):
+        refresh_base(repo, base)
+        relative_paths = configure_relative_worktree_paths(repo)
+        ident = uuid.uuid4().hex[:8]
+        branch = f"agent/issue-{issue_number}-{ident}"
+        # ``state_dir`` is supplied by the CLI. The legacy fallback keeps this
+        # low-level helper compatible for callers that intentionally manage paths.
+        parent = state_paths(repo, state_dir).worktrees if state_dir else legacy_worktrees_dir(repo)
+        parent.mkdir(parents=True, exist_ok=True)
+        worktree = parent / f"issue-{issue_number}-{ident}"
+        git(repo, "worktree", "add", "-b", branch, str(worktree), f"origin/{base}")
+    if relative_paths:
+        _status_print("[GIT] Using relative worktree paths for WSL/Windows compatibility")
+    else:
+        _status_print("[GIT] Relative worktree paths unavailable; using absolute paths")
+    return Run(issue_number, branch, worktree.resolve())
+
+
+def _task_slug(title: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    return (slug[:40].rstrip("-") or "local-task")
+
+
+def create_local_worktree(repo: Path, base: str, issue: Issue,
+                          state_dir: Path | None = None,
+                          separate: bool = False) -> Run:
+    if not issue.is_local or not issue.task_key:
+        raise ValueError("create_local_worktree requires a local task")
+    with repository_lock(repo, state_dir):
+        refresh_base(repo, base)
+        relative_paths = configure_relative_worktree_paths(repo)
+        slug = _task_slug(issue.title)
+        ident = f"-{uuid.uuid4().hex[:8]}" if separate else ""
+        branch = f"agent/task-{slug}-{issue.task_key}{ident}"
+        parent = state_paths(repo, state_dir).worktrees if state_dir else legacy_worktrees_dir(repo)
+        parent.mkdir(parents=True, exist_ok=True)
+        worktree = parent / f"task-{slug}-{issue.task_key}{ident}"
+        git(repo, "worktree", "add", "-b", branch, str(worktree), f"origin/{base}")
+    if relative_paths:
+        _status_print("[GIT] Using relative worktree paths for WSL/Windows compatibility")
+    else:
+        _status_print("[GIT] Relative worktree paths unavailable; using absolute paths")
+    return Run(None, branch, worktree.resolve(), issue.task_key)
