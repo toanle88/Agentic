@@ -26,7 +26,7 @@ RUNNERS = ("agent-alone", "agentic")
 TASK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 PLACEHOLDER_NAMES = {
     "benchmark_root", "repo", "reviewer", "result_file", "scenario", "state_dir",
-    "task_file", "task_id",
+    "task_file", "task_id", "repetition",
 }
 SUCCESS_STATUSES = {"success", "completed", "passed", "approved"}
 REPORTED_STATUSES = SUCCESS_STATUSES | {"failed", "timeout", "runner-error"}
@@ -153,9 +153,12 @@ def load_benchmark(path: Path) -> dict[str, Any]:
         command = _argv(value, f"reviewers.{reviewer}")
         _validate_placeholders(command, f"reviewers.{reviewer}")
         reviewers[reviewer] = command
+    repetitions = raw.get("repetitions", 1)
+    if type(repetitions) is not int or not 1 <= repetitions <= 20:
+        raise ValueError("benchmark.repetitions must be an integer from 1 to 20")
     return {
         "path": path.resolve(), "tasks": tasks, "runners": runners,
-        "reviewers": reviewers,
+        "reviewers": reviewers, "repetitions": repetitions,
     }
 
 
@@ -206,7 +209,8 @@ def render_command(command: Iterable[str], values: dict[str, str]) -> list[str]:
     for part in command:
         value = part
         for name in PLACEHOLDER_NAMES:
-            value = value.replace("{" + name + "}", values[name])
+            if name in values:
+                value = value.replace("{" + name + "}", values[name])
         rendered.append(value)
     return rendered
 
@@ -299,7 +303,7 @@ def _finding_ids(result: dict[str, Any]) -> list[str]:
 def _scenario_record(
     task: dict[str, Any], runner: str, raw: dict[str, Any], command_exit: int,
     duration: float, checks_passed: bool, checks: list[dict[str, Any]],
-    workspace: Path | None,
+    workspace: Path | None, repetition: int,
 ) -> dict[str, Any]:
     status = raw.get("status")
     reported_status = status if isinstance(status, str) else "invalid"
@@ -319,7 +323,9 @@ def _scenario_record(
     usage = raw.get("usage") if isinstance(raw.get("usage"), dict) else {}
     record: dict[str, Any] = {
         "task_id": task["id"],
+        "task_name": task["name"],
         "runner": runner,
+        "repetition": repetition,
         "status": "passed" if runner_ok and checks_passed else "failed",
         "runner_status": reported_status if reported_status in REPORTED_STATUSES else "invalid",
         "runner_returncode": command_exit,
@@ -351,10 +357,10 @@ def _scenario_record(
 def run_scenario(
     root: Path, task: dict[str, Any], runner: str, command: list[str],
     workspace_root: Path, timeout: int, keep_workspace: bool = False,
-    source_repository: str | None = None,
+    source_repository: str | None = None, repetition: int = 1,
 ) -> dict[str, Any]:
     scenario_directory = runner.replace(":", "-")
-    run_root = workspace_root / scenario_directory / task["id"]
+    run_root = workspace_root / scenario_directory / task["id"] / f"repetition-{repetition:03d}"
     run_root.mkdir(parents=True, exist_ok=True)
     repo = run_root / "repo"
     source = _path_under_root(
@@ -376,6 +382,7 @@ def run_scenario(
         "scenario": runner,
         "state_dir": str(state_dir),
         "task_id": task["id"],
+        "repetition": str(repetition),
     }
     rendered = render_command(command, values)
     environment = os.environ.copy()
@@ -388,6 +395,7 @@ def run_scenario(
         "AGENTIC_BENCHMARK_TASK_FILE": str(task_file),
         "AGENTIC_BENCHMARK_RESULT_FILE": str(result_file),
         "AGENTIC_BENCHMARK_STATE_DIR": str(state_dir),
+        "AGENTIC_BENCHMARK_REPETITION": str(repetition),
     })
     started = time.monotonic()
     command_exit = 127
@@ -409,7 +417,7 @@ def run_scenario(
     keep_path = run_root if keep_workspace else None
     record = _scenario_record(
         task, runner, raw, command_exit, time.monotonic() - started,
-        checks_passed, checks, keep_path,
+        checks_passed, checks, keep_path, repetition,
     )
     if not keep_workspace:
         shutil.rmtree(run_root, ignore_errors=True)
@@ -472,17 +480,18 @@ def run_benchmark(path: Path, *, timeout: int = 1800, workdir: Path | None = Non
     try:
         records: list[dict[str, Any]] = []
         for task in config["tasks"]:
-            for runner in RUNNERS:
-                records.append(run_scenario(
-                    root, task, runner, config["runners"][runner], workspace_root,
-                    timeout, keep_workspace=keep_workspaces,
-                ))
-            for reviewer, command in config["reviewers"].items():
-                records.append(run_scenario(
-                    root, task, f"reviewer:{reviewer}", command, workspace_root,
-                    timeout, keep_workspace=keep_workspaces,
-                    source_repository=task["review_repository"],
-                ))
+            for repetition in range(1, config["repetitions"] + 1):
+                for runner in RUNNERS:
+                    records.append(run_scenario(
+                        root, task, runner, config["runners"][runner], workspace_root,
+                        timeout, keep_workspace=keep_workspaces, repetition=repetition,
+                    ))
+                for reviewer, command in config["reviewers"].items():
+                    records.append(run_scenario(
+                        root, task, f"reviewer:{reviewer}", command, workspace_root,
+                        timeout, keep_workspace=keep_workspaces,
+                        source_repository=task["review_repository"], repetition=repetition,
+                    ))
     finally:
         if temporary is not None:
             temporary.cleanup()
@@ -495,6 +504,18 @@ def run_benchmark(path: Path, *, timeout: int = 1800, workdir: Path | None = Non
         reviewer: by_runner[f"reviewer:{reviewer}"]
         for reviewer in config["reviewers"]
     }
+    task_metrics = {}
+    for task in config["tasks"]:
+        task_records = [item for item in records if item["task_id"] == task["id"]]
+        task_metrics[task["id"]] = {
+            "name": task["name"],
+            "scenarios": {
+                runner: aggregate_metrics(
+                    item for item in task_records if item["runner"] == runner
+                )
+                for runner in scenario_names
+            },
+        }
     comparison: dict[str, Any] = {}
     for key, alone_value in by_runner["agent-alone"].items():
         agentic_value = by_runner["agentic"].get(key)
@@ -515,6 +536,7 @@ def run_benchmark(path: Path, *, timeout: int = 1800, workdir: Path | None = Non
             "same_candidate_fixture": bool(config["reviewers"]),
             "providers": reviewer_metrics,
         },
+        "task_metrics": task_metrics,
         "agentic_minus_agent_alone": comparison,
         "results": records,
     }
@@ -539,7 +561,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
     if args.validate_only:
         scenario_count = len(config["runners"]) + len(config["reviewers"])
-        print(f"Validated {len(config['tasks'])} tasks and {scenario_count} scenario runners.")
+        print(
+            f"Validated {len(config['tasks'])} tasks, {scenario_count} scenario runners, "
+            f"and {config['repetitions']} repetition(s)."
+        )
         return 0
     if not args.live:
         parser.error("scenario execution requires --live; use --validate-only for a credential-free check")

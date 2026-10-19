@@ -573,6 +573,11 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
       const blocked = run.blocked ? `<section class="callout rejected"><strong>Blocked</strong><p>${{esc(run.blocked.reason || "Repeated unchanged review blocker")}}</p></section>` : "";
       const investigationFindings = run.investigation.findings?.length ? `<ul class="findings">${{run.investigation.findings.map(item => `<li>${{esc(item)}}</li>`).join("")}}</ul>` : `<p class="subtle">No findings recorded.</p>`;
       const recurring = run.review.recurring?.length ? `<section class="callout rejected"><strong>Recurring findings</strong><ul class="findings">${{run.review.recurring.map(item => `<li>[${{esc(item.severity)}}] ${{esc(item.text)}} <span class="meta">(${{esc(item.count)}} reviews)</span></li>`).join("")}}</ul></section>` : "";
+      const policy = run.usage?.security_policy;
+      const policyHistory = Array.isArray(run.usage?.security_policy_history) ? run.usage.security_policy_history : [];
+      const latestPolicy = policyHistory.length && policyHistory[policyHistory.length - 1]?.policy || policy;
+      const policyChange = latestPolicy && policyHistory.length > 1 ? `<p class="subtle">Latest recorded policy: ${{esc(latestPolicy.mode || "unknown")}} · Network: ${{esc(latestPolicy.network || "unknown")}} · Git metadata: ${{esc(latestPolicy.git_metadata_mount || "unknown")}}</p>` : "";
+      const securityPolicy = policy ? `<section class="callout"><strong>Security policy</strong><p>Initial mode: ${{esc(policy.mode || "unknown")}} · Network: ${{esc(policy.network || "unknown")}} · Git metadata: ${{esc(policy.git_metadata_mount || "unknown")}}</p>${{policyChange}}</section>` : "";
       const invocations = Array.isArray(run.usage?.by_invocation) ? run.usage.by_invocation.filter(item => item && typeof item === "object") : [];
       const invocationRows = invocations.map((item, index) => {{
         const runLabel = `Run ${{index + 1}}${{index === invocations.length - 1 ? " · latest" : ""}}`;
@@ -588,6 +593,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
         <section class="callout ${{esc(run.review.status)}}"><strong>Review · ${{esc(labels[run.review.status] || run.review.status)}}</strong><p>${{esc(run.review.summary)}}</p>${{findings}}</section>
         ${{skipped}}
         ${{recurring}}
+        ${{securityPolicy}}
         <h3>Tests · ${{esc(run.tests.status)}}</h3><pre>${{esc(run.tests.summary)}}</pre>
         <h3>Latest developer result</h3><pre>${{esc(run.developer.summary)}}</pre>
         <h3>Run logs</h3><div class="file-list">${{files}}</div>`;

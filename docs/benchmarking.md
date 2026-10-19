@@ -49,6 +49,7 @@ and declares the checks and any known review defects:
       ]
     }
   ],
+  "repetitions": 3,
   "runners": {
     "agent-alone": ["python", "adapters/agent-alone.py"],
     "agentic": ["python", "adapters/agentic.py"]
@@ -56,11 +57,17 @@ and declares the checks and any known review defects:
 }
 ```
 
+`repetitions` defaults to `1` and may be set from `1` through `20`. Use more
+than one repetition for live provider comparisons because model behavior,
+review findings, retries, and cost can vary between runs. Repetitions use
+fresh disposable repositories and are reported individually as well as in the
+aggregate metrics.
+
 Scenario commands are argv arrays; they are never passed through a shell. The
 runner receives `{benchmark_root}`, `{repo}`, `{reviewer}`, `{result_file}`,
-`{scenario}`, `{state_dir}`, `{task_file}`, and `{task_id}` placeholders plus the
-same values as `AGENTIC_BENCHMARK_*` environment variables. It must leave the
-candidate patch in `{repo}` and
+`{scenario}`, `{state_dir}`, `{task_file}`, `{task_id}`, and `{repetition}`
+placeholders plus the same values as `AGENTIC_BENCHMARK_*` environment
+variables. It must leave the candidate patch in `{repo}` and
 write a normalized result such as:
 
 ```json
@@ -90,8 +97,11 @@ python scripts/agent_benchmark.py benchmarks/agent-quality.example.json \
 
 The output reports completion, check-pass, approval, first-pass approval,
 defect recall, false-positive rate, retries, interventions, recovery,
-duration, tokens, and observed cost for each scenario. Prompts, provider
-output, and credentials are intentionally excluded from the result artifact.
+duration, tokens, and observed cost for each scenario. It also includes
+`task_metrics`, preserving each task's name and the same metrics grouped by
+scenario so a multi-issue corpus cannot hide weak performance on individual
+tasks. Prompts, provider output, and credentials are intentionally excluded
+from the result artifact.
 The `--live` flag is mandatory for execution; without it the command only
 validates configuration.
 

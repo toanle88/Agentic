@@ -130,8 +130,11 @@ def sandbox_command(
             command.extend(["--env", "GIT_DIR=/agentic-git"])
         else:
             command.extend(["-v", f"{common_dir}:/agentic-git-common:ro"])
+            # Developers may write the worktree, but Git metadata remains
+            # immutable so provider processes cannot create commits, update
+            # refs, or alter the linked-worktree index inside the container.
             command.extend([
-                "-v", f"{git_dir}:/agentic-git-worktree:{'ro' if read_only else 'rw'}",
+                "-v", f"{git_dir}:/agentic-git-worktree:ro",
             ])
             command.extend([
                 "--env", "GIT_DIR=/agentic-git-worktree",
@@ -146,7 +149,7 @@ def sandbox_command(
     for name in policy["pass_env"] if pass_env is None else pass_env:
         if name in os.environ:
             command.extend(["--env", name])
-    command.append(policy["image"])
+    rendered_argv: list[str] = []
     for part in argv:
         replaced = part
         for source, destination in replacements:
@@ -160,7 +163,13 @@ def sandbox_command(
             if normalized_part.startswith(prefix):
                 replaced = destination + normalized_part[len(normalized_source):].replace(os.sep, "/")
                 break
-        command.append(replaced)
+        rendered_argv.append(replaced)
+    if rendered_argv:
+        # The sandbox is an argv runner; do not let an image entrypoint replace
+        # the executable selected by Agentic.
+        command.extend(["--entrypoint", rendered_argv[0]])
+    command.append(policy["image"])
+    command.extend(rendered_argv[1:])
     return command
 
 

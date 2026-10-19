@@ -52,6 +52,17 @@ class DashboardTests(unittest.TestCase):
             run.mkdir(parents=True)
             (run / "run.json").write_text(json.dumps({
                 "usage": {"total_tokens": 25, "estimated_cost_usd": 0.02},
+                "security_policy": {
+                    "mode": "isolated", "network": "none",
+                    "git_metadata_mount": "ro",
+                },
+                "security_policy_history": [{
+                    "recorded_at": "2026-01-01T00:00:00+00:00",
+                    "policy": {"mode": "isolated", "network": "none", "git_metadata_mount": "ro"},
+                }, {
+                    "recorded_at": "2026-01-01T00:01:00+00:00",
+                    "policy": {"mode": "trusted", "network": "host", "git_metadata_mount": "host"},
+                }],
                 "usage_by_invocation": [{
                     "name": "developer-001", "role": "developer",
                     "prompt_tokens": 10, "completion_tokens": 15,
@@ -65,9 +76,12 @@ class DashboardTests(unittest.TestCase):
             }))
             snapshot = agentic_dashboard.collect_runs(root)[0]
             self.assertEqual(snapshot["usage"]["metrics"]["duration_seconds"], 4.5)
+            self.assertEqual(snapshot["usage"]["security_policy"]["mode"], "isolated")
             self.assertEqual(snapshot["usage"]["by_invocation"][0]["total_tokens"], 25)
             html = agentic_dashboard.render_dashboard([snapshot], "demo", root.name)
             self.assertIn("Run metrics", html)
+            self.assertIn("Security policy", html)
+            self.assertIn("Latest recorded policy", html)
             self.assertIn("Token usage by run", html)
             self.assertIn("Known totals for each provider invocation", html)
             self.assertIn("The highest run number is the latest", html)

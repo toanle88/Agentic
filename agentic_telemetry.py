@@ -85,8 +85,32 @@ def extract_jsonl_usage(text: str, *, provider: str | None = None) -> dict[str, 
             value = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(value, dict) and ("usage" in value or "input_tokens" in value or "output_tokens" in value):
-            records.append(normalize_usage(value, provider=provider))
+        if not isinstance(value, dict):
+            continue
+        candidates = [value]
+        for key in ("result", "response", "message"):
+            nested = value.get(key)
+            if isinstance(nested, dict):
+                candidates.append(nested)
+        merged = None
+        for candidate in candidates:
+            if not (
+                "usage" in candidate
+                or any(key in candidate for key in (
+                    "prompt_tokens", "completion_tokens", "input_tokens",
+                    "output_tokens", "total_tokens",
+                ))
+            ):
+                continue
+            normalized = normalize_usage(candidate, provider=provider)
+            if merged is None:
+                merged = normalized
+                continue
+            for key in (*USAGE_KEYS, "estimated_cost_usd"):
+                if merged.get(key) is None and normalized.get(key) is not None:
+                    merged[key] = normalized[key]
+        if merged is not None:
+            records.append(normalize_usage(merged, provider=provider))
     return combine_usage(records, provider=provider)
 
 
@@ -143,6 +167,45 @@ def record_usage(folder: Path, role: str, usage: dict[str, Any], *,
             data["usage_by_invocation"] = invocations
         entry = {"role": role, **invocation, **usage}
         invocations.append(entry)
+    _write_run_record(path, data)
+
+
+def record_security_policy(folder: Path, config: dict[str, Any]) -> None:
+    """Persist the effective security boundary without secrets or commands."""
+    sandbox_value = config.get("sandbox")
+    sandbox: dict[str, Any] = sandbox_value if isinstance(sandbox_value, dict) else {}
+    developer_value = config.get("developer_agent")
+    developer: dict[str, Any] = developer_value if isinstance(developer_value, dict) else {}
+    reviewer_value = config.get("reviewer_agent")
+    reviewer: dict[str, Any] = reviewer_value if isinstance(reviewer_value, dict) else {}
+    enabled = sandbox.get("enabled") is True
+    policy = {
+        "mode": config.get("security_mode", "trusted"),
+        "sandbox_enabled": enabled,
+        "engine": sandbox.get("engine") if enabled else None,
+        "image": sandbox.get("image") if enabled else None,
+        "network": ("bridge" if sandbox.get("allow_network") else "none") if enabled else "host",
+        "worktree_mount": "rw" if enabled else "host",
+        "git_metadata_mount": "ro" if enabled else "host",
+        "passed_environment_names": list(sandbox.get("pass_env", [])) if enabled else [],
+        "developer": {
+            "provider": developer.get("provider", "codex"),
+            "filesystem": "write",
+        },
+        "reviewer": {
+            "provider": reviewer.get("provider", "codex"),
+            "filesystem": "read-only",
+        },
+    }
+    path, data = _load_run_record(folder)
+    history = data.get("security_policy_history")
+    if not isinstance(history, list):
+        history = []
+        data["security_policy_history"] = history
+    if not history or not isinstance(history[-1], dict) or history[-1].get("policy") != policy:
+        history.append({"recorded_at": _timestamp(), "policy": policy})
+    if not isinstance(data.get("security_policy"), dict):
+        data["security_policy"] = policy
     _write_run_record(path, data)
 
 
@@ -229,4 +292,8 @@ def read_run_usage(folder: Path) -> dict[str, Any]:
         result["by_invocation"] = data["usage_by_invocation"]
     if isinstance(data.get("metrics"), dict):
         result["metrics"] = data["metrics"]
+    if isinstance(data.get("security_policy"), dict):
+        result["security_policy"] = data["security_policy"]
+    if isinstance(data.get("security_policy_history"), list):
+        result["security_policy_history"] = data["security_policy_history"]
     return result

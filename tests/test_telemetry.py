@@ -8,6 +8,7 @@ from agentic_telemetry import (
     extract_jsonl_usage,
     read_run_usage,
     record_operation,
+    record_security_policy,
     record_usage,
 )
 
@@ -20,6 +21,19 @@ class TelemetryTests(unittest.TestCase):
         )
         self.assertEqual(usage["total_tokens"], 14)
         self.assertIsNone(usage["estimated_cost_usd"])
+
+    def test_merges_partial_outer_and_nested_provider_usage(self):
+        usage = extract_jsonl_usage(
+            json.dumps({
+                "usage": {"total_cost": 0.01},
+                "result": {"usage": {"input_tokens": 3, "output_tokens": 4}},
+            }),
+            provider="gemini",
+        )
+        self.assertEqual(usage["prompt_tokens"], 3)
+        self.assertEqual(usage["completion_tokens"], 4)
+        self.assertEqual(usage["total_tokens"], 7)
+        self.assertEqual(usage["estimated_cost_usd"], 0.01)
 
     def test_preserves_unknown_token_breakdowns(self):
         usage = combine_usage([{"provider": "provider", "total_tokens": 14}])
@@ -78,6 +92,57 @@ class TelemetryTests(unittest.TestCase):
             self.assertEqual(metrics["operations"][1]["status"], "failed")
             self.assertEqual(metrics["operations"][1]["exit_code"], 1)
             self.assertNotIn("python -c", json.dumps(metrics))
+
+    def test_record_security_policy_is_sanitized_and_backward_compatible(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            record_security_policy(folder, {
+                "security_mode": "isolated",
+                "sandbox": {
+                    "enabled": True,
+                    "engine": "docker",
+                    "image": "agentic-runner:latest",
+                    "allow_network": False,
+                    "pass_env": ["OPENAI_API_KEY"],
+                },
+                "developer_agent": {"provider": "codex"},
+                "reviewer_agent": {"provider": "claude"},
+            })
+            raw = json.loads((folder / "run.json").read_text())
+            policy = raw["security_policy"]
+            self.assertEqual(policy["mode"], "isolated")
+            self.assertEqual(policy["network"], "none")
+            self.assertEqual(policy["git_metadata_mount"], "ro")
+            self.assertEqual(policy["passed_environment_names"], ["OPENAI_API_KEY"])
+            self.assertEqual(read_run_usage(folder)["security_policy"], policy)
+            self.assertNotIn("secret-value", json.dumps(raw))
+
+    def test_record_security_policy_preserves_resume_history(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            record_security_policy(folder, {
+                "security_mode": "trusted",
+                "sandbox": {"enabled": False},
+            })
+            record_security_policy(folder, {
+                "security_mode": "isolated",
+                "sandbox": {
+                    "enabled": True,
+                    "engine": "docker",
+                    "image": "agentic-runner:latest",
+                    "allow_network": False,
+                    "pass_env": [],
+                },
+            })
+            raw = json.loads((folder / "run.json").read_text())
+            self.assertEqual(raw["security_policy"]["mode"], "trusted")
+            self.assertEqual(
+                [item["policy"]["mode"] for item in raw["security_policy_history"]],
+                ["trusted", "isolated"],
+            )
+            self.assertEqual(
+                len(read_run_usage(folder)["security_policy_history"]), 2,
+            )
 
 
 if __name__ == "__main__":

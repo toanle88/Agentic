@@ -38,6 +38,7 @@ class BenchmarkTests(unittest.TestCase):
             (root / "task.md").write_text("task\n", encoding="utf-8")
             valid = {
                 "schema_version": 1,
+                "repetitions": 2,
                 "tasks": [{
                     "id": "task-one",
                     "repository": "fixture",
@@ -54,6 +55,7 @@ class BenchmarkTests(unittest.TestCase):
             loaded = load_benchmark(path)
             self.assertEqual(len(loaded["tasks"]), 1)
             self.assertEqual(set(loaded["runners"]), {"agent-alone", "agentic"})
+            self.assertEqual(loaded["repetitions"], 2)
             self.assertEqual(
                 render_command(["adapter", "{repo}", "{task_id}", "{reviewer}", "{scenario}"], {
                     "benchmark_root": "/tmp/benchmark",
@@ -178,6 +180,10 @@ class BenchmarkTests(unittest.TestCase):
             set(payload["reviewer_comparison"]["providers"]), {"codex", "claude"}
         )
         self.assertEqual(payload["scenarios"]["reviewer:codex"]["defect_recall"], 1.0)
+        self.assertEqual(payload["task_metrics"]["task-one"]["name"], "A labeled task")
+        self.assertEqual(
+            payload["task_metrics"]["task-one"]["scenarios"]["agentic"]["runs"], 1,
+        )
         self.assertNotIn("private task prompt", json.dumps(payload))
         self.assertNotIn("secret output", json.dumps(payload))
         self.assertNotIn("command", payload["results"][0]["checks"][0])
@@ -200,6 +206,42 @@ class BenchmarkTests(unittest.TestCase):
         }])
         self.assertIsNone(metrics["approval_rate"])
         self.assertIsNone(metrics["first_pass_approval_rate"])
+
+    def test_repeated_quality_scenarios_get_distinct_repetition_records(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fixture = root / "fixture"
+            fixture.mkdir()
+            (fixture / "README.md").write_text("fixture\n", encoding="utf-8")
+            adapter = root / "adapter.py"
+            adapter.write_text(
+                "import json, os, sys\n"
+                "assert sys.argv[1] == os.environ['AGENTIC_BENCHMARK_REPETITION']\n"
+                "from pathlib import Path\n"
+                "Path(os.environ['AGENTIC_BENCHMARK_RESULT_FILE']).write_text("
+                "json.dumps({'status': 'success', 'completed': True}), encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            config = {
+                "schema_version": 1,
+                "repetitions": 2,
+                "tasks": [{
+                    "id": "task-one", "repository": "fixture", "task_file": "task.md",
+                    "checks": [[sys.executable, "-c", "pass"]],
+                }],
+                "runners": {
+                    "agent-alone": [sys.executable, str(adapter), "{repetition}"],
+                    "agentic": [sys.executable, str(adapter), "{repetition}"],
+                },
+            }
+            (root / "task.md").write_text("task\n", encoding="utf-8")
+            benchmark = root / "benchmark.json"
+            benchmark.write_text(json.dumps(config), encoding="utf-8")
+            payload = run_benchmark(benchmark, timeout=30)
+
+        self.assertEqual(payload["summary"], {"total": 4, "passed": 4, "failed": 0})
+        records = payload["results"]
+        self.assertEqual({item["repetition"] for item in records}, {1, 2})
 
 
 if __name__ == "__main__":

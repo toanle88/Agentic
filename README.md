@@ -96,7 +96,12 @@ provide an image containing the provider and project tools:
 
 ```bash
 agentic init --security-mode isolated --sandbox-image your-project-agentic-runner:latest
+# equivalent shorthand:
+agentic init --secure --sandbox-image your-project-agentic-runner:latest
 ```
+
+See the [sandbox image guide](examples/sandbox/README.md) for the required
+provider and project tooling.
 
 Provider-ready templates are in [`examples/provider-configs/`](examples/provider-configs/). Copy one to the target repository, or let initialization create it:
 

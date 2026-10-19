@@ -139,10 +139,13 @@ selected provider CLI and target-repository tools:
 
 ```bash
 agentic init --security-mode isolated --sandbox-image your-project-agentic-runner:latest
+# equivalent shorthand:
+agentic init --secure --sandbox-image your-project-agentic-runner:latest
 ```
 
-The image can also be supplied through `AGENTIC_SANDBOX_IMAGE`. Use trusted
-mode only when host execution is appropriate for the repository.
+The image can also be supplied through `AGENTIC_SANDBOX_IMAGE`. The `--secure`
+option is only a shorthand; it still requires a provider-ready image. Use
+trusted mode only when host execution is appropriate for the repository.
 
 For untrusted repositories or issue text, use isolated mode:
 
@@ -163,10 +166,12 @@ processes in a hardened Docker or Podman container:
 ```
 
 The image must be built and contain the selected provider CLI and all tools
-needed by the configured checks. Agentic mounts the task worktree, linked
-worktree Git metadata, and the run-output directory, makes the container root
-filesystem read-only, drops Linux capabilities, applies process/resource
-limits, and disables networking unless explicitly enabled. If the engine or
+needed by the configured checks. Agentic mounts the task worktree writable for
+developer processes, linked-worktree Git metadata read-only for both developer
+and reviewer processes, and the run-output directory. It makes the container
+root filesystem read-only, drops Linux capabilities, applies process/resource
+limits, and disables networking unless explicitly enabled. Agentic invokes the
+requested argv directly and overrides any image entrypoint. If the engine or
 image is unavailable, isolated runs stop instead of falling back to host
 execution.
 

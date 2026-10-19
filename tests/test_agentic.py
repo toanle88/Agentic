@@ -154,10 +154,28 @@ class PureTests(unittest.TestCase):
         self.assertEqual(args.provider, 'gemini')
         self.assertIsNone(args.reviewer_provider)
         self.assertEqual(args.security_mode, 'isolated')
+        self.assertFalse(args.secure)
         self.assertIsNone(args.sandbox_image)
 
         defaults = agentic.build_parser().parse_args(['init'])
         self.assertEqual(defaults.security_mode, 'trusted')
+        self.assertFalse(defaults.secure)
+
+    def test_secure_init_option_selects_isolated_mode(self):
+        args = agentic.build_parser().parse_args(['init', '--secure'])
+        self.assertTrue(args.secure)
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            sh('git', 'init', '--initial-branch=main', str(repo), cwd=repo.parent)
+            with patch('agentic.init_repository', return_value=0) as init:
+                self.assertEqual(
+                    agentic.main([
+                        'init', '--repo', str(repo), '--secure',
+                        '--sandbox-image', 'test-image',
+                    ]), 0
+                )
+            self.assertEqual(init.call_args.kwargs['security_mode'], 'isolated')
+            self.assertEqual(init.call_args.kwargs['sandbox_image'], 'test-image')
 
     def test_init_can_select_isolated_security_mode(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -820,7 +838,10 @@ class PureTests(unittest.TestCase):
                 },
             }))
 
+            probed = []
+
             def fake_probe(argv, cwd, **kwargs):
+                probed.append(argv)
                 if argv[:2] == ['git', 'rev-parse']:
                     return True, str(repo)
                 return True, 'ok'
@@ -836,6 +857,9 @@ class PureTests(unittest.TestCase):
         network = next(item for item in payload['checks'] if item['name'] == 'Sandbox network')
         self.assertEqual(network['status'], 'warn')
         self.assertIn('read-only reviewer', network['detail'])
+        provider_probe = next(argv for argv in probed if '--entrypoint' in argv)
+        self.assertEqual(provider_probe[provider_probe.index('--entrypoint') + 1], 'codex')
+        self.assertEqual(provider_probe[-1], '--version')
 
     def test_all_provider_templates_are_valid_configs(self):
         templates = sorted((Path(__file__).resolve().parents[1] / 'examples' / 'provider-configs').glob(

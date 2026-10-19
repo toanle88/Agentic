@@ -53,10 +53,10 @@ from agentic_context import (
     _compact_feedback,
     _issue_context,
 )
+from agentic_diagnostics import run_doctor as _run_doctor
 from agentic_execution import (
     _absolute_path,
     _console_print,
-    _doctor_public_detail,
     _paths_equal,
     _remaining_timeout,
     _short,
@@ -79,9 +79,10 @@ from agentic_review import (
 )
 from agentic_sandbox import DEFAULT_SANDBOX_IMAGE, validate_sandbox
 from agentic_security import redact_secrets
+from agentic_telemetry import record_security_policy
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.11"
+__version__ = "1.1.12"
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module
 # while the implementation lives in agentic_config.
@@ -1631,138 +1632,16 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
 
 
 def doctor(repo: Path, config_path: Path | None = None, *, json_output: bool = False) -> int:
-    """Report local prerequisites and return nonzero when a required item is missing."""
-    repo = repo.resolve()
-    checks: list[tuple[str, bool, str, bool]] = []
-    git_version = installed_git_version()
-    checks.append(("Git", git_version is not None, ".".join(map(str, git_version)) if git_version else "not found", True))
-    root_ok, _ = probe(["git", "rev-parse", "--show-toplevel"], repo)
-    checks.append(("Git repository", root_ok, "repository detected" if root_ok else "not a repository", True))
-    if root_ok:
-        origin_ok, _ = probe(["git", "remote", "get-url", "origin"], repo)
-        checks.append(("origin remote", origin_ok, "origin remote configured" if origin_ok else "missing origin remote", True))
-    else:
-        checks.append(("origin remote", False, "skipped", True))
-    gh_path = shutil.which("gh")
-    gh_ok, _ = probe(
-        [gh_path or "gh", "auth", "status", "--active", "--hostname", "github.com"],
-        repo, timeout=30,
-    ) if gh_path else (False, "gh not found")
-    checks.append(("GitHub CLI auth", gh_ok, "authenticated" if gh_ok else "not authenticated", True))
-    target_config = (config_path or repo / AGENT_CONFIG_FILENAME).resolve()
-    if target_config.is_file():
-        try:
-            loaded = load_config(target_config)
-            preflight_test_commands(
-                repo, loaded["test_commands"] + loaded["slow_test_commands"],
-                sandbox=loaded.get("sandbox"),
-            )
-            checks.append(("Agentic config", True, str(target_config), True))
-            checks.append(("Configured checks", True, f"{len(loaded['test_commands'])} fast / {len(loaded['slow_test_commands'])} slow", True))
-            if loaded["security_mode"] == "isolated":
-                checks.append(("Security mode", True, "isolated execution requested", True))
-            else:
-                checks.append((
-                    "Security mode", False,
-                    "trusted host execution; use security_mode=isolated for untrusted code",
-                    False,
-                ))
-            sandbox = loaded.get("sandbox", {})
-            if sandbox.get("enabled"):
-                engine = sandbox["engine"]
-                engine_path = shutil.which(engine)
-                checks.append(("Sandbox engine", engine_path is not None,
-                               f"{engine} is available" if engine_path else f"{engine} not found", True))
-                if engine_path:
-                    image_ok, _ = probe(
-                        [engine_path, "image", "inspect", sandbox["image"]], repo, timeout=30
-                    )
-                    checks.append((
-                        "Sandbox image", image_ok,
-                        "sandbox image is available" if image_ok else "sandbox image is not available",
-                        True,
-                    ))
-                if sandbox.get("allow_network"):
-                    checks.append((
-                        "Sandbox network", False,
-                        "enabled for developer and read-only reviewer; disable unless outbound access is required",
-                        False,
-                    ))
-                else:
-                    checks.append((
-                        "Sandbox network", True,
-                        "disabled for developer and read-only reviewer",
-                        False,
-                    ))
-            providers = []
-            for role, settings in (("developer", loaded["developer_agent"]), ("reviewer", loaded["reviewer_agent"])):
-                provider = settings["provider"]
-                if provider in providers:
-                    continue
-                providers.append(provider)
-                if provider == "openrouter":
-                    env_name = settings["api_key_env"]
-                    checks.append((f"{role.title()} provider ({provider})", bool(os.environ.get(env_name)),
-                                   f"${env_name} is set" if os.environ.get(env_name) else f"${env_name} is missing", True))
-                elif loaded.get("sandbox", {}).get("enabled"):
-                    pass_env = sandbox_env_for_provider(provider, loaded["sandbox"])
-                    missing_env = [name for name in pass_env if not os.environ.get(name)]
-                    if pass_env:
-                        detail = (
-                            "configured environment credentials are set"
-                            if not missing_env else
-                            "missing: " + ", ".join(f"${name}" for name in missing_env)
-                        )
-                        checks.append((
-                            f"{role.title()} sandbox credentials", not missing_env, detail, True,
-                        ))
-                    else:
-                        checks.append((
-                            f"{role.title()} provider ({provider})", False,
-                            "provider credentials must be provisioned in the image or sandbox.pass_env",
-                            False,
-                        ))
-                    checks.append((
-                        f"{role.title()} provider ({provider})", True,
-                        "expected in the configured sandbox image; executable not probed",
-                        False,
-                    ))
-                else:
-                    executable = shutil.which(provider)
-                    ok, _ = probe([executable or provider, "--version"], repo) if executable else (False, f"{provider} not found")
-                    checks.append((f"{role.title()} provider ({provider})", ok, "provider is available" if ok else "provider is not available", True))
-        except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
-            checks.append(("Agentic config", False, str(exc), True))
-    else:
-        checks.append(("Agentic config", False, f"missing: {target_config} (run agentic init)", True))
-    if git_version is not None and os.environ.get("WSL_DISTRO_NAME"):
-        if relative_worktree_paths_supported():
-            checks.append(("WSL/Windows worktree paths", True, "relative paths supported", False))
-        else:
-            checks.append(("WSL/Windows worktree paths", False, "Git 2.48+ is required in WSL and Windows Git", False))
-    success = all(ok or not required for _, ok, _, required in checks)
-    if json_output:
-        print(json.dumps({
-            "repository": str(repo),
-            "ok": success,
-            "checks": [
-                {
-                    "name": label,
-                    "ok": ok,
-                    "required": required,
-                    "status": "ok" if ok else ("fail" if required else "warn"),
-                    "detail": _doctor_public_detail(label, ok, required),
-                }
-                for label, ok, _detail, required in checks
-            ],
-        }, indent=2))
-    else:
-        print("Agentic doctor")
-        print(f"Repository: {repo}")
-        for label, ok, _detail, required in checks:
-            state = "OK" if ok else ("FAIL" if required else "WARN")
-            print(f"[{state:<4}] {label}: {_doctor_public_detail(label, ok, required)}")
-    return 0 if success else 1
+    """Compatibility wrapper for the extracted diagnostics workflow."""
+    return _run_doctor(
+        repo,
+        config_path,
+        json_output=json_output,
+        installed_git_version=installed_git_version,
+        probe=probe,
+        preflight_test_commands=preflight_test_commands,
+        relative_worktree_paths_supported=relative_worktree_paths_supported,
+    )
 
 
 def _run_log_folder(repo: Path, run: Run, state_dir: Path | None = None) -> Path:
@@ -1903,6 +1782,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="With init, choose trusted host execution or explicitly opt into isolated container execution",
     )
     parser.add_argument(
+        "--secure", action="store_true",
+        help="With init, shorthand for --security-mode isolated",
+    )
+    parser.add_argument(
         "--sandbox-image", default=None,
         help="With isolated init, container image to use (or set AGENTIC_SANDBOX_IMAGE)",
     )
@@ -2038,6 +1921,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
             run = create_worktree(repo, base, issue_number, state_dir)
         fresh = True
     folder = logs_path(repo, run, state_dir)
+    record_security_policy(folder, config)
     manual_approval = load_manual_approval(folder)
     print_run_header(issue, run, fresh)
     print(
@@ -2139,8 +2023,11 @@ def main(argv: list[str] | None = None) -> int:
             return init_repository(
                 Path(args.repo), force=args.force, create_agents=args.agents,
                 provider=args.provider, reviewer_provider=args.reviewer_provider,
-                security_mode=args.security_mode, sandbox_image=args.sandbox_image,
+                security_mode="isolated" if args.secure else args.security_mode,
+                sandbox_image=args.sandbox_image,
             )
+        if args.secure:
+            parser.error("--secure is only valid with init")
         if args.command == "doctor":
             return doctor(
                 Path(args.repo), Path(args.config) if args.config else None,
