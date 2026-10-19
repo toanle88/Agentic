@@ -17,6 +17,65 @@ def sh(*args, cwd):
 
 
 class StreamingTests(unittest.TestCase):
+    def test_native_provider_processes_streams_and_records_usage(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            script = root / 'fake_provider.py'
+            script.write_text(
+                'import json, sys\n'
+                'provider = sys.argv[1]\n'
+                'if provider == "copilot":\n'
+                '    print("copilot final", flush=True)\n'
+                'else:\n'
+                '    print(json.dumps({"type": "message", "content": "intermediate"}), flush=True)\n'
+                '    print(json.dumps({"type": "result", "usage": {}, "result": {\n'
+                '        "text": provider + " final",\n'
+                '        "usage": {"input_tokens": 3, "output_tokens": 4}\n'
+                '    }}), flush=True)\n',
+                encoding='utf-8',
+            )
+            calls = []
+
+            def fake_command(provider, prompt, *, readonly=False, model=None):
+                calls.append((provider, prompt, readonly, model))
+                return [sys.executable, str(script), provider], provider != 'copilot'
+
+            with patch('agentic_execution.cli_provider_command', side_effect=fake_command):
+                for provider in ('gemini', 'claude', 'copilot'):
+                    with self.subTest(provider=provider):
+                        output = root / f'{provider}.txt'
+                        ok, message = agentic_execution.run_cli_provider(
+                            root, 'review this patch', output=output,
+                            provider=provider, readonly=True, model='test-model', timeout=10,
+                        )
+                        self.assertTrue(ok)
+                        self.assertEqual(message, f'{provider} final')
+                        self.assertEqual(output.read_text(encoding='utf-8'), message)
+
+                        raw_path = output.with_suffix('.jsonl')
+                        if provider == 'copilot':
+                            self.assertFalse(raw_path.exists())
+                        else:
+                            self.assertIn('input_tokens', raw_path.read_text(encoding='utf-8'))
+
+                        run_record = json.loads((root / 'run.json').read_text(encoding='utf-8'))
+                        invocation = run_record['usage_by_invocation'][-1]
+                        self.assertEqual(invocation['role'], 'reviewer')
+                        self.assertEqual(invocation['prompt_chars'], len('review this patch'))
+                        if provider == 'copilot':
+                            self.assertIsNone(invocation['total_tokens'])
+                        else:
+                            self.assertEqual(invocation['total_tokens'], 7)
+
+            self.assertEqual(
+                calls,
+                [
+                    ('gemini', 'review this patch', True, 'test-model'),
+                    ('claude', 'review this patch', True, 'test-model'),
+                    ('copilot', 'review this patch', True, 'test-model'),
+                ],
+            )
+
     def test_codex_events_become_readable_progress(self):
         event = json.dumps({'type': 'item.started', 'item': {
             'type': 'command_execution', 'command': 'python -m pytest -q'}})

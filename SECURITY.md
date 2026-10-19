@@ -20,16 +20,19 @@ Isolated runs fail closed when the configured container engine, image, or
 explicitly configured credential environment is unavailable; they do not
 silently fall back to host execution.
 
-The developer is write-capable inside its assigned worktree. The reviewer is
+The developer is write-capable inside its assigned worktree, while Git
+metadata is mounted read-only inside isolated containers. The reviewer is
 read-only and uses restricted provider/tool policies. Agentic blocks commits,
 pushes, publication, protected files, secret-like files, and GitHub workflow
-changes during normal development.
+changes during normal development. Trusted host execution cannot provide the
+same OS-level Git or network enforcement.
 
 Docker/Podman sandboxing mounts the task worktree, the required linked-worktree
-Git metadata, and run-output directory, uses a read-only container root, drops
-Linux capabilities, limits resources, and disables networking by default.
-Native providers and configured checks run inside it. Credentials are passed
-only for environment names explicitly listed in `sandbox.pass_env`.
+Git metadata read-only, and the run-output directory, uses a read-only
+container root, drops Linux capabilities, limits resources, and disables
+networking by default. Native providers and configured checks run inside it.
+Credentials are passed only for environment names explicitly listed in
+`sandbox.pass_env`.
 OpenRouter's API request and scoped file inspection remain in the host Python
 process, but OpenRouter command tools are also routed through the configured
 sandbox.

@@ -549,7 +549,10 @@ class ShellTests(unittest.TestCase):
             root = Path(temp)
             session_dir = root / 'logs'
             first = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=session_dir)
-            job = first._launch([sys.executable, '-c', 'import time; print("persisted"); time.sleep(.3)'])
+            job = first._launch([
+                sys.executable, '-u', '-c',
+                'import time; print("persisted"); time.sleep(.3)',
+            ])
             second = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=session_dir)
             output = _capture_ps(second, ['/ps', '--all'])
             self.assertIn(f'{job.number}', output)

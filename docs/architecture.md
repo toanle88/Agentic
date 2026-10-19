@@ -12,6 +12,7 @@ Agentic is intentionally small and uses the Python standard library at runtime.
 | `agentic_openrouter.py` | OpenRouter tool policy, scoped file/command tools, and API agent loop. |
 | `agentic_policy.py` | Protected-path and sensitive-file policy shared by the runner and API tools. |
 | `agentic_config.py` | Target-repository configuration loading, provider validation/preflight, test-command detection, and setup defaults. |
+| `agentic_diagnostics.py` | Repository prerequisite checks and secure-sandbox/provider diagnostics. |
 | `agentic_shell.py` | Interactive supervisor for background jobs and terminal log tails. |
 | `agentic_dashboard.py` | Read-only parser and renderer for durable run logs. |
 | `agentic_models.py` | Immutable task, run, state, and provider configuration models. |
@@ -30,7 +31,8 @@ Agentic is intentionally small and uses the Python standard library at runtime.
 The main runner remains the compatibility-facing entry point, but cohesive
 boundaries are extracted one at a time. `agentic_config.py` owns configuration
 parsing, provider preflight, test-command detection, and setup defaults;
-`agentic.py` re-exports extracted names so existing integrations keep working.
+`agentic_diagnostics.py` owns the `doctor` workflow; `agentic.py` keeps the
+public wrapper so existing integrations keep working.
 Provider and context tests live in `tests/test_execution.py`,
 `tests/test_openrouter.py`, and `tests/test_worktrees.py`; `tests/test_agentic.py`
 retains workflow and CLI coverage. Future extractions should follow the same
