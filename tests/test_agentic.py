@@ -867,9 +867,10 @@ class PureTests(unittest.TestCase):
         self.assertTrue(worktree_check['ok'])
         lock.assert_called_once()
         locked_repo, locked_worktree = lock.call_args.args
-        normalize_path = lambda value: os.path.normcase(
-            os.path.realpath(os.path.abspath(os.fspath(value)))
-        )
+        def normalize_path(value):
+            return os.path.normcase(
+                os.path.realpath(os.path.abspath(os.fspath(value)))
+            )
         self.assertEqual(normalize_path(locked_repo), normalize_path(root))
         self.assertEqual(normalize_path(locked_worktree), normalize_path(worktree))
 
