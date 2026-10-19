@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, TextIO, cast
 
+from agentic import __version__
+
 
 HELP = """Commands:
 
@@ -826,7 +828,7 @@ def _welcome_banner(repo: Path, state_dir: Path | None = None,
     # A framed banner is useful on normal terminals, but should not wrap on
     # split panes or small CI terminals.
     if columns < 62:
-        print(_shell_paint("AGENTIC", "1;36"))
+        print(_shell_paint(f"AGENTIC v{__version__}", "1;36"))
         print(_shell_paint(
             f"Interactive coding workflow - {_fit_terminal_text(repo.name, max(columns - 34, 8))}",
             "36",
@@ -864,7 +866,7 @@ def _welcome_banner(repo: Path, state_dir: Path | None = None,
 
     print()
     print(_shell_paint(border(left, right), "36"))
-    print(_shell_paint(row(f"{marker}  A G E N T I C"), "1;36"))
+    print(_shell_paint(row(f"{marker}  A G E N T I C  v{__version__}"), "1;36"))
     print(_shell_paint(row("   Interactive issue-driven coding workflow"), "36"))
     print(_shell_paint(divider + horizontal * inner + ("┤" if unicode_banner else "+"), "36"))
     print(row(f"Repository  {repo}"))

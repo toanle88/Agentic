@@ -25,6 +25,7 @@ class ShellTests(unittest.TestCase):
             with patch('builtins.input', return_value='/quit'), redirect_stdout(output):
                 self.assertEqual(shell.run(), 0)
         self.assertIn('A G E N T I C', output.getvalue())
+        self.assertIn(f'v{agentic_shell.__version__}', output.getvalue())
         self.assertIn('Interactive issue-driven coding workflow', output.getvalue())
         self.assertIn('/run ISSUE', output.getvalue())
         self.assertIn('/ps', output.getvalue())
