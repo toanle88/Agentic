@@ -4,12 +4,14 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from io import StringIO
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
 
 import agentic
 import agentic_execution
+from agentic_output import style_text
 
 
 def sh(*args, cwd):
@@ -17,6 +19,29 @@ def sh(*args, cwd):
 
 
 class StreamingTests(unittest.TestCase):
+    def test_status_styling_is_tty_only_and_honors_no_color(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), patch('sys.stdout', new=TTYBuffer()):
+            self.assertIn('\033[32m', style_text('[TESTS] PASSED'))
+        with patch.dict('os.environ', {'NO_COLOR': '1'}), patch('sys.stdout', new=TTYBuffer()):
+            self.assertNotIn('\033[', style_text('[TESTS] PASSED'))
+        self.assertNotIn('\033[', style_text('[TESTS] PASSED'))
+
+    def test_style_text_marks_commands_and_file_changes(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+             patch('sys.stdout', new=TTYBuffer()):
+            styled = style_text('[TESTS] Running: python -m unittest\n+added.py\n-removed.py')
+        self.assertIn('\033[36m[TESTS] Running:', styled)
+        self.assertIn('\033[32m+added.py', styled)
+        self.assertIn('\033[31m-removed.py', styled)
+
     def test_native_provider_processes_streams_and_records_usage(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -109,6 +134,23 @@ class StreamingTests(unittest.TestCase):
             self.assertEqual(metrics['operations'][0]['role'], 'developer')
             self.assertEqual(metrics['operations'][0]['status'], 'completed')
             self.assertGreaterEqual(metrics['operations'][0]['duration_seconds'], 0)
+
+    def test_tty_streaming_colors_terminal_but_keeps_human_log_plain(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), patch('sys.stdout', new=TTYBuffer()) as out:
+                result = agentic.streamed_command(
+                    [sys.executable, '-c', 'print("\\033[31m[TESTS] FAILED\\033[0m")'],
+                    root, label='TESTS', log_file=root / 'tests.log', timeout=10,
+                )
+            self.assertEqual(result.returncode, 0)
+            self.assertIn('\033[', out.getvalue())
+            self.assertNotIn('\033[', (root / 'tests.log').read_text(encoding='utf-8'))
+            self.assertIn('[TESTS] FAILED', (root / 'tests.log').read_text(encoding='utf-8'))
 
     def test_streamed_command_reports_heartbeat_during_silence(self):
         from io import StringIO

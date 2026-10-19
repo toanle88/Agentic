@@ -200,8 +200,11 @@ Typing `/` opens an interactive autocomplete dropdown with command descriptions,
 arrow key navigation, and live filtering.
 
 The shell shows a compact welcome banner with the repository, state directory,
-configuration, and job status. Set `AGENTIC_ASCII=1` for terminals that do not
-render box-drawing characters, or `AGENTIC_PLAIN=1` for plain, uncolored output.
+configuration, and job status. Interactive TTY output uses colors for provider
+roles, commands, checks, warnings, and failures while keeping status words
+visible. Set `AGENTIC_ASCII=1` for terminals that do not render box-drawing
+characters, or `NO_COLOR=1` / `AGENTIC_PLAIN=1` for plain, uncolored output.
+Redirected output and persisted logs are plain text.
 
 For direct foreground execution:
 

@@ -9,6 +9,7 @@ Agentic is intentionally small and uses the Python standard library at runtime.
 | `agentic.py` | Compatibility-facing CLI entry point and workflow orchestration. |
 | `agentic_context.py` | Bounded issue, feedback, and provider-history context formatting. |
 | `agentic_execution.py` | Provider CLI execution, streamed output, console rendering, and usage recording. |
+| `agentic_output.py` | Shared TTY-only styling and ANSI stripping for terminal presentation and plain logs. |
 | `agentic_openrouter.py` | OpenRouter tool policy, scoped file/command tools, and API agent loop. |
 | `agentic_policy.py` | Protected-path and sensitive-file policy shared by the runner and API tools. |
 | `agentic_config.py` | Target-repository configuration loading, provider validation/preflight, test-command detection, and setup defaults. |
