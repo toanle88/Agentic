@@ -73,6 +73,51 @@ class ShellTests(unittest.TestCase):
         self.assertIn('\033[1;36mCommands:', output.getvalue())
         self.assertIn('\033[1;37m/run', output.getvalue())
 
+    def test_log_replay_colors_statuses_only_on_a_terminal(self):
+        from contextlib import redirect_stdout
+
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            job = shell._launch([sys.executable, '-c', 'print("[TESTS] PASSED")'])
+            job.process.wait(timeout=5)
+            shell.refresh()
+
+            colored = TTYBuffer()
+            with patch.dict(os.environ, {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), redirect_stdout(colored):
+                shell.show_logs(['/logs', str(job.number), '5'])
+            self.assertIn('\033[32m', colored.getvalue())
+
+            plain = StringIO()
+            with redirect_stdout(plain):
+                shell.show_logs(['/logs', str(job.number), '5'])
+            self.assertNotIn('\033[', plain.getvalue())
+            self.assertIn('[TESTS] PASSED', plain.getvalue())
+
+    def test_runner_command_forwarding_uses_terminal_styling(self):
+        from contextlib import redirect_stdout
+        from subprocess import CompletedProcess
+
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        with tempfile.TemporaryDirectory() as temp:
+            shell = agentic_shell.AgenticShell(
+                Path(temp), Path(sys.executable), session_dir=Path(temp) / 'logs'
+            )
+            output = TTYBuffer()
+            with patch.dict(os.environ, {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+                 patch('agentic_shell.subprocess.run', return_value=CompletedProcess(
+                     ['agentic'], 0, stdout='[TESTS] PASSED\n', stderr=''
+                 )), redirect_stdout(output):
+                shell._run_runner_command(['agentic', 'doctor'])
+            self.assertIn('\033[32m[TESTS] PASSED', output.getvalue())
+
     def test_help_command_is_available(self):
         self.assertEqual(agentic_shell.build_parser().parse_args(['help']).command, 'help')
 

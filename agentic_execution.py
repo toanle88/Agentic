@@ -16,6 +16,7 @@ from typing import Any
 
 from agentic_models import Issue, Run
 from agentic_guidance import guidance_phase, guidance_prompt
+from agentic_output import paint, strip_ansi, style_text
 from agentic_providers import cli_provider_command, codex_command
 from agentic_sandbox import sandbox_command
 from agentic_security import redact_secrets
@@ -75,7 +76,7 @@ def _record_provider_usage(output: Path, readonly: bool, usage: dict[str, Any], 
             parts.append(f"{tokens:,} tokens")
         if cost is not None:
             parts.append(f"${cost:.4f}")
-        print(f"[COST] {role.title()}: {' '.join(parts)}", flush=True)
+        _console_print(style_text(f"[COST] {role.title()}: {' '.join(parts)}"), flush=True)
 
 
 def _console_text(value: Any, stream: Any = None) -> str:
@@ -125,9 +126,7 @@ def _unicode_or_ascii(unicode_text: str, ascii_text: str, stream: Any = None) ->
 
 def _paint(text: str, code: str) -> str:
     """Use color only for interactive output; logs remain plain text."""
-    if os.environ.get("NO_COLOR") or not getattr(sys.stdout, "isatty", lambda: False)():
-        return text
-    return f"\033[{code}m{text}\033[0m"
+    return paint(text, code)
 
 
 def print_run_header(issue: Issue, run: Run, fresh: bool) -> None:
@@ -144,34 +143,34 @@ def print_run_header(issue: Issue, run: Run, fresh: bool) -> None:
 def print_review_summary(verdict: dict[str, Any]) -> None:
     approved = bool(verdict.get("approved"))
     status = _paint("APPROVED", "32") if approved else _paint("REJECTED", "31")
-    _console_print(f"[REVIEW] {status}")
+    _console_print(style_text(f"[REVIEW] {status}"))
     summary = str(verdict.get("summary", "")).strip()
     if summary:
-        _console_print(f"[REVIEW] {_short(summary, 500)}")
+        _console_print(style_text(f"[REVIEW] {_short(summary, 500)}"))
     findings = verdict.get("findings", [])
     if isinstance(findings, list):
         bullet = _unicode_or_ascii("•", "-")
         for finding in findings[:3]:
-            _console_print(f"  {bullet} {_short(finding, 260)}")
+            _console_print(style_text(f"  {bullet} {_short(finding, 260)}"))
         if len(findings) > 3:
-            _console_print(f"  {bullet} ... and {len(findings) - 3} more; see the review JSON log")
+            _console_print(style_text(f"  {bullet} ... and {len(findings) - 3} more; see the review JSON log"))
     skipped = verdict.get("skipped", [])
     if isinstance(skipped, list) and skipped:
-        _console_print(f"[REVIEW] Skipped validation: {len(skipped)}")
+        _console_print(style_text(f"[REVIEW] Skipped validation: {len(skipped)}"))
         for item in skipped[:3]:
-            _console_print(f"  {bullet} {_short(item, 260)}")
+            _console_print(style_text(f"  {bullet} {_short(item, 260)}"))
         if len(skipped) > 3:
-            _console_print(f"  {bullet} ... and {len(skipped) - 3} more; see the review JSON log")
+            _console_print(style_text(f"  {bullet} ... and {len(skipped) - 3} more; see the review JSON log"))
     repeated = verdict.get("_repeated_findings", [])
     if isinstance(repeated, list) and repeated:
-        _console_print(f"[REVIEW] Repeated findings from earlier attempts: {len(repeated)}")
+        _console_print(style_text(f"[REVIEW] Repeated findings from earlier attempts: {len(repeated)}"))
         repeat_marker = _unicode_or_ascii("↻", "*")
         for item in repeated[:3]:
             if isinstance(item, dict):
-                _console_print(
+                _console_print(style_text(
                     f"  {repeat_marker} [{item.get('severity', 'UNSPECIFIED')}] "
                     f"{_short(item.get('text', ''), 240)}"
-                )
+                ))
 
 
 def print_run_summary(run: Run, status: str, next_action: str) -> None:
@@ -281,11 +280,8 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                 nonlocal last_notice
                 now = datetime.datetime.now().strftime("%H:%M:%S")
                 prefix = f"[{now}] [{label}]"
-                formatted = f"{prefix} {message}"
-                colored_label = _paint(f"[{label}]", {
-                    "DEVELOPER": "36", "REVIEW": "35", "TESTS": "34",
-                }.get(label, "37"))
-                _console_print(f"[{now}] {colored_label} {message}", flush=True)
+                formatted = strip_ansi(f"{prefix} {message}")
+                _console_print(style_text(formatted), flush=True)
                 human_log.write(formatted + "\n")
                 last_notice = time.monotonic()
 
@@ -309,7 +305,7 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                     continue
                 if line is None:
                     break
-                safe_line = redact_secrets(line)
+                safe_line = strip_ansi(redact_secrets(line))
                 if raw_file:
                     raw_file.write(safe_line)
                     raw_file.flush()

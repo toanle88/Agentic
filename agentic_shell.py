@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, TextIO, cast
 
 from agentic import __version__
+from agentic_output import paint, strip_ansi, style_text
 
 
 HELP = """Commands:
@@ -832,10 +833,24 @@ def _readline_module():
 
 def _shell_paint(text: str, code: str) -> str:
     """Add terminal color without leaking escape codes into captured output."""
-    if (os.environ.get("NO_COLOR") or os.environ.get("AGENTIC_PLAIN")
-            or not getattr(sys.stdout, "isatty", lambda: False)()):
-        return text
-    return f"\033[{code}m{text}\033[0m"
+    return paint(text, code)
+
+
+def _shell_print(message: Any = "", *, end: str = "\n", flush: bool = False) -> None:
+    """Print shell status or replayed log text with terminal-only styling."""
+    text = style_text(message)
+    print(text, end=end, flush=flush)
+
+
+def _shell_print_raw(message: Any = "", *, end: str = "\n", flush: bool = False) -> None:
+    """Print machine-oriented child output without adding terminal decoration."""
+    print(strip_ansi(message), end=end, flush=flush)
+
+
+def _shell_write_log(text: str) -> None:
+    """Write appended log text without bypassing the TTY styling boundary."""
+    sys.stdout.write(style_text(text))
+    sys.stdout.flush()
 
 
 def _help_line(line: str) -> str:
@@ -1015,7 +1030,7 @@ def _open_dashboard(path: Path) -> None:
         if callable(startfile):
             try:
                 startfile(str(path))
-                print(f"[DASHBOARD] Opened {path}")
+                _shell_print(f"[DASHBOARD] Opened {path}")
                 return
             except OSError:
                 pass
@@ -1040,11 +1055,11 @@ def _open_dashboard(path: Path) -> None:
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
-            print(f"[DASHBOARD] Opened {path}")
+            _shell_print(f"[DASHBOARD] Opened {path}")
             return
         except OSError:
             continue
-    print(f"[DASHBOARD] Ready: {path} (open it manually; no desktop opener found)")
+    _shell_print(f"[DASHBOARD] Ready: {path} (open it manually; no desktop opener found)")
 
 
 def _display_command(argv: list[str]) -> str:
@@ -1332,8 +1347,8 @@ class AgenticShell:
                   record_path, self.session_id, completion_callback=on_complete)
         self.jobs[number] = job
         self._write_record(job)
-        print(f"[JOB {number}] started (PID {process.pid})")
-        print(f"[JOB {number}] log: {log_path}")
+        _shell_print(f"[JOB {number}] started (PID {process.pid})")
+        _shell_print(f"[JOB {number}] log: {log_path}")
         if on_complete is not None:
             threading.Thread(
                 target=self._wait_for_completion,
@@ -1352,7 +1367,7 @@ class AgenticShell:
         try:
             job.completion_callback(code)
         except Exception as exc:  # desktop openers must not crash the shell
-            print(f"[DASHBOARD] Could not open dashboard: {exc}")
+            _shell_print(f"[DASHBOARD] Could not open dashboard: {exc}")
 
     def _refresh(self, job: Job) -> None:
         if job.finished is not None:
@@ -1375,7 +1390,7 @@ class AgenticShell:
         if not job.notified:
             job.notified = True
             state = "finished" if code == 0 else f"failed (exit {code})"
-            print(f"\n[JOB {job.number}] {state} after {job.elapsed}s; use /logs {job.number}")
+            _shell_print(f"\n[JOB {job.number}] {state} after {job.elapsed}s; use /logs {job.number}")
 
     def refresh(self) -> None:
         for job in self.jobs.values():
@@ -1415,7 +1430,10 @@ class AgenticShell:
             text=True, encoding="utf-8", errors="replace", check=False,
         )
         if result.stdout:
-            print(result.stdout.rstrip())
+            if "--json" in argv:
+                _shell_print_raw(result.stdout.rstrip())
+            else:
+                _shell_print(result.stdout.rstrip())
         if result.returncode:
             raise RuntimeError(f"command failed with exit {result.returncode}")
 
@@ -1438,7 +1456,7 @@ class AgenticShell:
         return data.get("task_source", "github") if isinstance(data, dict) else "github"
 
     def _capture_local_task(self) -> Path:
-        print("Paste the local task. Finish with a line containing /done; use /cancel to abort.")
+        _shell_print("Paste the local task. Finish with a line containing /done; use /cancel to abort.")
         lines: list[str] = []
         while True:
             try:
@@ -1455,7 +1473,7 @@ class AgenticShell:
             raise ValueError("local task must not be empty")
         path = self.session_dir / f"task-{uuid.uuid4().hex[:12]}.md"
         path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
-        print(f"Local task saved: {path}")
+        _shell_print(f"Local task saved: {path}")
         return path
 
     def run_issue(self, parts: list[str]) -> None:
@@ -1480,7 +1498,7 @@ class AgenticShell:
         if task_file and task_file_value is None:
             argv.extend(["--task-file", str(task_file)])
         if _has_job_flag(flags, "--publish"):
-            print("[PUBLISH] Running in the foreground so publication confirmation can be entered")
+            _shell_print("[PUBLISH] Running in the foreground so publication confirmation can be entered")
             self._run_foreground(argv)
         else:
             self._launch(argv)
@@ -1488,7 +1506,7 @@ class AgenticShell:
     def run_dashboard(self, parts: list[str]) -> None:
         dashboard = self.runner.with_name("agentic_dashboard.py")
         if not dashboard.is_file():
-            print(f"Dashboard script not found: {dashboard}")
+            _shell_print(f"Dashboard script not found: {dashboard}")
             return
         argv = [sys.executable, "-u", str(dashboard), "--repo", str(self.repo)]
         argv.extend(["--state-dir", str(self.state_dir)])
@@ -1505,7 +1523,7 @@ class AgenticShell:
             if code == 0:
                 _open_dashboard(output)
             else:
-                print(f"[DASHBOARD] Generation failed (exit {code}); use /logs for details")
+                _shell_print(f"[DASHBOARD] Generation failed (exit {code}); use /logs for details")
 
         self._launch(argv, on_complete=open_when_ready)
 
@@ -1517,14 +1535,14 @@ class AgenticShell:
         self.refresh()
         jobs = [job for job in self.jobs.values() if show_all or job.session_id == self.session_id]
         if not jobs:
-            print("No matching jobs. Use /ps --all to include previous shell sessions.")
+            _shell_print("No matching jobs. Use /ps --all to include previous shell sessions.")
             return
-        print("ID  STATUS      PID     AGE  SESSION      COMMAND")
+        _shell_print("ID  STATUS      PID     AGE  SESSION      COMMAND")
         states = [(job, job.running) for job in jobs]
         for job, running in sorted(states, key=lambda item: (not item[1], item[0].pid, item[0].number)):
             status = "RUNNING" if running else f"EXIT {job.exit_code if job.exit_code not in (None, -1) else '?'}"
             session = "current" if job.session_id == self.session_id else job.session_id[:8]
-            print(f"{job.number:<3} {status:<10} {job.pid:<7} {job.elapsed:>3}s  {session:<8} {_display_command(job.argv)}")
+            _shell_print(f"{job.number:<3} {status:<10} {job.pid:<7} {job.elapsed:>3}s  {session:<8} {_display_command(job.argv)}")
 
     def show_logs(self, parts: list[str]) -> None:
         if len(parts) < 2 or not parts[1].isdigit():
@@ -1542,13 +1560,13 @@ class AgenticShell:
         if len(parts) == 3:
             lines = min(int(parts[2]), 500)
         self._refresh(job)
-        print(f"--- job {job.number}: {_display_command(job.argv)} ---")
+        _shell_print(f"--- job {job.number}: {_display_command(job.argv)} ---")
         if job.running:
-            print("--- following live output; press Ctrl-C to stop following ---")
+            _shell_print("--- following live output; press Ctrl-C to stop following ---")
             self._follow_log(job, lines)
         else:
-            print(_tail(job.log_path, lines))
-        print(f"--- end; full log: {job.log_path} ---")
+            _shell_print(_tail(job.log_path, lines))
+        _shell_print(f"--- end; full log: {job.log_path} ---")
 
     def _follow_log(self, job: Job, lines: int) -> None:
         """Print a running job's existing tail and stream appended output."""
@@ -1559,7 +1577,7 @@ class AgenticShell:
                 initial_start = max(0, initial_end - 200_000)
                 stream.seek(initial_start)
                 initial = stream.read(initial_end - initial_start)
-                print(_tail_from_text(initial, lines))
+                _shell_print(_tail_from_text(initial, lines))
                 # Keep the position at the end of the initial snapshot rather
                 # than seeking to the current EOF, so a concurrent write is
                 # still included in the first live read.
@@ -1569,8 +1587,7 @@ class AgenticShell:
                     self._refresh(job)
                     chunk = stream.read()
                     if chunk:
-                        sys.stdout.write(chunk)
-                        sys.stdout.flush()
+                        _shell_write_log(chunk)
                     if not job.running:
                         break
                     time.sleep(0.1)
@@ -1580,12 +1597,11 @@ class AgenticShell:
                 self._refresh(job)
                 chunk = stream.read()
                 if chunk:
-                    sys.stdout.write(chunk)
-                    sys.stdout.flush()
+                    _shell_write_log(chunk)
         except KeyboardInterrupt:
-            print("\n--- live output follow stopped; job continues running ---")
+            _shell_print("\n--- live output follow stopped; job continues running ---")
         except OSError as exc:
-            print(f"Could not read {job.log_path}: {exc}")
+            _shell_print(f"Could not read {job.log_path}: {exc}")
 
     def _request_stop(self, job: Job) -> bool:
         """Request termination for one running job and report the result."""
@@ -1602,7 +1618,7 @@ class AgenticShell:
                 job.process.terminate()
             else:
                 os.kill(job.pid, signal.SIGTERM)
-        print(f"[JOB {job.number}] stop requested")
+        _shell_print(f"[JOB {job.number}] stop requested")
         return True
 
     def stop(self, parts: list[str]) -> None:
@@ -1611,15 +1627,15 @@ class AgenticShell:
         if parts[1] == "--all":
             requested = sum(self._request_stop(job) for job in self.jobs.values())
             if requested == 0:
-                print("[STOP] no running jobs")
+                _shell_print("[STOP] no running jobs")
             else:
-                print(f"[STOP] stop requested for {requested} job(s)")
+                _shell_print(f"[STOP] stop requested for {requested} job(s)")
             return
         job = self.jobs.get(int(parts[1]))
         if job is None:
             raise ValueError(f"unknown job: {parts[1]}")
         if not self._request_stop(job):
-            print(f"[JOB {job.number}] already finished with exit {job.exit_code}")
+            _shell_print(f"[JOB {job.number}] already finished with exit {job.exit_code}")
 
     def show_status(self, parts: list[str]) -> None:
         if len(parts) > 2 or (len(parts) == 2 and parts[1] != "--json"):
@@ -1631,7 +1647,10 @@ class AgenticShell:
             argv, cwd=self.repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace", check=False,
         )
-        print(result.stdout.rstrip())
+        if len(parts) == 2:
+            _shell_print_raw(result.stdout.rstrip())
+        else:
+            _shell_print(result.stdout.rstrip())
         if result.returncode:
             raise RuntimeError(f"status command failed with exit {result.returncode}")
 
@@ -1643,7 +1662,7 @@ class AgenticShell:
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace", check=False,
         )
-        print(result.stdout.rstrip())
+        _shell_print(result.stdout.rstrip())
         if result.returncode:
             raise RuntimeError(f"list command failed with exit {result.returncode}")
 
@@ -1697,12 +1716,12 @@ class AgenticShell:
         try:
             parts = shlex.split(line)
         except ValueError as exc:
-            print(f"Input error: {exc}")
+            _shell_print(f"Input error: {exc}")
             return True
         if not parts:
             return True
         if not parts[0].startswith("/"):
-            print("Commands must start with '/'. Use /help for available commands.")
+            _shell_print("Commands must start with '/'. Use /help for available commands.")
             return True
         command = parts[0].lower()
         try:
@@ -1735,9 +1754,9 @@ class AgenticShell:
             elif command in {"/quit", "/exit"}:
                 return False
             else:
-                print(f"Unknown command: {command}. Use /help.")
+                _shell_print(f"Unknown command: {command}. Use /help.")
         except (OSError, ValueError, RuntimeError) as exc:
-            print(f"Error: {exc}")
+            _shell_print(f"Error: {exc}")
         return True
 
     def run(self) -> int:
@@ -1767,8 +1786,8 @@ class AgenticShell:
         running = [job.number for job in self.jobs.values()
                    if job.running and job.session_id == self.session_id]
         if running:
-            print(f"Leaving shell; jobs still running: {', '.join(map(str, running))}")
-            print("Their logs and job records remain in the session directory; use /ps --all later.")
+            _shell_print(f"Leaving shell; jobs still running: {', '.join(map(str, running))}")
+            _shell_print("Their logs and job records remain in the session directory; use /ps --all later.")
         return 0
 
 

@@ -69,6 +69,7 @@ from agentic_execution import (
     run_codex,
     streamed_command,
 )
+from agentic_output import style_text
 from agentic_openrouter import (
     run_openrouter,
 )
@@ -87,7 +88,7 @@ from agentic_telemetry import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.19"
+__version__ = "1.1.20"
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 INSTRUCTION_CONTEXT_CHARS = _INSTRUCTION_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module
@@ -97,6 +98,11 @@ DEFAULT_SECURITY_MODE = _agentic_config.DEFAULT_SECURITY_MODE
 
 class NoCodeChangesError(RuntimeError):
     """Signal that validation passed but the developer produced no patch."""
+
+
+def _status_print(message: Any, *, file: Any = None, flush: bool = False) -> None:
+    """Print human-facing status with TTY-only styling."""
+    _console_print(style_text(message, file), file=file, flush=flush)
 
 
 PROVIDER_SANDBOX_ENV = _agentic_config.PROVIDER_SANDBOX_ENV
@@ -472,9 +478,9 @@ def runs_for_task(repo: Path, task_key: str) -> list[Run]:
 def choose_existing(runs: list[Run]) -> Run:
     if len(runs) == 1:
         return runs[0]
-    print("\nMultiple worktrees exist for this issue:")
+    _status_print("\nMultiple worktrees exist for this issue:")
     for idx, run in enumerate(runs, 1):
-        print(f" {idx}. {run.branch}  ({run.worktree})")
+        _status_print(f" {idx}. {run.branch}  ({run.worktree})")
     choice = input("Resume which number? ").strip()
     if not choice.isdigit() or not 1 <= int(choice) <= len(runs):
         raise RuntimeError("Invalid worktree selection")
@@ -495,9 +501,9 @@ def create_worktree(repo: Path, base: str, issue_number: int,
         worktree = parent / f"issue-{issue_number}-{ident}"
         git(repo, "worktree", "add", "-b", branch, str(worktree), f"origin/{base}")
     if relative_paths:
-        print("[GIT] Using relative worktree paths for WSL/Windows compatibility")
+        _status_print("[GIT] Using relative worktree paths for WSL/Windows compatibility")
     else:
-        print("[GIT] Relative worktree paths unavailable; using absolute paths")
+        _status_print("[GIT] Relative worktree paths unavailable; using absolute paths")
     return Run(issue_number, branch, worktree.resolve())
 
 
@@ -522,9 +528,9 @@ def create_local_worktree(repo: Path, base: str, issue: Issue,
         worktree = parent / f"task-{slug}-{issue.task_key}{ident}"
         git(repo, "worktree", "add", "-b", branch, str(worktree), f"origin/{base}")
     if relative_paths:
-        print("[GIT] Using relative worktree paths for WSL/Windows compatibility")
+        _status_print("[GIT] Using relative worktree paths for WSL/Windows compatibility")
     else:
-        print("[GIT] Relative worktree paths unavailable; using absolute paths")
+        _status_print("[GIT] Relative worktree paths unavailable; using absolute paths")
     return Run(None, branch, worktree.resolve(), issue.task_key)
 
 
@@ -655,8 +661,8 @@ def record_manual_approval(run: Run, issue: Issue, base: str, config: dict[str, 
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
-    print(f"[MANUAL] Marked complete: {summary.strip() or '(patch recorded)'}")
-    print(f"[MANUAL] Approval record: {path}")
+    _status_print(f"[MANUAL] Marked complete: {summary.strip() or '(patch recorded)'}")
+    _status_print(f"[MANUAL] Approval record: {path}")
     return approval
 
 
@@ -835,10 +841,10 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
     for argv in test_commands:
         if deadline is not None and time.monotonic() >= deadline:
             report = "\n\n".join(results) + "\nTask deadline reached before the next test command"
-            print("[TESTS] Overall task deadline reached", flush=True)
+            _status_print("[TESTS] Overall task deadline reached", flush=True)
             return False, report.strip()
         display_command = " ".join(argv)
-        print(f"[TESTS] Running: {display_command}", flush=True)
+        _status_print(f"[TESTS] Running: {display_command}", flush=True)
         log = next_log(folder, "test-command") if folder else (Path(tempfile.gettempdir()) / f"agentic-tests-{os.getpid()}.log")
         result = streamed_command(argv, worktree, label="TESTS", log_file=log,
                                   timeout=_remaining_timeout(deadline, timeout),
@@ -846,12 +852,12 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
                                   metrics_folder=folder)
         results.append(f"$ {display_command}\n{result.stdout[-6000:]}")
         if result.returncode:
-            print(f"[TESTS] FAILED (exit {result.returncode})", flush=True)
+            _status_print(f"[TESTS] FAILED (exit {result.returncode})", flush=True)
             return False, "\n\n".join(results)
-        print("[TESTS] PASSED", flush=True)
+        _status_print("[TESTS] PASSED", flush=True)
     if deadline is not None and time.monotonic() >= deadline:
         report = "\n\n".join(results) + "\nTask deadline reached before git diff --check"
-        print("[TESTS] Overall task deadline reached", flush=True)
+        _status_print("[TESTS] Overall task deadline reached", flush=True)
         return False, report.strip()
     try:
         diff_check = command(
@@ -861,9 +867,9 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
     except RuntimeError as exc:
         return False, "\n\n".join(results) + f"\ngit diff --check failed: {exc}"
     if diff_check.returncode:
-        print("[TESTS] git diff --check FAILED", flush=True)
+        _status_print("[TESTS] git diff --check FAILED", flush=True)
         return False, "\n\n".join(results) + "\ngit diff --check failed"
-    print("[TESTS] All configured checks passed", flush=True)
+    _status_print("[TESTS] All configured checks passed", flush=True)
     return True, "\n\n".join(results)
 
 
@@ -1037,7 +1043,7 @@ Make summary a concise handoff, and
 make findings an ordered array of concise, actionable observations. Include file
 paths and test names when they support the observation.
 """
-    print(f"[INVESTIGATION] Launching independent read-only {provider} process")
+    _status_print(f"[INVESTIGATION] Launching independent read-only {provider} process")
     run_kwargs: dict[str, Any] = {
         "model": model, "reasoning_effort": reasoning_effort, "timeout": timeout,
     }
@@ -1100,17 +1106,17 @@ def _latest_investigation(folder: Path, issue: Issue) -> dict[str, Any] | None:
 
 
 def print_investigation_summary(feedback: dict[str, Any]) -> None:
-    _console_print("[INVESTIGATION] Feedback recorded for the developer")
+    _status_print("[INVESTIGATION] Feedback recorded for the developer")
     summary = str(feedback.get("summary", "")).strip()
     if summary:
-        _console_print(f"[INVESTIGATION] {_short(summary, 700)}")
+        _status_print(f"[INVESTIGATION] {_short(summary, 700)}")
     findings = feedback.get("findings", [])
     if isinstance(findings, list):
         bullet = _unicode_or_ascii("•", "-")
         for finding in findings[:5]:
-            _console_print(f"  {bullet} {_short(finding, 300)}")
+            _status_print(f"  {bullet} {_short(finding, 300)}")
         if len(findings) > 5:
-            _console_print(f"  {bullet} ... and {len(findings) - 5} more; see the investigation JSON log")
+            _status_print(f"  {bullet} ... and {len(findings) - 5} more; see the investigation JSON log")
 
 
 def _run_investigation(run: Run, issue: Issue, config: dict[str, Any],
@@ -1118,7 +1124,7 @@ def _run_investigation(run: Run, issue: Issue, config: dict[str, Any],
     """Load a cached investigation or perform it, retrying tooling errors once."""
     cached = _latest_investigation(folder, issue)
     if cached is not None:
-        print("[INVESTIGATION] Using cached feedback")
+        _status_print("[INVESTIGATION] Using cached feedback")
         print_investigation_summary(cached)
         return cached
 
@@ -1136,7 +1142,7 @@ def _run_investigation(run: Run, issue: Issue, config: dict[str, Any],
 
     verdict = run_once()
     if verdict.get("_tooling_error"):
-        print("[INVESTIGATION] Investigator result was invalid; retrying read-only investigation")
+        _status_print("[INVESTIGATION] Investigator result was invalid; retrying read-only investigation")
         verdict = run_once()
     if verdict.get("_tooling_error"):
         raise RuntimeError(
@@ -1221,7 +1227,7 @@ informational and does not itself approve the patch; reject when the available
 evidence shows a defect or when the missing validation prevents a reliable
 verdict.
 """
-    print(f"[REVIEW] Launching independent read-only {provider} process")
+    _status_print(f"[REVIEW] Launching independent read-only {provider} process")
     run_kwargs: dict[str, Any] = {
         "model": model, "reasoning_effort": reasoning_effort, "timeout": timeout,
     }
@@ -1435,10 +1441,10 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
     )
     next_log(folder, "tests").write_text(report, encoding="utf-8")
     if not passed:
-        print("[TESTS] Failed\n" + report[-2500:])
+        _status_print("[TESTS] Failed\n" + report[-2500:])
         return False, report, {}, "", ""
     base_sha, digest, summary = prepare_patch(run.worktree, base, config["max_files"])
-    print("[PATCH] Proposed changes:\n" + summary)
+    _status_print("[PATCH] Proposed changes:\n" + summary)
     verdict = review(
         run.worktree, issue, folder, base_sha, test_report=report,
         developer_report=developer_report,
@@ -1452,7 +1458,7 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
         sandbox=config.get("sandbox"),
     )
     if verdict.get("_tooling_error"):
-        print("[REVIEW] Reviewer result was invalid; retrying read-only review")
+        _status_print("[REVIEW] Reviewer result was invalid; retrying read-only review")
         verdict = review(
             run.worktree, issue, folder, base_sha, test_report=report,
             developer_report=developer_report,
@@ -1496,7 +1502,7 @@ def validate_publication_approval(run: Run, issue: Issue, base: str,
     base_sha, digest, summary = prepare_patch(run.worktree, base, config["max_files"])
     if base_sha != approval.get("base_sha") or digest != approval.get("patch_digest"):
         raise RuntimeError("Patch changed since approval; rerun development or review before publishing")
-    print("[PATCH] Proposed changes:\n" + summary)
+    _status_print("[PATCH] Proposed changes:\n" + summary)
     return base_sha, digest, summary
 
 
@@ -1571,7 +1577,7 @@ def publish(run: Run, issue: Issue, github_repo: str, base: str,
         raise RuntimeError("Issue is closed; publication blocked")
     prs = check_existing_pr(run.worktree, github_repo, run.branch)
     if prs:
-        print(f"Existing PR for this branch: {prs[0]['url']}. No duplicate PR created.")
+        _status_print(f"Existing PR for this branch: {prs[0]['url']}. No duplicate PR created.")
         return
     approval = dict(manual_approval) if manual_approval is not None else load_publication_approval(folder)
     if approval is not None and manual_approval is not None:
@@ -1585,7 +1591,7 @@ def publish(run: Run, issue: Issue, github_repo: str, base: str,
     )
     confirm = input("\nCommit, PUSH and open a DRAFT PR? Type 'publish' to approve: ").strip()
     if confirm != "publish":
-        print("Publication cancelled; branch/worktree kept intact")
+        _status_print("Publication cancelled; branch/worktree kept intact")
         return
     # A human confirmation is not permission to publish a different patch.
     _, new_digest, _ = prepare_patch(run.worktree, base, config["max_files"])
@@ -1621,7 +1627,7 @@ def publish(run: Run, issue: Issue, github_repo: str, base: str,
         "--head", run.branch, "--title", f"{title_prefix}: {issue.title[:110]}",
         "--body", body,
     ], run.worktree)
-    print("Draft PR: " + result.stdout.strip())
+    _status_print("Draft PR: " + result.stdout.strip())
 
 
 def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: Path,
@@ -1643,7 +1649,7 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
         if current_digest == blocked["patch_digest"]:
             if blocked.get("kind") == "no-code-changes":
                 log_hint = blocked.get("logs_path") or str(folder)
-                print(
+                _status_print(
                     "[BLOCKED] Developer reported a blocker without producing code changes; "
                     f"resolve it and see the run logs at {log_hint}"
                 )
@@ -1673,9 +1679,9 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
             ]
     for attempt in range(config["max_retries"] + 1):
         if deadline is not None and time.monotonic() >= deadline:
-            print("[TIMEOUT] Overall task deadline reached")
+            _status_print("[TIMEOUT] Overall task deadline reached")
             return False
-        print(f"\n[DEVELOPER] Working on {issue.reference}, attempt {attempt + 1}")
+        _status_print(f"\n[DEVELOPER] Working on {issue.reference}, attempt {attempt + 1}")
         output = next_log(folder, "developer")
         agent_kwargs: dict[str, Any] = {
             "settings": config.get("developer_agent"),
@@ -1697,11 +1703,11 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
         if not ok:
             provider = config.get("developer_agent", {}).get("provider", "codex")
             feedback = f"{provider} invocation failed: {message[-3000:]}"
-            print(feedback[-1000:])
+            _status_print(feedback[-1000:])
             continue
         developer_report = message.strip()
         if developer_report:
-            _console_print("[DEVELOPER] Final response:\n" + developer_report[-3000:])
+            _status_print("[DEVELOPER] Final response:\n" + developer_report[-3000:])
         action_error = validate_developer_review_actions(
             developer_report, required_review_findings,
         )
@@ -1712,7 +1718,7 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
                 "Return one Finding/Action/Evidence entry for every prior review finding.\n"
                 f"Previous developer report:\n{_bounded_text(developer_report, REPORT_CONTEXT_CHARS) or '(no final response)'}"
             )
-            print(f"[RETRY] {action_error}")
+            _status_print(f"[RETRY] {action_error}")
             continue
         try:
             passed, test_output, verdict, digest, _ = verify_and_review(
@@ -1726,11 +1732,11 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
             developer_summary = _short(
                 developer_report or "No developer blocker summary was provided.", 1_200,
             )
-            _console_print(
+            _status_print(
                 "[BLOCKED] Checks passed, but the developer produced no code changes."
             )
-            _console_print(f"[BLOCKED] Developer blocker: {developer_summary}")
-            _console_print(f"[BLOCKED] Run logs: {folder}")
+            _status_print(f"[BLOCKED] Developer blocker: {developer_summary}")
+            _status_print(f"[BLOCKED] Run logs: {folder}")
             print_run_summary(
                 run, "BLOCKED",
                 f"resolve the blocker and resume; see logs at {folder}",
@@ -1790,10 +1796,10 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
                     "Tests failed because of an environment or infrastructure problem; "
                     f"retries skipped.\n{test_output[-2500:]}"
                 )
-        print("[RETRY] Returning evidence to developer (if retries remain)")
+        _status_print("[RETRY] Returning evidence to developer (if retries remain)")
         # Preserve all files, only unstage to make subsequent git diff easier to inspect.
         git(run.worktree, "reset", "--quiet")
-    print(f"\nAttempts exhausted; worktree preserved: {run.worktree}")
+    _status_print(f"\nAttempts exhausted; worktree preserved: {run.worktree}")
     return False
 
 
@@ -1848,34 +1854,34 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
         "sandbox": sandbox,
     }
     if config_path.exists() and not force:
-        print(f"[INIT] Keeping existing {config_path}")
+        _status_print(f"[INIT] Keeping existing {config_path}")
     else:
         config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-        print(f"[INIT] Wrote {config_path}")
+        _status_print(f"[INIT] Wrote {config_path}")
     if _append_gitignore_entry(repo, AGENT_CONFIG_FILENAME):
-        print(f"[INIT] Added {AGENT_CONFIG_FILENAME} to {repo / '.gitignore'}")
+        _status_print(f"[INIT] Added {AGENT_CONFIG_FILENAME} to {repo / '.gitignore'}")
     agents_path = repo / AGENTS_FILENAME
     if create_agents:
         if agents_path.exists() and not force:
-            print(f"[INIT] Keeping existing {agents_path}")
+            _status_print(f"[INIT] Keeping existing {agents_path}")
         else:
             agents_path.write_text(DEFAULT_AGENTS, encoding="utf-8")
-            print(f"[INIT] Wrote {agents_path}")
-    print(f"[INIT] {detection}: {' '.join(commands[0])}")
+            _status_print(f"[INIT] Wrote {agents_path}")
+    _status_print(f"[INIT] {detection}: {' '.join(commands[0])}")
     if commands == [["git", "diff", "--check"]]:
-        print("[INIT] Warning: replace the starter check with the project's real test/build commands")
-    print(f"[INIT] Providers: developer={provider}, reviewer={reviewer_provider}")
+        _status_print("[INIT] Warning: replace the starter check with the project's real test/build commands")
+    _status_print(f"[INIT] Providers: developer={provider}, reviewer={reviewer_provider}")
     if security_mode == "isolated":
-        print(
+        _status_print(
             "[INIT] Security mode: isolated; verify the Docker image, provider tools, "
             "credentials, and network policy with agentic doctor"
         )
     else:
-        print(
+        _status_print(
             "[INIT] Warning: trusted mode runs provider CLIs and checks with host "
             "account permissions; use --security-mode isolated for untrusted code"
         )
-    print("[INIT] Review agent_config.json before the first issue run")
+    _status_print("[INIT] Review agent_config.json before the first issue run")
     return 0
 
 
@@ -1922,34 +1928,34 @@ def cleanup(repo: Path, *, issue: int | None = None, all_runs: bool = False,
     if issue is not None:
         runs = [run for run in runs if run.issue_number == issue]
     if not runs:
-        print("No matching Agentic worktrees.")
+        _status_print("No matching Agentic worktrees.")
         return 0
     removed = 0
     for run in runs:
         dirty = bool(git(run.worktree, "status", "--porcelain", "--untracked-files=all", "--ignored"))
         folder = _run_log_folder(repo, run, state_dir)
         if dirty:
-            print(f"[SKIP] {run.branch}: worktree has uncommitted changes ({run.worktree})")
+            _status_print(f"[SKIP] {run.branch}: worktree has uncommitted changes ({run.worktree})")
             continue
         if not confirm:
-            print(f"[DRY RUN] would remove clean worktree: {run.worktree}")
+            _status_print(f"[DRY RUN] would remove clean worktree: {run.worktree}")
             if remove_logs:
-                print(f"[DRY RUN] would remove logs: {folder}")
+                _status_print(f"[DRY RUN] would remove logs: {folder}")
             continue
         try:
             git(repo, "worktree", "remove", str(run.worktree))
         except RuntimeError as exc:
-            print(f"[SKIP] {run.branch}: {exc}")
+            _status_print(f"[SKIP] {run.branch}: {exc}")
             continue
         if remove_logs and folder.is_dir():
             shutil.rmtree(folder)
-            print(f"[CLEAN] removed logs: {folder}")
-        print(f"[CLEAN] removed worktree: {run.worktree}")
+            _status_print(f"[CLEAN] removed logs: {folder}")
+        _status_print(f"[CLEAN] removed worktree: {run.worktree}")
         removed += 1
     if not confirm:
-        print("Nothing removed. Re-run with --yes after inspecting the list.")
+        _status_print("Nothing removed. Re-run with --yes after inspecting the list.")
     else:
-        print(f"Removed {removed} worktree(s); uncommitted work was preserved.")
+        _status_print(f"Removed {removed} worktree(s); uncommitted work was preserved.")
     return 0
 
 
@@ -1971,22 +1977,22 @@ def show_runs(repo: Path, *, json_output: bool = False) -> None:
         print(json.dumps([run_status_record(repo, run) for run in runs], indent=2))
         return
     if not runs:
-        print("No existing agent worktrees.")
+        _status_print("No existing agent worktrees.")
         return
     for run in runs:
         record = run_status_record(repo, run)
         label = (f"#{run.issue_number}" if run.issue_number is not None
                  else f"local:{(run.task_key or 'unknown')[:8]}")
-        print(f"{label:<16} {run.branch:<44} [{record['status']}] {run.worktree}")
+        _status_print(f"{label:<16} {run.branch:<44} [{record['status']}] {run.worktree}")
 
 
 def show_issues(repo: Path, issues: list[Issue]) -> None:
     ongoing = {r.issue_number for r in discover_runs(repo)}
     if not issues:
-        print("No open GitHub issues found.")
+        _status_print("No open GitHub issues found.")
     for issue in issues:
         marker = " [RESUME]" if issue.number in ongoing else ""
-        print(f"#{issue.number:<5} {issue.title[:75]}{marker}")
+        _status_print(f"#{issue.number:<5} {issue.title[:75]}{marker}")
 
 
 def select_issue(issues: list[Issue]) -> int:
@@ -2182,7 +2188,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
             refresh_base(repo, base)
             repaired = repair_relative_worktree(repo, run.worktree)
         if repaired:
-            print(f"[GIT] Repaired worktree metadata: {run.worktree}")
+            _status_print(f"[GIT] Repaired worktree metadata: {run.worktree}")
     else:
         if args.review or args.publish or args.mark_done:
             raise RuntimeError(
@@ -2205,7 +2211,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
     record_security_policy(folder, config)
     manual_approval = load_publication_approval(folder)
     print_run_header(issue, run, fresh)
-    print(
+    _status_print(
         f"Providers: developer={config['developer_agent']['provider']} "
         f"reviewer={config['reviewer_agent']['provider']}",
         flush=True,
@@ -2258,7 +2264,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
         if existing:
             raise RuntimeError(f"A PR already exists: {existing[0]['url']}. Review it instead of editing here")
     if fresh:
-        print("[BASELINE] Verifying untouched base before development")
+        _status_print("[BASELINE] Verifying untouched base before development")
         with worktree_lock(repo, run, state_dir):
             passed, report = run_tests(
                 run.worktree, test_commands, folder,
@@ -2271,7 +2277,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
     feedback_parts = [investigation_feedback(investigation)]
     resume_feedback = load_resume_feedback(folder) if not fresh else ""
     if resume_feedback:
-        print("[RESUME] Loaded previous review/test feedback for the developer")
+        _status_print("[RESUME] Loaded previous review/test feedback for the developer")
         feedback_parts.append(resume_feedback)
     with worktree_lock(repo, run, state_dir):
         completed = develop(
@@ -2362,7 +2368,7 @@ def main(argv: list[str] | None = None) -> int:
             return run_shell(Path(args.repo), Path(__file__).resolve(), config, state_dir=state_dir)
         return execute(args)
     except (RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        _status_print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
 
