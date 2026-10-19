@@ -836,7 +836,7 @@ class PureTests(unittest.TestCase):
                 'test_commands': [[
                     sys.executable, '-c',
                     'import os, sys; '
-                    'normal = lambda value: os.path.normcase(os.path.abspath(value)); '
+                    'normal = lambda value: os.path.normcase(os.path.realpath(os.path.abspath(value))); '
                     'sys.exit(0 if normal(os.getcwd()) == normal(sys.argv[1]) else 1)',
                     str(worktree),
                 ]],
@@ -908,8 +908,8 @@ class PureTests(unittest.TestCase):
 
             def fake_probe(argv, cwd, **kwargs):
                 if argv[:3] == ['git', 'rev-parse', '--git-common-dir']:
-                    same_root = os.path.normcase(os.path.abspath(os.fspath(cwd))) == os.path.normcase(
-                        os.path.abspath(os.fspath(root))
+                    same_root = os.path.normcase(os.path.realpath(os.path.abspath(os.fspath(cwd)))) == os.path.normcase(
+                        os.path.realpath(os.path.abspath(os.fspath(root)))
                     )
                     common = root / ('.git' if same_root else 'other.git')
                     return True, str(common)
