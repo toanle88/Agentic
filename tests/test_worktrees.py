@@ -388,6 +388,7 @@ class GitTest(unittest.TestCase):
             'test_commands': [['go', 'test', './...']],
             'max_files': None,
             'reviewer_agent': {'provider': 'claude'},
+            'system_prompt': 'Review against our project standards.',
         }
         patch_value = ('base-sha', 'digest', 'one file changed')
         invalid = {'_tooling_error': True, 'approved': False, 'summary': 'invalid', 'findings': []}
@@ -400,6 +401,7 @@ class GitTest(unittest.TestCase):
         self.assertTrue(result[0])
         self.assertEqual(review.call_count, 2)
         self.assertEqual(review.call_args.kwargs['agent'], config['reviewer_agent'])
+        self.assertEqual(review.call_args.kwargs['system_prompt'], config['system_prompt'])
         record.assert_called_once_with(folder, approved)
 
     def test_verify_and_review_stops_before_review_when_tests_fail(self):
@@ -597,6 +599,7 @@ class GitTest(unittest.TestCase):
         config_path.write_text(json.dumps({
             'task_source': 'local',
             'test_commands': [[sys.executable, '-c', 'print("ok")']],
+            'system_prompt': 'Prefer focused changes and regression tests.',
         }))
         args = agentic.build_parser().parse_args([
             '--repo', str(self.repo), '--config', str(config_path),
@@ -621,6 +624,10 @@ class GitTest(unittest.TestCase):
         self.assertIn('Valid local task', develop.call_args.kwargs['initial_feedback'])
         self.assertEqual(
             develop.call_args.kwargs['instruction'], 'Preserve the CSV header order',
+        )
+        self.assertEqual(
+            develop.call_args.kwargs['system_prompt'],
+            'Prefer focused changes and regression tests.',
         )
         run_folder = agentic.logs_path(
             self.repo, fake_run, Path(self.tmp.name) / 'agentic-state',

@@ -224,6 +224,7 @@ jobs. Use `/stop --all` to request termination for every running Agentic job.
 | `agentic` | Open the interactive background-job shell. |
 | `agentic --issue N` | Create or resume issue `N` in the foreground. |
 | `agentic --issue N --instruction "..."` | Preserve an optional per-run instruction for development and review. |
+| `system_prompt` in `agent_config.json` | Apply persistent, bounded project guidance to developer and reviewer prompts. |
 | `agentic --issue N --profile slow` | Run the fast checks plus configured slow checks. |
 | `agentic --issue N --review` | Re-run checks and review an existing worktree without coding. |
 | `agentic --issue N --mark-done [--reason "..."]` | Record explicit human completion for the current patch. |

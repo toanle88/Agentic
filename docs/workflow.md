@@ -114,6 +114,24 @@ If a resume omits `--instruction`, Agentic reuses the stored value. Supplying
 it again replaces the stored value; an empty value clears it. The interactive
 shell accepts the same option, for example `/run 119 --instruction "..."`.
 
+Persistent project guidance belongs in the target repository's
+`agent_config.json` as `system_prompt`. It is bounded, escaped, and included
+as actionable guidance in the developer prompt and as read-only review context:
+
+```json
+{
+  "system_prompt": "Follow our development standards. Prefer small focused changes and add tests for behavior changes."
+}
+```
+
+`system_prompt` is reread on each invocation, including resumes. The developer
+follows it when compatible with repository safety rules; the reviewer and
+investigator evaluate it without executing it. Repository safety rules,
+`AGENTS.md`, and read-only review boundaries are authoritative over both prompt
+values. Unlike the per-run
+instruction, the configured prompt is not stored in run metadata or shown in
+the dashboard.
+
 Agentic preserves code, commits, test output, reviewer output, and structured evidence after failures, timeouts, rejected reviews, and exhausted retries. On resume, the latest failed test and review evidence is supplied to the developer as untrusted feedback, regardless of provider.
 
 If the same rejected review is returned without a changed proposed patch,

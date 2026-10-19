@@ -172,6 +172,7 @@ def load_config(path: Path) -> dict[str, Any]:
     security_mode = data.get("security_mode", DEFAULT_SECURITY_MODE)
     codex_model = data.get("codex_model")
     reasoning_effort = data.get("codex_reasoning_effort")
+    system_prompt = data.get("system_prompt")
     if type(retries) is not int or not 0 <= retries <= 3:
         raise ValueError("max_retries must be an integer from 0 to 3")
     if max_files is not None and (type(max_files) is not int or not 1 <= max_files <= 100):
@@ -189,6 +190,10 @@ def load_config(path: Path) -> dict[str, Any]:
     for name, value in (("codex_model", codex_model), ("codex_reasoning_effort", reasoning_effort)):
         if value is not None and (not isinstance(value, str) or not value.strip()):
             raise ValueError(f"{name} must be a nonempty string or null")
+    if system_prompt is not None and (
+        not isinstance(system_prompt, str) or not system_prompt.strip()
+    ):
+        raise ValueError("system_prompt must be a nonempty string or null")
     developer_agent = _agent_settings_from_config(
         data, "developer", legacy_provider="codex", legacy_model=codex_model,
         legacy_reasoning=reasoning_effort, legacy_timeout=codex_timeout,
@@ -200,7 +205,7 @@ def load_config(path: Path) -> dict[str, Any]:
     sandbox = validate_sandbox(data.get("sandbox"))
     if security_mode == "isolated" and not sandbox["enabled"]:
         raise ValueError("security_mode 'isolated' requires sandbox.enabled=true")
-    return {
+    result = {
         "task_source": task_source,
         "test_commands": commands,
         "slow_test_commands": slow_commands,
@@ -227,6 +232,12 @@ def load_config(path: Path) -> dict[str, Any]:
         "reviewer_agent": reviewer_agent.as_dict(),
         "sandbox": sandbox,
     }
+    # Keep the returned shape of older configurations unchanged. An explicit
+    # null remains distinguishable from an omitted setting for callers that
+    # inspect the normalized configuration.
+    if "system_prompt" in data:
+        result["system_prompt"] = system_prompt
+    return result
 
 
 def preflight_agent_settings(*settings: dict[str, Any],
