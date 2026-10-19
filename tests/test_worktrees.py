@@ -425,6 +425,83 @@ class GitTest(unittest.TestCase):
                 agentic.develop(run, issue, 'main', config, folder)
         run_agent.assert_called_once()
 
+    def test_develop_blocks_repeated_review_without_patch_change(self):
+        run = agentic.create_worktree(self.repo, 'main', 35)
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(35, 'Repeated review blocker', '')
+        config = {
+            'max_retries': 3,
+            'max_files': None,
+            'developer_agent': {'provider': 'codex'},
+        }
+        developer_reports = [
+            'implemented',
+            'implemented\nReview finding actions:\n'
+            '- Finding: Wire the production adapter\n'
+            '  Action: blocked\n'
+            '  Evidence: adapter is unavailable in this slice',
+        ]
+        review = (
+            False, 'tests passed', {
+                'approved': False,
+                'summary': 'Production adapter is unavailable',
+                'findings': ['Wire the production adapter'],
+            }, 'same-digest', 'base',
+        )
+        with (patch('agentic.run_agent', side_effect=[
+                  (True, developer_reports[0]), (True, developer_reports[1]),
+              ]) as run_agent,
+              patch('agentic.verify_and_review', return_value=review)):
+            self.assertTrue(agentic.develop(run, issue, 'main', config, folder))
+        self.assertEqual(run_agent.call_count, 2)
+        blocked = json.loads((folder / 'blocked.json').read_text())
+        self.assertEqual(blocked['status'], 'blocked')
+        self.assertEqual(blocked['patch_digest'], 'same-digest')
+
+        with (patch('agentic.prepare_patch', return_value=('base', 'same-digest', 'summary')),
+              patch('agentic.run_agent') as resumed_agent):
+            self.assertTrue(agentic.develop(run, issue, 'main', config, folder))
+        resumed_agent.assert_not_called()
+
+    def test_develop_blocks_repeated_finding_after_patch_change(self):
+        run = agentic.create_worktree(self.repo, 'main', 36)
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(36, 'Repeated finding after edit', '')
+        config = {
+            'max_retries': 3,
+            'max_files': None,
+            'developer_agent': {'provider': 'codex'},
+        }
+        reports = [
+            'implemented',
+            'implemented\nReview finding actions:\n'
+            '- Finding: Wire the production adapter\n'
+            '  Action: skipped\n'
+            '  Evidence: only a cosmetic edit was possible',
+        ]
+        reviews = [
+            (False, 'tests passed', {
+                'approved': False,
+                'summary': 'Production adapter is unavailable',
+                'findings': ['Wire the production adapter'],
+            }, 'digest-one', 'base'),
+            (False, 'tests passed', {
+                'approved': False,
+                'summary': 'Production adapter is unavailable',
+                'findings': ['Wire the production adapter'],
+                '_repeated_findings': [{'fingerprint': 'same'}],
+            }, 'digest-two', 'base'),
+        ]
+        with (patch('agentic.run_agent', side_effect=[
+                  (True, reports[0]), (True, reports[1]),
+              ]) as run_agent,
+              patch('agentic.verify_and_review', side_effect=reviews)):
+            self.assertTrue(agentic.develop(run, issue, 'main', config, folder))
+        self.assertEqual(run_agent.call_count, 2)
+        blocked = json.loads((folder / 'blocked.json').read_text())
+        self.assertEqual(blocked['status'], 'blocked')
+        self.assertEqual(blocked['patch_digest'], 'digest-two')
+
     def test_offline_fake_provider_retries_failed_tests_and_approves_review(self):
         issue = agentic.Issue.from_local_text("Add a generated feature file\n")
         run = agentic.create_local_worktree(self.repo, "main", issue)

@@ -90,6 +90,12 @@ agentic --issue 119 --profile slow
 
 Agentic preserves code, commits, test output, reviewer output, and structured evidence after failures, timeouts, rejected reviews, and exhausted retries. On resume, the latest failed test and review evidence is supplied to the developer as untrusted feedback, regardless of provider.
 
+If the same rejected review is returned without a changed proposed patch,
+Agentic marks the run `blocked`, preserves the worktree and evidence, and skips
+future developer attempts for that unchanged patch. A later resume is allowed
+only after the proposed patch changes. A blocked run is not approved and cannot
+be published.
+
 Use `--new` only when you intentionally want a second worktree:
 
 ```bash

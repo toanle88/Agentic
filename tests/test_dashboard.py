@@ -82,6 +82,20 @@ class DashboardTests(unittest.TestCase):
             self.assertIn("not valid JSON", snapshot["review"]["summary"])
             self.assertEqual(snapshot["review"]["findings"], [])
 
+    def test_blocked_run_is_visible_as_blocked(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            run = root / "agent-issue-35-deadbeef"
+            run.mkdir(parents=True)
+            (run / "blocked.json").write_text(json.dumps({
+                "status": "blocked",
+                "reason": "Repeated review blocker with no patch change",
+                "patch_digest": "same",
+            }))
+            snapshot = agentic_dashboard.collect_runs(root)[0]
+            self.assertEqual(snapshot["status"], "blocked")
+            self.assertEqual(snapshot["blocked"]["status"], "blocked")
+
     def test_investigation_feedback_is_visible_before_development(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / ".demo-agent-runs"

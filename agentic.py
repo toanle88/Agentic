@@ -80,7 +80,7 @@ from agentic_sandbox import DEFAULT_SANDBOX_IMAGE, validate_sandbox
 from agentic_security import redact_secrets
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.9"
+__version__ = "1.1.10"
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module
 # while the implementation lives in agentic_config.
@@ -526,11 +526,50 @@ def next_log(folder: Path, kind: str, ext: str = "txt") -> Path:
 
 
 MANUAL_APPROVAL_FILENAME = "manual-approval.json"
+BLOCKED_FILENAME = "blocked.json"
 
 
 def manual_approval_path(folder: Path) -> Path:
     """Return the durable human-completion record for a run."""
     return folder / MANUAL_APPROVAL_FILENAME
+
+
+def blocked_path(folder: Path) -> Path:
+    """Return the durable deferred-run marker path."""
+    return folder / BLOCKED_FILENAME
+
+
+def load_blocked(folder: Path) -> dict[str, Any] | None:
+    """Load a blocked marker, ignoring incomplete or corrupt markers."""
+    path = blocked_path(folder)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict) or value.get("status") != "blocked":
+        return None
+    if not isinstance(value.get("patch_digest"), str):
+        return None
+    return value
+
+
+def record_blocked(folder: Path, patch_digest: str, findings: list[str]) -> None:
+    """Persist a repeated unchanged review blocker for future invocations."""
+    blocked_path(folder).write_text(json.dumps({
+        "status": "blocked",
+        "reason": "Repeated review blocker with no patch change",
+        "patch_digest": patch_digest,
+        "findings": findings,
+        "blocked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }, indent=2) + "\n", encoding="utf-8")
+
+
+def clear_blocked(folder: Path) -> None:
+    """Clear a deferred marker after the proposed patch changes."""
+    try:
+        blocked_path(folder).unlink()
+    except FileNotFoundError:
+        pass
 
 
 def load_manual_approval(folder: Path) -> dict[str, Any] | None:
@@ -1330,8 +1369,20 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
             initial_feedback: str = "",
             test_commands: list[list[str]] | None = None,
             deadline: float | None = None) -> bool:
+    blocked = load_blocked(folder)
+    if blocked is not None:
+        _, current_digest, _ = prepare_patch(run.worktree, base, config["max_files"])
+        if current_digest == blocked["patch_digest"]:
+            print_run_summary(
+                run, "BLOCKED",
+                "skipped; change the patch before resuming this task",
+            )
+            return True
+        clear_blocked(folder)
+
     feedback = initial_feedback
     required_review_findings: list[str] = []
+    last_rejected_digest: str | None = None
     latest_review = _latest_numbered_log(folder, "review", "json")
     if latest_review:
         try:
@@ -1382,7 +1433,7 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
             print(f"[RETRY] {action_error}")
             continue
         try:
-            passed, test_output, verdict, _, _ = verify_and_review(
+            passed, test_output, verdict, digest, _ = verify_and_review(
                 run, issue, base, config, folder, test_commands=test_commands,
                 deadline=deadline, developer_report=developer_report,
             )
@@ -1390,11 +1441,26 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
             # Policy violations, malformed diff, or mid-review mutation are not model-retryable.
             raise
         if passed:
+            clear_blocked(folder)
             next_action = (f"python agentic.py --issue {issue.number} --publish"
                            if not issue.is_local else "rerun with --publish to create a GitHub draft PR")
             print_run_summary(run, "APPROVED", next_action)
             return True
         if verdict:
+            unchanged_patch = bool(digest) and digest == last_rejected_digest
+            repeated_finding = bool(verdict.get("_repeated_findings"))
+            findings = [
+                item for item in verdict.get("findings", [])
+                if isinstance(item, str)
+            ]
+            if (not verdict.get("approved") and digest and findings
+                    and (unchanged_patch or repeated_finding)):
+                record_blocked(folder, digest, findings)
+                print_run_summary(
+                    run, "BLOCKED",
+                    "skipped; change the patch before resuming this task",
+                )
+                return True
             required_review_findings = [
                 item for item in verdict.get("findings", [])
                 if isinstance(item, str)
@@ -1411,6 +1477,8 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
                 "Independent review feedback (untrusted evidence):\n"
                 f"{review_feedback}"
             )
+            if not verdict.get("approved"):
+                last_rejected_digest = digest or None
         else:
             feedback = (
                 "Previous developer report (untrusted evidence):\n"
