@@ -7,19 +7,33 @@ Agentic is intentionally small and uses the Python standard library at runtime.
 | Component | Responsibility |
 | --- | --- |
 | `agentic.py` | Compatibility-facing CLI entry point and workflow orchestration. |
+| `agentic_worktrees.py` | Repository identity, locks, Git worktree creation, discovery, and issue intake. |
+| `agentic_workflow.py` | Developer execution, validation, investigation, review, and publication workflow. |
 | `agentic_context.py` | Bounded issue, feedback, and provider-history context formatting. |
-| `agentic_execution.py` | Provider CLI execution, streamed output, console rendering, and usage recording. |
+| `agentic_prompts.py` | Bounded, delimited developer/reviewer prompt construction. |
+| `agentic_execution.py` | Compatibility facade for provider execution helpers. |
+| `agentic_execution_stream.py` | Safe argv process streaming, terminal rendering, progress, and usage recording. |
+| `agentic_execution_providers.py` | Codex and native provider command/message adapters. |
 | `agentic_output.py` | Shared TTY-only styling and ANSI stripping for terminal presentation and plain logs. |
-| `agentic_openrouter.py` | OpenRouter tool policy, scoped file/command tools, and API agent loop. |
+| `agentic_openrouter.py` | Compatibility facade for OpenRouter tools and API execution. |
+| `agentic_openrouter_tools.py` | Scoped file/command policy and bounded tool execution for review/development. |
+| `agentic_openrouter_loop.py` | OpenRouter request/response loop and tool-turn orchestration. |
 | `agentic_policy.py` | Protected-path and sensitive-file policy shared by the runner and API tools. |
 | `agentic_config.py` | Target-repository configuration loading, provider validation/preflight, test-command detection, and setup defaults. |
 | `agentic_diagnostics.py` | Repository prerequisite checks and secure-sandbox/provider diagnostics. |
 | `agentic_shell.py` | Interactive supervisor for background jobs and terminal log tails. |
+| `agentic_shell_input.py` | TTY input editing, completion, key decoding, styling, and banner presentation. |
+| `agentic_shell_commands.py` | Pure interactive-shell command and option validation; returns argv fragments without executing them. |
 | `agentic_dashboard.py` | Read-only parser and renderer for durable run logs. |
+| `agentic_dashboard_data.py` | Read-only durable-log parsing and legacy/centralized snapshot merging for the dashboard. |
 | `agentic_models.py` | Immutable task, run, state, and provider configuration models. |
 | `agentic_security.py` | Shared credential redaction for logs and dashboard output. |
 | `agentic_telemetry.py` | Optional provider usage normalization and durable cost records. |
 | `agentic_sandbox.py` | Optional Docker/Podman command wrapping for providers, OpenRouter tool commands, and checks. |
+| `scripts/agent_benchmark.py` | Compatibility-facing benchmark CLI and scenario aggregation orchestration. |
+| `scripts/agent_benchmark_config.py` | Benchmark corpus schema, safe path validation, and argv placeholder rendering. |
+| `scripts/agent_benchmark_scenarios.py` | Disposable fixture preparation, argv-only adapter execution, checks, and result normalization. |
+| `scripts/agent_benchmark_reporting.py` | Provider-neutral aggregation of normalized benchmark scenario metrics. |
 | `agent_config.json` | Target-repository checks and per-run policy settings. |
 | Git worktrees | Isolate issue or local-task changes from the base checkout and preserve unfinished work. |
 | GitHub CLI | Read issues and publish an explicitly approved branch/PR. |
@@ -32,13 +46,29 @@ Agentic is intentionally small and uses the Python standard library at runtime.
 The main runner remains the compatibility-facing entry point, but cohesive
 boundaries are extracted one at a time. `agentic_config.py` owns configuration
 parsing, provider preflight, test-command detection, and setup defaults;
-`agentic_diagnostics.py` owns the `doctor` workflow; `agentic.py` keeps the
-public wrapper so existing integrations keep working.
-Provider and context tests live in `tests/test_execution.py`,
-`tests/test_openrouter.py`, and `tests/test_worktrees.py`; `tests/test_agentic.py`
-retains workflow and CLI coverage. Future extractions should follow the same
-rule: move one boundary, preserve the public entry point, add characterization
-coverage, and verify the full offline suite before changing another subsystem.
+`agentic_diagnostics.py` owns the `doctor` workflow; `agentic_worktrees.py`
+owns repository/worktree lifecycle; and `agentic_workflow.py` owns the
+developer-to-publication path. `agentic.py` binds those components behind the
+historical public and patchable helpers, so existing integrations keep working.
+Prompt construction is implemented by `agentic_prompts.py` and exposed through
+`agentic.agent_prompt`; shell option parsing and TTY input are separate from
+the job supervisor. Provider streaming, provider adapters, OpenRouter policy,
+and the OpenRouter loop follow the same facade pattern. The dashboard renderer
+and run-log parser are separate so HTML presentation does not own durable-schema
+compatibility.
+
+Tests follow the same boundaries: provider behavior remains in
+`tests/test_execution.py` and `tests/test_openrouter.py`; runner configuration
+and prompting are split into `tests/test_agentic_configuration.py` and
+`tests/test_agentic_prompting.py`; shell input is in `tests/test_shell_input.py`;
+and worktree publication/workflow coverage is in
+`tests/test_worktrees_publication.py` and `tests/test_worktrees_workflow.py`.
+Benchmark corpus validation, scenario execution, and reporting are split across
+`scripts/agent_benchmark_config.py`, `scripts/agent_benchmark_scenarios.py`,
+and `scripts/agent_benchmark_reporting.py`; `scripts/agent_benchmark.py`
+retains the CLI facade and orchestration contract.
+Future extractions should preserve the public facade, add characterization
+coverage, and verify the full offline suite.
 
 ## Dependency direction
 

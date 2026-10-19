@@ -8,13 +8,20 @@ from scripts.agent_benchmark import (
     aggregate_metrics,
     load_benchmark,
     render_command,
+    run_scenario as run_scenario_facade,
     run_benchmark,
     validate_benchmark_files,
 )
+from scripts.agent_benchmark_config import load_benchmark as load_benchmark_config
+from scripts.agent_benchmark_scenarios import run_scenario
 from scripts.benchmark import run_case
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_benchmark_facade_preserves_split_component_contract(self):
+        self.assertIs(load_benchmark, load_benchmark_config)
+        self.assertIs(run_scenario, run_scenario_facade)
+
     def test_checked_in_deterministic_quality_profile_is_valid(self):
         path = Path(__file__).resolve().parents[1] / "benchmarks" / "agent-quality.offline.json"
         config = load_benchmark(path)
