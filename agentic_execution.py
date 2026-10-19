@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from agentic_models import Issue, Run
+from agentic_guidance import guidance_phase, guidance_prompt
 from agentic_providers import cli_provider_command, codex_command
 from agentic_sandbox import sandbox_command
 from agentic_security import redact_secrets
@@ -355,6 +356,10 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
               reasoning_effort: str | None = None,
               sandbox: dict[str, Any] | None = None) -> tuple[bool, str]:
     # Each invocation creates a fresh session. The repository is the memory.
+    prompt = guidance_prompt(
+        worktree, prompt, readonly=readonly, audit_folder=output.parent,
+        phase=guidance_phase(output, readonly=readonly),
+    )
     args = codex_command(
         prompt, readonly=readonly, schema=schema, output=output,
         model=model, reasoning_effort=reasoning_effort,
@@ -470,6 +475,10 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
                      model: str | None = None,
                      sandbox: dict[str, Any] | None = None) -> tuple[bool, str]:
     """Run a locally installed coding CLI in its non-interactive mode."""
+    prompt = guidance_prompt(
+        worktree, prompt, readonly=readonly, audit_folder=output.parent,
+        phase=guidance_phase(output, readonly=readonly),
+    )
     args, structured = cli_provider_command(provider, prompt, readonly=readonly, model=model)
 
     label = "REVIEW" if readonly else "DEVELOPER"

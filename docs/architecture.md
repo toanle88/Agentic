@@ -39,6 +39,33 @@ retains workflow and CLI coverage. Future extractions should follow the same
 rule: move one boundary, preserve the public entry point, add characterization
 coverage, and verify the full offline suite before changing another subsystem.
 
+## Dependency direction
+
+The compatibility-facing `agentic.py` workflow coordinates configuration,
+worktrees, providers, checks, review, and publication. Focused modules may
+depend on shared models, policy, security, context, guidance, and telemetry,
+but provider adapters must not own workflow or publication decisions. The
+dashboard and interactive shell consume run artifacts and do not call
+write-capable workflow operations.
+
+## Data flow
+
+An issue or local task becomes a run and isolated worktree. The workflow builds
+bounded prompts, the provider adapter executes in the configured security
+boundary, and streamed output is redacted into run artifacts. Tests and the
+read-only reviewer consume the worktree and recorded evidence; publication
+consumes only an approved, revalidated patch. Repository guidance follows the
+same prompt path as other bounded context, while its source files remain in
+the worktree and only a sanitized inventory enters run metadata.
+
+## Extension points
+
+Provider support belongs in an adapter and its command/API policy, with the
+common execution and telemetry wrappers preserved. New context sources should
+have explicit size limits, untrusted-data delimiters, and regression tests.
+New durable metadata must remain optional when reading older runs. New
+architecture choices belong in a Markdown ADR under `docs/decisions/`.
+
 ## Run state
 
 Git worktrees are the source of truth for code state. Durable run logs are stored outside the worktree and contain:

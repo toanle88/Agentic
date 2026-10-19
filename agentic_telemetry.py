@@ -275,6 +275,38 @@ def record_operation(folder: Path, role: str, name: str, *,
     _write_run_record(path, data)
 
 
+def record_guidance_loads(folder: Path, loads: list[dict[str, Any]]) -> None:
+    """Record sanitized repository-guidance inventory without its contents."""
+    if not loads:
+        return
+    path, data = _load_run_record(folder)
+    records = data.setdefault("guidance_loads", [])
+    if not isinstance(records, list):
+        records = []
+        data["guidance_loads"] = records
+    for load in loads:
+        if not isinstance(load, dict):
+            continue
+        relative = load.get("path")
+        role = load.get("role")
+        phase = load.get("phase")
+        digest = load.get("sha256")
+        if not all(isinstance(value, str) and value for value in (relative, role, phase, digest)):
+            continue
+        try:
+            size = max(0, int(load.get("size", 0)))
+        except (TypeError, ValueError):
+            size = 0
+        records.append({
+            "path": relative.replace("\\", "/"),
+            "role": role,
+            "phase": phase,
+            "size": size,
+            "sha256": digest,
+        })
+    _write_run_record(path, data)
+
+
 def read_run_usage(folder: Path) -> dict[str, Any]:
     try:
         data = json.loads((folder / "run.json").read_text(encoding="utf-8"))
@@ -296,4 +328,6 @@ def read_run_usage(folder: Path) -> dict[str, Any]:
         result["security_policy"] = data["security_policy"]
     if isinstance(data.get("security_policy_history"), list):
         result["security_policy_history"] = data["security_policy_history"]
+    if isinstance(data.get("guidance_loads"), list):
+        result["guidance_loads"] = data["guidance_loads"]
     return result

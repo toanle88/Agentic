@@ -2,6 +2,9 @@
 
 Copy this file to the target repository as `AGENTS.md`, then customize it with
 the project's language, test commands, architecture, and coding conventions.
+Keep this file concise: detailed standards belong in
+`docs/development-standards.md`, architecture boundaries in
+`docs/architecture.md`, and durable design choices in `docs/decisions/`.
 
 ## Before changing code
 

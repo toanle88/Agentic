@@ -16,6 +16,7 @@ from agentic_config import (
     DEFAULT_OPENROUTER_COMMAND_TIMEOUT,
     OPENROUTER_MAX_TURNS,
 )
+from agentic_guidance import guidance_phase, guidance_prompt
 from agentic_context import _compact_openrouter_history
 from agentic_execution import (
     _console_print,
@@ -330,6 +331,10 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
     api_key = os.environ.get(api_key_env)
     if not api_key:
         raise RuntimeError(f"OpenRouter API key is missing; set ${api_key_env}")
+    prompt = guidance_prompt(
+        worktree, prompt, readonly=readonly, audit_folder=output.parent,
+        phase=guidance_phase(output, readonly=readonly),
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     log_file = output.with_suffix(".log")
     raw_file = output.with_suffix(".jsonl")
