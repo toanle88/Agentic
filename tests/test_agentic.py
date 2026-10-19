@@ -307,6 +307,20 @@ class PureTests(unittest.TestCase):
                 agentic.preflight_test_commands(Path(dirname), [['missing-test-tool', '--check']])
 
 
+    def test_workflow_binding_supports_direct_script_execution(self):
+        wrapper = agentic.preflight_test_commands
+        original_module = wrapper.__module__
+        try:
+            wrapper.__module__ = '__main__'
+            with tempfile.TemporaryDirectory() as dirname:
+                agentic._workflow_call(
+                    'preflight_test_commands',
+                    Path(dirname), [[sys.executable, '-c', 'pass']],
+                )
+        finally:
+            wrapper.__module__ = original_module
+
+
     def test_environment_test_failures_are_not_retryable(self):
         self.assertFalse(agentic.retryable_test_failure('No module named pytest'))
         self.assertFalse(agentic.retryable_test_failure('listen tcp: address already in use'))

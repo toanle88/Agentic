@@ -231,7 +231,7 @@ def bind(namespace: dict[str, object]) -> None:
             # implementation; patched MagicMocks and explicit integrations
             # should still flow through for compatibility.
             if (
-                getattr(value, "__module__", None) == "agentic"
+                getattr(value, "__module__", None) in {"agentic", "__main__"}
                 and getattr(value, "__name__", None) == name
             ):
                 continue
