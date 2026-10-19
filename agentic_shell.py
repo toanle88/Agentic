@@ -51,7 +51,7 @@ HELP = """Commands:
     /version                            show the Agentic version
 
   Session
-    /stop JOB                           stop a running job
+    /stop JOB|--all                     stop one or all running jobs
     /help                               show this help
     /quit                               leave the shell; running jobs continue
 
@@ -98,6 +98,7 @@ SHELL_OPTIONS = {
     "/status": ("--json",),
     "/doctor": ("--json",),
     "/cleanup": ("--issue", "--all", "--yes", "--remove-logs"),
+    "/stop": ("--all",),
     "/init": ("--provider", "--reviewer-provider", "--security-mode", "--sandbox-image", "--agents", "--force"),
 }
 COMMAND_DESCRIPTIONS: dict[str, str] = {
@@ -106,7 +107,7 @@ COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/logs": "follow or show captured terminal output",
     "/list": "list open GitHub issues",
     "/runs": "list existing Agentic worktrees",
-    "/stop": "stop a running background job",
+    "/stop": "stop one or all running background jobs",
     "/status": "show Agentic worktree and git status",
     "/dashboard": "generate and open the HTML dashboard",
     "/init": "initialize target-repository configuration",
@@ -174,6 +175,10 @@ def _completion_candidates(line: str, cursor: int | None = None,
         values = ("fast", "slow")
         return [value for value in values if value.startswith(current)]
 
+    if command == "/stop" and (current.startswith("-") or not job_numbers):
+        options = SHELL_OPTIONS["/stop"]
+        return [option for option in options if option.startswith(current)]
+
     if command in {"/logs", "/stop"}:
         numbers = sorted(
             job_numbers,
@@ -182,6 +187,8 @@ def _completion_candidates(line: str, cursor: int | None = None,
             ),
         )
         values = [str(number) for number in numbers]
+        if command == "/stop":
+            values.insert(0, "--all")
         return [value for value in values if value.startswith(current)]
 
     options = SHELL_OPTIONS.get(command, ())
@@ -1511,16 +1518,11 @@ class AgenticShell:
         except OSError as exc:
             print(f"Could not read {job.log_path}: {exc}")
 
-    def stop(self, parts: list[str]) -> None:
-        if len(parts) != 2 or not parts[1].isdigit():
-            raise ValueError("usage: /stop JOB")
-        job = self.jobs.get(int(parts[1]))
-        if job is None:
-            raise ValueError(f"unknown job: {parts[1]}")
+    def _request_stop(self, job: Job) -> bool:
+        """Request termination for one running job and report the result."""
         self._refresh(job)
         if not job.running:
-            print(f"[JOB {job.number}] already finished with exit {job.exit_code}")
-            return
+            return False
         if os.name != "nt":
             try:
                 os.killpg(os.getpgid(job.pid), signal.SIGTERM)
@@ -1532,6 +1534,23 @@ class AgenticShell:
             else:
                 os.kill(job.pid, signal.SIGTERM)
         print(f"[JOB {job.number}] stop requested")
+        return True
+
+    def stop(self, parts: list[str]) -> None:
+        if len(parts) != 2 or (parts[1] != "--all" and not parts[1].isdigit()):
+            raise ValueError("usage: /stop JOB|--all")
+        if parts[1] == "--all":
+            requested = sum(self._request_stop(job) for job in self.jobs.values())
+            if requested == 0:
+                print("[STOP] no running jobs")
+            else:
+                print(f"[STOP] stop requested for {requested} job(s)")
+            return
+        job = self.jobs.get(int(parts[1]))
+        if job is None:
+            raise ValueError(f"unknown job: {parts[1]}")
+        if not self._request_stop(job):
+            print(f"[JOB {job.number}] already finished with exit {job.exit_code}")
 
     def show_status(self, parts: list[str]) -> None:
         if len(parts) > 2 or (len(parts) == 2 and parts[1] != "--json"):

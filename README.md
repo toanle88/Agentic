@@ -206,8 +206,9 @@ Running the same issue again resumes its existing worktree. Use `--new` only whe
 
 Interactive shell commands include `/run`, `/ps`, `/logs`, `/list`, `/runs`,
 `/status`, `/dashboard`, `/init`, `/doctor`, `/cleanup`, `/version`, `/help`,
-and `/quit`. Use `/run --task-file PATH` for a local task already saved in a
-file. `/runs` lists Agentic worktrees; `/ps --all` lists persisted shell jobs.
+`/stop`, and `/quit`. Use `/run --task-file PATH` for a local task already saved
+in a file. `/runs` lists Agentic worktrees; `/ps --all` lists persisted shell
+jobs. Use `/stop --all` to request termination for every running Agentic job.
 
 ## Common commands
 

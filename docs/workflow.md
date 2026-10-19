@@ -44,7 +44,7 @@ Available commands:
      [--review|--publish|--mark-done|--new]
 /ps [--all]                            Show current or persisted job status
 /logs JOB|PID [LINES]                  Follow a running job or show recent output
-/stop JOB                              Stop a running job
+/stop JOB|--all                        Stop one or all running jobs
 /list                                  List open GitHub issues
 /runs [--json]                         List existing Agentic worktrees
 /dashboard [OUTPUT]                    Generate and open the HTML dashboard
@@ -65,7 +65,7 @@ to dismiss. Supported options such as `/run --profile` and known job IDs for
 renders the dropdown with live filtering and command descriptions using standard ANSI
 escapes with zero third-party dependencies.
 
-`/run` starts a child process and returns immediately. `/ps` shows jobs started in the current shell; `/ps --all` also discovers job records from previous shell sessions. The child runner's durable logs remain available after the shell exits, and `/logs JOB` works for persisted jobs too. Use `/logs JOB` or `/logs PID` on a running job to follow new output until it exits; press Ctrl-C to stop following without stopping the job. Add `LINES` to control how much existing output is shown first. Running jobs are listed before completed jobs so active work is immediately visible.
+`/run` starts a child process and returns immediately. `/ps` shows jobs started in the current shell; `/ps --all` also discovers job records from previous shell sessions. The child runner's durable logs remain available after the shell exits, and `/logs JOB` works for persisted jobs too. Use `/logs JOB` or `/logs PID` on a running job to follow new output until it exits; press Ctrl-C to stop following without stopping the job. Add `LINES` to control how much existing output is shown first. Running jobs are listed before completed jobs so active work is immediately visible. Use `/stop JOB` to stop one job or `/stop --all` to request termination for every running Agentic job visible to the shell, including jobs from previous shell sessions.
 
 `/list` synchronously lists the target repository's open GitHub issues. It uses
 the same GitHub CLI-backed issue listing as `agentic --list` and does not create

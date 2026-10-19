@@ -55,6 +55,7 @@ class ShellTests(unittest.TestCase):
         self.assertIn('/dashboard [OUTPUT]', output.getvalue())
         self.assertIn('/list', output.getvalue())
         self.assertIn('/runs [--json]', output.getvalue())
+        self.assertIn('/stop JOB|--all', output.getvalue())
         self.assertIn('/init [OPTIONS]', output.getvalue())
         self.assertNotIn('\033[', output.getvalue())
 
@@ -203,6 +204,10 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(
             agentic_shell._completion_candidates('/status '),
             ['--json'],
+        )
+        self.assertEqual(
+            agentic_shell._completion_candidates('/stop '),
+            ['--all'],
         )
         self.assertEqual(agentic_shell._completion_candidates('run '), [])
 
@@ -614,6 +619,20 @@ class ShellTests(unittest.TestCase):
             self.assertIn('Could not read', agentic_shell._tail(root / 'missing.log', 5))
             with self.assertRaisesRegex(ValueError, 'unknown job'):
                 shell.show_logs(['/logs', '999'])
+
+    def test_shell_stop_all_requests_termination_for_running_jobs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            first = shell._launch([sys.executable, '-c', 'import time; time.sleep(5)'])
+            second = shell._launch([sys.executable, '-c', 'import time; time.sleep(5)'])
+            with patch('sys.stdout'):
+                shell.stop(['/stop', '--all'])
+            first.process.wait(timeout=5)
+            second.process.wait(timeout=5)
+            shell.refresh()
+            self.assertIsNotNone(first.exit_code)
+            self.assertIsNotNone(second.exit_code)
 
     def test_shell_ignores_malformed_persisted_job_records(self):
         with tempfile.TemporaryDirectory() as temp:
