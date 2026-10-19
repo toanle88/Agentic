@@ -29,7 +29,9 @@ PROVIDER_SANDBOX_ENV = {
     "openrouter": (),
 }
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_MAX_TURNS = 80
+# Bound worst-case repeated context cost; callers can raise this explicitly
+# for unusually large tasks.
+OPENROUTER_MAX_TURNS = 40
 OPENROUTER_MAX_TOOL_TURNS = (1, 200)
 OPENROUTER_COMMAND_TIMEOUT = (1, 86400)
 DEFAULT_TEST_TIMEOUT = 300
@@ -92,6 +94,7 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
     max_tool_turns = raw.get("max_tool_turns")
     command_timeout = raw.get("command_timeout_seconds")
     allow_network = raw.get("allow_network", False)
+    json_mode = raw.get("json_mode", False)
     if not isinstance(provider, str) or provider not in SUPPORTED_PROVIDERS:
         choices = ", ".join(SUPPORTED_PROVIDERS)
         raise ValueError(f"{section}.provider must be one of: {choices}")
@@ -118,6 +121,8 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
         )
     if type(allow_network) is not bool:
         raise ValueError(f"{section}.allow_network must be a boolean")
+    if type(json_mode) is not bool:
+        raise ValueError(f"{section}.json_mode must be a boolean")
     if api_key_env is not None and (
         not isinstance(api_key_env, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", api_key_env)
     ):
@@ -131,14 +136,14 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
             raise ValueError(f"{section}.base_url must start with http:// or https://")
     elif api_key_env is not None or base_url is not None:
         raise ValueError(f"{section}.api_key_env and {section}.base_url are only valid for openrouter")
-    elif max_tool_turns is not None or command_timeout is not None or allow_network:
+    elif max_tool_turns is not None or command_timeout is not None or allow_network or json_mode:
         raise ValueError(
             f"{section}.max_tool_turns, {section}.command_timeout_seconds, and "
-            f"{section}.allow_network are only valid for openrouter"
+            f"{section}.allow_network, and {section}.json_mode are only valid for openrouter"
         )
     return AgentSettings(
         provider, model, reasoning, timeout, api_key_env, base_url,
-        max_tool_turns, command_timeout, allow_network,
+        max_tool_turns, command_timeout, allow_network, json_mode,
     )
 
 
@@ -352,6 +357,7 @@ def default_provider_settings(provider: str) -> dict[str, Any]:
             "max_tool_turns": OPENROUTER_MAX_TURNS,
             "command_timeout_seconds": DEFAULT_OPENROUTER_COMMAND_TIMEOUT,
             "allow_network": False,
+            "json_mode": False,
         })
     return settings
 

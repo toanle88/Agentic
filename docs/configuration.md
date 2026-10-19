@@ -86,9 +86,10 @@ Each provider object supports these fields:
 | `timeout_seconds` | integer or `null` | Per developer/reviewer invocation limit; `null` uses 600 seconds for developers or 300 seconds for reviewers. |
 | `api_key_env` | string | OpenRouter only: environment variable containing the API key. |
 | `base_url` | URL | OpenRouter only: API base URL, defaulting to the public OpenRouter endpoint. |
-| `max_tool_turns` | integer or `null` | OpenRouter only: maximum number of model/tool rounds; default `80`. |
+| `max_tool_turns` | integer or `null` | OpenRouter only: maximum number of model/tool rounds; default `40`. |
 | `command_timeout_seconds` | integer or `null` | OpenRouter only: maximum duration of one tool command; `null` uses 300 seconds. |
 | `allow_network` | boolean | OpenRouter only: allow explicitly network-capable commands. Defaults to `false`. This is not an OS-level network sandbox. |
+| `json_mode` | boolean | OpenRouter only: request JSON-mode responses when the configured model/provider endpoint is known to support it. Defaults to `false`; local schema validation is always used. |
 
 ### Providers
 
