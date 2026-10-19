@@ -24,6 +24,7 @@ class DashboardTests(unittest.TestCase):
                 "approved": False,
                 "summary": "Needs persistence fixes",
                 "findings": ["Use an empty JSON array instead of null."],
+                "skipped": ["Browser check unavailable"],
             }))
             # Progress/event files share the review prefix but are not the
             # structured review result.
@@ -41,6 +42,7 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(snapshot["tests"]["status"], "passed")
             self.assertEqual(snapshot["attempts"], 1)
             self.assertIn("persistence", snapshot["review"]["summary"])
+            self.assertEqual(snapshot["review"]["skipped"], ["Browser check unavailable"])
             self.assertEqual(snapshot["review"]["recurring"][0]["count"], 2)
 
     def test_review_parser_accepts_json_code_fence(self):
@@ -170,6 +172,21 @@ class DashboardTests(unittest.TestCase):
             html = agentic_dashboard.render_dashboard(agentic_dashboard.collect_runs(root), "demo", root.name)
             self.assertIn("Recurring findings", html)
             self.assertIn("Fix wiring", html)
+
+    def test_dashboard_renders_skipped_review_validation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            run = root / "agent-issue-7-deadbeef"
+            run.mkdir(parents=True)
+            (run / "review-001.json").write_text(json.dumps({
+                "approved": True, "summary": "Approved with a limitation", "findings": [],
+                "skipped": ["Integration service is not available"],
+            }))
+            html = agentic_dashboard.render_dashboard(
+                agentic_dashboard.collect_runs(root), "demo", root.name,
+            )
+            self.assertIn("Skipped validation", html)
+            self.assertIn("Integration service is not available", html)
 
     def test_collect_runs_from_roots_prefers_centralized_snapshot(self):
         with tempfile.TemporaryDirectory() as temp:
