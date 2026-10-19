@@ -76,6 +76,9 @@ the command for inspecting persisted interactive-shell jobs. Use
 `/run --task-file PATH` to start a local task from an existing task file. Setup
 and maintenance commands such as `/init`, `/doctor`, and `/cleanup` run
 synchronously so their output and confirmation errors are shown immediately.
+Use `/doctor --commands --worktree PATH` when you want doctor to execute the
+configured checks in a specific worktree; this is opt-in because checks may
+install dependencies or modify generated files.
 
 The default `fast` profile runs the configured `test_commands`. Use `/run 119 --profile slow` to run those checks followed by the configured `slow_test_commands`. Profiles select which checks run; they do not select the provider model or reasoning setting.
 

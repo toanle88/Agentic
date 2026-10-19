@@ -7,15 +7,57 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
+import subprocess
+import time
+from contextlib import nullcontext
 from pathlib import Path
-from typing import Callable
+from typing import Callable, ContextManager
 
 from agentic_config import load_config, sandbox_env_for_provider
 from agentic_execution import _doctor_public_detail
+from agentic_sandbox import sandbox_command
 
 
 AGENT_CONFIG_FILENAME = "agent_config.json"
+
+
+def _run_configured_command(
+    argv: list[str], cwd: Path, *, timeout: int | None,
+    sandbox: dict[str, object] | None,
+) -> dict[str, object]:
+    """Run one doctor command without exposing its output in doctor JSON."""
+    started = time.monotonic()
+    try:
+        process = subprocess.run(
+            sandbox_command(argv, cwd, sandbox, pass_env=[]),
+            cwd=cwd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "argv": list(argv),
+            "status": "timeout",
+            "exit_code": 124,
+            "duration_seconds": round(time.monotonic() - started, 3),
+        }
+    except OSError:
+        return {
+            "argv": list(argv),
+            "status": "not-started",
+            "exit_code": None,
+            "duration_seconds": round(time.monotonic() - started, 3),
+        }
+    return {
+        "argv": list(argv),
+        "status": "passed" if process.returncode == 0 else "failed",
+        "exit_code": process.returncode,
+        "duration_seconds": round(time.monotonic() - started, 3),
+    }
 
 
 def run_doctor(
@@ -23,14 +65,22 @@ def run_doctor(
     config_path: Path | None = None,
     *,
     json_output: bool = False,
+    run_commands: bool = False,
+    profile: str = "fast",
+    worktree: Path | None = None,
+    command_lock: Callable[[Path], ContextManager[None]] | None = None,
     installed_git_version: Callable[..., tuple[int, int, int] | None],
     probe: Callable[..., tuple[bool, str]],
     preflight_test_commands: Callable[..., None],
     relative_worktree_paths_supported: Callable[[], bool],
 ) -> int:
     """Report local prerequisites and return nonzero when a required item is missing."""
+    if profile not in {"fast", "slow"}:
+        raise ValueError("profile must be 'fast' or 'slow'")
     repo = repo.resolve()
+    command_worktree = (worktree or repo).resolve()
     checks: list[tuple[str, bool, str, bool]] = []
+    command_results: list[dict[str, object]] = []
     git_version = installed_git_version()
     checks.append(("Git", git_version is not None, ".".join(map(str, git_version)) if git_version else "not found", True))
     root_ok, _ = probe(["git", "rev-parse", "--show-toplevel"], repo)
@@ -51,11 +101,42 @@ def run_doctor(
         try:
             loaded = load_config(target_config)
             preflight_test_commands(
-                repo, loaded["test_commands"] + loaded["slow_test_commands"],
+                command_worktree if run_commands and command_worktree.is_dir() else repo,
+                loaded["test_commands"] + loaded["slow_test_commands"],
                 sandbox=loaded.get("sandbox"),
             )
             checks.append(("Agentic config", True, str(target_config), True))
             checks.append(("Configured checks", True, f"{len(loaded['test_commands'])} fast / {len(loaded['slow_test_commands'])} slow", True))
+            worktree_ok = True
+            if run_commands:
+                worktree_ok = command_worktree.is_dir()
+                if worktree_ok:
+                    worktree_ok, _ = probe(
+                        ["git", "rev-parse", "--show-toplevel"], command_worktree,
+                    )
+                if worktree_ok:
+                    repo_git_ok, repo_git_common = probe(
+                        ["git", "rev-parse", "--git-common-dir"], repo,
+                    )
+                    worktree_git_ok, worktree_git_common = probe(
+                        ["git", "rev-parse", "--git-common-dir"], command_worktree,
+                    )
+                    if repo_git_ok and worktree_git_ok:
+                        def absolute_git_common(path: Path, value: str) -> Path:
+                            common = Path(value.strip())
+                            return (common if common.is_absolute() else path / common).resolve()
+
+                        worktree_ok = (
+                            absolute_git_common(repo, repo_git_common)
+                            == absolute_git_common(command_worktree, worktree_git_common)
+                        )
+                    else:
+                        worktree_ok = False
+                checks.append((
+                    "Command worktree", worktree_ok,
+                    str(command_worktree) if worktree_ok else f"not a Git worktree: {command_worktree}",
+                    True,
+                ))
             if loaded["security_mode"] == "isolated":
                 checks.append(("Security mode", True, "isolated execution requested", True))
             else:
@@ -144,6 +225,30 @@ def run_doctor(
                     executable = shutil.which(provider)
                     ok, _ = probe([executable or provider, "--version"], repo) if executable else (False, f"{provider} not found")
                     checks.append((f"{role.title()} provider ({provider})", ok, "provider is available" if ok else "provider is not available", True))
+            if run_commands and worktree_ok:
+                commands = list(loaded["test_commands"])
+                if profile == "slow":
+                    commands.extend(loaded["slow_test_commands"])
+                try:
+                    with (command_lock(command_worktree) if command_lock else nullcontext()):
+                        for argv in commands:
+                            if not json_output:
+                                print(f"[DOCTOR] Running: {shlex.join(argv)}", flush=True)
+                            command_results.append(_run_configured_command(
+                                argv,
+                                command_worktree,
+                                timeout=loaded["effective_test_timeout_seconds"],
+                                sandbox=loaded.get("sandbox"),
+                            ))
+                except RuntimeError as exc:
+                    checks.append(("Command worktree lock", False, str(exc), True))
+                else:
+                    commands_ok = all(item["status"] == "passed" for item in command_results)
+                    checks.append((
+                        "Configured command execution", commands_ok,
+                        f"{len(command_results)} {profile} command(s) ran in {command_worktree}",
+                        True,
+                    ))
         except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
             checks.append(("Agentic config", False, str(exc), True))
     else:
@@ -158,6 +263,8 @@ def run_doctor(
         print(json.dumps({
             "repository": str(repo),
             "ok": success,
+            "command_profile": profile if run_commands else None,
+            "command_worktree": str(command_worktree) if run_commands else None,
             "checks": [
                 {
                     "name": label,
@@ -168,11 +275,21 @@ def run_doctor(
                 }
                 for label, ok, _detail, required in checks
             ],
+            "command_results": command_results,
         }, indent=2))
     else:
         print("Agentic doctor")
         print(f"Repository: {repo}")
+        if run_commands:
+            print(f"Command worktree: {command_worktree}")
         for label, ok, _detail, required in checks:
             state = "OK" if ok else ("FAIL" if required else "WARN")
             print(f"[{state:<4}] {label}: {_doctor_public_detail(label, ok, required)}")
+        if command_results:
+            print("Configured commands:")
+            for result in command_results:
+                status = str(result["status"]).upper()
+                command = shlex.join(str(part) for part in result["argv"])
+                duration = result["duration_seconds"]
+                print(f"[{status:<11}] {command} ({duration}s)")
     return 0 if success else 1

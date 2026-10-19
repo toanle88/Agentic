@@ -144,6 +144,7 @@ Run the environment diagnostic before the first issue:
 ```bash
 agentic doctor
 agentic doctor --json
+agentic doctor --commands --worktree /path/to/worktree
 ```
 
 By default, worktrees, logs, shell records, and dashboards live under the user-level Agentic state directory, not beside the target repository. In WSL, use a shared Windows-mounted location when you need to open worktrees with Windows Git:

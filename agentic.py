@@ -82,7 +82,7 @@ from agentic_security import redact_secrets
 from agentic_telemetry import record_security_policy
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.12"
+__version__ = "1.1.13"
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module
 # while the implementation lives in agentic_config.
@@ -349,9 +349,9 @@ def repository_lock(repo: Path, state_dir: Path | None = None):
 
 
 @contextmanager
-def worktree_lock(repo: Path, run: Run, state_dir: Path | None = None):
+def worktree_path_lock(repo: Path, worktree: Path, state_dir: Path | None = None):
     """Allow independent worktrees to run concurrently, but not one worktree twice."""
-    identity = hashlib.sha256(run.branch.encode("utf-8")).hexdigest()[:16]
+    identity = hashlib.sha256(str(worktree.resolve()).encode("utf-8")).hexdigest()[:16]
     lock_path = state_paths(repo, state_dir).root / "locks" / f"worktree-{identity}.lock"
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -362,8 +362,15 @@ def worktree_lock(repo: Path, run: Run, state_dir: Path | None = None):
         lock_path = git_dir / f"{identity}.lock"
     with _exclusive_lock(
         lock_path,
-        f"Another Agentic run is already active for worktree {run.worktree}; wait for it to finish",
+        f"Another Agentic operation is already active for worktree {worktree}; wait for it to finish",
     ):
+        yield
+
+
+@contextmanager
+def worktree_lock(repo: Path, run: Run, state_dir: Path | None = None):
+    """Allow independent worktrees to run concurrently, but not one worktree twice."""
+    with worktree_path_lock(repo, run.worktree, state_dir):
         yield
 
 
@@ -1631,12 +1638,24 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
     return 0
 
 
-def doctor(repo: Path, config_path: Path | None = None, *, json_output: bool = False) -> int:
+def doctor(
+    repo: Path,
+    config_path: Path | None = None,
+    *,
+    json_output: bool = False,
+    run_commands: bool = False,
+    profile: str = "fast",
+    worktree: Path | None = None,
+) -> int:
     """Compatibility wrapper for the extracted diagnostics workflow."""
     return _run_doctor(
         repo,
         config_path,
         json_output=json_output,
+        run_commands=run_commands,
+        profile=profile,
+        worktree=worktree,
+        command_lock=(lambda path: worktree_path_lock(repo, path)) if run_commands else None,
         installed_git_version=installed_git_version,
         probe=probe,
         preflight_test_commands=preflight_test_commands,
@@ -1766,6 +1785,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--list", action="store_true", help="List open issues")
     parser.add_argument("--runs", action="store_true", help="List existing worktrees without contacting GitHub")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON for status/runs output")
+    parser.add_argument(
+        "--commands", action="store_true",
+        help="With doctor, run configured checks in the selected worktree (opt-in; may mutate it)",
+    )
+    parser.add_argument(
+        "--worktree", default=None,
+        help="With doctor --commands, run checks from this worktree (default: --repo)",
+    )
     parser.add_argument("--new", action="store_true", help="Make another worktree even if one already exists")
     parser.add_argument("--force", action="store_true", help="Allow init to replace generated setup files")
     parser.add_argument("--agents", action="store_true", help="With init, create a starter AGENTS.md")
@@ -2031,7 +2058,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "doctor":
             return doctor(
                 Path(args.repo), Path(args.config) if args.config else None,
-                json_output=args.json,
+                json_output=args.json, run_commands=args.commands,
+                profile=args.profile,
+                worktree=Path(args.worktree) if args.worktree else None,
             )
         if args.command in {"status", "runs"}:
             repo = _absolute_path(Path(args.repo))
