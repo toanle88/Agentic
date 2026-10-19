@@ -25,6 +25,27 @@ class GuidanceTests(unittest.TestCase):
         self.assertIsNotNone(match)
         self.assertIn('"agentic_guidance"', match.group(1))
 
+    def test_split_runtime_modules_are_in_the_setuptools_manifest(self):
+        root = Path(__file__).resolve().parents[1]
+        pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+        match = re.search(r"py-modules\s*=\s*\[(.*?)\]", pyproject, re.DOTALL)
+        self.assertIsNotNone(match)
+        manifest = match.group(1)
+        for module in (
+            "agentic_dashboard_data",
+            "agentic_execution_providers",
+            "agentic_execution_stream",
+            "agentic_openrouter_loop",
+            "agentic_openrouter_tools",
+            "agentic_prompts",
+            "agentic_shell_commands",
+            "agentic_shell_input",
+            "agentic_workflow",
+            "agentic_worktrees",
+        ):
+            with self.subTest(module=module):
+                self.assertIn(f'"{module}"', manifest)
+
     def test_discovers_standard_guidance_and_records_bounded_audit_metadata(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
