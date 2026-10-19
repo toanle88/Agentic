@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import agentic
 import agentic_shell
 from agentic import state_paths
 
@@ -90,6 +91,36 @@ class ShellTests(unittest.TestCase):
             agentic_shell._parse_job_command(['/run', '119', '--profile', 'slow']),
             ('119', ['--profile', 'slow']),
         )
+        self.assertEqual(
+            agentic_shell._parse_job_command([
+                '/run', '119', '--instruction', 'Bump the version when complete',
+            ]),
+            ('119', ['--instruction', 'Bump the version when complete']),
+        )
+        self.assertEqual(
+            agentic_shell._parse_job_command([
+                '/run', '119', '--instruction', '--preserve',
+            ]),
+            ('119', ['--instruction', '--preserve']),
+        )
+        self.assertEqual(
+            agentic_shell._parse_job_command([
+                '/run', '119', '--instruction', '', '--review',
+            ]),
+            ('119', ['--instruction', '', '--review']),
+        )
+        for option in (
+            '--profile', '--instruction', '--review', '--publish',
+            '--mark-done', '--reason', '--new', '--task-file',
+        ):
+            actual_flag = '--publish' if option == '--review' else '--review'
+            parsed = agentic_shell._parse_job_command([
+                '/run', '119', '--instruction', option, actual_flag,
+            ])
+            self.assertEqual(
+                parsed, ('119', ['--instruction', option, actual_flag]),
+            )
+            self.assertFalse(agentic_shell._has_job_flag(parsed[1], option))
         self.assertEqual(
             agentic_shell._parse_job_command(['/run', '--task-file', 'task.md']),
             (None, ['--task-file', 'task.md']),
@@ -628,6 +659,62 @@ class ShellTests(unittest.TestCase):
             self.assertIn('--publish', argv)
             self.assertNotIn('stdin', run.call_args.kwargs)
             self.assertIn('foreground', output.getvalue())
+
+    def test_shell_preserves_instruction_as_one_runner_argv_value(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), session_dir=root / 'logs'
+            )
+            instruction = 'Bump version; keep this text as data'
+            with patch.object(shell, '_launch') as launch:
+                shell.run_issue(['/run', '119', '--instruction', instruction])
+            argv = launch.call_args.args[0]
+            self.assertIn('--instruction=' + instruction, argv)
+
+    def test_shell_preserves_option_like_and_empty_instruction_values(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), session_dir=root / 'logs'
+            )
+            with patch.object(shell, '_launch') as launch:
+                shell.execute('/run 119 --instruction "--preserve"')
+                argv = launch.call_args.args[0]
+                self.assertIn('--instruction=--preserve', argv)
+                parsed = agentic.build_parser().parse_args(argv[3:])
+                self.assertEqual(parsed.instruction, '--preserve')
+
+                shell.execute('/run 119 --instruction "--publish"')
+                argv = launch.call_args.args[0]
+                self.assertIn('--instruction=--publish', argv)
+                self.assertNotIn('--publish', argv)
+
+                shell.execute('/run 119 --instruction ""')
+                argv = launch.call_args.args[0]
+                self.assertIn('--instruction=', argv)
+                parsed = agentic.build_parser().parse_args(argv[3:])
+                self.assertEqual(parsed.instruction, '')
+
+    def test_shell_does_not_treat_instruction_option_names_as_run_options(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / 'agent_config.json'
+            config.write_text('{"task_source":"local"}')
+            task = root / 'logs' / 'task.md'
+            task.parent.mkdir()
+            task.write_text('Implement export\n')
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), config=config, session_dir=root / 'logs'
+            )
+            with (patch.object(shell, '_capture_local_task', return_value=task),
+                  patch.object(shell, '_launch') as launch):
+                shell.run_issue(['/run', '--instruction', '--task-file'])
+            argv = launch.call_args.args[0]
+            self.assertIn('--instruction=--task-file', argv)
+            self.assertIn('--task-file', argv)
+            self.assertIn(str(task.resolve()), argv)
+            self.assertNotIn('--publish', argv)
 
     def test_shell_reports_foreground_publish_failure(self):
         with tempfile.TemporaryDirectory() as temp:

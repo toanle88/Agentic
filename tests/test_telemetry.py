@@ -7,13 +7,36 @@ from agentic_telemetry import (
     combine_usage,
     extract_jsonl_usage,
     read_run_usage,
+    read_run_instruction,
     record_operation,
+    record_run_instruction,
     record_security_policy,
     record_usage,
 )
 
 
 class TelemetryTests(unittest.TestCase):
+    def test_run_instruction_is_optional_bounded_and_replaceable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            self.assertIsNone(read_run_instruction(folder))
+            record_run_instruction(folder, 'first instruction')
+            self.assertEqual(read_run_instruction(folder), 'first instruction')
+            record_run_instruction(folder, 'second instruction')
+            self.assertEqual(read_run_instruction(folder), 'second instruction')
+            record_run_instruction(folder, '')
+            self.assertIsNone(read_run_instruction(folder))
+            self.assertNotIn('instruction', json.loads((folder / 'run.json').read_text()))
+
+    def test_run_instruction_is_bounded_in_durable_metadata(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            record_run_instruction(folder, 'head-' + ('x' * 3_000) + '-tail')
+            stored = read_run_instruction(folder)
+            self.assertEqual(len(stored), 2_000)
+            self.assertIn('head-', stored)
+            self.assertIn('-tail', stored)
+
     def test_extracts_provider_usage_without_guessing_cost(self):
         usage = extract_jsonl_usage(
             json.dumps({"usage": {"prompt_tokens": 10, "completion_tokens": 4}}),

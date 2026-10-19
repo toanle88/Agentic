@@ -161,6 +161,7 @@ agentic --runs                           # list existing worktrees
 agentic status --json                     # machine-readable worktree status
 agentic runs --json                       # alias for status
 agentic --issue 119                      # create or resume issue 119
+agentic --issue 119 --instruction "Bump the version when complete"
 agentic --issue 119 --review              # rerun tests and review only
 agentic --issue 119 --mark-done                     # optional reason is recorded automatically
 agentic --issue 119 --mark-done --reason "Human reviewed; remaining finding is out of scope"
@@ -222,6 +223,7 @@ jobs. Use `/stop --all` to request termination for every running Agentic job.
 | --- | --- |
 | `agentic` | Open the interactive background-job shell. |
 | `agentic --issue N` | Create or resume issue `N` in the foreground. |
+| `agentic --issue N --instruction "..."` | Preserve an optional per-run instruction for development and review. |
 | `agentic --issue N --profile slow` | Run the fast checks plus configured slow checks. |
 | `agentic --issue N --review` | Re-run checks and review an existing worktree without coding. |
 | `agentic --issue N --mark-done [--reason "..."]` | Record explicit human completion for the current patch. |
