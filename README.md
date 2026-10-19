@@ -251,9 +251,11 @@ jobs. Use `/stop --all` to request termination for every running Agentic job.
 | [Offline benchmarking](docs/benchmarking.md) | Deterministic argv-only benchmark cases and result format. |
 | [Configuration](docs/configuration.md) | `agent_config.json`, test commands, model settings, retries, and timeouts. |
 | [Agent instructions](docs/agent-instructions.md) | How to create and maintain a target repository's `AGENTS.md`. |
+| [Development standards](docs/development-standards.md) | Testing, naming, security, compatibility, and review conventions for Agentic changes. |
 | [Workflow](docs/workflow.md) | Worktrees, resume behavior, reviews, publication, logs, and dashboard usage. |
 | [Troubleshooting](docs/troubleshooting.md) | Missing tools, failed checks, repeated rejections, and WSL/Git issues. |
 | [Architecture](docs/architecture.md) | Components, lifecycle, filesystem layout, and safety boundaries. |
+| [Architecture decisions](docs/decisions/) | Durable architecture decision records. |
 | [Security policy](SECURITY.md) | Threat model, credentials, logs, and sandbox limitations. |
 | [Development](docs/development.md) | Local development, tests, CI, releases, and contribution workflow. |
 | [`agent_config.schema.json`](agent_config.schema.json) | JSON Schema for editor-assisted configuration validation. |

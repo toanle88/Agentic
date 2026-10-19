@@ -43,6 +43,19 @@ Keep personal configuration in an ignored local file. Commit `AGENTS.md` only wh
 
 ## How Agentic uses it
 
-The developer is instructed to read repository guidance before changing code. The reviewer uses the repository's instructions while evaluating the patch. Agentic treats `AGENTS.md` as protected and will reject a patch that tries to modify it as part of normal issue work.
+Before each provider turn, Agentic discovers `AGENTS.md`, the standardized
+development and architecture documents, compatible legacy development guidance,
+and Markdown ADRs under `docs/decisions/`. It adds bounded copies to the
+developer, investigator, and reviewer context inside explicit untrusted-data
+delimiters. The source documents remain in the worktree for direct inspection.
+
+Each loaded file is recorded in the run metadata by relative path, role, phase,
+byte size, and SHA-256 digest. Guidance contents are not copied into
+`run.json`, and a changed file is reread on the next provider turn. Missing,
+symlinked, escaped, and non-regular guidance paths are ignored, so existing
+repositories without the standard documents continue to work unchanged.
+
+Agentic treats `AGENTS.md` as protected and will reject a patch that tries to
+modify it as part of normal issue work.
 
 Instructions guide the agent but do not replace tests, CI, code review, or human judgment. If the file conflicts with the issue's explicit requirements or higher-priority system policy, the higher-priority requirement wins.
