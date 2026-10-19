@@ -591,6 +591,7 @@ class GitTest(unittest.TestCase):
             '--repo', str(self.repo), '--config', str(config_path),
             '--state-dir', str(Path(self.tmp.name) / 'agentic-state'),
             '--task', 'Add CSV export\nAdd regression tests.',
+            '--instruction', 'Preserve the CSV header order',
         ])
         fake_run = agentic.Run(None, 'agent/task-csv-aabbccddeeff', Path('/tmp/fake-worktree'))
         with (patch('agentic.preflight_test_commands'),
@@ -607,6 +608,16 @@ class GitTest(unittest.TestCase):
         self.assertIn('Add CSV export', task.body)
         self.assertEqual(develop.call_args.args[1], task)
         self.assertIn('Valid local task', develop.call_args.kwargs['initial_feedback'])
+        self.assertEqual(
+            develop.call_args.kwargs['instruction'], 'Preserve the CSV header order',
+        )
+        run_folder = agentic.logs_path(
+            self.repo, fake_run, Path(self.tmp.name) / 'agentic-state',
+        )
+        self.assertEqual(
+            json.loads((run_folder / 'run.json').read_text())['instruction'],
+            'Preserve the CSV header order',
+        )
 
     def test_investigation_feedback_does_not_block_development(self):
         config_path = self.repo / 'local-agent-config.json'
@@ -637,6 +648,9 @@ class ResumeIntegrationTests(GitTest):
         run = agentic.create_worktree(self.repo, 'main', 25)
         (run.worktree / 'partial.py').write_text('unfinished = True\n')
         folder = agentic.logs_path(self.repo, run)
+        (folder / 'run.json').write_text(json.dumps({
+            'instruction': 'Keep the migration backwards compatible',
+        }))
         (folder / 'review-001.json').write_text(json.dumps({
             'approved': False,
             'summary': 'Previous review found a missing test',
@@ -662,5 +676,9 @@ class ResumeIntegrationTests(GitTest):
             refresh_base.assert_called_once_with(self.repo, 'main')
             self.assertEqual(develop.call_args.args[0], run)
             self.assertIn('Previous review found a missing test', develop.call_args.kwargs['initial_feedback'])
+            self.assertEqual(
+                develop.call_args.kwargs['instruction'],
+                'Keep the migration backwards compatible',
+            )
             self.assertTrue((run.worktree / 'partial.py').exists())
 

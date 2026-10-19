@@ -308,6 +308,7 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
 
     issue = match.group("issue")
     task = match.group("task")
+    usage = read_run_usage(folder)
     if issue is not None:
         label = f"Issue #{issue}"
         branch = f"agent/issue-{issue}-{match.group('issue_token')}"
@@ -316,7 +317,7 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
         label = f"Local task: {task}"
         branch = f"agent/task-{task}-{match.group('task_token')}"
         issue_value = None
-    return {
+    snapshot = {
         "id": folder.name,
         "issue": issue_value,
         "label": label,
@@ -335,8 +336,11 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
         "has_investigation": investigation_path is not None,
         "has_tests": tests_path is not None,
         "has_developer": bool(developer_paths),
-        "usage": read_run_usage(folder),
+        "usage": usage,
     }
+    if usage.get("instruction") is not None:
+        snapshot["instruction"] = usage["instruction"]
+    return snapshot
 
 
 def collect_runs(logs_root: Path) -> list[dict[str, Any]]:
@@ -578,6 +582,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
       const latestPolicy = policyHistory.length && policyHistory[policyHistory.length - 1]?.policy || policy;
       const policyChange = latestPolicy && policyHistory.length > 1 ? `<p class="subtle">Latest recorded policy: ${{esc(latestPolicy.mode || "unknown")}} · Network: ${{esc(latestPolicy.network || "unknown")}} · Git metadata: ${{esc(latestPolicy.git_metadata_mount || "unknown")}}</p>` : "";
       const securityPolicy = policy ? `<section class="callout"><strong>Security policy</strong><p>Initial mode: ${{esc(policy.mode || "unknown")}} · Network: ${{esc(policy.network || "unknown")}} · Git metadata: ${{esc(policy.git_metadata_mount || "unknown")}}</p>${{policyChange}}</section>` : "";
+      const instruction = run.instruction ? `<section class="callout"><strong>Per-run instruction</strong><pre>${{esc(run.instruction)}}</pre></section>` : "";
       const invocations = Array.isArray(run.usage?.by_invocation) ? run.usage.by_invocation.filter(item => item && typeof item === "object") : [];
       const invocationRows = invocations.map((item, index) => {{
         const runLabel = `Run ${{index + 1}}${{index === invocations.length - 1 ? " · latest" : ""}}`;
@@ -593,6 +598,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
         <section class="callout ${{esc(run.review.status)}}"><strong>Review · ${{esc(labels[run.review.status] || run.review.status)}}</strong><p>${{esc(run.review.summary)}}</p>${{findings}}</section>
         ${{skipped}}
         ${{recurring}}
+        ${{instruction}}
         ${{securityPolicy}}
         <h3>Tests · ${{esc(run.tests.status)}}</h3><pre>${{esc(run.tests.summary)}}</pre>
         <h3>Latest developer result</h3><pre>${{esc(run.developer.summary)}}</pre>

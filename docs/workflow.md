@@ -102,6 +102,18 @@ Use `--profile slow` when the issue needs the configured integration, browser, o
 agentic --issue 119 --profile slow
 ```
 
+An optional per-run instruction can be supplied when starting or resuming an
+issue. It is stored in the run metadata and passed to the developer and
+read-only reviewer as bounded, explicitly delimited untrusted data:
+
+```bash
+agentic --issue 119 --instruction "Bump the version when the implementation is complete"
+```
+
+If a resume omits `--instruction`, Agentic reuses the stored value. Supplying
+it again replaces the stored value; an empty value clears it. The interactive
+shell accepts the same option, for example `/run 119 --instruction "..."`.
+
 Agentic preserves code, commits, test output, reviewer output, and structured evidence after failures, timeouts, rejected reviews, and exhausted retries. On resume, the latest failed test and review evidence is supplied to the developer as untrusted feedback, regardless of provider.
 
 If the same rejected review is returned without a changed proposed patch,

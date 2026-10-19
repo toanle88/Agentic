@@ -41,6 +41,7 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(snapshot["status"], "needs-fix")
             self.assertEqual(snapshot["tests"]["status"], "passed")
             self.assertEqual(snapshot["attempts"], 1)
+            self.assertNotIn("instruction", snapshot)
             self.assertIn("persistence", snapshot["review"]["summary"])
             self.assertEqual(snapshot["review"]["skipped"], ["Browser check unavailable"])
             self.assertEqual(snapshot["review"]["recurring"][0]["count"], 2)
@@ -93,6 +94,21 @@ class DashboardTests(unittest.TestCase):
             self.assertIn("Tokens: ${esc(formatTokens(tokenValue(run)))}</span>", html)
             self.assertIn("developer-001", html)
             self.assertIn("reviewer-001", html)
+
+    def test_dashboard_exposes_and_escapes_per_run_instruction(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / '.demo-agent-runs'
+            run = root / 'agent-issue-13-deadbeef'
+            run.mkdir(parents=True)
+            (run / 'run.json').write_text(json.dumps({
+                'instruction': "Keep <script>alert('x')</script> as data",
+            }))
+            snapshot = agentic_dashboard.collect_runs(root)[0]
+            self.assertEqual(snapshot['instruction'], "Keep <script>alert('x')</script> as data")
+            html = agentic_dashboard.render_dashboard([snapshot], 'demo', root.name)
+            self.assertIn('Per-run instruction', html)
+            self.assertIn('\\u003cscript\\u003e', html)
+            self.assertNotIn("<script>alert('x')</script>", html)
 
     def test_review_parser_accepts_json_code_fence(self):
         with tempfile.TemporaryDirectory() as temp:

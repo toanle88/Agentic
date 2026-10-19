@@ -30,10 +30,12 @@ from agentic import __version__
 HELP = """Commands:
 
   Run
-    /run ISSUE [--profile fast|slow] [--review|--publish|--mark-done|--new]
+    /run ISSUE [--profile fast|slow] [--instruction "text"]
+                                      [--review|--publish|--mark-done|--new]
                                       [--reason "why"] with --mark-done
                                       start a background job
-    /run [--profile fast|slow] [--review|--publish|--mark-done|--new]
+    /run [--profile fast|slow] [--instruction "text"]
+                                      [--review|--publish|--mark-done|--new]
                                       local mode: paste a task, finish with /done
     /run --task-file PATH [OPTIONS]    local mode: use an existing task file
 
@@ -93,7 +95,7 @@ SHELL_COMMANDS = (
     "/?",
 )
 SHELL_OPTIONS = {
-    "/run": ("--profile", "--review", "--publish", "--mark-done", "--reason", "--new", "--task-file"),
+    "/run": ("--profile", "--instruction", "--review", "--publish", "--mark-done", "--reason", "--new", "--task-file"),
     "/ps": ("--all",),
     "/runs": ("--json",),
     "/status": ("--json",),
@@ -122,6 +124,7 @@ COMMAND_DESCRIPTIONS: dict[str, str] = {
 }
 OPTION_DESCRIPTIONS: dict[str, str] = {
     "--profile": "execution profile (fast or slow)",
+    "--instruction": "optional instruction preserved for this run",
     "--review": "request read-only review",
     "--publish": "publish the existing approved patch as a draft PR",
     "--mark-done": "record human completion for the current patch",
@@ -1084,14 +1087,30 @@ def _parse_job_command(parts: list[str]) -> tuple[str | None, list[str]]:
     elif len(parts) == 1 or parts[1].startswith("--"):
         flags = parts[1:]
     else:
-        raise ValueError("usage: /run ISSUE [--profile fast|slow] [--review|--publish|--mark-done|--new]")
-    value_options = {"--profile", "--reason", "--task-file"}
+        raise ValueError("usage: /run ISSUE [--profile fast|slow] [--instruction \"text\"] [--review|--publish|--mark-done|--new]")
+    value_options = {"--profile", "--instruction", "--reason", "--task-file"}
     boolean_options = {"--review", "--publish", "--mark-done", "--new"}
+    seen_values: set[str] = set()
     index = 0
     while index < len(flags):
         flag = flags[index]
         if flag in value_options:
-            if index + 1 >= len(flags) or flags[index + 1].startswith("--"):
+            if flag in seen_values:
+                messages = {
+                    "--profile": "/run accepts --profile only once",
+                    "--instruction": "/run accepts --instruction only once",
+                    "--reason": "/run accepts --reason only once",
+                    "--task-file": "/run accepts --task-file only once",
+                }
+                raise ValueError(messages[flag])
+            seen_values.add(flag)
+            if index + 1 >= len(flags):
+                raise ValueError(f"{flag} requires a value")
+            # An instruction is data, so a value beginning with ``--`` must
+            # remain in the value position instead of being treated as a
+            # missing value or another shell option. Other value options keep
+            # their existing option-looking-value validation.
+            if flag != "--instruction" and flags[index + 1].startswith("--"):
                 raise ValueError(f"{flag} requires a value")
             if flag == "--profile" and flags[index + 1] not in {"fast", "slow"}:
                 raise ValueError("--profile must be fast or slow")
@@ -1100,27 +1119,41 @@ def _parse_job_command(parts: list[str]) -> tuple[str | None, list[str]]:
         if flag not in boolean_options:
             raise ValueError(f"unknown /run option: {flag}")
         index += 1
-    if flags.count("--profile") > 1:
-        raise ValueError("/run accepts --profile only once")
-    if flags.count("--reason") > 1:
-        raise ValueError("/run accepts --reason only once")
-    if flags.count("--task-file") > 1:
-        raise ValueError("/run accepts --task-file only once")
-    if "--review" in flags and "--publish" in flags:
+    if _has_job_flag(flags, "--review") and _has_job_flag(flags, "--publish"):
         raise ValueError("/run cannot combine --review and --publish")
-    if "--mark-done" in flags and "--publish" in flags:
+    if _has_job_flag(flags, "--mark-done") and _has_job_flag(flags, "--publish"):
         raise ValueError("/run cannot combine --mark-done and --publish")
-    if "--mark-done" not in flags and "--reason" in flags:
+    if not _has_job_flag(flags, "--mark-done") and "--reason" in seen_values:
         raise ValueError("/run --reason requires --mark-done")
     return issue, flags
 
 
+def _has_job_flag(flags: Sequence[str], option: str) -> bool:
+    """Check a boolean /run option without treating a value as a flag."""
+    value_options = {"--profile", "--instruction", "--reason", "--task-file"}
+    index = 0
+    while index < len(flags):
+        if flags[index] in value_options:
+            index += 2
+            continue
+        if flags[index] == option:
+            return True
+        index += 1
+    return False
+
+
 def _option_value(flags: list[str], option: str) -> str | None:
-    try:
-        index = flags.index(option)
-    except ValueError:
-        return None
-    return flags[index + 1]
+    value_options = {"--profile", "--instruction", "--reason", "--task-file", "--issue"}
+    index = 0
+    while index < len(flags):
+        flag = flags[index]
+        if flag in value_options:
+            if flag == option:
+                return flags[index + 1]
+            index += 2
+            continue
+        index += 1
+    return None
 
 
 def _parse_options(parts: list[str], *, usage: str,
@@ -1357,7 +1390,17 @@ class AgenticShell:
             argv.extend(["--issue", issue])
         if self.config:
             argv.extend(["--config", str(self.config)])
-        argv.extend(flags)
+        # Use argparse's inline form for instruction values. This keeps
+        # option-like and empty instruction text in the value itself when the
+        # child runner parses the argv array.
+        index = 0
+        while index < len(flags):
+            if flags[index] == "--instruction" and index + 1 < len(flags):
+                argv.append(f"--instruction={flags[index + 1]}")
+                index += 2
+                continue
+            argv.append(flags[index])
+            index += 1
         return argv
 
     def _run_foreground(self, argv: list[str]) -> None:
@@ -1435,7 +1478,7 @@ class AgenticShell:
         argv = self._runner_args(issue, runner_flags)
         if task_file and task_file_value is None:
             argv.extend(["--task-file", str(task_file)])
-        if "--publish" in flags:
+        if _has_job_flag(flags, "--publish"):
             print("[PUBLISH] Running in the foreground so publication confirmation can be entered")
             self._run_foreground(argv)
         else:

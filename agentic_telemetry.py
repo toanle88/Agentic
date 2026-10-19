@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from agentic_context import INSTRUCTION_CONTEXT_CHARS, _bounded_text
+
 
 USAGE_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens")
 
@@ -209,6 +211,17 @@ def record_security_policy(folder: Path, config: dict[str, Any]) -> None:
     _write_run_record(path, data)
 
 
+def record_run_instruction(folder: Path, instruction: str) -> None:
+    """Persist or clear the bounded, user-provided instruction for a run."""
+    path, data = _load_run_record(folder)
+    bounded = _bounded_text(instruction, INSTRUCTION_CONTEXT_CHARS)
+    if bounded.strip():
+        data["instruction"] = bounded
+    else:
+        data.pop("instruction", None)
+    _write_run_record(path, data)
+
+
 def record_operation(folder: Path, role: str, name: str, *,
                      started_at: str | None = None,
                      finished_at: str | None = None,
@@ -335,4 +348,13 @@ def read_run_usage(folder: Path) -> dict[str, Any]:
         result["security_policy_history"] = data["security_policy_history"]
     if isinstance(data.get("guidance_loads"), list):
         result["guidance_loads"] = data["guidance_loads"]
+    instruction = data.get("instruction")
+    if isinstance(instruction, str) and instruction.strip():
+        result["instruction"] = _bounded_text(instruction, INSTRUCTION_CONTEXT_CHARS)
     return result
+
+
+def read_run_instruction(folder: Path) -> str | None:
+    """Read an optional bounded instruction from a run record."""
+    value = read_run_usage(folder).get("instruction")
+    return value if isinstance(value, str) else None
