@@ -1086,6 +1086,10 @@ class PureTests(unittest.TestCase):
         prompt = agentic.agent_prompt(issue)
         self.assertIn('ALREADY been completed', prompt)
         self.assertIn('git diff --cached', prompt)
+        self.assertIn('runner source itself may be changed', prompt)
+        self.assertIn('agent_config.json', prompt)
+        self.assertIn('AGENTS.md', prompt)
+        self.assertNotIn('change agentic.py/agent_config.json/AGENTS.md', prompt)
 
     def test_config_validation(self):
         folder = Path(__file__).resolve().parents[1]
