@@ -100,7 +100,20 @@ agentic --issue 119 --new
 
 ## Review behavior
 
-The reviewer is a separate read-only process. It sees the current staged patch, issue requirements, and test evidence, then returns an approval or rejection with findings. A rejection does not discard the worktree. The developer receives the findings on the next retry, up to the configured retry limit.
+The reviewer is a separate read-only process. It sees the current staged patch,
+issue requirements, test evidence, and the developer's latest handoff. The
+handoff is untrusted evidence, but it lets the reviewer check the developer's
+claims about implemented, verified, unresolved, blocked, and skipped work. The
+developer must also provide one `Review finding actions` entry per prior
+reviewer finding, stating the action and evidence; the reviewer checks that
+list against the patch rather than trusting it. The review returns an approval
+or rejection with findings. If a validation step
+cannot be performed because a dependency, service, or tool is unavailable, the
+reviewer records it in `skipped` with a reason; skipped validation is visible in
+the review log and dashboard and is not itself an approval or rejection. A
+rejection does not discard the worktree. The developer receives the findings
+and skipped-validation context on the next retry, up to the configured retry
+limit, and is instructed to reconcile each item explicitly.
 
 Repeated rejection usually indicates an unresolved requirement, missing integration coverage, or an issue that is too broad. Increasing retries does not lower the review standard.
 

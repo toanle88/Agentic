@@ -174,23 +174,30 @@ class GitTest(unittest.TestCase):
             calls.append(argv)
             output = Path(argv[argv.index('--output-last-message') + 1])
             if '--output-schema' in argv:
-                output.write_text(json.dumps({'approved': True, 'summary': 'Looks good', 'findings': []}))
+                output.write_text(json.dumps({
+                    'approved': True, 'summary': 'Looks good', 'findings': [],
+                    'skipped': ['Browser check unavailable in this environment'],
+                }))
             else:
                 output.write_text('Made implementation changes.')
             return CompletedProcess(argv, 0, stdout='')
 
         with patch('agentic.streamed_command', side_effect=fake_stream):
             agentic.run_codex(run.worktree, 'Implement it', output=folder / 'developer-001.txt')
-            verdict = agentic.review(run.worktree, issue, folder, base, test_report='pytest passed')
+            verdict = agentic.review(
+                run.worktree, issue, folder, base, test_report='pytest passed',
+            )
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0][0:3], ['codex', 'exec', '--json'])
         self.assertEqual(calls[0][3:5], ['--sandbox', 'workspace-write'])
         self.assertEqual(calls[1][3:5], ['--sandbox', 'read-only'])
         self.assertEqual(verdict['approved'], True)
+        self.assertEqual(verdict['skipped'], ['Browser check unavailable in this environment'])
         self.assertEqual(len(list(folder.glob('review-*.json'))), 2)  # review-schema + review-001
         self.assertIn('git diff --cached', calls[1][-1])
         self.assertIn('description', calls[1][-1])
         self.assertIn('pytest passed', calls[1][-1])
+        self.assertIn('Made implementation changes.', calls[1][-1])
 
     def test_publish_requires_new_verification_and_confirmation(self):
         run = agentic.create_worktree(self.repo, 'main', 15)
@@ -370,7 +377,13 @@ class GitTest(unittest.TestCase):
             'max_files': None,
             'developer_agent': {'provider': 'codex'},
         }
-        agent_results = [(True, 'first'), (True, 'second')]
+        agent_results = [
+            (True, 'first'),
+            (True, 'second\nReview finding actions:\n'
+                   '- Finding: Add a regression test\n'
+                   '  Action: fixed\n'
+                   '  Evidence: added regression coverage'),
+        ]
         review_results = [
             (False, 'tests passed', {
                 'approved': False, 'summary': 'Missing regression test',
@@ -381,13 +394,20 @@ class GitTest(unittest.TestCase):
             }, '', ''),
         ]
         with (patch('agentic.run_agent', side_effect=agent_results) as run_agent,
-              patch('agentic.verify_and_review', side_effect=review_results)):
+              patch('agentic.verify_and_review', side_effect=review_results) as verify):
             self.assertTrue(agentic.develop(run, issue, 'main', config, folder))
         self.assertEqual(run_agent.call_count, 2)
+        self.assertEqual(verify.call_args_list[0].kwargs['developer_report'], 'first')
+        self.assertIn('Review finding actions:', verify.call_args_list[1].kwargs['developer_report'])
         second_prompt = run_agent.call_args_list[1].args[1]
         self.assertIn('first', second_prompt)
         self.assertIn('Missing regression test', second_prompt)
         self.assertIn('Add a regression test', second_prompt)
+        self.assertIn('one list entry for every finding', second_prompt)
+        self.assertIn('prior\n  review', second_prompt)
+        self.assertIn('Finding:', second_prompt)
+        self.assertIn('Action:', second_prompt)
+        self.assertIn('Evidence:', second_prompt)
 
     def test_develop_does_not_retry_environment_failures(self):
         run = agentic.create_worktree(self.repo, 'main', 34)
@@ -688,6 +708,40 @@ class PureTests(unittest.TestCase):
         self.assertTrue(verdict['_tooling_error'])
         self.assertIn('wrong shape', verdict['summary'])
 
+    def test_review_rejects_wrong_skipped_shape(self):
+        with tempfile.TemporaryDirectory() as temp:
+            worktree = Path(temp)
+            folder = worktree / 'logs'
+            folder.mkdir()
+            issue = agentic.Issue(20, 'Review skipped shape', '')
+            with patch('agentic.run_agent', return_value=(True, json.dumps({
+                'approved': True, 'summary': 'bad', 'findings': [], 'skipped': 'not a list',
+            }))):
+                verdict = agentic.review(worktree, issue, folder, 'base')
+        self.assertTrue(verdict['_tooling_error'])
+        self.assertIn('wrong shape', verdict['summary'])
+
+    def test_developer_review_action_validation_requires_each_entry(self):
+        self.assertIn(
+            'missing Evidence',
+            agentic.validate_developer_review_actions(
+                'Finding: first\nAction: fixed\n', ['first'],
+            ),
+        )
+        self.assertIn(
+            'contains 2 findings',
+            agentic.validate_developer_review_actions(
+                'Finding: first\nAction: fixed\nEvidence: test\n',
+                ['first', 'second'],
+            ),
+        )
+        self.assertEqual(
+            agentic.validate_developer_review_actions(
+                'Finding: first\nAction: fixed\nEvidence: test\n', ['first'],
+            ),
+            '',
+        )
+
     def test_issue_investigation_returns_structured_feedback(self):
         with tempfile.TemporaryDirectory() as temp:
             worktree = Path(temp)
@@ -803,11 +857,14 @@ class PureTests(unittest.TestCase):
                 'approved': False,
                 'summary': 'Reject: missing recovery behavior',
                 'findings': ['Add restart coverage', 'Persist failure audit'],
+                'skipped': ['Browser check unavailable'],
             })
         output = out.getvalue()
         self.assertIn('[REVIEW] REJECTED', output)
         self.assertIn('missing recovery behavior', output)
         self.assertIn('Persist failure audit', output)
+        self.assertIn('Skipped validation: 1', output)
+        self.assertIn('Browser check unavailable', output)
         self.assertNotIn('"approved": false', output)
 
     def test_codex_config_overrides_are_added_to_cli(self):

@@ -144,7 +144,7 @@ def _review(folder: Path) -> tuple[dict[str, Any], Path | None]:
                        key=lambda item: (-item["count"], item["fingerprint"]))
     if path is None:
         return {"status": "not-run", "summary": "No review result recorded.", "findings": [],
-                "recurring": recurring}, None
+                "skipped": [], "recurring": recurring}, None
     raw = _parse_json_object(_read(path, 100_000))
     if raw is None:
         try:
@@ -157,16 +157,21 @@ def _review(folder: Path) -> tuple[dict[str, Any], Path | None]:
             "status": "invalid",
             "summary": f"Review output is not valid JSON: {error}",
             "findings": [],
+            "skipped": [],
             "recurring": recurring,
         }, path
     approved = raw.get("approved") is True
     findings = raw.get("findings", [])
     if not isinstance(findings, list):
         findings = [str(findings)]
+    skipped = raw.get("skipped", [])
+    if not isinstance(skipped, list):
+        skipped = [str(skipped)]
     return {
         "status": "approved" if approved else "rejected",
         "summary": str(raw.get("summary", "No review summary.")),
         "findings": [str(item) for item in findings],
+        "skipped": [str(item) for item in skipped],
         "recurring": recurring,
         "file": path.name,
         "updated": _timestamp(path),
@@ -480,6 +485,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
       const detail = document.querySelector("#detail");
       if (!run) {{ detail.innerHTML = `<div class="empty">No run selected.</div>`; return; }}
       const findings = run.review.findings?.length ? `<ul class="findings">${{run.review.findings.map(item => `<li>${{esc(item)}}</li>`).join("")}}</ul>` : `<p class="subtle">No findings recorded.</p>`;
+      const skipped = run.review.skipped?.length ? `<section class="callout"><strong>Skipped validation</strong><ul class="findings">${{run.review.skipped.map(item => `<li>${{esc(item)}}</li>`).join("")}}</ul></section>` : "";
       const investigationFindings = run.investigation.findings?.length ? `<ul class="findings">${{run.investigation.findings.map(item => `<li>${{esc(item)}}</li>`).join("")}}</ul>` : `<p class="subtle">No findings recorded.</p>`;
       const recurring = run.review.recurring?.length ? `<section class="callout rejected"><strong>Recurring findings</strong><ul class="findings">${{run.review.recurring.map(item => `<li>[${{esc(item.severity)}}] ${{esc(item.text)}} <span class="meta">(${{esc(item.count)}} reviews)</span></li>`).join("")}}</ul></section>` : "";
       const files = run.files.length ? run.files.map(file => `<details><summary>${{esc(file.kind)}} · ${{esc(file.name)}} <span class="meta">${{esc(file.updated)}}</span></summary><pre>${{esc(file.content)}}</pre></details>`).join("") : `<div class="empty">No log files recorded.</div>`;
@@ -488,6 +494,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
         <section class="callout"><strong>Usage and cost</strong><p>${{esc(run.usage.total_tokens == null ? "Provider usage unavailable" : `${{run.usage.total_tokens.toLocaleString()}} tokens`)}}${{run.usage.estimated_cost_usd == null ? "" : ` · $${{Number(run.usage.estimated_cost_usd).toFixed(4)}} estimated`}}</p></section>
         <section class="callout"><strong>Investigation feedback</strong><p>${{esc(run.investigation.summary)}}</p>${{investigationFindings}}</section>
         <section class="callout ${{esc(run.review.status)}}"><strong>Review · ${{esc(labels[run.review.status] || run.review.status)}}</strong><p>${{esc(run.review.summary)}}</p>${{findings}}</section>
+        ${{skipped}}
         ${{recurring}}
         <h3>Tests · ${{esc(run.tests.status)}}</h3><pre>${{esc(run.tests.summary)}}</pre>
         <h3>Latest developer result</h3><pre>${{esc(run.developer.summary)}}</pre>
