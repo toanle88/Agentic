@@ -216,9 +216,9 @@ class StreamingTests(unittest.TestCase):
                 root, [[sys.executable, '-c', 'print("ok")']]
             )
 
-            self.assertFalse(passed)
-            self.assertIn('new.py', report)
-            self.assertIn('new blank line at EOF', report)
+            self.assertTrue(passed)
+            self.assertIn('ok', report)
+            self.assertEqual((root / 'new.py').read_bytes(), b'value = 1\n')
 
     def test_test_runner_stops_when_deadline_expires_between_commands(self):
         with tempfile.TemporaryDirectory() as dirname:

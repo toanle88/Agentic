@@ -9,7 +9,9 @@ Each issue or local-task run follows this sequence:
 3. Ask an independent read-only configured investigator to analyze the issue and repository.
 4. Record the investigation feedback and pass it to the developer automatically.
 5. Give the task and repository instructions to the configured developer provider.
-6. Run every configured test command.
+6. Run every configured test command. Agentic removes extra final blank lines
+   that Git reports as `new blank line at EOF`; other whitespace errors still
+   fail validation.
 7. Stage and inspect the proposed patch.
 8. Ask an independent read-only configured reviewer for a structured verdict.
 9. Approve, retry with evidence, or preserve the worktree for resume.

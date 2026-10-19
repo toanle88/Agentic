@@ -292,6 +292,76 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
     )
 
 
+_EOF_BLANK_LINE_RE = re.compile(r"^(?P<path>.+):\d+: new blank line at EOF\.$")
+
+
+def _whitespace_check(worktree: Path, timeout: int) -> str:
+    """Return Git whitespace diagnostics, including untracked files."""
+    diff_check = command(
+        ["git", "-c", "core.whitespace=cr-at-eol", "diff", "--check"], worktree,
+        timeout=timeout, check=False,
+    )
+    if diff_check.returncode:
+        return diff_check.stdout.strip()
+
+    untracked = command(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        worktree, timeout=timeout, check=False,
+    )
+    if untracked.returncode:
+        return untracked.stdout.strip() or "git ls-files failed"
+    for path in filter(None, untracked.stdout.split("\x00")):
+        candidate = command(
+            [
+                "git", "-c", "core.whitespace=cr-at-eol", "diff",
+                "--no-index", "--check", "--", os.devnull, path,
+            ],
+            worktree, timeout=timeout, check=False,
+        )
+        # --no-index returns 1 for a clean difference and 3 when it reports
+        # whitespace errors.
+        if candidate.returncode not in (0, 1):
+            return candidate.stdout.strip()
+    return ""
+
+
+def _repair_eof_blank_lines(worktree: Path, diagnostics: str) -> list[str]:
+    """Remove only the extra final line breaks rejected by Git."""
+    root = worktree.resolve()
+    repaired: list[str] = []
+    paths: set[Path] = set()
+    for line in diagnostics.splitlines():
+        match = _EOF_BLANK_LINE_RE.match(line)
+        if not match:
+            continue
+        raw_path = Path(match.group("path"))
+        path = (raw_path if raw_path.is_absolute() else worktree / raw_path).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError:
+            continue
+        paths.add(path)
+
+    for path in paths:
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        original = data
+        while data.endswith(b"\r\n\r\n"):
+            data = data[:-2]
+        while data.endswith(b"\n\n"):
+            data = data[:-1]
+        if data == original:
+            continue
+        try:
+            path.write_bytes(data)
+        except OSError:
+            continue
+        repaired.append(str(path.relative_to(root)))
+    return sorted(repaired)
+
+
 def run_tests(worktree: Path, test_commands: list[list[str]],
               folder: Path | None = None, timeout: int | None = None,
               sandbox: dict[str, Any] | None = None,
@@ -319,40 +389,23 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
         _status_print("[TESTS] Overall task deadline reached", flush=True)
         return False, report.strip()
     try:
-        diff_check = command(
-            ["git", "-c", "core.whitespace=cr-at-eol", "diff", "--check"], worktree,
-            timeout=_remaining_timeout(deadline, 180) or 1, check=False,
+        whitespace_report = _whitespace_check(
+            worktree, _remaining_timeout(deadline, 180) or 1,
         )
-        if diff_check.returncode == 0:
-            untracked = command(
-                ["git", "ls-files", "--others", "--exclude-standard", "-z"],
-                worktree, timeout=_remaining_timeout(deadline, 180) or 1, check=False,
+        repaired = _repair_eof_blank_lines(worktree, whitespace_report)
+        if repaired:
+            _status_print(
+                "[TESTS] Removed extra blank line at EOF: " + ", ".join(repaired),
+                flush=True,
             )
-            if untracked.returncode:
-                diff_check = untracked
-            else:
-                for path in filter(None, untracked.stdout.split("\x00")):
-                    candidate = command(
-                        [
-                            "git", "-c", "core.whitespace=cr-at-eol", "diff",
-                            "--no-index", "--check", "--", os.devnull, path,
-                        ],
-                        worktree,
-                        timeout=_remaining_timeout(deadline, 180) or 1,
-                        check=False,
-                    )
-                    # --no-index returns 1 for a clean difference and 3 when
-                    # it reports whitespace errors.
-                    if candidate.returncode not in (0, 1):
-                        diff_check = candidate
-                        break
+            whitespace_report = _whitespace_check(
+                worktree, _remaining_timeout(deadline, 180) or 1,
+            )
     except RuntimeError as exc:
         return False, "\n\n".join(results) + f"\ngit diff --check failed: {exc}"
-    if diff_check.returncode:
+    if whitespace_report:
         _status_print("[TESTS] git diff --check FAILED", flush=True)
-        details = diff_check.stdout.strip()
-        suffix = f"\n{details}" if details else ""
-        return False, "\n\n".join(results) + f"\ngit diff --check failed{suffix}"
+        return False, "\n\n".join(results) + f"\ngit diff --check failed\n{whitespace_report}"
     _status_print("[TESTS] All configured checks passed", flush=True)
     return True, "\n\n".join(results)
 
