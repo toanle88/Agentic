@@ -210,9 +210,11 @@ In the interactive shell, `/dashboard` generates the snapshot and opens it with
 the host operating system's default browser. Use `/dashboard PATH` to choose a
 specific output file. Regenerate the dashboard after a run to refresh its
 contents. The dashboard shows the recorded token total for each run and a
-visual token-usage chart with one bar per provider invocation when available.
-This keeps retries and separate developer/reviewer executions visible instead
-of collapsing them into one issue bar. Providers that do not report usage
+visual token-usage chart with one numbered bar per provider invocation when
+available. Runs are ordered oldest to newest, and the highest number is marked
+as latest. This keeps retries and separate developer/reviewer executions
+visible instead of collapsing them into one issue bar. The run detail table
+uses the same numbering and latest marker. Providers that do not report usage
 remain marked as unknown rather than being estimated.
 
 For scripts and external dashboards, use the read-only status command instead

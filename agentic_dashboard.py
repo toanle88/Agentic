@@ -461,7 +461,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
     <section class="metrics" aria-label="Run summary" id="metrics"></section>
     <section class="panel chart-panel" aria-labelledby="token-chart-title">
       <div class="panel-heading">
-        <div><h2 id="token-chart-title">Token usage by run</h2><p class="subtle">Known totals for each provider invocation, ordered from oldest to newest.</p></div>
+        <div><h2 id="token-chart-title">Token usage by run</h2><p class="subtle">Known totals for each provider invocation, ordered from oldest to newest. The highest run number is the latest.</p></div>
         <span class="token-legend">Striped bars = usage unavailable</span>
       </div>
       <div class="token-chart" id="token-chart" role="img" aria-label="Token usage chart"></div>
@@ -536,15 +536,18 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
       const known = entries.map(entry => tokenValue(entry.invocation || entry.run.usage)).filter(value => value != null);
       const max = Math.max(...known, 1);
       chart.setAttribute("aria-label", `Token usage chart for ${{entries.length}} executions`);
-      chart.innerHTML = entries.map(entry => {{
+      chart.innerHTML = entries.map((entry, index) => {{
         const run = entry.run;
         const invocation = entry.invocation;
         const tokens = tokenValue(invocation || run.usage);
+        const runNumber = index + 1;
+        const latest = index === entries.length - 1;
+        const runTag = `Run ${{runNumber}}${{latest ? " · latest" : ""}}`;
         const runLabel = run.issue == null ? run.label.replace(/^Local task: /, "") : `#${{run.issue}}`;
         const invocationLabel = invocation ? (invocation.name || invocation.role || `run ${{entry.index + 1}}`) : runLabel;
-        const label = invocation ? `${{runLabel}} · ${{invocationLabel}}` : runLabel;
+        const label = `${{runTag}} · ${{runLabel}}${{invocation ? ` · ${{invocationLabel}}` : ""}}`;
         const height = tokens == null ? 4 : Math.max(4, Math.round(tokens / max * 132));
-        return `<div class="token-column" title="${{esc(run.label)}} · ${{esc(invocationLabel)}}: ${{esc(formatTokens(tokens))}} tokens">
+        return `<div class="token-column" title="${{esc(runTag)}} · ${{esc(run.label)}} · ${{esc(invocationLabel)}}: ${{esc(formatTokens(tokens))}} tokens">
           <div class="token-value">${{esc(formatTokens(tokens))}}</div>
           <div class="token-bar-track"><div class="token-bar ${{tokens == null ? "unknown" : ""}}" style="height:${{height}}px"></div></div>
           <div class="token-label">${{esc(label)}}</div>
@@ -571,7 +574,11 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
       const investigationFindings = run.investigation.findings?.length ? `<ul class="findings">${{run.investigation.findings.map(item => `<li>${{esc(item)}}</li>`).join("")}}</ul>` : `<p class="subtle">No findings recorded.</p>`;
       const recurring = run.review.recurring?.length ? `<section class="callout rejected"><strong>Recurring findings</strong><ul class="findings">${{run.review.recurring.map(item => `<li>[${{esc(item.severity)}}] ${{esc(item.text)}} <span class="meta">(${{esc(item.count)}} reviews)</span></li>`).join("")}}</ul></section>` : "";
       const invocations = Array.isArray(run.usage?.by_invocation) ? run.usage.by_invocation.filter(item => item && typeof item === "object") : [];
-      const tokenBreakdown = invocations.length ? `<div class="token-breakdown"><table><thead><tr><th>Invocation</th><th>Role</th><th>Prompt</th><th>Completion</th><th>Total</th></tr></thead><tbody>${{invocations.map(item => `<tr><td>${{esc(item.name || "unknown")}}</td><td>${{esc(item.role || "unknown")}}</td><td>${{esc(formatTokens(item.prompt_tokens))}}</td><td>${{esc(formatTokens(item.completion_tokens))}}</td><td>${{esc(formatTokens(item.total_tokens))}}</td></tr>`).join("")}}</tbody></table></div>` : "";
+      const invocationRows = invocations.map((item, index) => {{
+        const runLabel = `Run ${{index + 1}}${{index === invocations.length - 1 ? " · latest" : ""}}`;
+        return `<tr><td>${{esc(runLabel)}}</td><td>${{esc(item.name || "unknown")}}</td><td>${{esc(item.role || "unknown")}}</td><td>${{esc(formatTokens(item.prompt_tokens))}}</td><td>${{esc(formatTokens(item.completion_tokens))}}</td><td>${{esc(formatTokens(item.total_tokens))}}</td></tr>`;
+      }}).join("");
+      const tokenBreakdown = invocations.length ? `<div class="token-breakdown"><table><thead><tr><th>Run</th><th>Invocation</th><th>Role</th><th>Prompt</th><th>Completion</th><th>Total</th></tr></thead><tbody>${{invocationRows}}</tbody></table></div>` : "";
       const files = run.files.length ? run.files.map(file => `<details><summary>${{esc(file.kind)}} · ${{esc(file.name)}} <span class="meta">${{esc(file.updated)}}</span></summary><pre>${{esc(file.content)}}</pre></details>`).join("") : `<div class="empty">No log files recorded.</div>`;
       detail.innerHTML = `<div class="detail-top"><div><h2>${{esc(run.label)}}</h2><div class="branch">${{esc(run.branch)}}</div></div>${{badge(run.status)}}</div>
         ${{blocked}}
