@@ -14,7 +14,8 @@
     "enabled": false,
     "engine": "docker",
     "image": "agentic-runner:latest",
-    "allow_network": false
+    "allow_network": false,
+    "build_network": true
   },
   "developer": {
     "provider": "codex",

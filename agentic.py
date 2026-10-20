@@ -101,7 +101,7 @@ from agentic_telemetry import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.48"
+__version__ = "1.1.49"
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 INSTRUCTION_CONTEXT_CHARS = _INSTRUCTION_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module
@@ -661,6 +661,7 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
         "build_context": sandbox_context,
         "language": sandbox_language,
         "allow_network": False,
+        "build_network": True,
         "pass_env": sandbox_env_for_providers(provider, reviewer_provider),
     })
     config = {

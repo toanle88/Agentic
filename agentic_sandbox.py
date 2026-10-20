@@ -10,7 +10,12 @@ from typing import Any
 SUPPORTED_ENGINES = ("docker", "podman")
 SUPPORTED_LANGUAGES = ("python", "node", "go", "rust", "java", "dotnet")
 DEFAULT_SANDBOX_IMAGE = "agentic-runner:latest"
+DEFAULT_BUILD_NETWORK = True
 ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Keep image references in the image position of the engine argv. In
+# particular, never allow a leading dash that could be parsed as another
+# Docker/Podman option.
+IMAGE_REFERENCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]*$")
 
 
 def _relative_path_setting(name: str, value: Any, *, default: str | None = None) -> str | None:
@@ -29,7 +34,7 @@ def validate_sandbox(raw: Any) -> dict[str, Any]:
         return {
             "enabled": False, "engine": "docker", "image": DEFAULT_SANDBOX_IMAGE,
             "dockerfile": None, "build_context": ".", "language": None,
-            "allow_network": False, "pass_env": [],
+            "allow_network": False, "build_network": DEFAULT_BUILD_NETWORK, "pass_env": [],
         }
     if not isinstance(raw, dict):
         raise ValueError("sandbox must be an object")
@@ -40,6 +45,7 @@ def validate_sandbox(raw: Any) -> dict[str, Any]:
     build_context = _relative_path_setting("build_context", raw.get("build_context"), default=".")
     language = raw.get("language")
     allow_network = raw.get("allow_network", False)
+    build_network = raw.get("build_network", DEFAULT_BUILD_NETWORK)
     pass_env = raw.get("pass_env", [])
     if type(enabled) is not bool:
         raise ValueError("sandbox.enabled must be a boolean")
@@ -47,14 +53,19 @@ def validate_sandbox(raw: Any) -> dict[str, Any]:
         raise ValueError(f"sandbox.engine must be one of: {', '.join(SUPPORTED_ENGINES)}")
     if image is None and not enabled:
         image = DEFAULT_SANDBOX_IMAGE
-    if not isinstance(image, str) or not image.strip() or any(char in image for char in "\r\n"):
-        raise ValueError("sandbox.image must be a nonempty single-line string when sandbox.enabled is true")
+    if not isinstance(image, str) or not image.strip() or IMAGE_REFERENCE.fullmatch(image) is None:
+        raise ValueError(
+            "sandbox.image must be a nonempty Docker/Podman image reference "
+            "containing no whitespace or option-like prefix"
+        )
     if language is not None and language not in SUPPORTED_LANGUAGES:
         raise ValueError(
             f"sandbox.language must be one of: {', '.join(SUPPORTED_LANGUAGES)} or null"
         )
     if type(allow_network) is not bool:
         raise ValueError("sandbox.allow_network must be a boolean")
+    if type(build_network) is not bool:
+        raise ValueError("sandbox.build_network must be a boolean")
     if not isinstance(pass_env, list) or any(
         not isinstance(name, str) or not ENVIRONMENT_NAME.fullmatch(name) for name in pass_env
     ) or len(set(pass_env)) != len(pass_env):
@@ -67,6 +78,7 @@ def validate_sandbox(raw: Any) -> dict[str, Any]:
         "build_context": build_context,
         "language": language,
         "allow_network": allow_network,
+        "build_network": build_network,
         "pass_env": list(pass_env),
     }
 
@@ -89,8 +101,9 @@ def sandbox_build_command(settings: dict[str, Any], repo: Path) -> list[str] | N
         raise ValueError(f"Configured sandbox Dockerfile does not exist: {dockerfile}")
     if not context_path.is_dir():
         raise ValueError(f"Configured sandbox build context is not a directory: {policy['build_context']}")
+    network = "default" if policy["build_network"] else "none"
     return [
-        policy["engine"], "build", "--pull=false", "--tag", policy["image"],
+        policy["engine"], "build", "--pull=false", f"--network={network}", "--tag", policy["image"],
         "--file", str(dockerfile_path), str(context_path),
     ]
 

@@ -26,6 +26,7 @@ CHAT_FILES = (
     "run.json", "blocked.json", "result.json", "review-*.json", "investigation-*.json",
     "tests-*.txt", "test-command-*.txt", "developer-*.txt", "developer-*.log",
 )
+_FILE_HASH_CHUNK = 1024 * 1024
 
 
 class _GeneratedChatOutput(str):
@@ -60,9 +61,17 @@ def _safe_read(path: Path, limit: int) -> str:
     try:
         if path.is_symlink() or not path.is_file():
             return ""
-        value = path.read_text(encoding="utf-8", errors="replace")
+        size = path.stat().st_size
+        with path.open("rb") as stream:
+            start = max(0, size - max(limit * 4, 4096))
+            stream.seek(start)
+            value = stream.read().decode("utf-8", errors="replace")
     except OSError:
         return ""
+    if start > 0 or len(value) > limit:
+        value = "[… earlier output omitted; showing the last {:,} characters …]\n{}".format(
+            limit, value[-limit:]
+        )
     return _bounded_text(redact_secrets(value), limit)
 
 
@@ -179,24 +188,32 @@ def capture_worktree_snapshot(worktree: Path) -> str:
 
 def _protected_snapshot(worktree: Path) -> dict[str, str]:
     found: dict[str, str] = {}
-    for path in worktree.rglob("*"):
-        if path.is_dir():
-            continue
-        try:
-            relative = path.relative_to(worktree).as_posix()
-            if (
-                ".git" in Path(relative).parts
-                or not forbidden(relative)
-                or _runner_source_change_allowed(worktree, relative)
-            ):
-                continue
-            if path.is_symlink():
-                digest = hashlib.sha256(("symlink:" + os.readlink(path)).encode()).hexdigest()
-            else:
-                digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        except OSError as exc:
-            digest = f"!unreadable:{type(exc).__name__}"
-        found[relative] = digest
+    for current, directories, filenames in os.walk(worktree, topdown=True, followlinks=False):
+        # Git objects and refs are checked separately through ``git`` below;
+        # walking them here adds cost without improving the protected-file
+        # guard and can make a large repository unnecessarily expensive.
+        directories[:] = [directory for directory in directories if directory != ".git"]
+        for filename in filenames:
+            path = Path(current) / filename
+            try:
+                relative = path.relative_to(worktree).as_posix()
+                if (
+                    ".git" in Path(relative).parts
+                    or not forbidden(relative)
+                    or _runner_source_change_allowed(worktree, relative)
+                ):
+                    continue
+                if path.is_symlink():
+                    digest = hashlib.sha256(("symlink:" + os.readlink(path)).encode()).hexdigest()
+                else:
+                    digest_builder = hashlib.sha256()
+                    with path.open("rb") as stream:
+                        while chunk := stream.read(_FILE_HASH_CHUNK):
+                            digest_builder.update(chunk)
+                    digest = digest_builder.hexdigest()
+            except OSError as exc:
+                digest = f"!unreadable:{type(exc).__name__}"
+            found[relative] = digest
     return found
 
 

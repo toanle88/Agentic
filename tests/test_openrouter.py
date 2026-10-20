@@ -12,6 +12,7 @@ from unittest.mock import patch
 import agentic
 import agentic_context
 import agentic_openrouter
+import agentic_openrouter_tools
 
 
 class OpenRouterTests(unittest.TestCase):
@@ -405,6 +406,82 @@ class OpenRouterTests(unittest.TestCase):
             )
             self.assertLessEqual(len(bounded), agentic_openrouter.OPENROUTER_READ_FILE_CHARS)
             self.assertIn('use start_line/end_line', bounded)
+
+    def test_openrouter_file_tools_bound_large_tree_and_file_reads(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for index in range(350):
+                path = root / "tree" / f"file-{index:03d}.txt"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"file {index}\n")
+            listed = agentic_openrouter._openrouter_tool_call(
+                root, 'list_files', {'path': 'tree'}, readonly=True,
+            ).splitlines()
+            self.assertEqual(len(listed), agentic_openrouter_tools.OPENROUTER_LIST_FILES_PAGE_SIZE + 1)
+            self.assertEqual(listed[0], 'tree/file-000.txt')
+            self.assertEqual(listed[agentic_openrouter_tools.OPENROUTER_LIST_FILES_PAGE_SIZE - 1], 'tree/file-299.txt')
+            self.assertIn('call list_files with page=2', listed[-1])
+            second_page = agentic_openrouter._openrouter_tool_call(
+                root, 'list_files', {'path': 'tree', 'page': 2}, readonly=True,
+            ).splitlines()
+            self.assertEqual(second_page, [f'tree/file-{index:03d}.txt' for index in range(300, 350)])
+            self.assertIn('ERROR: page must be a positive integer', agentic_openrouter._openrouter_tool_call(
+                root, 'list_files', {'path': 'tree', 'page': 0}, readonly=True,
+            ))
+
+            large = root / 'large-no-newline.txt'
+            large.write_text('z' * (20 * 1024 * 1024))
+            bounded = agentic_openrouter._openrouter_tool_call(
+                root, 'read_file', {'path': large.name}, readonly=True,
+            )
+            self.assertLessEqual(len(bounded), agentic_openrouter.OPENROUTER_READ_FILE_CHARS)
+            self.assertIn('use start_line/end_line', bounded)
+            ranged_bounded = agentic_openrouter._openrouter_tool_call(
+                root, 'read_file', {
+                    'path': large.name, 'start_line': 1, 'end_line': 1,
+                }, readonly=True,
+            )
+            self.assertLessEqual(
+                len(ranged_bounded), agentic_openrouter.OPENROUTER_READ_FILE_CHARS,
+            )
+            self.assertIn('use start_line/end_line', ranged_bounded)
+
+    def test_openrouter_ranged_reader_uses_bounded_chunks(self):
+        class HugeLineReader:
+            def __init__(self):
+                self.remaining = 20 * 1024 * 1024
+                self.read_sizes = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def __iter__(self):
+                raise AssertionError('ranged reads must not iterate over whole lines')
+
+            def read(self, size=-1):
+                self.read_sizes.append(size)
+                if self.remaining <= 0:
+                    return ''
+                count = min(size, 4096, self.remaining)
+                self.remaining -= count
+                return 'z' * count
+
+        reader = HugeLineReader()
+        with patch.object(Path, 'open', return_value=reader):
+            bounded = agentic_openrouter._openrouter_tool_call(
+                Path('synthetic-worktree'), 'read_file', {
+                    'path': 'synthetic-large-file', 'start_line': 1, 'end_line': 1,
+                }, readonly=True,
+            )
+        self.assertLessEqual(len(bounded), agentic_openrouter.OPENROUTER_READ_FILE_CHARS)
+        self.assertIn('use start_line/end_line', bounded)
+        self.assertTrue(reader.read_sizes)
+        self.assertLessEqual(
+            max(reader.read_sizes), agentic_openrouter_tools.OPENROUTER_READ_CHUNK_CHARS,
+        )
 
     def test_openrouter_rejects_symlink_escape_and_invalid_paths(self):
         with tempfile.TemporaryDirectory() as temp:

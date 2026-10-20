@@ -1,5 +1,20 @@
 # Offline benchmarking
 
+## Performance baselines
+
+Issue execution performance is compared using the reproducible corpus and
+budgets in [`audits/issue-73.md`](audits/issue-73.md). Record p50, p95, p99,
+peak resident memory, Python version, operating system, CPU, filesystem type,
+and repetition count for dashboard collection/rendering, log processing,
+OpenRouter file tools, chat guard capture, and Git operations. Use three cold
+and three warm repetitions on the same host. A result is a regression when
+p95 is more than 20% slower or peak memory is more than 10% higher than the
+same-host baseline; investigate before changing a safety boundary.
+
+The quality benchmark below measures normalized workflow outcomes, not these
+performance budgets. Provider calls and external services are never required
+for the offline performance or schema checks.
+
 The benchmark harness runs deterministic argv-array cases without provider
 credentials. This is suitable for fake providers, fixture repositories, and
 regression checks:
