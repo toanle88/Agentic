@@ -324,9 +324,12 @@ not modify a worktree, run record, or pull request. A `file://` dashboard
 cannot poll local files, and a generic static HTTP server serves the same
 snapshot; use `--serve` for the regenerating endpoint. The dashboard shows the
 recorded token total for each run and a visual token-usage chart with one
-numbered bar per provider invocation when available. Runs are ordered oldest to
-newest, and the highest number is marked as latest. Providers that do not report
-usage remain marked as unknown rather than being estimated.
+numbered bar per provider invocation when available. Token usage is ordered
+newest to oldest by each invocation timestamp by default; the Token usage view
+also provides an order control for switching to oldest first. Older records
+without an invocation timestamp fall back to their matching operation timestamp
+and then the run's last activity. Providers that do not report usage remain
+marked as unknown rather than being estimated.
 
 For scripts and external dashboards, use the read-only status command instead
 of parsing terminal output:

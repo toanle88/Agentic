@@ -169,6 +169,9 @@ def record_usage(folder: Path, role: str, usage: dict[str, Any], *,
             invocations = []
             data["usage_by_invocation"] = invocations
         entry = {"role": role, **invocation, **usage}
+        # Keep usage records order-independent for the dashboard. Older
+        # records continue to work through dashboard timestamp fallbacks.
+        entry.setdefault("recorded_at", _timestamp())
         invocations.append(entry)
     _write_run_record(path, data)
 
