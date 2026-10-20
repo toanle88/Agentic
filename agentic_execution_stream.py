@@ -302,7 +302,9 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                      sandbox: dict[str, Any] | None = None,
                      sandbox_read_only: bool = False,
                      sandbox_pass_env: list[str] | None = None,
-                     metrics_folder: Path | None = None) -> subprocess.CompletedProcess[str]:
+                     metrics_folder: Path | None = None,
+                     env: dict[str, str] | None = None,
+                     sandbox_restricted: bool = False) -> subprocess.CompletedProcess[str]:
     """Stream a subprocess to terminal + durable log; print heartbeats when quiet.
 
     Raw JSONL events are stored next to the human-readable log when a provider
@@ -312,13 +314,13 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
     log_file.parent.mkdir(parents=True, exist_ok=True)
     process_argv = sandbox_command(
         argv, cwd, sandbox, output_root=log_file.parent, read_only=sandbox_read_only,
-        pass_env=sandbox_pass_env,
+        pass_env=sandbox_pass_env, restricted=sandbox_restricted,
     )
     try:
         proc = subprocess.Popen(
             process_argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace",
-            bufsize=1, start_new_session=(os.name != "nt"),
+            bufsize=1, start_new_session=(os.name != "nt"), env=env,
         )
     except OSError as exc:
         raise RuntimeError(f"Could not start {argv[0]!r}: {exc}") from exc

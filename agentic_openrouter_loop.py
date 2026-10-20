@@ -39,8 +39,10 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                    max_tool_turns: int | None = None,
                    command_timeout: int | None = None,
                    allow_network: bool = False,
+                   allow_runner_source: bool = False,
                    json_mode: bool = False,
-                   sandbox: dict[str, Any] | None = None) -> tuple[bool, str]:
+                   sandbox: dict[str, Any] | None = None,
+                   chat_restricted: bool = False) -> tuple[bool, str]:
     """Run an OpenAI-compatible OpenRouter agent with scoped local tools."""
     if not model:
         raise RuntimeError("OpenRouter requires a model, for example openai/gpt-5.4")
@@ -49,6 +51,8 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
     api_key = os.environ.get(api_key_env)
     if not api_key:
         raise RuntimeError(f"OpenRouter API key is missing; set ${api_key_env}")
+    if chat_restricted and not readonly:
+        allow_network = False
     prompt = guidance_prompt(
         worktree, prompt, readonly=readonly, audit_folder=output.parent,
         phase=guidance_phase(output, readonly=readonly),
@@ -160,7 +164,8 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                 result = _openrouter_tool_call(
                     worktree, name, arguments, readonly=readonly,
                     command_timeout=tool_timeout, allow_network=allow_network,
-                    sandbox=sandbox,
+                    sandbox=sandbox, allow_runner_source=allow_runner_source,
+                    restricted=chat_restricted and not readonly,
                 )
                 messages.append({
                     "role": "tool",

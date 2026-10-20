@@ -182,7 +182,9 @@ def _openrouter_command_allowed(argv: Any, readonly: bool,
 def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                           *, readonly: bool, command_timeout: int | None = None,
                           allow_network: bool = False,
-                          sandbox: dict[str, Any] | None = None) -> str:
+                          sandbox: dict[str, Any] | None = None,
+                          allow_runner_source: bool = False,
+                          restricted: bool = False) -> str:
     try:
         if name == "list_files":
             relative = arguments.get("path", ".")
@@ -233,7 +235,7 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                 return "ERROR: write_file is unavailable during review"
             target = _safe_worktree_path(worktree, arguments.get("path", ""), write=True)
             relative = str(target.relative_to(worktree.resolve()))
-            if forbidden(relative):
+            if forbidden(relative) and not (allow_runner_source and relative == "agentic.py"):
                 return f"ERROR: protected file {relative!r} cannot be changed"
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(arguments.get("content", ""), encoding="utf-8")
@@ -247,6 +249,7 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                 return "ERROR: " + reason
             process_argv = sandbox_command(
                 argv, worktree, sandbox, read_only=readonly, pass_env=[],
+                restricted=restricted,
             )
             try:
                 result = subprocess.run(

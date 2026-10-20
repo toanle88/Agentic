@@ -71,6 +71,16 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
         self.assertEqual(command[command.index("--network") + 1], "bridge")
         self.assertIn(f"{Path('/tmp/worktree').resolve()}:/workspace:ro", command)
 
+    def test_restricted_sandbox_forces_network_off(self):
+        settings = validate_sandbox({
+            "enabled": True, "engine": "docker", "image": "test-image",
+            "allow_network": True,
+        })
+        command = sandbox_command(
+            ["python", "-c", "pass"], Path("/tmp/worktree"), settings, restricted=True,
+        )
+        self.assertEqual(command[command.index("--network") + 1], "none")
+
         settings["allow_network"] = False
         command = sandbox_command(["rg", "needle", "."], Path("/tmp/worktree"), settings, read_only=True)
         self.assertEqual(command[command.index("--network") + 1], "none")
@@ -97,6 +107,25 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
         self.assertIn("GIT_DIR=/agentic-git-worktree", command)
         self.assertIn("GIT_COMMON_DIR=/agentic-git-common", command)
         self.assertIn("GIT_WORK_TREE=/workspace", command)
+
+    def test_restricted_linked_worktree_git_pointer_is_read_only(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp)
+            worktree = parent / "worktree"
+            common = parent / "repo" / ".git"
+            git_dir = common / "worktrees" / "task"
+            worktree.mkdir()
+            git_dir.mkdir(parents=True)
+            (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+            (git_dir / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+            (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+            settings = validate_sandbox({
+                "enabled": True, "engine": "docker", "image": "test-image",
+            })
+            command = sandbox_command(
+                ["git", "status"], worktree, settings, restricted=True,
+            )
+        self.assertIn(f"{(worktree / '.git').resolve()}:/workspace/.git:ro", command)
 
     def test_sandbox_ignores_unrelated_git_pointer(self):
         with tempfile.TemporaryDirectory() as temp:

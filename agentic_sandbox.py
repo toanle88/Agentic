@@ -141,7 +141,7 @@ def _git_metadata(root: Path) -> tuple[Path, Path | None] | None:
 def sandbox_command(
     argv: list[str], cwd: Path, settings: dict[str, Any] | None,
     *, output_root: Path | None = None, read_only: bool = False,
-    pass_env: list[str] | None = None,
+    pass_env: list[str] | None = None, restricted: bool = False,
 ) -> list[str]:
     """Build a hardened container command while preserving argv semantics."""
     policy = validate_sandbox(settings)
@@ -157,7 +157,7 @@ def sandbox_command(
         # Read-only is a filesystem/provider-capability policy. It must not
         # implicitly disable provider API access: native reviewers may need
         # outbound networking even though their worktree remains read-only.
-        "--network", "bridge" if policy["allow_network"] else "none",
+        "--network", "none" if restricted else "bridge" if policy["allow_network"] else "none",
         "-v", f"{root}:/workspace:{'ro' if read_only else 'rw'}", "-w", "/workspace",
     ]
     # Rootless/containerized engines may map container root to an unmapped host
@@ -188,6 +188,14 @@ def sandbox_command(
                 "--env", "GIT_COMMON_DIR=/agentic-git-common",
             ])
         command.extend(["--env", "GIT_WORK_TREE=/workspace"])
+        if restricted:
+            # A linked worktree's .git file is part of the writable worktree
+            # bind mount. Protect the marker itself too: otherwise a provider
+            # could replace it, run ``git init``, and create writable metadata
+            # outside the read-only mounts above.
+            marker = root / ".git"
+            if not marker.is_symlink() and (marker.is_file() or marker.is_dir()):
+                command.extend(["-v", f"{marker}:/workspace/.git:ro"])
     if output_root is not None:
         output = output_root.resolve()
         if output != root and output.is_dir():

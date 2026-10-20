@@ -575,9 +575,9 @@ class AgenticShell:
             self._launch(argv)
 
     def run_chat(self, parts: list[str], raw_line: str | None = None) -> None:
-        """Start a task from a chat-style instruction without shell eval."""
+        """Open chat or preserve the historical one-shot chat task forms."""
         if len(parts) < 2:
-            raise ValueError("usage: /chat ISSUE MESSAGE or /chat MESSAGE (local mode)")
+            raise ValueError("usage: /chat ISSUE [MESSAGE] or /chat MESSAGE (local mode)")
         message_parts = parts[2:] if parts[1].isdigit() else parts[1:]
         multiline_message: str | None = None
         if raw_line is not None and "\n" in raw_line:
@@ -589,24 +589,28 @@ class AgenticShell:
             if first_parts and first_parts[0].lower() == "/chat":
                 offset = 2 if len(first_parts) > 1 and first_parts[1].isdigit() else 1
                 first_message = " ".join(first_parts[offset:])
-                multiline_message = first_message
-                if remainder:
-                    multiline_message += "\n" + remainder
-        if parts[1].isdigit():
-            if len(parts) < 3:
-                raise ValueError("usage: /chat ISSUE MESSAGE")
+                multiline_message = first_message + (("\n" + remainder) if remainder else "")
+
+        # The new two-token issue form is the interactive session. A message
+        # after the issue retains the original one-shot /run behavior.
+        if parts[1].isdigit() and len(parts) == 2:
             issue = parts[1]
-            message = (multiline_message if multiline_message is not None
-                       else " ".join(message_parts)).strip()
+            self.active_task = f"issue #{issue}"
+            self._run_foreground(self._runner_args(issue, ["--chat"]))
+            return
+
+        if parts[1].isdigit():
+            issue = parts[1]
+            message = (multiline_message if multiline_message is not None else " ".join(message_parts)).strip()
             if not message:
-                raise ValueError("chat message must not be empty")
+                raise ValueError("usage: /chat ISSUE MESSAGE")
             self.active_task = f"issue #{issue}"
             self.run_issue(["/run", issue, "--instruction", message])
             return
+
         if self._task_source() != "local":
             raise ValueError("GitHub mode requires /chat ISSUE MESSAGE; set task_source to local for /chat MESSAGE")
-        message = (multiline_message if multiline_message is not None
-                   else " ".join(message_parts)).strip()
+        message = (multiline_message if multiline_message is not None else " ".join(message_parts)).strip()
         if not message:
             raise ValueError("chat message must not be empty")
         path = self.session_dir / f"chat-{uuid.uuid4().hex[:12]}.md"
