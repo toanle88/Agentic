@@ -224,6 +224,64 @@ def _signal_process_tree(process: subprocess.Popen[Any], signum: int) -> None:
             pass
 
 
+def _is_foreground_prompt(text: str) -> bool:
+    """Recognize the child prompts that are safe to make editable."""
+    return text in {
+        "chat> ",
+        "[PUBLISH] Publish this patch? Type 'publish' to approve: ",
+    }
+
+
+def _display_escape(character: str) -> str:
+    """Decode one safe shell escape for terminal display only."""
+    return {
+        "a": "<BEL>",
+        "b": "<BS>",
+        "f": "<FF>",
+        "n": "\n",
+        "r": "\n",
+        "t": "    ",
+        "v": "<VT>",
+        "\\": "\\",
+        "'": "'",
+        '"': '"',
+    }.get(character, "\\" + character)
+
+
+def _normalize_foreground_output(text: str) -> str:
+    """Make recognized shell-escaped command output readable.
+
+    Only ANSI-C shell strings are normalized. Ordinary backslashes must remain
+    untouched because they commonly occur in Windows paths and other output.
+    """
+    normalized: list[str] = []
+    index = 0
+    while index < len(text):
+        if text.startswith("$'", index):
+            decoded: list[str] = []
+            cursor = index + 2
+            closed = False
+            while cursor < len(text):
+                character = text[cursor]
+                if character == "'":
+                    cursor += 1
+                    closed = True
+                    break
+                if character == "\\" and cursor + 1 < len(text):
+                    decoded.append(_display_escape(text[cursor + 1]))
+                    cursor += 2
+                    continue
+                decoded.append(character)
+                cursor += 1
+            if closed:
+                normalized.extend(decoded)
+                index = cursor
+                continue
+        normalized.append(text[index])
+        index += 1
+    return "".join(normalized)
+
+
 class _ForegroundInputForwarder:
     """Own a child line buffer while keeping the terminal echo under control."""
 
@@ -716,12 +774,26 @@ class AgenticShell:
                     if is_transient_progress(line):
                         _shell_write_transient(line)
                     elif terminated:
-                        _shell_print(line, style_status_tokens=False, flush=True)
-                    elif line:
+                        _shell_print(
+                            _normalize_foreground_output(line),
+                            style_status_tokens=False,
+                            flush=True,
+                        )
+                    elif line and _is_foreground_prompt(line):
                         if foreground is not None:
                             foreground.set_prompt(line)
                         else:
                             _shell_print(line, end="", style_status_tokens=False, flush=True)
+                    elif line:
+                        # A child may finish or pause after writing a line
+                        # without a trailing newline. Do not guess that such
+                        # output is an input prompt: command text must remain
+                        # scrollback, never the shell-owned input buffer.
+                        _shell_print(
+                            _normalize_foreground_output(line),
+                            style_status_tokens=False,
+                            flush=True,
+                        )
 
                 chunks: Queue[str | None] = Queue()
 
@@ -753,7 +825,12 @@ class AgenticShell:
                                 foreground.refresh()
                             if _take_resize_pending():
                                 foreground.refresh()
-                        if pending and foreground and not prompt_was_displayed:
+                        if (
+                            pending
+                            and foreground
+                            and not prompt_was_displayed
+                            and _is_foreground_prompt(pending)
+                        ):
                             foreground.set_prompt(pending)
                             pending = ""
                             prompt_was_displayed = True
@@ -780,10 +857,11 @@ class AgenticShell:
                         continue
                     pending += chunk
                     previous_was_carriage_return = False
-                    if pending.endswith("chat> "):
-                        emit_line(pending, terminated=False)
-                        pending = ""
-                        prompt_was_displayed = True
+                    # Wait until the stream is briefly idle before treating
+                    # an exact prompt as complete. This prevents a command
+                    # that starts with "chat> " from being split into an
+                    # editable prompt followed by scrollback when its next
+                    # character arrives in a later read.
                 if pending:
                     emit_line(pending, terminated=False)
                 stdout_reader.join(timeout=1.0)
@@ -827,6 +905,7 @@ class AgenticShell:
                 except (OSError, ValueError):
                     pass
             if foreground is not None:
+                foreground.clear_input()
                 foreground.finish()
                 _restore_interactive_output(previous_output)
 
