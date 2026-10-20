@@ -1,4 +1,6 @@
 import json
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -69,10 +71,12 @@ class DashboardTests(unittest.TestCase):
                 }],
                 "usage_by_invocation": [{
                     "name": "developer-001", "role": "developer",
+                    "recorded_at": "2026-01-01T00:02:00+00:00",
                     "prompt_tokens": 10, "completion_tokens": 15,
                     "total_tokens": 25,
                 }, {
                     "name": "reviewer-001", "role": "reviewer",
+                    "recorded_at": "2026-01-01T00:01:00+00:00",
                     "prompt_tokens": 4, "completion_tokens": 6,
                     "total_tokens": 10,
                 }],
@@ -88,12 +92,16 @@ class DashboardTests(unittest.TestCase):
             self.assertIn("Latest recorded policy", html)
             self.assertIn("Token usage by run", html)
             self.assertIn("Known totals for each provider invocation", html)
-            self.assertIn("The highest run number is the latest", html)
-            self.assertIn("const runNumber = index + 1", html)
-            self.assertIn('latest ? " · latest"', html)
-            self.assertIn("const entries = [...DATA.runs].reverse().flatMap", html)
-            self.assertIn("<th>Run</th><th>Invocation</th>", html)
-            self.assertIn("const invocationRows = invocations.map", html)
+            self.assertIn("ordered from newest to oldest by timestamp", html)
+            self.assertIn('id="token-sort"', html)
+            self.assertIn('value="newest"', html)
+            self.assertIn('value="oldest"', html)
+            self.assertIn("function compareTokenEntries", html)
+            self.assertIn('return state.tokenSort===\"newest\"?rightTime-leftTime:leftTime-rightTime;', html)
+            self.assertIn("String(left.run.id).localeCompare", html)
+            self.assertIn("const entries=invocationsForRuns(tokenRuns).sort(compareTokenEntries)", html)
+            self.assertIn("<th>Timestamp</th><th>Run</th><th>Invocation</th>", html)
+            self.assertIn("tokenTimestampText", html)
             self.assertIn("Tokens: ${esc(formatTokens(tokenValue(run)))}</span>", html)
             self.assertIn("developer-001", html)
             self.assertIn("reviewer-001", html)
@@ -399,6 +407,7 @@ class DashboardTests(unittest.TestCase):
             self.assertIn(f'data-view="{view}"', html)
         for control in ("search", "status", "issue", "stage", "severity", "model", "provider"):
             self.assertIn(f'id="{control}"', html)
+        self.assertIn('id="token-sort"', html)
         self.assertIn('data-copy=', html)
         self.assertIn('data-download=', html)
         self.assertIn("async function refreshDashboard", html)
@@ -414,6 +423,43 @@ class DashboardTests(unittest.TestCase):
             self.assertIn(f'value="{severity}"', html)
         self.assertIn("Latest recorded run activity, newest first.", html)
         self.assertIn("Issue status", html)
+
+    def test_dashboard_token_sort_contract_uses_timestamp_and_run_id_tie_breaker(self):
+        html = agentic_dashboard.render_dashboard([], "demo", ".demo-agent-runs")
+        self.assertIn("recorded_at||invocation.timestamp||invocation.finished_at", html)
+        self.assertIn("operations.find(operation=>operation&&operation.name===invocation.name)", html)
+        self.assertIn("state.tokenSort===\"newest\"?-1:1", html)
+        self.assertIn("document.querySelector(\"#token-sort\").addEventListener", html)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for the dashboard JavaScript regression")
+    def test_dashboard_token_sort_orders_newest_and_ties_by_run_id(self):
+        html = agentic_dashboard.render_dashboard([], "demo", ".demo-agent-runs")
+        start = html.index("function invocationTimestamp")
+        end = html.index("function renderTokenChart", start)
+        helpers = html[start:end]
+        harness = f"""
+globalThis.state = {{tokenSort: "newest"}};
+{helpers}
+const records = [
+  {{run: {{id: "issue-1", last_activity: "2026-01-01T00:00:00Z"}}, invocation: {{name: "a", recorded_at: "2026-01-01T00:02:00Z"}}}},
+  {{run: {{id: "issue-2", last_activity: "2026-01-01T00:00:00Z"}}, invocation: {{name: "b", recorded_at: "2026-01-01T00:01:00Z"}}}},
+  {{run: {{id: "issue-3", last_activity: "2026-01-01T00:00:00Z"}}, invocation: {{name: "c", recorded_at: "2026-01-01T00:01:00Z"}}}}
+];
+state.tokenSort = "newest";
+const newest = records.slice().sort(compareTokenEntries).map(item => item.run.id);
+state.tokenSort = "oldest";
+const oldest = records.slice().sort(compareTokenEntries).map(item => item.run.id);
+console.log(JSON.stringify({{newest, oldest}}));
+"""
+        result = subprocess.run(
+            [shutil.which("node"), "-e", harness],
+            capture_output=True, text=True, check=True,
+        )
+        self.assertEqual(
+            json.loads(result.stdout),
+            {"newest": ["issue-1", "issue-3", "issue-2"],
+             "oldest": ["issue-2", "issue-3", "issue-1"]},
+        )
 
     def test_dashboard_filter_contract_matches_and_excludes_runs(self):
         runs = [

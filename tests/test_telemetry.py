@@ -121,6 +121,7 @@ class TelemetryTests(unittest.TestCase):
             raw = json.loads((folder / "run.json").read_text())
             self.assertEqual(raw["usage_by_invocation"][0]["prompt_chars"], 8000)
             self.assertEqual(raw["usage_by_invocation"][0]["turns"], 4)
+            self.assertRegex(raw["usage_by_invocation"][0]["recorded_at"], r"^202[0-9]-")
             self.assertNotIn("full prompt", json.dumps(raw["usage_by_invocation"][0]))
             self.assertEqual(read_run_usage(folder)["by_invocation"][0]["name"], "developer-001")
 

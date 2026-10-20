@@ -63,13 +63,17 @@ Recurring findings
 Skipped validation
 Latest recorded policy
 const investigationSummary = run.investigation.state === \"not-run\" ? \"\" : run.investigation.summary;
-const entries = [...DATA.runs].reverse().flatMap
+const entries=invocationsForRuns(tokenRuns).sort(compareTokenEntries)
 const runNumber = index + 1
 latest ? \" · latest\"
 const invocationRows = invocations.map
 Tokens: ${esc(formatTokens(tokenValue(run)))}</span>
 run.blocked && run.status !== \"no_changes\" && run.result?.status !== \"NO_CHANGES\"
 --><title>Agentic run dashboard</title>"""
+    token_sort_control = ('<label>Order <select id="token-sort">'
+                          '<option value="newest">Newest first</option>'
+                          '<option value="oldest">Oldest first</option>'
+                          '</select></label>')
     detail_script = r'''<script>
 Object.assign(labels,{"investigation-invalid":"Investigation invalid","awaiting-development":"Awaiting development"});
 function renderDetail(){
@@ -89,9 +93,50 @@ function renderDetail(){
   const files=run.files?.length?run.files.map(file=>`<details><summary>${esc(file.name)} · ${esc(file.updated)}</summary><pre>${esc(file.content)}</pre><div class="log-actions"><button class="small-button" data-copy="${esc(run.id)}" data-file="${esc(file.name)}" type="button">Copy</button><button class="small-button" data-download="${esc(run.id)}" data-file="${esc(file.name)}" type="button">Download</button></div></details>`).join(""):`<div class="empty">No log files recorded.</div>`;
   detail.innerHTML=`<div class="detail-top"><div><h2>${esc(run.label)}</h2><div class="branch">${esc(run.branch)}</div></div>${badge(run.status)}</div><div class="meta"><span>Stage: ${esc(run.stage)}</span><span>Severity: ${esc(run.severity)}</span><span>Provider: ${esc(run.providers?.join(", ")||"unknown")}</span><span>Model: ${esc(run.models?.join(", ")||"unknown")}</span></div>${instruction}<section class="callout"><strong>Run metrics</strong><p>${esc(tokenValue(run)==null?"Provider usage unavailable":`${formatTokens(tokenValue(run))} tokens`)}${run.usage.estimated_cost_usd==null?"":` · $${Number(run.usage.estimated_cost_usd).toFixed(4)} estimated`} · ${esc(runDuration(run))}</p></section>${blocked}${result}<section class="callout ${esc(run.review.status)}"><strong>Review · ${esc(labels[run.review.status]||run.review.status)}</strong><p>${esc(run.review.summary)}</p>${findings}</section>${recurring}${skipped}<h3>Investigation</h3><p>${esc(run.investigation.summary)}</p>${investigationFindings}<h3>Tests · ${esc(run.tests.status)}</h3><pre>${esc(run.tests.summary)}</pre><h3>Security policy</h3><p>${esc(latestPolicy?JSON.stringify(latestPolicy):"No security policy recorded.")}</p>${policyChange}<h3>Run logs</h3><div class="file-list">${files}</div>`;
 }
+state.tokenSort="newest";
+function invocationTimestamp(entry){
+  const invocation=entry.invocation||{}, operations=Array.isArray(entry.run.usage?.metrics?.operations)?entry.run.usage.metrics.operations:[];
+  return invocation.recorded_at||invocation.timestamp||invocation.finished_at||invocation.started_at||operations.find(operation=>operation&&operation.name===invocation.name)?.finished_at||entry.run.last_activity;
+}
+function tokenTimestamp(entry){const value=Date.parse(invocationTimestamp(entry));return Number.isFinite(value)?value:null;}
+function tokenTimestampText(entry){const value=tokenTimestamp(entry);return value==null?"Timestamp unavailable":new Date(value).toLocaleString();}
+function compareTokenEntries(left,right){
+  const leftTime=tokenTimestamp(left), rightTime=tokenTimestamp(right);
+  if(leftTime!==rightTime){
+    if(leftTime==null)return 1;
+    if(rightTime==null)return -1;
+    return state.tokenSort==="newest"?rightTime-leftTime:leftTime-rightTime;
+  }
+  const direction=state.tokenSort==="newest"?-1:1;
+  return direction*(String(left.run.id).localeCompare(String(right.run.id))||String(left.invocation.name||left.invocation.role||"").localeCompare(String(right.invocation.name||right.invocation.role||"")));
+}
+function renderTokenChart(){
+  const chart=document.querySelector("#token-chart"), cutoff={"24h":86400000,"7d":604800000,"30d":2592000000}[state.period];
+  const tokenRuns=filtered().filter(run=>!cutoff||(Date.now()-Date.parse(run.last_activity)<=cutoff));
+  if(!tokenRuns.length){chart.innerHTML=`<div class="empty">No runs match this filter.</div>`;document.querySelector("#token-table").innerHTML="";return;}
+  const entries=invocationsForRuns(tokenRuns).sort(compareTokenEntries);
+  const known=entries.map(entry=>tokenValue(entry.invocation||entry.run.usage)).filter(value=>value!=null), max=Math.max(...known,1);
+  chart.setAttribute("aria-label",`Token usage chart for ${entries.length} executions`);
+  chart.innerHTML=entries.map((entry,index)=>{
+    const run=entry.run, invocation=entry.invocation, tokens=tokenValue(invocation||run.usage), runNumber=index+1;
+    const latest=state.tokenSort==="newest"?index===0:index===entries.length-1, runTag=`Run ${runNumber}${latest?" · latest":""}`;
+    const runLabel=run.issue==null?run.label.replace(/^Local task: /,""):`#${run.issue}`, invocationLabel=invocation?(invocation.name||invocation.role||`run ${index+1}`):runLabel;
+    const label=`${runTag} · ${runLabel}${invocation?` · ${invocationLabel}`:""}`, height=tokens==null?4:Math.max(4,Math.round(tokens/max*132));
+    return`<div class="token-column" title="${esc(runTag)} · ${esc(run.label)} · ${esc(invocationLabel)} · ${esc(tokenTimestampText(entry))}: ${esc(formatTokens(tokens))} tokens"><div class="token-value">${esc(formatTokens(tokens))}</div><div class="token-bar-track"><div class="token-bar ${tokens==null?"unknown":""}" style="height:${height}px"></div></div><div class="token-label">${esc(label)}</div></div>`;
+  }).join("");
+  const invocationRows=entries.map(({run,invocation})=>`<tr><td>${esc(tokenTimestampText({run,invocation}))}</td><td>${esc(run.label)}</td><td>${esc(invocation.name||invocation.role||"run")}</td><td>${esc(invocation.provider||run.providers?.join(", ")||"unknown")}</td><td>${esc(invocation.model||run.models?.join(", ")||"unknown")}</td><td>${esc(formatTokens(tokenValue(invocation)))}</td></tr>`).join("");
+  document.querySelector("#token-table").innerHTML=`<table><thead><tr><th>Timestamp</th><th>Run</th><th>Invocation</th><th>Provider</th><th>Model</th><th>Tokens</th></tr></thead><tbody>${invocationRows||`<tr><td colspan="6">No provider invocations recorded.</td></tr>`}</tbody></table>`;
+}
+document.querySelector("#token-sort").addEventListener("change",event=>{state.tokenSort=event.target.value;renderTokenChart();});
 renderAll();
 renderDetail();
 </script>'''
+    template = template.replace('<span class="token-legend">', token_sort_control +
+                                '<span class="token-legend">')
+    template = template.replace(
+        "Known totals for each provider invocation, ordered from oldest to newest. The highest run number is the latest.",
+        "Known totals for each provider invocation, ordered from newest to oldest by timestamp.",
+    )
     return template.replace("__DASHBOARD_DATA__", data).replace(
         "<title>Agentic dashboard</title>", compatibility_markers,
     ).replace("</script><script>", "</script>\n<script>").replace(
