@@ -119,7 +119,7 @@ class ShellTests(unittest.TestCase):
             colored = TTYBuffer()
             with patch.dict(os.environ, {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), redirect_stdout(colored):
                 shell.show_logs(['/logs', str(job.number), '5'])
-            self.assertIn('\033[34m[TESTS]\033[0m PASSED', colored.getvalue())
+            self.assertIn('\033[32m[TESTS]\033[0m PASSED', colored.getvalue())
             self.assertNotIn('\033[32mPASSED\033[0m', colored.getvalue())
 
             plain = StringIO()
@@ -147,7 +147,7 @@ class ShellTests(unittest.TestCase):
                      ['agentic'], 0, stdout='[TESTS] PASSED\n', stderr=''
                  )), redirect_stdout(output):
                 shell._run_runner_command(['agentic', 'doctor'])
-            self.assertIn('\033[34m[TESTS]\033[0m \033[32mPASSED\033[0m', output.getvalue())
+            self.assertIn('\033[32m[TESTS]\033[0m \033[32mPASSED\033[0m', output.getvalue())
 
 
     def test_help_command_is_available(self):
@@ -636,6 +636,33 @@ class ShellTests(unittest.TestCase):
                 agentic_shell_input._restore_interactive_output(previous)
 
         self.assertIn('publication output', ''.join(state.history))
+
+    def test_foreground_child_output_styles_prefix_without_recoloring_body(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), session_dir=root / 'logs'
+            )
+            process = type('Process', (), {
+                'stdout': StringIO('[DEVELOPER] Agent: provider says PASSED\n'),
+                'wait': lambda self: 0,
+            })()
+            with (patch('agentic_shell._is_interactive_terminal', return_value=True),
+                  patch('agentic_shell.subprocess.Popen', return_value=process),
+                  patch.dict(os.environ, {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}),
+                  patch('sys.stdout', new=TTYBuffer()) as output):
+                shell._run_foreground(['chat'])
+
+        rendered = output.getvalue()
+        self.assertIn(
+            '\033[36m[DEVELOPER]\033[0m Agent: provider says PASSED',
+            rendered,
+        )
+        self.assertNotIn('\033[32mPASSED\033[0m', rendered)
 
 
     def test_shell_preserves_instruction_as_one_runner_argv_value(self):

@@ -144,6 +144,13 @@ markers. Chat does not automatically review, commit, push, or publish. Any
 later automated run or `--review` sees the resulting worktree and must validate
 it again before publication.
 
+On an interactive terminal, chat responses are marked as `[CHAT] Agent response`
+and workflow prefixes such as `[DEVELOPER]`, `[TESTS]`, `[REVIEW]`, `[PATCH]`,
+`[GIT]`, `[RETRY]`, `[ERROR]`, and `[RESULT]` are styled without coloring their
+message bodies. Repeated provider progress and elapsed-time updates use one
+replaceable status row; important events remain in scrollback. Redirected output,
+`NO_COLOR`, and persisted chat/run logs retain plain, line-oriented text.
+
 ## Resume and retries
 
 Run the same issue again to resume its existing worktree:

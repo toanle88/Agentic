@@ -44,6 +44,7 @@ class _InteractiveOutputState:
         self.cursor_column = 1
         self.cursor_wrap_pending = False
         self._cursor_columns: int | None = None
+        self.live_status = False
 
     @staticmethod
     def _with_newline(text: str, ensure_newline: bool) -> str:
@@ -100,10 +101,27 @@ class _InteractiveOutputState:
     def write_without_editor(self, text: str, ensure_newline: bool = True) -> None:
         """Retain output while no prompt renderer is currently active."""
         with _OUTPUT_LOCK:
+            if self.live_status:
+                sys.stdout.write("\r\033[2K")
+                self.live_status = False
             columns = max(1, shutil.get_terminal_size(fallback=(80, 24)).columns)
             output_text = self.append(text, ensure_newline, columns)
             sys.stdout.write(output_text)
             sys.stdout.flush()
+
+    def write_transient(self, text: str) -> None:
+        """Draw one replaceable status row without adding it to scrollback."""
+        with _OUTPUT_LOCK:
+            if not getattr(sys.stdout, "isatty", lambda: False)():
+                self.write_without_editor(text, ensure_newline=True)
+                return
+            columns = max(1, shutil.get_terminal_size(fallback=(80, 24)).columns)
+            status = _fit_terminal_text(sanitize_terminal_text(text), columns - 1)
+            if self.live_status:
+                sys.stdout.write("\r\033[2K")
+            sys.stdout.write("\r" + style_text(status, style_status_tokens=False))
+            sys.stdout.flush()
+            self.live_status = True
 
 
 def _activate_interactive_output(
@@ -1481,6 +1499,27 @@ def _shell_write_log(text: str) -> None:
         ensure_newline=False,
     )
     sys.stdout.flush()
+
+
+def _shell_write_transient(text: str) -> None:
+    """Draw provider progress as one live row when the shell owns the TTY."""
+    callback = _ACTIVE_INTERACTIVE_OUTPUT
+    owner = getattr(callback, "__self__", None)
+    if isinstance(owner, _InteractiveOutputState):
+        owner.write_transient(text)
+        return
+    _shell_print(text, style_status_tokens=False, flush=True)
+
+
+def _shell_clear_transient() -> None:
+    """Remove a live provider status before returning to the shell prompt."""
+    callback = _ACTIVE_INTERACTIVE_OUTPUT
+    owner = getattr(callback, "__self__", None)
+    if isinstance(owner, _InteractiveOutputState) and owner.live_status:
+        with _OUTPUT_LOCK:
+            sys.stdout.write("\r\033[2K")
+            sys.stdout.flush()
+            owner.live_status = False
 
 
 def _help_line(line: str) -> str:

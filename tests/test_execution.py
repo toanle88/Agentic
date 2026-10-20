@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import agentic
 import agentic_execution
-from agentic_output import style_text
+from agentic_output import is_transient_progress, style_text
 
 
 def sh(*args, cwd):
@@ -43,7 +43,7 @@ class StreamingTests(unittest.TestCase):
                 '[REVIEW] APPROVED summary text'
             )
         self.assertIn('\033[90m[00:30:10]\033[0m', styled)
-        self.assertIn('\033[34m[TESTS]\033[0m', styled)
+        self.assertIn('\033[31m[TESTS]\033[0m', styled)
         self.assertIn('\033[32mFinished\033[0m', styled)
         self.assertIn('\033[31mexit 1\033[0m', styled)
         self.assertIn('/tmp/traceback.py', styled)
@@ -111,7 +111,8 @@ class StreamingTests(unittest.TestCase):
 
         expected = {
             'DEVELOPER': '36', 'REVIEW': '35', 'TESTS': '34', 'RETRY': '33',
-            'GIT': '90', 'PATCH': '90', 'TIMEOUT': '33', 'BLOCKED': '33', 'STOP': '33',
+            'GIT': '33', 'PATCH': '95', 'ERROR': '31', 'RESULT': '31',
+            'TIMEOUT': '33', 'BLOCKED': '33', 'STOP': '33',
         }
         with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
              patch('sys.stdout', new=TTYBuffer()):
@@ -127,17 +128,45 @@ class StreamingTests(unittest.TestCase):
             )
             self.assertEqual(
                 style_text('[TESTS] Finished in 0s (exit 124) [TIMEOUT]'),
-                '\033[34m[TESTS]\033[0m \033[32mFinished\033[0m in 0s '
+                '\033[31m[TESTS]\033[0m \033[32mFinished\033[0m in 0s '
                 '(\033[31mexit 124\033[0m) \033[33m[TIMEOUT]\033[0m',
             )
             self.assertEqual(
                 style_text('[TESTS] Finished in 0s (exit -9)'),
-                '\033[34m[TESTS]\033[0m \033[32mFinished\033[0m in 0s '
+                '\033[31m[TESTS]\033[0m \033[32mFinished\033[0m in 0s '
                 '(\033[31mexit -9\033[0m)',
             )
             self.assertEqual(
                 style_text('[STOP] no running jobs', style_status_tokens=False),
                 '\033[33m[STOP]\033[0m no running jobs',
+            )
+
+    def test_stage_prefix_colors_follow_outcomes_without_painting_body(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+             patch('sys.stdout', new=TTYBuffer()):
+            self.assertEqual(
+                style_text('[TESTS] passed /tmp/FAILED.txt', style_status_tokens=False),
+                '\033[32m[TESTS]\033[0m passed /tmp/FAILED.txt',
+            )
+            self.assertEqual(
+                style_text('[TESTS] failed /tmp/PASSED.txt', style_status_tokens=False),
+                '\033[31m[TESTS]\033[0m failed /tmp/PASSED.txt',
+            )
+            self.assertEqual(
+                style_text('[GIT] operation failed', style_status_tokens=False),
+                '\033[31m[GIT]\033[0m operation failed',
+            )
+            self.assertEqual(
+                style_text('[RESULT] APPROVED', style_status_tokens=False),
+                '\033[32m[RESULT]\033[0m APPROVED',
+            )
+            self.assertEqual(
+                style_text('[RESULT] BLOCKED', style_status_tokens=False),
+                '\033[31m[RESULT]\033[0m BLOCKED',
             )
 
     def test_style_text_colors_padded_bracketed_warning_and_failure_statuses(self):
@@ -168,8 +197,24 @@ class StreamingTests(unittest.TestCase):
         self.assertEqual(
             styled,
             '\033[90m[00:30:10]\033[0m '\
-            '\033[34m[TESTS]\033[0m ERROR PASSED /tmp/traceback.py',
+            '\033[31m[TESTS]\033[0m ERROR PASSED /tmp/traceback.py',
         )
+
+    def test_successful_provider_completions_are_transient_but_failures_are_not(self):
+        for line in (
+            '[DEVELOPER] Agent finished its turn (12 input/output tokens)',
+            '[DEVELOPER] Command finished (exit 0)',
+            '[REVIEW] Gemini agent finished',
+        ):
+            with self.subTest(line=line):
+                self.assertTrue(is_transient_progress(line))
+
+        for line in (
+            '[DEVELOPER] Command finished (exit 1)',
+            '[DEVELOPER] Agent: provider says PASSED',
+        ):
+            with self.subTest(line=line):
+                self.assertFalse(is_transient_progress(line))
 
     def test_style_text_preserves_bounded_status_and_incoming_ansi(self):
         class TTYBuffer(StringIO):
@@ -181,7 +226,7 @@ class StreamingTests(unittest.TestCase):
             styled = style_text('[TESTS] \033[32mPASSED\033[0m /tmp/PASSED.txt')
         self.assertEqual(
             styled,
-            '\033[34m[TESTS]\033[0m \033[32mPASSED\033[0m /tmp/PASSED.txt',
+            '\033[32m[TESTS]\033[0m \033[32mPASSED\033[0m /tmp/PASSED.txt',
         )
 
     def test_native_provider_processes_streams_and_records_usage(self):
@@ -352,7 +397,7 @@ class StreamingTests(unittest.TestCase):
                 )
             self.assertEqual(result.returncode, 0)
             rendered = out.getvalue()
-            self.assertIn('\033[34m[TESTS]\033[0m ERROR PASSED /tmp/traceback.py', rendered)
+            self.assertIn('\033[31m[TESTS]\033[0m ERROR PASSED /tmp/traceback.py', rendered)
             self.assertNotIn('\033[31mERROR\033[0m', rendered)
             self.assertNotIn('\033[32mPASSED\033[0m', rendered)
 
@@ -368,6 +413,24 @@ class StreamingTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             self.assertIn('Still running', out.getvalue())
             self.assertIn('ok', out.getvalue())
+
+    def test_tty_streaming_replaces_transient_progress_but_keeps_it_in_log(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            script = 'import time; time.sleep(1.2); print("ok", flush=True)'
+            with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+                 patch('sys.stdout', new=TTYBuffer()) as out:
+                result = agentic.streamed_command(
+                    [sys.executable, '-c', script], root, label='TESTS',
+                    log_file=root / 'tests.log', timeout=10, heartbeat=0,
+                )
+            self.assertEqual(result.returncode, 0)
+            self.assertIn('\r\033[2K', out.getvalue())
+            self.assertIn('Still running', (root / 'tests.log').read_text(encoding='utf-8'))
 
     def test_streamed_command_allows_no_timeout(self):
         with tempfile.TemporaryDirectory() as dirname:

@@ -319,7 +319,7 @@ def run_chat_session(
                 "Configure sandbox.enabled=true (prefer security_mode=isolated) and retry."
             )
             remember(response)
-            output_fn(response)
+            output_fn(f"[CHAT] Agent response:\n{response}")
             continue
         before_status = status_reader() if may_edit and status_reader is not None else ""
         before_guard = guard_reader() if may_edit and guard_reader is not None else None
@@ -356,7 +356,11 @@ def run_chat_session(
                 ok = False
                 response = validation_error + (f"\nProvider response: {response}" if response else "")
         remember(response)
-        output_fn(response or ("(The provider returned no response.)" if ok else "Provider turn failed: no error detail"))
+        visible_response = response or (
+            "(The provider returned no response.)" if ok
+            else "Provider turn failed: no error detail"
+        )
+        output_fn(f"[CHAT] Agent response:\n{visible_response}")
         after_status = status_reader() if may_edit and status_reader is not None else ""
         changed = may_edit and status_reader is not None and after_status != before_status
         if may_edit and changed:
@@ -369,4 +373,7 @@ def run_chat_session(
                         worktree, selected, check_folder,
                         timeout=config.get("effective_test_timeout_seconds"), sandbox=config.get("sandbox"),
                     )
-                output_fn("Selected checks passed." if passed else f"Selected checks failed:\n{report[-3000:]}")
+                output_fn(
+                    "[TESTS] Selected checks passed."
+                    if passed else f"[TESTS] Selected checks failed:\n{report[-3000:]}"
+                )
