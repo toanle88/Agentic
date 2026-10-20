@@ -161,6 +161,92 @@ class InteractiveInputTests(unittest.TestCase):
         self.assertIn('[DEVELOPER] Finished in 3s (exit 0)', ''.join(state.history))
         self.assertIn('\r\033[2K', output.getvalue())
 
+    def test_foreground_prompt_reserves_bottom_rows_and_redraws_after_resize(self):
+        state = agentic_shell_input._InteractiveOutputState()
+        output = TTYBuffer()
+        foreground = agentic_shell_input._ForegroundOutputState(state)
+        with patch('sys.stdout', output), \
+             patch('agentic_shell_input.shutil.get_terminal_size',
+                   side_effect=[os.terminal_size((20, 6)), os.terminal_size((30, 8))]):
+            foreground.set_prompt('first line\nsecond: ')
+            foreground.refresh()
+
+        rendered = output.getvalue()
+        self.assertIn('\033[5;1H\033[2Kfirst line', rendered)
+        self.assertIn('\033[7;1H\033[2Kfirst line', rendered)
+        self.assertIn('second: ', rendered)
+
+    def test_foreground_prompt_redraw_preserves_typed_child_input(self):
+        state = agentic_shell_input._InteractiveOutputState()
+        output = TTYBuffer()
+        foreground = agentic_shell_input._ForegroundOutputState(state)
+        with patch('sys.stdout', output), \
+             patch('agentic_shell_input.shutil.get_terminal_size',
+                   return_value=os.terminal_size((30, 6))):
+            foreground.set_prompt('Continue? ')
+            foreground.set_input('publ', 4)
+            foreground.refresh()
+
+        self.assertEqual(foreground.input_text, 'publ')
+        self.assertEqual(foreground.input_cursor, 4)
+        self.assertIn('Continue? publ', output.getvalue())
+
+    def test_foreground_output_keeps_typed_child_input_active(self):
+        state = agentic_shell_input._InteractiveOutputState()
+        output = TTYBuffer()
+        foreground = agentic_shell_input._ForegroundOutputState(state)
+        with patch('sys.stdout', output), \
+             patch('agentic_shell_input.shutil.get_terminal_size',
+                   return_value=os.terminal_size((30, 6))):
+            foreground.set_prompt('Continue? ')
+            foreground.set_input('publ', 4)
+            foreground.write('status update\n')
+
+        self.assertEqual(foreground.input_text, 'publ')
+        self.assertEqual(foreground.input_cursor, 4)
+        self.assertIn('status update', ''.join(state.history))
+        self.assertIn('Continue? publ', output.getvalue())
+
+    def test_foreground_page_scroll_keeps_prompt_at_bottom(self):
+        state = agentic_shell_input._InteractiveOutputState()
+        output = TTYBuffer()
+        foreground = agentic_shell_input._ForegroundOutputState(state)
+        with patch('sys.stdout', output), \
+             patch('agentic_shell_input.shutil.get_terminal_size',
+                   return_value=os.terminal_size((80, 4))):
+            foreground.set_prompt('Continue? ')
+            for index in range(1, 9):
+                foreground.write(f'output-{index}\n')
+            foreground.scroll(100)
+
+        visible = strip_ansi(output.getvalue().rsplit('\033[1;3r', 1)[-1])
+        self.assertIn('output-1', visible)
+        self.assertNotIn('output-8', visible)
+        self.assertIn('Continue? ', visible)
+
+        with patch('sys.stdout', output), \
+             patch('agentic_shell_input.shutil.get_terminal_size',
+                   return_value=os.terminal_size((80, 4))):
+            foreground.scroll(-100)
+        visible = strip_ansi(output.getvalue().rsplit('\033[1;3r', 1)[-1])
+        self.assertNotIn('output-1', visible)
+        self.assertIn('output-8', visible)
+        self.assertIn('Continue? ', visible)
+
+    def test_foreground_prompt_clips_multiline_text_to_active_bottom_rows(self):
+        state = agentic_shell_input._InteractiveOutputState()
+        output = TTYBuffer()
+        foreground = agentic_shell_input._ForegroundOutputState(state)
+        with patch('sys.stdout', output), \
+             patch('agentic_shell_input.shutil.get_terminal_size',
+                   return_value=os.terminal_size((30, 3))):
+            foreground.set_prompt('one\ntwo\nthree\nfour\nfive: ')
+
+        rendered = output.getvalue()
+        self.assertNotIn('one', rendered)
+        self.assertIn('three', rendered)
+        self.assertIn('five: ', rendered)
+
     def test_help_output_is_retained_by_the_interactive_viewport(self):
         state = agentic_shell_input._InteractiveOutputState()
         previous = agentic_shell_input._activate_interactive_output(state)

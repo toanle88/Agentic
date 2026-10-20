@@ -15,6 +15,45 @@ from agentic import state_paths
 
 
 class ShellTests(unittest.TestCase):
+    def test_foreground_input_forwarder_scrolls_on_page_keys(self):
+        class Reader:
+            _posix_fd = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read_key(self):
+                if not hasattr(self, 'keys'):
+                    self.keys = iter([
+                        ('PAGE_UP', ''), ('PAGE_DOWN', ''), ('CTRL_D', ''),
+                    ])
+                return next(self.keys)
+
+        class Foreground:
+            def __init__(self):
+                self.scrolls = []
+
+            def scroll(self, delta):
+                self.scrolls.append(delta)
+
+            def set_input(self, text, cursor):
+                pass
+
+            def refresh(self):
+                pass
+
+        process = type('Process', (), {'stdin': StringIO()})()
+        foreground = Foreground()
+        forwarder = agentic_shell._ForegroundInputForwarder(process, foreground)
+        forwarder.reader = Reader()
+        with patch.object(forwarder, '_set_noecho'):
+            forwarder._run()
+
+        self.assertEqual(foreground.scrolls, [1, -1])
+
     def test_startup_prints_available_commands(self):
         from contextlib import redirect_stdout
         from io import StringIO
@@ -636,6 +675,93 @@ class ShellTests(unittest.TestCase):
                 agentic_shell_input._restore_interactive_output(previous)
 
         self.assertIn('publication output', ''.join(state.history))
+
+    def test_foreground_child_confirmation_prompt_stays_in_reserved_bottom_row(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), session_dir=root / 'logs'
+            )
+            state = agentic_shell_input._InteractiveOutputState()
+            previous = agentic_shell_input._activate_interactive_output(state)
+            output = StringIO()
+
+            class Process:
+                stdout = StringIO(
+                    'publication output\n'
+                    "Commit, PUSH and open a DRAFT PR? Type 'publish' to approve: "
+                )
+
+                def wait(self):
+                    self.prompt_was_visible = (
+                        "Type 'publish' to approve: " in output.getvalue()
+                    )
+                    return 0
+
+            process = Process()
+            try:
+                with (patch('agentic_shell._is_interactive_terminal', return_value=True),
+                      patch('agentic_shell.subprocess.Popen', return_value=process),
+                      patch('agentic_shell.shutil.get_terminal_size',
+                            return_value=os.terminal_size((80, 8))),
+                      patch('agentic_shell_input.shutil.get_terminal_size',
+                            return_value=os.terminal_size((80, 8))),
+                      patch('sys.stdout', output)):
+                    shell._run_foreground(['publish'])
+            finally:
+                agentic_shell_input._restore_interactive_output(previous)
+
+        rendered = output.getvalue()
+        self.assertTrue(process.prompt_was_visible)
+        self.assertLess(
+            rendered.rfind('publication output'),
+            rendered.rfind("Type 'publish' to approve: "),
+        )
+        self.assertIn("Type 'publish' to approve: ", ''.join(state.history))
+
+    def test_foreground_child_arbitrary_prompt_is_shown_while_it_waits(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), session_dir=root / 'logs'
+            )
+            output = StringIO()
+
+            class PromptStream:
+                def __init__(self):
+                    self.text = iter('Continue?')
+                    self.waiting = threading.Event()
+
+                def read(self, _size):
+                    try:
+                        return next(self.text)
+                    except StopIteration:
+                        self.waiting.wait(0.2)
+                        return ''
+
+            class Process:
+                stdout = PromptStream()
+
+                def wait(self):
+                    self.prompt_was_visible = 'Continue?' in output.getvalue()
+                    return 0
+
+            process = Process()
+            state = agentic_shell_input._InteractiveOutputState()
+            previous = agentic_shell_input._activate_interactive_output(state)
+            try:
+                with (patch('agentic_shell._is_interactive_terminal', return_value=True),
+                      patch('agentic_shell.subprocess.Popen', return_value=process),
+                      patch('agentic_shell.shutil.get_terminal_size',
+                            return_value=os.terminal_size((80, 8))),
+                      patch('agentic_shell_input.shutil.get_terminal_size',
+                            return_value=os.terminal_size((80, 8))),
+                      patch('sys.stdout', output)):
+                    shell._run_foreground(['publish'])
+            finally:
+                agentic_shell_input._restore_interactive_output(previous)
+
+        self.assertTrue(process.prompt_was_visible)
 
     def test_foreground_child_output_styles_prefix_without_recoloring_body(self):
         class TTYBuffer(StringIO):

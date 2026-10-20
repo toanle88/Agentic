@@ -299,6 +299,10 @@ In the interactive shell, `/run ... --publish` runs in the foreground so the
 shell can receive the exact publication confirmation. Other `/run` operations
 remain background jobs. If no valid approval is recorded, publication stops
 and asks you to run development or `--review` first.
+While a foreground child is running, its output and progress stay above a
+reserved bottom input area; confirmation prompts remain visible there and are
+redrawn on terminal resize. The same layout applies to the foreground
+`/chat ISSUE` session.
 
 For a local task, use `agentic --task-file task.md --publish` or resume from
 the saved task file created by the interactive shell.

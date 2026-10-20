@@ -10,6 +10,7 @@ import argparse
 from collections.abc import Sequence
 import json
 import os
+from queue import Empty, Queue
 import shlex
 import signal
 import shutil
@@ -20,7 +21,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, TextIO
+from typing import Any, Callable, TextIO
 
 from agentic import __version__  # noqa: F401
 from agentic_output import is_transient_progress, sanitize_terminal_text
@@ -33,6 +34,7 @@ from agentic_shell_input import (  # noqa: F401
     SHELL_OPTIONS,
     _KeyReader,
     _InteractiveOutputState,
+    _begin_foreground_output,
     _apply_completion,
     _activate_interactive_output,
     _clip_input_line,
@@ -59,6 +61,8 @@ from agentic_shell_input import (  # noqa: F401
     _token_start,
     _welcome_banner,
     _windows_input,
+    _mark_resize_pending,
+    _take_resize_pending,
 )
 from agentic_shell_commands import (
     has_job_flag as _has_job_flag,
@@ -194,6 +198,128 @@ def _pid_running(pid: int) -> bool:
     except (OSError, ProcessLookupError):
         return False
     return True
+
+
+class _ForegroundInputForwarder:
+    """Own a child line buffer while keeping the terminal echo under control."""
+
+    def __init__(self, process: subprocess.Popen[str], foreground) -> None:
+        self.process = process
+        self.foreground = foreground
+        self.reader = _KeyReader()
+        self.stop_event = threading.Event()
+        self.thread: threading.Thread | None = None
+        self.buffer = ""
+        self.cursor = 0
+
+    def start(self) -> None:
+        self.thread = threading.Thread(
+            target=self._run,
+            name="agentic-foreground-input",
+            daemon=True,
+        )
+        self.thread.start()
+
+    def _set_noecho(self) -> None:
+        if os.name == "nt":
+            return
+        try:
+            import termios
+
+            fd = self.reader._posix_fd
+            if fd is None:
+                return
+            settings = termios.tcgetattr(fd)
+            settings[3] &= ~termios.ECHO
+            termios.tcsetattr(fd, termios.TCSANOW, settings)
+        except (OSError, ValueError):
+            return
+
+    def _send_line(self) -> None:
+        if self.process.stdin is None:
+            return
+        self.foreground.commit_prompt()
+        try:
+            self.process.stdin.write(self.buffer + "\n")
+            self.process.stdin.flush()
+        except (BrokenPipeError, OSError, ValueError):
+            self.stop_event.set()
+        self.buffer = ""
+        self.cursor = 0
+        self.foreground.set_input("", 0)
+
+    def _insert(self, text: str) -> None:
+        self.buffer = self.buffer[:self.cursor] + text + self.buffer[self.cursor:]
+        self.cursor += len(text)
+        self.foreground.set_input(self.buffer, self.cursor)
+
+    def _run(self) -> None:
+        try:
+            self.reader.__enter__()
+            self._set_noecho()
+            self.foreground.set_input("", 0)
+            while not self.stop_event.is_set():
+                key, char = self.reader.read_key()
+                if key == "RESIZE":
+                    self.foreground.refresh()
+                elif key in {"CHAR", "NEWLINE", "PASTE"}:
+                    self._insert(char if key != "NEWLINE" else "\n")
+                elif key == "LEFT":
+                    self.cursor = max(0, self.cursor - 1)
+                    self.foreground.set_input(self.buffer, self.cursor)
+                elif key == "RIGHT":
+                    self.cursor = min(len(self.buffer), self.cursor + 1)
+                    self.foreground.set_input(self.buffer, self.cursor)
+                elif key == "HOME":
+                    self.cursor = 0
+                    self.foreground.set_input(self.buffer, self.cursor)
+                elif key == "END":
+                    self.cursor = len(self.buffer)
+                    self.foreground.set_input(self.buffer, self.cursor)
+                elif key == "BACKSPACE":
+                    if self.cursor:
+                        self.buffer = self.buffer[:self.cursor - 1] + self.buffer[self.cursor:]
+                        self.cursor -= 1
+                        self.foreground.set_input(self.buffer, self.cursor)
+                elif key == "DELETE":
+                    if self.cursor < len(self.buffer):
+                        self.buffer = self.buffer[:self.cursor] + self.buffer[self.cursor + 1:]
+                        self.foreground.set_input(self.buffer, self.cursor)
+                elif key == "CTRL_U":
+                    self.buffer = self.buffer[self.cursor:]
+                    self.cursor = 0
+                    self.foreground.set_input(self.buffer, self.cursor)
+                elif key == "CTRL_C":
+                    try:
+                        self.process.send_signal(signal.SIGINT)
+                    except (OSError, ValueError, AttributeError):
+                        pass
+                    self.buffer = ""
+                    self.cursor = 0
+                    self.foreground.set_input("", 0)
+                elif key == "CTRL_D":
+                    if not self.buffer and self.process.stdin is not None:
+                        try:
+                            self.process.stdin.close()
+                        except (OSError, ValueError):
+                            pass
+                        self.stop_event.set()
+                elif key == "PAGE_UP":
+                    self.foreground.scroll(1)
+                elif key == "PAGE_DOWN":
+                    self.foreground.scroll(-1)
+                elif key == "ENTER":
+                    self._send_line()
+        finally:
+            try:
+                self.reader.__exit__(None, None, None)
+            except Exception:
+                pass
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        if self.thread is not None:
+            self.thread.join(timeout=1.0)
 
 
 class AgenticShell:
@@ -440,63 +566,144 @@ class AgenticShell:
                 raise RuntimeError(f"command failed with exit {result.returncode}")
             return
 
-        process = subprocess.Popen(
-            argv,
-            cwd=self.repo,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+        foreground, previous_output = _begin_foreground_output(
+            self._interactive_output_state
         )
-        if process.stdout is not None:
-            pending = ""
-            previous_was_carriage_return = False
-            prompt_was_displayed = False
+        resize_handler_previous = None
+        resize_handler_installed = False
+        input_forwarder: _ForegroundInputForwarder | None = None
+        try:
+            if foreground and os.name != "nt" and hasattr(signal, "SIGWINCH"):
+                try:
+                    resize_handler_previous = signal.getsignal(signal.SIGWINCH)
+                    signal.signal(signal.SIGWINCH, _mark_resize_pending)
+                    resize_handler_installed = True
+                except (OSError, ValueError):
+                    resize_handler_previous = None
 
-            def emit_line(line: str, *, terminated: bool) -> None:
-                nonlocal prompt_was_displayed
-                line = line.rstrip("\r")
-                if line and prompt_was_displayed:
-                    _shell_print("", flush=True)
-                    prompt_was_displayed = False
-                if is_transient_progress(line):
-                    _shell_write_transient(line)
-                elif terminated:
-                    _shell_print(line, style_status_tokens=False, flush=True)
-                elif line:
-                    _shell_print(line, end="", style_status_tokens=False, flush=True)
-
-            while True:
-                chunk = process.stdout.read(1)
-                if not chunk:
-                    break
-                if chunk == "\r":
-                    if pending:
-                        emit_line(pending, terminated=True)
-                        pending = ""
-                    previous_was_carriage_return = True
-                    continue
-                if chunk == "\n":
-                    if pending:
-                        emit_line(pending, terminated=True)
-                        pending = ""
-                    elif not previous_was_carriage_return:
-                        emit_line("", terminated=True)
-                    previous_was_carriage_return = False
-                    continue
-                pending += chunk
+            popen_kwargs: dict[str, Any] = {
+                "cwd": self.repo,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.STDOUT,
+                "text": True,
+                "encoding": "utf-8",
+                "errors": "replace",
+            }
+            real_tty = bool(
+                getattr(sys.stdin, "isatty", lambda: False)()
+                and getattr(sys.stdout, "isatty", lambda: False)()
+            )
+            if foreground is not None and real_tty:
+                popen_kwargs["stdin"] = subprocess.PIPE
+            process = subprocess.Popen(
+                argv, **popen_kwargs
+            )
+            if foreground is not None and real_tty and process.stdin is not None:
+                input_forwarder = _ForegroundInputForwarder(process, foreground)
+                input_forwarder.start()
+            stdout = process.stdout
+            if stdout is not None:
+                pending = ""
                 previous_was_carriage_return = False
-                if pending.endswith("chat> "):
+                prompt_was_displayed = False
+
+                def emit_line(line: str, *, terminated: bool) -> None:
+                    nonlocal prompt_was_displayed
+                    line = line.rstrip("\r")
+                    if line and prompt_was_displayed:
+                        # Child output does not mean the active prompt was
+                        # submitted. Keep its prompt and typed buffer in the
+                        # reserved bottom area until Enter or a new prompt.
+                        prompt_was_displayed = False
+                    if is_transient_progress(line):
+                        _shell_write_transient(line)
+                    elif terminated:
+                        _shell_print(line, style_status_tokens=False, flush=True)
+                    elif line:
+                        if foreground is not None:
+                            foreground.set_prompt(line)
+                        else:
+                            _shell_print(line, end="", style_status_tokens=False, flush=True)
+
+                chunks: Queue[str | None] = Queue()
+
+                def read_stdout() -> None:
+                    try:
+                        while True:
+                            chunk = stdout.read(1)
+                            if not chunk:
+                                break
+                            chunks.put(chunk)
+                    finally:
+                        chunks.put(None)
+
+                stdout_reader = threading.Thread(
+                    target=read_stdout,
+                    name="agentic-foreground-output",
+                    daemon=True,
+                )
+                stdout_reader.start()
+                last_terminal_size = shutil.get_terminal_size(fallback=(80, 24))
+                while True:
+                    try:
+                        chunk = chunks.get(timeout=0.1)
+                    except Empty:
+                        if foreground:
+                            current_size = shutil.get_terminal_size(fallback=(80, 24))
+                            if current_size != last_terminal_size:
+                                last_terminal_size = current_size
+                                foreground.refresh()
+                            if _take_resize_pending():
+                                foreground.refresh()
+                        if pending and foreground and not prompt_was_displayed:
+                            foreground.set_prompt(pending)
+                            pending = ""
+                            prompt_was_displayed = True
+                        continue
+                    if chunk is None:
+                        break
+                    if prompt_was_displayed:
+                        # Preserve the active prompt while status or other
+                        # child output is rendered above it.
+                        prompt_was_displayed = False
+                    if chunk == "\r":
+                        if pending:
+                            emit_line(pending, terminated=True)
+                            pending = ""
+                        previous_was_carriage_return = True
+                        continue
+                    if chunk == "\n":
+                        if pending:
+                            emit_line(pending, terminated=True)
+                            pending = ""
+                        elif not previous_was_carriage_return:
+                            emit_line("", terminated=True)
+                        previous_was_carriage_return = False
+                        continue
+                    pending += chunk
+                    previous_was_carriage_return = False
+                    if pending.endswith("chat> "):
+                        emit_line(pending, terminated=False)
+                        pending = ""
+                        prompt_was_displayed = True
+                if pending:
                     emit_line(pending, terminated=False)
-                    pending = ""
-                    prompt_was_displayed = True
-            if pending:
-                emit_line(pending, terminated=False)
-            _shell_clear_transient()
-        returncode = process.wait()
-        if returncode:
-            raise RuntimeError(f"command failed with exit {returncode}")
+                stdout_reader.join(timeout=1.0)
+                _shell_clear_transient()
+            returncode = process.wait()
+            if returncode:
+                raise RuntimeError(f"command failed with exit {returncode}")
+        finally:
+            if input_forwarder is not None:
+                input_forwarder.stop()
+            if resize_handler_installed:
+                try:
+                    signal.signal(signal.SIGWINCH, resize_handler_previous)
+                except (OSError, ValueError):
+                    pass
+            if foreground is not None:
+                foreground.finish()
+                _restore_interactive_output(previous_output)
 
     def _run_runner_command(self, argv: list[str]) -> None:
         result = subprocess.run(
