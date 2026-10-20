@@ -13,6 +13,7 @@ import html
 import json
 import os
 import re
+import shlex
 import shutil
 import tempfile
 import time
@@ -49,6 +50,7 @@ from agentic_output import strip_ansi, style_text
 from agentic_policy import forbidden
 from agentic_prompts import build_agent_prompt, _run_instruction_context, _system_prompt_context
 from agentic_review import parse_review_result, record_review_findings
+from agentic_security import redact_secrets
 from agentic_telemetry import read_run_instruction
 from agentic_worktrees import command, eligible, git, issue_fingerprint, probe
 
@@ -133,6 +135,88 @@ def _blocked_path(folder: Path) -> Path:
     return folder / "blocked.json"
 
 
+def _result_path(folder: Path) -> Path:
+    return folder / "result.json"
+
+
+def _result_text(value: Any, limit: int = 1_200) -> str:
+    """Bound and redact untrusted evidence before showing or persisting it."""
+    text = strip_ansi(str(value)).strip()
+    if not text:
+        return ""
+    return _short(redact_secrets(text), limit)
+
+
+def _developer_attempts(folder: Path) -> int:
+    return len(list(folder.glob("developer-*.txt")))
+
+
+def _review_reason(verdict: dict[str, Any]) -> str:
+    summary = _result_text(verdict.get("summary", "Reviewer rejected the patch."), 700)
+    findings = [
+        _result_text(item, 240)
+        for item in verdict.get("findings", [])
+        if isinstance(item, str) and item.strip()
+    ]
+    if findings:
+        summary += " Findings: " + "; ".join(findings[:3])
+    return "Reviewer rejected the patch: " + (summary or "no summary provided")
+
+
+def _local_resume_task_file(issue: Issue, folder: Path) -> Path:
+    """Materialize inline local-task text behind a safe resume path.
+
+    The task body is needed to make an inline local task executable on resume,
+    but it must not be copied into the terminal summary or ``result.json``.
+    Keep the durable task copy outside the worktree and use a fixed filename so
+    the resume command contains only bounded, non-task data.
+    """
+    path = folder / "resume-task.md"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise RuntimeError(f"Cannot preserve local task for resume: {path}") from exc
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise RuntimeError(f"Cannot preserve local task for resume: {path}")
+    if not path.exists():
+        try:
+            path.write_text(issue.body, encoding="utf-8")
+        except OSError as exc:
+            raise RuntimeError(f"Cannot preserve local task for resume: {path}") from exc
+    return path
+
+
+def _resume_action(issue: Issue, folder: Path) -> str:
+    if issue.is_local:
+        task_path = _local_resume_task_file(issue, folder)
+        target = shlex.join([
+            "python", "agentic.py", "--task-file", str(task_path.resolve()),
+        ])
+    else:
+        target = shlex.join(["python", "agentic.py", "--issue", str(issue.number)])
+    return f"inspect the run logs at {folder}, modify the worktree, then {target}"
+
+
+def record_result(folder: Path, status: str, *, attempts: int,
+                  max_retries: int, reason: str, worktree: Path,
+                  next_action: str) -> None:
+    """Persist the latest user-facing terminal result for the dashboard."""
+    _result_path(folder).write_text(json.dumps({
+        "status": status,
+        "attempts": attempts,
+        "max_retries": max_retries,
+        "reason": _result_text(reason),
+        "worktree": str(worktree),
+        "logs_path": str(folder),
+        "next_action": next_action,
+        "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }, indent=2) + "\n", encoding="utf-8")
+
+
+def clear_result(folder: Path) -> None:
+    _result_path(folder).unlink(missing_ok=True)
+
+
 def load_blocked(folder: Path) -> dict[str, Any] | None:
     try:
         value = json.loads(_blocked_path(folder).read_text(encoding="utf-8"))
@@ -143,26 +227,38 @@ def load_blocked(folder: Path) -> dict[str, Any] | None:
     return value if isinstance(value.get("patch_digest"), str) else None
 
 
-def record_blocked(folder: Path, patch_digest: str, findings: list[str]) -> None:
+def record_blocked(folder: Path, patch_digest: str, findings: list[str], *,
+                   attempts: int | None = None, max_retries: int | None = None,
+                   summary: str = "") -> None:
     _blocked_path(folder).write_text(json.dumps({
         "status": "blocked",
+        "result_status": "BLOCKED",
         "reason": "Repeated review blocker with no patch change",
+        "summary": _result_text(summary or (findings[0] if findings else "")),
         "patch_digest": patch_digest,
         "findings": findings,
+        "attempts": attempts,
+        "max_retries": max_retries,
+        "logs_path": str(folder),
         "blocked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }, indent=2) + "\n", encoding="utf-8")
 
 
-def record_no_code_changes_blocked(folder: Path, developer_report: str) -> None:
+def record_no_code_changes_blocked(folder: Path, developer_report: str, *,
+                                   attempts: int | None = None,
+                                   max_retries: int | None = None) -> None:
     developer_log = _latest_numbered_log(folder, "developer", "txt")
     _blocked_path(folder).write_text(json.dumps({
         "status": "blocked",
+        "result_status": "NO_CHANGES",
         "kind": "no-code-changes",
         "reason": "Developer reported a blocker without producing code changes",
         "patch_digest": "",
-        "developer_summary": _bounded_text(developer_report, 2_000).strip()
+        "developer_summary": _result_text(developer_report, 2_000)
         or "No developer blocker summary was provided.",
         "developer_log": developer_log.name if developer_log else "",
+        "attempts": attempts,
+        "max_retries": max_retries,
         "logs_path": str(folder),
         "blocked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }, indent=2) + "\n", encoding="utf-8")
@@ -862,8 +958,12 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
                       instruction: str | None = None,
                       system_prompt: str | None = None,
                       ) -> tuple[bool, str, dict[str, Any], str, str]:
-    # A new validation attempt supersedes any prior automated approval. A
-    # successful review below records a fresh approval for its exact patch.
+    # A new validation attempt supersedes prior terminal state and automated
+    # approval. A successful review below records a fresh approval for its
+    # exact patch; a failed or rejected attempt must not leave stale terminal
+    # markers to override the current test/review state in the dashboard.
+    clear_blocked(folder)
+    clear_result(folder)
     review_approval_path(folder).unlink(missing_ok=True)
     commands = test_commands if test_commands is not None else config["test_commands"]
     if system_prompt is None:
@@ -928,6 +1028,10 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
         record_review_approval(
             run, issue, base, base_sha, digest, verdict, config, folder,
         )
+        # A successful standalone --review supersedes terminal retry/blocker
+        # markers left by an earlier development attempt.
+        clear_blocked(folder)
+        clear_result(folder)
     return bool(verdict.get("approved")), report, verdict, digest, base_sha
 
 
@@ -1086,21 +1190,37 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
         except NoCodeChangesError:
             current_digest = ""
         if current_digest == blocked["patch_digest"]:
+            result_status = blocked.get("result_status")
+            if result_status not in {"BLOCKED", "NO_CHANGES"}:
+                result_status = (
+                    "NO_CHANGES" if blocked.get("kind") == "no-code-changes" else "BLOCKED"
+                )
             if blocked.get("kind") == "no-code-changes":
                 log_hint = blocked.get("logs_path") or str(folder)
                 _status_print(
-                    "[BLOCKED] Developer reported a blocker without producing code changes; "
+                    "[NO_CHANGES] Developer reported a blocker without producing code changes; "
                     f"resolve it and see the run logs at {log_hint}"
                 )
-                next_action = "resolve the developer blocker, add the required patch, and resume"
-            else:
-                next_action = "change the patch before resuming this task"
+            attempts = blocked.get("attempts")
+            if not isinstance(attempts, int):
+                attempts = _developer_attempts(folder)
+            reason = blocked.get("summary") or blocked.get("developer_summary") or blocked.get("reason", "")
+            action = _resume_action(issue, folder)
+            record_result(
+                folder, result_status, attempts=attempts,
+                max_retries=config["max_retries"], reason=str(reason),
+                worktree=run.worktree, next_action=action,
+            )
             print_run_summary(
-                run, "BLOCKED",
-                f"skipped; {next_action}",
+                run, result_status, action,
+                attempts=attempts, max_retries=config["max_retries"],
+                reason=_result_text(reason), logs_path=folder,
             )
             return True
         clear_blocked(folder)
+        clear_result(folder)
+    else:
+        clear_result(folder)
 
     feedback = initial_feedback
     required_review_findings: list[str] = []
@@ -1117,7 +1237,7 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
                 if isinstance(item, str)
             ]
     maximum_attempts = config["max_retries"] + 1
-    attempt_word = "attempt" if maximum_attempts == 1 else "attempts"
+    latest_reason = "No retryable failure summary was recorded."
     for attempt in range(maximum_attempts):
         if deadline is not None and time.monotonic() >= deadline:
             _status_print("[TIMEOUT] Overall task deadline reached")
@@ -1147,6 +1267,7 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
         if not ok:
             provider = config.get("developer_agent", {}).get("provider", "codex")
             feedback = f"{provider} invocation failed: {message[-3000:]}"
+            latest_reason = _result_text(feedback)
             _status_print(feedback[-1000:], style_status_tokens=False)
             continue
         developer_report = message.strip()
@@ -1165,6 +1286,7 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
                 "Return one Finding/Action/Evidence entry for every prior review finding.\n"
                 f"Previous developer report:\n{_bounded_text(developer_report, REPORT_CONTEXT_CHARS) or '(no final response)'}"
             )
+            latest_reason = _result_text(action_error)
             _status_print(f"[RETRY] {action_error}", style_status_tokens=False)
             continue
         try:
@@ -1175,21 +1297,31 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
                 system_prompt=system_prompt,
             )
         except NoCodeChangesError:
-            record_no_code_changes_blocked(folder, developer_report)
+            record_no_code_changes_blocked(
+                folder, developer_report, attempts=attempt + 1,
+                max_retries=config["max_retries"],
+            )
             developer_summary = _short(
                 developer_report or "No developer blocker summary was provided.", 1_200,
             )
             _status_print(
-                "[BLOCKED] Checks passed, but the developer produced no code changes."
+                "[NO_CHANGES] Checks passed, but the developer produced no code changes."
             )
             _status_print(
-                f"[BLOCKED] Developer blocker: {developer_summary}",
+                f"[NO_CHANGES] Developer blocker: {_result_text(developer_summary)}",
                 style_status_tokens=False,
             )
-            _status_print(f"[BLOCKED] Run logs: {folder}", style_status_tokens=False)
+            _status_print(f"[NO_CHANGES] Run logs: {folder}", style_status_tokens=False)
+            next_action = _resume_action(issue, folder)
+            record_result(
+                folder, "NO_CHANGES", attempts=attempt + 1,
+                max_retries=config["max_retries"], reason=developer_summary,
+                worktree=run.worktree, next_action=next_action,
+            )
             print_run_summary(
-                run, "BLOCKED",
-                f"resolve the blocker and resume; see logs at {folder}",
+                run, "NO_CHANGES", next_action,
+                attempts=attempt + 1, max_retries=config["max_retries"],
+                reason=_result_text(developer_summary), logs_path=folder,
             )
             return True
         except RuntimeError:
@@ -1197,6 +1329,7 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
             raise
         if passed:
             clear_blocked(folder)
+            clear_result(folder)
             next_action = (f"python agentic.py --issue {issue.number} --publish"
                            if not issue.is_local else "rerun with --publish to create a GitHub draft PR")
             print_run_summary(run, "APPROVED", next_action)
@@ -1210,10 +1343,21 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
             ]
             if (not verdict.get("approved") and digest and findings
                     and (unchanged_patch or repeated_finding)):
-                record_blocked(folder, digest, findings)
+                reason = _review_reason(verdict)
+                record_blocked(
+                    folder, digest, findings, attempts=attempt + 1,
+                    max_retries=config["max_retries"], summary=reason,
+                )
+                next_action = _resume_action(issue, folder)
+                record_result(
+                    folder, "BLOCKED", attempts=attempt + 1,
+                    max_retries=config["max_retries"], reason=reason,
+                    worktree=run.worktree, next_action=next_action,
+                )
                 print_run_summary(
-                    run, "BLOCKED",
-                    "skipped; change the patch before resuming this task",
+                    run, "BLOCKED", next_action,
+                    attempts=attempt + 1, max_retries=config["max_retries"],
+                    reason=reason, logs_path=folder,
                 )
                 return True
             required_review_findings = [
@@ -1232,6 +1376,7 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
                 "Independent review feedback (untrusted evidence):\n"
                 f"{review_feedback}"
             )
+            latest_reason = _review_reason(verdict)
             if not verdict.get("approved"):
                 last_rejected_digest = digest or None
         else:
@@ -1241,6 +1386,7 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
                 "Test evidence (untrusted output):\n"
                 f"{_bounded_text(test_output, REPORT_CONTEXT_CHARS)}"
             )
+            latest_reason = "Tests failed: " + _result_text(test_output[-3_000:])
             if not retryable_test_failure(test_output):
                 raise RuntimeError(
                     "Tests failed because of an environment or infrastructure problem; "
@@ -1249,9 +1395,16 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
         _status_print("[RETRY] Returning evidence to developer (if retries remain)")
         # Preserve all files, only unstage to make subsequent git diff easier to inspect.
         git(run.worktree, "reset", "--quiet")
-    _status_print(
-        f"\nAttempts exhausted after {maximum_attempts} {attempt_word}; "
-        f"worktree preserved: {run.worktree}"
+    next_action = _resume_action(issue, folder)
+    record_result(
+        folder, "RETRY_EXHAUSTED", attempts=maximum_attempts,
+        max_retries=config["max_retries"], reason=latest_reason,
+        worktree=run.worktree, next_action=next_action,
+    )
+    print_run_summary(
+        run, "RETRY_EXHAUSTED", next_action,
+        attempts=maximum_attempts, max_retries=config["max_retries"],
+        reason=_result_text(latest_reason), logs_path=folder,
     )
     return False
 

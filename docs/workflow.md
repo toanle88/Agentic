@@ -148,6 +148,18 @@ reviewer. The result includes the bounded developer blocker summary and the
 durable run-log directory; resolve the blocker, add the required patch, and
 resume the run.
 
+Final development results are explicit: `RETRY_EXHAUSTED` means every
+configured attempt was used and another repair may help; `BLOCKED` means the
+requirements, contract, or decision needed to proceed is missing; and
+`NO_CHANGES` means checks passed but the developer produced no patch. The
+terminal summary reports attempts used, the configured retry limit, the latest
+failure or blocker summary, the preserved worktree and logs, and the next
+resume action. These results are also retained in the run's `result.json`
+artifact; older `blocked.json` markers remain readable. For local tasks, the
+resume action uses a durable `resume-task.md` copy in the run log directory
+and emits a shell-safe `--task-file` invocation, so task text is not copied
+into terminal summaries or `result.json`.
+
 Use `--new` only when you intentionally want a second worktree:
 
 ```bash

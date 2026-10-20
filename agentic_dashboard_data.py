@@ -185,6 +185,21 @@ def _blocked(folder: Path) -> dict[str, Any] | None:
     return value if isinstance(value, dict) and value.get("status") == "blocked" else None
 
 
+def _result(folder: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads((folder / "result.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    status = value.get("status")
+    if not isinstance(status, str) or status not in {
+        "RETRY_EXHAUSTED", "BLOCKED", "NO_CHANGES",
+    }:
+        return None
+    return value
+
+
 def _investigation(folder: Path) -> tuple[dict[str, Any], Path | None]:
     path = _latest(
         path for path in _numbered_files(folder, ["investigation"])
@@ -264,6 +279,23 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
     investigation, investigation_path = _investigation(folder)
     review, review_path = _review(folder)
     blocked = _blocked(folder)
+    result = _result(folder)
+    legacy_result_status = blocked.get("result_status") if blocked else None
+    if blocked is not None and legacy_result_status is None:
+        if blocked.get("kind") == "no-code-changes":
+            legacy_result_status = "NO_CHANGES"
+    if result is None and blocked is not None and legacy_result_status in {
+        "BLOCKED", "NO_CHANGES",
+    }:
+        result = {
+            key: blocked[key] for key in (
+                "result_status", "attempts", "max_retries", "summary",
+                "reason", "logs_path",
+            ) if key in blocked
+        }
+        result["status"] = legacy_result_status
+        if result["status"] == "NO_CHANGES":
+            result["reason"] = blocked.get("developer_summary") or result.get("reason", "")
     tests, tests_path = _tests(folder)
     developer, developer_paths = _latest_developer(folder)
     all_files = _all_log_files(folder)
@@ -274,6 +306,8 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
         status = "investigation-invalid"
     elif investigation["state"] == "recorded" and not developer_paths and review["status"] == "not-run":
         status = "awaiting-development"
+    elif result is not None:
+        status = str(result["status"]).lower()
     elif blocked is not None:
         status = "blocked"
     elif review["status"] == "approved":
@@ -305,7 +339,8 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
         "id": folder.name, "issue": issue_value, "label": label, "branch": branch,
         "status": status, "investigation": investigation, "attempts": developer["attempts"],
         "last_activity": _timestamp(last_activity) if last_activity else "unknown",
-        "review": review, "blocked": blocked, "tests": tests, "developer": developer,
+        "review": review, "blocked": blocked, "result": result, "tests": tests,
+        "developer": developer,
         "files": file_records, "file_count": len(all_files),
         "has_review": review_path is not None, "has_investigation": investigation_path is not None,
         "has_tests": tests_path is not None, "has_developer": bool(developer_paths),
