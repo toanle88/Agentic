@@ -283,7 +283,7 @@ jobs. Use `/stop --all` to request termination for every running Agentic job.
 | `agentic status --json` | Emit machine-readable worktree status. |
 | `agentic runs --json` | Alias for `status --json`. |
 | `agentic init [--provider NAME] [--security-mode MODE] [--sandbox-image IMAGE] [--sandbox-dockerfile PATH]` | Create ignored target configuration and detect a starter check. |
-| `agentic doctor` | Diagnose Git, GitHub CLI, selected provider CLIs/API key, config, and check prerequisites. |
+| `agentic doctor` | Diagnose repository, GitHub task access, and developer/reviewer agent prerequisites. |
 | `agentic --state-dir PATH ...` | Store worktrees and runtime artifacts in a chosen location. |
 | `agentic cleanup --issue N` | Preview removal of a clean issue worktree; add `--yes` to confirm. |
 | `agentic dashboard` | Generate the HTML run dashboard. Add `--serve` for a loopback server that regenerates it for live polling. |
