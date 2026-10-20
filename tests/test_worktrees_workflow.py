@@ -475,6 +475,7 @@ class WorkflowTests(_GitRepositoryTestCase):
         blocked = json.loads((folder / 'blocked.json').read_text(encoding='utf-8'))
         self.assertEqual(blocked['kind'], 'no-code-changes')
         self.assertEqual(blocked['result_status'], 'NO_CHANGES')
+        self.assertEqual(blocked['issue_digest'], agentic.issue_fingerprint(issue))
         self.assertEqual(blocked['developer_summary'], developer_report)
         self.assertEqual(blocked['developer_log'], 'developer-001.txt')
         self.assertEqual(blocked['logs_path'], str(folder))
@@ -520,6 +521,7 @@ class WorkflowTests(_GitRepositoryTestCase):
         self.assertEqual(blocked['status'], 'blocked')
         self.assertEqual(blocked['result_status'], 'BLOCKED')
         self.assertEqual(blocked['patch_digest'], 'same-digest')
+        self.assertEqual(blocked['issue_digest'], agentic.issue_fingerprint(issue))
         self.assertIn('Production adapter is unavailable', blocked['summary'])
         rendered = output.getvalue()
         self.assertIn('RESULT:   BLOCKED', rendered)
@@ -531,6 +533,87 @@ class WorkflowTests(_GitRepositoryTestCase):
               patch('agentic.run_agent') as resumed_agent):
             self.assertTrue(agentic.develop(run, issue, 'main', config, folder))
         resumed_agent.assert_not_called()
+
+
+    def test_develop_resumes_review_blocker_when_issue_changes(self):
+        run = agentic.create_worktree(self.repo, 'main', 45)
+        folder = agentic.logs_path(self.repo, run)
+        blocked_issue = agentic.Issue(45, 'Missing contract', 'Define the API contract.')
+        changed_issue = agentic.Issue(45, 'Missing contract', 'Define the API contract and error cases.')
+        (folder / 'blocked.json').write_text(json.dumps({
+            'status': 'blocked',
+            'result_status': 'BLOCKED',
+            'patch_digest': 'same-digest',
+            'issue_digest': agentic.issue_fingerprint(blocked_issue),
+            'summary': 'The contract is still missing',
+            'attempts': 2,
+        }))
+        (folder / 'result.json').write_text(json.dumps({'status': 'BLOCKED'}))
+        config = {
+            'max_retries': 3,
+            'max_files': None,
+            'developer_agent': {'provider': 'codex'},
+        }
+        approved = (True, 'tests passed', {
+            'approved': True, 'summary': 'Contract is now defined', 'findings': [],
+        }, 'same-digest', 'base')
+        with (patch('agentic.prepare_patch', return_value=('base', 'same-digest', 'summary')),
+              patch('agentic.run_agent', return_value=(True, 'implemented')) as run_agent,
+              patch('agentic.verify_and_review', return_value=approved),
+              patch('sys.stdout', new_callable=StringIO) as output):
+            self.assertTrue(agentic.develop(run, changed_issue, 'main', config, folder))
+
+        run_agent.assert_called_once()
+        self.assertFalse((folder / 'blocked.json').exists())
+        self.assertFalse((folder / 'result.json').exists())
+        self.assertIn('[RESUME] Issue changed since the previous blocked run; resumed development.',
+                      output.getvalue())
+        self.assertIn('Reason:   Issue changed since the previous blocked run; resumed development.',
+                      output.getvalue())
+
+
+    def test_develop_resumes_no_code_blocker_when_issue_changes(self):
+        run = agentic.create_worktree(self.repo, 'main', 46)
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(46, 'Blocked task', 'Implement the task.')
+        config = {
+            'max_retries': 1,
+            'max_files': None,
+            'developer_agent': {'provider': 'codex'},
+        }
+        developer_report = 'Blocked: the required upstream service is unavailable.'
+
+        def fake_developer(_worktree, _prompt, *, output, **_kwargs):
+            output.write_text(developer_report, encoding='utf-8')
+            return True, developer_report
+
+        with (patch('agentic.run_agent', side_effect=fake_developer),
+              patch('agentic.run_tests', return_value=(True, 'All configured checks passed')),
+              patch('agentic.review'),
+              patch('sys.stdout', new_callable=StringIO)):
+            self.assertTrue(agentic.develop(
+                run, issue, 'main', config, folder,
+                test_commands=[['python', '-c', 'print("ok")']],
+            ))
+
+        blocked = json.loads((folder / 'blocked.json').read_text(encoding='utf-8'))
+        changed_issue = agentic.Issue(46, 'Blocked task', 'Implement the task and document retries.')
+        self.assertEqual(blocked['issue_digest'], agentic.issue_fingerprint(issue))
+
+        with (patch('agentic.prepare_patch', return_value=('base', '', 'no changes')),
+              patch('agentic.run_agent', return_value=(True, 'implemented')) as resumed_agent,
+              patch('agentic.verify_and_review', return_value=(
+                  True, 'tests passed', {'approved': True, 'summary': 'approved', 'findings': []},
+                  '', 'base',
+              )),
+              patch('sys.stdout', new_callable=StringIO) as output):
+            self.assertTrue(agentic.develop(run, changed_issue, 'main', config, folder))
+
+        resumed_agent.assert_called_once()
+        self.assertFalse((folder / 'blocked.json').exists())
+        self.assertFalse((folder / 'result.json').exists())
+        self.assertIn('[RESUME] Issue changed since the previous blocked run; resumed development.',
+                      output.getvalue())
 
 
     def test_develop_blocks_repeated_finding_after_patch_change(self):
