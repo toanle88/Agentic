@@ -10,11 +10,21 @@ from typing import Any
 _ANSI_SEQUENCE = re.compile(
     r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))"
 )
+_TERMINAL_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 def strip_ansi(value: Any) -> str:
     """Remove terminal control sequences before text is persisted or replayed."""
     return _ANSI_SEQUENCE.sub("", str(value))
+
+
+def sanitize_terminal_text(value: Any) -> str:
+    """Remove terminal controls while keeping status text readable."""
+    text = strip_ansi(value)
+    return _TERMINAL_CONTROL.sub(
+        lambda match: " " if match.group() in "\t\n\r\v\f" else "",
+        text,
+    )
 
 
 def color_enabled(stream: Any = None) -> bool:

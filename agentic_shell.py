@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Callable, TextIO
 
 from agentic import __version__  # noqa: F401
+from agentic_output import sanitize_terminal_text
 from agentic_shell_input import (  # noqa: F401
     COMMAND_DESCRIPTIONS,
     HELP,
@@ -211,6 +212,7 @@ class AgenticShell:
         self._load_persisted_jobs()
         self.next_number = max(self.jobs, default=0) + 1
         self.history: list[str] = []
+        self.active_task = "idle"
 
     def _completion_matches(self, line: str, cursor: int | None = None) -> list[str]:
         return _completion_candidates(line, cursor, tuple(self.jobs), jobs=self.jobs)
@@ -255,19 +257,26 @@ class AgenticShell:
         readline.set_completer(completer)
         readline.set_completer_delims(delimiters)
 
-    def _input(self, prompt: str) -> str:
+    def _input(self, prompt: str, status_line: str | None = None) -> str:
         """Read a shell line with completion where the terminal supports it."""
         if _is_interactive_terminal():
             return _interactive_input(
                 prompt,
                 self._completion_items,
                 history=self.history,
+                status_line=status_line,
             )
         if _readline_module() is not None:
-            return input(prompt)
-        if os.name == "nt" and getattr(sys.stdin, "isatty", lambda: False)():
+            return input()
+        if (
+            os.name == "nt"
+            and getattr(sys.stdin, "isatty", lambda: False)()
+            and getattr(sys.stdout, "isatty", lambda: False)()
+        ):
             return _windows_input(prompt, self._completion_matches)
-        return input(prompt)
+        # A redirected shell must not put an interactive prompt on stdout.
+        # Callers can still provide input through a pipe or a test double.
+        return input()
 
 
     def _record_path(self, number: int) -> Path:
@@ -453,12 +462,47 @@ class AgenticShell:
             return "github"
         return data.get("task_source", "github") if isinstance(data, dict) else "github"
 
+    def _status_line(self) -> str:
+        """Return bounded, non-secret context for the interactive prompt."""
+        config_path = self.config or (self.repo / "agent_config.json")
+        provider = "codex"
+        model: str | None = None
+        try:
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = {}
+        if isinstance(data, dict):
+            developer = data.get("developer")
+            if not isinstance(developer, dict):
+                developer = data.get("agent")
+            if not isinstance(developer, dict):
+                developer = {}
+            provider = sanitize_terminal_text(
+                developer.get("provider") or data.get("developer_provider") or "codex"
+            ).strip() or "codex"
+            value = developer.get("model")
+            if value is None:
+                value = data.get("codex_model")
+            if isinstance(value, str) and value.strip():
+                model = sanitize_terminal_text(value).strip() or None
+        model_label = (
+            f"{provider} · {model}"
+            if model
+            else ("GPT model" if provider == "codex" else f"{provider} model")
+        )
+        repo = sanitize_terminal_text(self.repo)
+        task = sanitize_terminal_text(self.active_task)
+        return f"{model_label} · {repo} · task: {task}"
+
     def _capture_local_task(self) -> Path:
         _shell_print("Paste the local task. Finish with a line containing /done; use /cancel to abort.")
         lines: list[str] = []
         while True:
             try:
-                line = input("task> ")
+                if _is_interactive_terminal():
+                    line = self._input("task › ", self._status_line())
+                else:
+                    line = input()
             except (EOFError, KeyboardInterrupt) as exc:
                 print()
                 raise ValueError("local task input cancelled") from exc
@@ -488,6 +532,9 @@ class AgenticShell:
                 if task_file_value is not None
                 else self._capture_local_task().expanduser().resolve()
             )
+            self.active_task = "local task"
+        else:
+            self.active_task = f"issue #{issue}"
         runner_flags = list(flags)
         if task_file is not None and task_file_value is not None:
             task_file_index = runner_flags.index("--task-file")
@@ -500,6 +547,46 @@ class AgenticShell:
             self._run_foreground(argv)
         else:
             self._launch(argv)
+
+    def run_chat(self, parts: list[str], raw_line: str | None = None) -> None:
+        """Start a task from a chat-style instruction without shell eval."""
+        if len(parts) < 2:
+            raise ValueError("usage: /chat ISSUE MESSAGE or /chat MESSAGE (local mode)")
+        message_parts = parts[2:] if parts[1].isdigit() else parts[1:]
+        multiline_message: str | None = None
+        if raw_line is not None and "\n" in raw_line:
+            first_line, remainder = raw_line.split("\n", 1)
+            try:
+                first_parts = shlex.split(first_line)
+            except ValueError:
+                first_parts = []
+            if first_parts and first_parts[0].lower() == "/chat":
+                offset = 2 if len(first_parts) > 1 and first_parts[1].isdigit() else 1
+                first_message = " ".join(first_parts[offset:])
+                multiline_message = first_message
+                if remainder:
+                    multiline_message += "\n" + remainder
+        if parts[1].isdigit():
+            if len(parts) < 3:
+                raise ValueError("usage: /chat ISSUE MESSAGE")
+            issue = parts[1]
+            message = (multiline_message if multiline_message is not None
+                       else " ".join(message_parts)).strip()
+            if not message:
+                raise ValueError("chat message must not be empty")
+            self.active_task = f"issue #{issue}"
+            self.run_issue(["/run", issue, "--instruction", message])
+            return
+        if self._task_source() != "local":
+            raise ValueError("GitHub mode requires /chat ISSUE MESSAGE; set task_source to local for /chat MESSAGE")
+        message = (multiline_message if multiline_message is not None
+                   else " ".join(message_parts)).strip()
+        if not message:
+            raise ValueError("chat message must not be empty")
+        path = self.session_dir / f"chat-{uuid.uuid4().hex[:12]}.md"
+        path.write_text(message + "\n", encoding="utf-8")
+        self.run_issue(["/run", "--task-file", str(path)])
+        self.active_task = "local chat"
 
     def run_dashboard(self, parts: list[str]) -> None:
         dashboard = self.runner.with_name("agentic_dashboard.py")
@@ -733,6 +820,8 @@ class AgenticShell:
                 _print_help()
             elif command == "/run":
                 self.run_issue(parts)
+            elif command == "/chat":
+                self.run_chat(parts, line)
             elif command == "/ps":
                 self.show_processes(parts)
             elif command == "/logs":
@@ -779,10 +868,15 @@ class AgenticShell:
             while True:
                 self.refresh()
                 try:
-                    line = self._input("agentic> ")
-                except (EOFError, KeyboardInterrupt):
+                    line = self._input("› ", self._status_line())
+                except EOFError:
                     print()
                     break
+                except KeyboardInterrupt:
+                    # Ctrl+C cancels the editable buffer; it does not end the
+                    # supervisor session. EOF remains the explicit exit path.
+                    _shell_print("Input cancelled")
+                    continue
                 if not self.execute(line):
                     break
         finally:
