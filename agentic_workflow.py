@@ -541,8 +541,8 @@ def preflight_test_commands(repo: Path, test_commands: list[list[str]],
         executable = argv[0]
         if shutil.which(executable) is None:
             raise RuntimeError(
-                f"Configured test command is unavailable: {argv!r}; "
-                f"executable {executable!r} was not found on PATH"
+                f"Configured test command is unavailable: executable {executable!r} "
+                "was not found on PATH"
             )
         executable_name = Path(executable).name.lower()
         if len(argv) >= 3 and argv[1] == "-m" and (

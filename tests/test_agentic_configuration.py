@@ -482,6 +482,126 @@ class ConfigurationTests(unittest.TestCase):
         self.assertTrue(any(item['name'] == 'Agentic config' for item in payload['checks']))
 
 
+    def test_doctor_reports_configuration_failure_reason_in_human_and_json_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            config = repo / 'agent_config.json'
+            config.write_text(json.dumps({
+                'test_commands': [[sys.executable, '-c', 'pass']],
+                'developer': {'provider': 'copliot'},
+            }))
+
+            def fake_probe(argv, cwd, **kwargs):
+                return True, 'ok'
+
+            common_patches = (
+                patch('agentic.installed_git_version', return_value=(2, 48, 0)),
+                patch('agentic.probe', side_effect=fake_probe),
+                patch('agentic.shutil.which', return_value='/usr/bin/tool'),
+            )
+            with common_patches[0], common_patches[1], common_patches[2], \
+                    patch('sys.stdout', new_callable=io.StringIO) as output:
+                result = agentic.doctor(repo, config)
+            human = output.getvalue()
+
+            with common_patches[0], common_patches[1], common_patches[2], \
+                    patch('sys.stdout', new_callable=io.StringIO) as output:
+                result_json = agentic.doctor(repo, config, json_output=True)
+            payload = json.loads(output.getvalue())
+
+        expected = 'developer.provider must be one of: codex, gemini, claude, copilot, openrouter'
+        self.assertEqual(result, 1)
+        self.assertEqual(result_json, 1)
+        self.assertIn(f'[FAIL] Agentic config: {expected}', human)
+        config_check = next(item for item in payload['checks'] if item['name'] == 'Agentic config')
+        self.assertEqual(config_check['detail'], expected)
+        self.assertNotEqual(config_check['detail'], 'required check failed')
+
+
+    def test_doctor_reports_missing_provider_executable_without_probe_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            config = repo / 'agent_config.json'
+            config.write_text(json.dumps({
+                'test_commands': [[sys.executable, '-c', 'pass']],
+                'developer': {'provider': 'copilot'},
+                'reviewer': {'provider': 'copilot'},
+            }))
+
+            def fake_probe(argv, cwd, **kwargs):
+                if argv[-1:] == ['--version']:
+                    return False, 'provider output contains private-provider-secret'
+                return True, 'ok'
+
+            def fake_which(name):
+                return None if name == 'copilot' else '/usr/bin/' + Path(name).name
+
+            patches = (
+                patch('agentic.installed_git_version', return_value=(2, 48, 0)),
+                patch('agentic.probe', side_effect=fake_probe),
+                patch('agentic.shutil.which', side_effect=fake_which),
+            )
+            with patches[0], patches[1], patches[2], \
+                    patch('sys.stdout', new_callable=io.StringIO) as output:
+                result = agentic.doctor(repo, config, json_output=True)
+            payload = json.loads(output.getvalue())
+            provider_check = next(
+                item for item in payload['checks']
+                if item['name'] == 'Developer provider (copilot)'
+            )
+
+            with patches[0], patches[1], patches[2], \
+                    patch('sys.stdout', new_callable=io.StringIO) as output:
+                human_result = agentic.doctor(repo, config)
+
+        self.assertEqual(result, 1)
+        self.assertEqual(human_result, 1)
+        self.assertEqual(provider_check['detail'], 'executable not found on PATH')
+        self.assertIn('executable not found on PATH', output.getvalue())
+        self.assertNotIn('private-provider-secret', output.getvalue())
+
+
+    def test_doctor_replaces_provider_probe_output_with_safe_failure_reason(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            config = repo / 'agent_config.json'
+            config.write_text(json.dumps({
+                'test_commands': [[sys.executable, '-c', 'pass']],
+                'developer': {'provider': 'copilot'},
+                'reviewer': {'provider': 'copilot'},
+            }))
+
+            def fake_probe(argv, cwd, **kwargs):
+                if argv[-1:] == ['--version']:
+                    return False, 'private-provider-secret output'
+                return True, 'ok'
+
+            patches = (
+                patch('agentic.installed_git_version', return_value=(2, 48, 0)),
+                patch('agentic.probe', side_effect=fake_probe),
+                patch('agentic.shutil.which', return_value='/usr/bin/copilot'),
+            )
+            with patches[0], patches[1], patches[2], \
+                    patch('sys.stdout', new_callable=io.StringIO) as output:
+                result = agentic.doctor(repo, config, json_output=True)
+            payload = json.loads(output.getvalue())
+            provider_check = next(
+                item for item in payload['checks']
+                if item['name'] == 'Developer provider (copilot)'
+            )
+
+            with patches[0], patches[1], patches[2], \
+                    patch('sys.stdout', new_callable=io.StringIO) as output:
+                human_result = agentic.doctor(repo, config)
+
+        expected = 'executable failed its --version check'
+        self.assertEqual(result, 1)
+        self.assertEqual(human_result, 1)
+        self.assertEqual(provider_check['detail'], expected)
+        self.assertIn(expected, output.getvalue())
+        self.assertNotIn('private-provider-secret', output.getvalue())
+
+
     def test_doctor_commands_runs_from_selected_worktree(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -536,7 +656,10 @@ class ConfigurationTests(unittest.TestCase):
             root = Path(temp)
             config = root / 'agent_config.json'
             config.write_text(json.dumps({
-                'test_commands': [[sys.executable, '-c', 'import sys; sys.exit(3)']],
+                'test_commands': [[
+                    sys.executable, '-c',
+                    'print("configured-command-" + "secret"); import sys; sys.exit(3)',
+                ]],
             }))
 
             def fake_probe(argv, cwd, **kwargs):
@@ -559,6 +682,89 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(payload['command_results'][0]['exit_code'], 3)
         execution = next(item for item in payload['checks'] if item['name'] == 'Configured command execution')
         self.assertFalse(execution['ok'])
+        self.assertEqual(execution['detail'], 'fast command failed (exit code 3)')
+        self.assertNotIn('configured-command-secret', output.getvalue())
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / 'agent_config.json'
+            config.write_text(json.dumps({
+                'test_commands': [[
+                    sys.executable, '-c',
+                    'print("configured-command-" + "secret"); import sys; sys.exit(3)',
+                ]],
+            }))
+
+            def fake_probe(argv, cwd, **kwargs):
+                if argv[:3] == ['git', 'rev-parse', '--git-common-dir']:
+                    return True, str(root / '.git')
+                if argv[:2] == ['git', 'rev-parse']:
+                    return True, str(root)
+                return True, 'ok'
+
+            with (patch('agentic.installed_git_version', return_value=(2, 48, 0)),
+                  patch('agentic.probe', side_effect=fake_probe),
+                  patch('agentic.shutil.which', return_value='/usr/bin/tool'),
+                  patch('agentic.worktree_path_lock', return_value=nullcontext()),
+                  patch('sys.stdout', new_callable=io.StringIO) as output):
+                result = agentic.doctor(root, config, run_commands=True)
+
+        self.assertEqual(result, 1)
+        self.assertNotIn('configured-command-secret', output.getvalue())
+
+
+    def test_doctor_command_failure_details_distinguish_timeout_and_start_failure(self):
+        results = [
+            {'argv': ['tool', '--timeout-secret'], 'status': 'timeout', 'exit_code': 124,
+             'duration_seconds': 1.0},
+            {'argv': ['tool', '--start-secret'], 'status': 'not-started', 'exit_code': None,
+             'duration_seconds': 0.1},
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            config = repo / 'agent_config.json'
+            config.write_text(json.dumps({
+                'test_commands': [['tool', '--secret'], ['tool', '--second-secret']],
+            }))
+            with (patch('agentic.installed_git_version', return_value=(2, 48, 0)),
+                  patch('agentic.probe', return_value=(True, 'ok')),
+                  patch('agentic.shutil.which', return_value='/usr/bin/tool'),
+                  patch('agentic.worktree_path_lock', return_value=nullcontext()),
+                  patch('agentic_diagnostics._run_configured_command',
+                        side_effect=results),
+                  patch('sys.stdout', new_callable=io.StringIO) as output):
+                result = agentic.doctor(repo, config, json_output=True, run_commands=True)
+
+        payload = json.loads(output.getvalue())
+        execution = next(item for item in payload['checks'] if item['name'] == 'Configured command execution')
+        self.assertEqual(result, 1)
+        self.assertEqual(
+            execution['detail'],
+            '2 of 2 fast commands failed (1 timed out, 1 could not start)',
+        )
+        self.assertNotIn('timeout-secret', execution['detail'])
+        self.assertNotIn('start-secret', execution['detail'])
+
+
+    def test_doctor_preflight_detail_does_not_include_configured_argv(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            config = repo / 'agent_config.json'
+            config.write_text(json.dumps({
+                'test_commands': [['missing-test-tool', 'literal-secret-argument']],
+            }))
+
+            with (patch('agentic.installed_git_version', return_value=(2, 48, 0)),
+                  patch('agentic.probe', return_value=(True, 'ok')),
+                  patch('agentic.shutil.which', return_value=None),
+                  patch('sys.stdout', new_callable=io.StringIO) as output):
+                result = agentic.doctor(repo, config, json_output=True)
+
+        payload = json.loads(output.getvalue())
+        config_check = next(item for item in payload['checks'] if item['name'] == 'Agentic config')
+        self.assertEqual(result, 1)
+        self.assertIn("executable 'missing-test-tool' was not found on PATH", config_check['detail'])
+        self.assertNotIn('literal-secret-argument', output.getvalue())
 
 
     def test_doctor_commands_reject_unrelated_worktree(self):

@@ -39,6 +39,9 @@ Run the diagnostic from the target repository root:
 agentic doctor
 ```
 
+Doctor reports the specific configuration or provider availability reason in
+both its terminal and `--json` output. Provider command output is not included.
+
 Install and authenticate the provider selected in `agent_config.json`. For
 OpenRouter, export the configured key environment variable instead of putting
 the key in JSON:

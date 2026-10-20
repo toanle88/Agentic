@@ -61,6 +61,50 @@ def _run_configured_command(
     }
 
 
+def _configured_command_detail(
+    command_results: list[dict[str, object]],
+    profile: str,
+    worktree: Path,
+) -> str:
+    """Describe configured command execution without exposing command text."""
+    failures = [item for item in command_results if item.get("status") != "passed"]
+    if not failures:
+        return f"{len(command_results)} {profile} command(s) ran in {worktree}"
+
+    if len(failures) == 1:
+        result = failures[0]
+        status = result.get("status")
+        if status == "failed":
+            exit_code = result.get("exit_code")
+            if isinstance(exit_code, int):
+                reason = f"exit code {exit_code}"
+            else:
+                reason = "a nonzero exit status"
+            return f"{profile} command failed ({reason})"
+        if status == "timeout":
+            return f"{profile} command timed out"
+        if status == "not-started":
+            return f"{profile} command could not start"
+        return f"{profile} command did not complete"
+
+    counts = {
+        "failed": sum(item.get("status") == "failed" for item in failures),
+        "timeout": sum(item.get("status") == "timeout" for item in failures),
+        "not-started": sum(item.get("status") == "not-started" for item in failures),
+    }
+    reasons = []
+    if counts["failed"]:
+        reasons.append(f"{counts['failed']} failed")
+    if counts["timeout"]:
+        reasons.append(f"{counts['timeout']} timed out")
+    if counts["not-started"]:
+        reasons.append(f"{counts['not-started']} could not start")
+    return (
+        f"{len(failures)} of {len(command_results)} {profile} commands failed"
+        f" ({', '.join(reasons)})"
+    )
+
+
 def run_doctor(
     repo: Path,
     config_path: Path | None = None,
@@ -203,7 +247,7 @@ def run_doctor(
                             False,
                         ))
                     if engine_path and image_ok:
-                        provider_ok, provider_output = probe(
+                        provider_ok, _provider_output = probe(
                             [engine_path, "run", "--rm", "--network", "none",
                              "--entrypoint", provider,
                              loaded["sandbox"]["image"], "--version"],
@@ -213,7 +257,7 @@ def run_doctor(
                             f"{role.title()} provider ({provider})", provider_ok,
                             "provider executable is available in the sandbox image"
                             if provider_ok else
-                            f"provider executable is unavailable in the sandbox image: {provider_output[-240:]}",
+                            "provider executable failed its --version check in the sandbox image",
                             True,
                         ))
                     else:
@@ -224,8 +268,14 @@ def run_doctor(
                         ))
                 else:
                     executable = shutil.which(provider)
-                    ok, _ = probe([executable or provider, "--version"], repo) if executable else (False, f"{provider} not found")
-                    checks.append((f"{role.title()} provider ({provider})", ok, "provider is available" if ok else "provider is not available", True))
+                    ok, _provider_output = probe([executable, "--version"], repo) if executable else (False, "")
+                    if ok:
+                        detail = "provider is available"
+                    elif executable:
+                        detail = "executable failed its --version check"
+                    else:
+                        detail = "executable not found on PATH"
+                    checks.append((f"{role.title()} provider ({provider})", ok, detail, True))
             if run_commands and worktree_ok:
                 commands = list(loaded["test_commands"])
                 if profile == "slow":
@@ -253,7 +303,7 @@ def run_doctor(
                     commands_ok = all(item["status"] == "passed" for item in command_results)
                     checks.append((
                         "Configured command execution", commands_ok,
-                        f"{len(command_results)} {profile} command(s) ran in {command_worktree}",
+                        _configured_command_detail(command_results, profile, command_worktree),
                         True,
                     ))
         except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
@@ -278,7 +328,7 @@ def run_doctor(
                     "ok": ok,
                     "required": required,
                     "status": "ok" if ok else ("fail" if required else "warn"),
-                    "detail": _doctor_public_detail(label, ok, required),
+                    "detail": _doctor_public_detail(label, ok, required, _detail),
                 }
                 for label, ok, _detail, required in checks
             ],
@@ -289,11 +339,11 @@ def run_doctor(
         print(f"Repository: {repo}")
         if run_commands:
             print(f"Command worktree: {command_worktree}")
-        for label, ok, _detail, required in checks:
+        for label, ok, detail, required in checks:
             state = "OK" if ok else ("FAIL" if required else "WARN")
             print(
                 style_system_text(
-                    f"[{state:<4}] {label}: {_doctor_public_detail(label, ok, required)}",
+                    f"[{state:<4}] {label}: {_doctor_public_detail(label, ok, required, detail)}",
                     system_prefix=state,
                     style_status_tokens=False,
                 )

@@ -16,7 +16,14 @@ from pathlib import Path
 from typing import Any
 
 from agentic_models import Issue, Run
-from agentic_output import is_transient_progress, paint, strip_ansi, style_system_text, style_text
+from agentic_output import (
+    is_transient_progress,
+    paint,
+    sanitize_terminal_text,
+    strip_ansi,
+    style_system_text,
+    style_text,
+)
 from agentic_sandbox import sandbox_command
 from agentic_security import redact_secrets
 from agentic_telemetry import record_operation, record_usage
@@ -27,14 +34,30 @@ def _short(value: Any, limit: int = 180) -> str:
     return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
-def _doctor_public_detail(label: str, ok: bool, required: bool) -> str:
-    """Return only fixed, non-sensitive details for doctor output."""
+def _doctor_public_detail(
+    label: str,
+    ok: bool,
+    required: bool,
+    detail: str | None = None,
+) -> str:
+    """Return concise, safe details for doctor output.
+
+    Successful checks retain their established compact labels. Required
+    failures may expose the diagnostic reason, but only after terminal-control
+    removal, secret redaction, and length bounding. Provider and configured
+    command output must be converted to a fixed reason before reaching here.
+    """
     if label == "Sandbox network":
         return (
             "enabled for developer and read-only reviewer; disable unless outbound access is required"
             if not ok else "disabled for developer and read-only reviewer"
         )
-    return "passed" if ok else ("required check failed" if required else "warning")
+    if ok:
+        return "passed"
+    safe_detail = redact_secrets(sanitize_terminal_text(detail or "")).strip()
+    if safe_detail:
+        return _short(safe_detail, 240)
+    return "required check failed" if required else "warning"
 
 
 def _remaining_timeout(deadline: float | None, maximum: int | None) -> int | None:
