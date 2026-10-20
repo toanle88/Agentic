@@ -1120,6 +1120,16 @@ class ShellTests(unittest.TestCase):
             ''.join(state.history),
         )
 
+    def test_foreground_publish_waiting_prompts_are_editable(self):
+        prompts = (
+            "[PUBLISH] Waiting for worktree selection. Enter a number or 'q' to cancel: ",
+            "[PUBLISH] Waiting for publication confirmation. Type 'publish' to continue or 'q' to cancel: ",
+        )
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                self.assertTrue(agentic_shell._is_foreground_prompt(prompt))
+                self.assertEqual(agentic_shell._foreground_prompt_prefix(prompt), 'PUBLISH')
+
     def test_foreground_child_arbitrary_prompt_is_shown_while_it_waits(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

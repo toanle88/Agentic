@@ -232,6 +232,10 @@ def _is_foreground_prompt(text: str) -> bool:
 
 _FOREGROUND_PROMPT_PREFIXES = {
     "chat> ": "CHAT",
+    "[RESUME] Waiting for worktree selection. Enter a number or 'q' to cancel: ": "RESUME",
+    "[PUBLISH] Waiting for worktree selection. Enter a number or 'q' to cancel: ": "PUBLISH",
+    "[PUBLISH] Waiting for publication confirmation. Type 'publish' to continue or 'q' to cancel: ": "PUBLISH",
+    # Retain recognition for logs and older runner children.
     "[PUBLISH] Publish this patch? Type 'publish' to approve: ": "PUBLISH",
 }
 

@@ -28,6 +28,10 @@ LOCAL_BRANCH_RE = re.compile(
 RELATIVE_WORKTREE_GIT = (2, 48, 0)
 
 
+class UserCancelled(RuntimeError):
+    """Signal that a user cancelled an interactive runner step."""
+
+
 def _status_print(message: Any, *, file: Any = None, flush: bool = False,
                   system_prefix: str | None = None) -> None:
     renderer = style_system_text if system_prefix is not None else style_text
@@ -351,16 +355,54 @@ def runs_for_task(repo: Path, task_key: str) -> list[Run]:
     return [run for run in discover_runs(repo) if run.task_key == task_key]
 
 
-def choose_existing(runs: list[Run]) -> Run:
+def choose_existing(runs: list[Run], *, prompt_prefix: str = "RESUME") -> Run:
+    label = prompt_prefix.upper()
     if len(runs) == 1:
+        _status_print(
+            f"[{label}] Worktree selected: {runs[0].branch} ({runs[0].worktree})"
+        )
         return runs[0]
     _status_print("\nMultiple worktrees exist for this issue:")
     for idx, run in enumerate(runs, 1):
         _status_print(f" {idx}. {run.branch}  ({run.worktree})")
-    choice = input("Resume which number? ").strip()
-    if not choice.isdigit() or not 1 <= int(choice) <= len(runs):
-        raise RuntimeError("Invalid worktree selection")
-    return runs[int(choice) - 1]
+    prompt = (
+        f"\n[{label}] Waiting for worktree selection. "
+        "Enter a number or 'q' to cancel: "
+    )
+    while True:
+        try:
+            choice = input(prompt).strip()
+        except KeyboardInterrupt as exc:
+            _status_print(f"[{label}] Worktree selection cancelled by Ctrl-C")
+            raise UserCancelled("Worktree selection cancelled") from exc
+        if choice.casefold() == "q":
+            _status_print(f"[{label}] Worktree selection cancelled")
+            raise UserCancelled("Worktree selection cancelled")
+        try:
+            # ``str.isdigit`` accepts non-ASCII numerals, and ``int`` can
+            # reject an excessively long ASCII digit string. Treat both as
+            # ordinary invalid input so the prompt remains retryable.
+            if not choice.isascii() or not choice.isdigit():
+                raise ValueError
+            selected_number = int(choice)
+        except ValueError:
+            _status_print(
+                f"[{label}] Invalid worktree selection. Enter a number from 1 to "
+                f"{len(runs)} or 'q' to cancel."
+            )
+            continue
+        if not 1 <= selected_number <= len(runs):
+            _status_print(
+                f"[{label}] Invalid worktree selection. Enter a number from 1 to "
+                f"{len(runs)} or 'q' to cancel."
+            )
+            continue
+        selected = runs[selected_number - 1]
+        _status_print(
+            f"[{label}] Worktree {selected_number} selected: "
+            f"{selected.branch} ({selected.worktree})"
+        )
+        return selected
 
 
 def create_worktree(repo: Path, base: str, issue_number: int,

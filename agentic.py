@@ -101,7 +101,7 @@ from agentic_telemetry import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.47"
+__version__ = "1.1.48"
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 INSTRUCTION_CONTEXT_CHARS = _INSTRUCTION_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module
@@ -211,6 +211,7 @@ from agentic_worktrees import (  # noqa: E402, F401
     runs_for_issue,
     runs_for_task,
     state_paths,
+    UserCancelled,
     worktree_lock,
     worktree_path_lock,
 )
@@ -1077,7 +1078,9 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
             run = create_worktree(repo, base, issue_number, state_dir)
         fresh = True
     elif previous:
-        run = choose_existing(previous)
+        run = choose_existing(
+            previous, prompt_prefix="PUBLISH" if args.publish else "RESUME"
+        )
         fresh = False
         with repository_lock(repo, state_dir):
             refresh_base(repo, base)
@@ -1288,6 +1291,9 @@ def main(argv: list[str] | None = None) -> int:
             state_dir = Path(args.state_dir).expanduser().resolve() if args.state_dir else default_state_dir()
             return run_shell(Path(args.repo), Path(__file__).resolve(), config, state_dir=state_dir)
         return execute(args)
+    except UserCancelled as exc:
+        _status_print(f"[CANCEL] {exc}", file=sys.stderr)
+        return 0
     except (RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
         _status_print(f"ERROR: {exc}", file=sys.stderr)
         return 1

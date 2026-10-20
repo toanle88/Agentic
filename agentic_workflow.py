@@ -1130,17 +1130,21 @@ def _validation_summary(report: str, test_commands: list[list[str]], *, checks_r
     return "\n".join(lines)
 
 
-def publish(run: Run, issue: Issue, github_repo: str, base: str,
-            config: dict[str, Any], folder: Path,
-            test_commands: list[list[str]] | None = None,
-            deadline: float | None = None,
-            manual_approval: dict[str, Any] | None = None) -> None:
+def _publish(run: Run, issue: Issue, github_repo: str, base: str,
+             config: dict[str, Any], folder: Path,
+             test_commands: list[list[str]] | None = None,
+             deadline: float | None = None,
+             manual_approval: dict[str, Any] | None = None) -> None:
     """Publish the exact patch covered by an existing approval."""
     if not eligible(issue):
         raise RuntimeError("Issue is closed; publication blocked")
+    _status_print("[PUBLISH] Running: checking the approved patch", flush=True)
     prs = check_existing_pr(run.worktree, github_repo, run.branch)
     if prs:
-        _status_print(f"Existing PR for this branch: {prs[0]['url']}. No duplicate PR created.")
+        _status_print(
+            f"[PUBLISH] Completed: existing PR for this branch: "
+            f"{prs[0]['url']}. No duplicate PR created."
+        )
         return
     approval = dict(manual_approval) if manual_approval is not None else load_publication_approval(folder)
     if approval is not None and manual_approval is not None:
@@ -1158,13 +1162,31 @@ def publish(run: Run, issue: Issue, github_repo: str, base: str,
     # used by its input forwarder.
     from agentic_shell_input import _interactive_line
 
-    confirm = _interactive_line(
-        "\n[PUBLISH] Publish this patch? Type 'publish' to approve: ",
-        system_prefix="PUBLISH",
-    ).strip()
-    if confirm != "publish":
-        _status_print("Publication cancelled; branch/worktree kept intact")
-        return
+    prompt = (
+        "\n[PUBLISH] Waiting for publication confirmation. "
+        "Type 'publish' to continue or 'q' to cancel: "
+    )
+    while True:
+        try:
+            confirm = _interactive_line(prompt, system_prefix="PUBLISH").strip().casefold()
+        except KeyboardInterrupt:
+            _status_print(
+                "[PUBLISH] Publication cancelled by Ctrl-C; "
+                "branch/worktree kept intact"
+            )
+            return
+        if confirm == "publish":
+            _status_print("[PUBLISH] Publication approved; starting publication.", flush=True)
+            break
+        # Keep the historical `no` response as a cancellation alias while the
+        # user-facing prompt advertises the clearer `q` shortcut.
+        if confirm in {"q", "no"}:
+            _status_print("[PUBLISH] Publication cancelled; branch/worktree kept intact")
+            return
+        _status_print(
+            "[PUBLISH] Invalid confirmation. Type 'publish' to continue or "
+            "'q' to cancel."
+        )
     # A human confirmation is not permission to publish a different patch.
     _, new_digest, _ = prepare_patch(run.worktree, base, config["max_files"])
     if digest != new_digest:
@@ -1199,7 +1221,24 @@ def publish(run: Run, issue: Issue, github_repo: str, base: str,
         "--head", run.branch, "--title", f"{title_prefix}: {issue.title[:110]}",
         "--body", body,
     ], run.worktree)
-    _status_print("Draft PR: " + result.stdout.strip())
+    _status_print("[PUBLISH] Completed: Draft PR: " + result.stdout.strip())
+
+
+def publish(run: Run, issue: Issue, github_repo: str, base: str,
+            config: dict[str, Any], folder: Path,
+            test_commands: list[list[str]] | None = None,
+            deadline: float | None = None,
+            manual_approval: dict[str, Any] | None = None) -> None:
+    """Publish while making failures explicit before preserving the exception."""
+    try:
+        _publish(
+            run, issue, github_repo, base, config, folder,
+            test_commands=test_commands, deadline=deadline,
+            manual_approval=manual_approval,
+        )
+    except RuntimeError as exc:
+        _status_print(f"[PUBLISH] Failed: {exc}")
+        raise
 
 
 def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: Path,
