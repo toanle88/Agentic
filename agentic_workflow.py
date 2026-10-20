@@ -32,6 +32,7 @@ from agentic_context import (
     _issue_context,
 )
 from agentic_execution import (
+    _console_print,
     _paths_equal,
     _remaining_timeout,
     _short,
@@ -44,7 +45,7 @@ from agentic_execution import (
 )
 from agentic_models import AgentSettings, Issue, Run
 from agentic_openrouter import run_openrouter
-from agentic_output import style_text
+from agentic_output import strip_ansi, style_text
 from agentic_policy import forbidden
 from agentic_prompts import build_agent_prompt, _run_instruction_context, _system_prompt_context
 from agentic_review import parse_review_result, record_review_findings
@@ -59,11 +60,16 @@ class NoCodeChangesError(RuntimeError):
     """Signal that validation passed but the developer produced no patch."""
 
 
-def _status_print(message: Any, *, file: Any = None, flush: bool = False) -> None:
+def _status_print(message: Any, *, file: Any = None, flush: bool = False,
+                  style_status_tokens: bool = True) -> None:
     """Print human-facing status with TTY-only styling."""
     from agentic_execution import _console_print
 
-    _console_print(style_text(message, file), file=file, flush=flush)
+    _console_print(
+        style_text(message, file, style_status_tokens=style_status_tokens),
+        file=file,
+        flush=flush,
+    )
 
 
 REVIEW_SCHEMA = {
@@ -646,14 +652,17 @@ def print_investigation_summary(feedback: dict[str, Any]) -> None:
     _status_print("[INVESTIGATION] Feedback recorded for the developer")
     summary = str(feedback.get("summary", "")).strip()
     if summary:
-        _status_print(f"[INVESTIGATION] {_short(summary, 700)}")
+        _status_print(f"[INVESTIGATION] {_short(summary, 700)}", style_status_tokens=False)
     findings = feedback.get("findings", [])
     if isinstance(findings, list):
         bullet = _unicode_or_ascii("•", "-")
         for finding in findings[:5]:
-            _status_print(f"  {bullet} {_short(finding, 300)}")
+            _status_print(f"  {bullet} {_short(finding, 300)}", style_status_tokens=False)
         if len(findings) > 5:
-            _status_print(f"  {bullet} ... and {len(findings) - 5} more; see the investigation JSON log")
+            _status_print(
+                f"  {bullet} ... and {len(findings) - 5} more; see the investigation JSON log",
+                style_status_tokens=False,
+            )
 
 
 def _run_investigation(run: Run, issue: Issue, config: dict[str, Any],
@@ -870,10 +879,11 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
     )
     next_log(folder, "tests").write_text(report, encoding="utf-8")
     if not passed:
-        _status_print("[TESTS] Failed\n" + report[-2500:])
+        _status_print("[TESTS] Failed")
+        _console_print(strip_ansi(report[-2500:]))
         return False, report, {}, "", ""
     base_sha, digest, summary = prepare_patch(run.worktree, base, config["max_files"])
-    _status_print("[PATCH] Proposed changes:\n" + summary)
+    _status_print("[PATCH] Proposed changes:\n" + summary, style_status_tokens=False)
     verdict = review(
         run.worktree, issue, folder, base_sha, test_report=report,
         developer_report=developer_report,
@@ -931,7 +941,7 @@ def validate_publication_approval(run: Run, issue: Issue, base: str,
     base_sha, digest, summary = prepare_patch(run.worktree, base, config["max_files"])
     if base_sha != approval.get("base_sha") or digest != approval.get("patch_digest"):
         raise RuntimeError("Patch changed since approval; rerun development or review before publishing")
-    _status_print("[PATCH] Proposed changes:\n" + summary)
+    _status_print("[PATCH] Proposed changes:\n" + summary, style_status_tokens=False)
     return base_sha, digest, summary
 
 
@@ -1132,11 +1142,14 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
         if not ok:
             provider = config.get("developer_agent", {}).get("provider", "codex")
             feedback = f"{provider} invocation failed: {message[-3000:]}"
-            _status_print(feedback[-1000:])
+            _status_print(feedback[-1000:], style_status_tokens=False)
             continue
         developer_report = message.strip()
         if developer_report:
-            _status_print("[DEVELOPER] Final response:\n" + developer_report[-3000:])
+            _status_print(
+                "[DEVELOPER] Final response:\n" + developer_report[-3000:],
+                style_status_tokens=False,
+            )
         action_error = validate_developer_review_actions(
             developer_report, required_review_findings,
         )
@@ -1147,7 +1160,7 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
                 "Return one Finding/Action/Evidence entry for every prior review finding.\n"
                 f"Previous developer report:\n{_bounded_text(developer_report, REPORT_CONTEXT_CHARS) or '(no final response)'}"
             )
-            _status_print(f"[RETRY] {action_error}")
+            _status_print(f"[RETRY] {action_error}", style_status_tokens=False)
             continue
         try:
             passed, test_output, verdict, digest, _ = verify_and_review(
@@ -1164,8 +1177,11 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
             _status_print(
                 "[BLOCKED] Checks passed, but the developer produced no code changes."
             )
-            _status_print(f"[BLOCKED] Developer blocker: {developer_summary}")
-            _status_print(f"[BLOCKED] Run logs: {folder}")
+            _status_print(
+                f"[BLOCKED] Developer blocker: {developer_summary}",
+                style_status_tokens=False,
+            )
+            _status_print(f"[BLOCKED] Run logs: {folder}", style_status_tokens=False)
             print_run_summary(
                 run, "BLOCKED",
                 f"resolve the blocker and resume; see logs at {folder}",

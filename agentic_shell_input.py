@@ -829,9 +829,10 @@ def _shell_paint(text: str, code: str) -> str:
     return paint(text, code)
 
 
-def _shell_print(message: Any = "", *, end: str = "\n", flush: bool = False) -> None:
+def _shell_print(message: Any = "", *, end: str = "\n", flush: bool = False,
+                 style_status_tokens: bool = True) -> None:
     """Print shell status or replayed log text with terminal-only styling."""
-    text = style_text(message)
+    text = style_text(message, style_status_tokens=style_status_tokens)
     print(text, end=end, flush=flush)
 
 
@@ -842,7 +843,7 @@ def _shell_print_raw(message: Any = "", *, end: str = "\n", flush: bool = False)
 
 def _shell_write_log(text: str) -> None:
     """Write appended log text without bypassing the TTY styling boundary."""
-    sys.stdout.write(style_text(text))
+    sys.stdout.write(style_text(text, style_status_tokens=False))
     sys.stdout.flush()
 
 

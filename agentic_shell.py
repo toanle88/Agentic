@@ -558,13 +558,19 @@ class AgenticShell:
         if len(parts) == 3:
             lines = min(int(parts[2]), 500)
         self._refresh(job)
-        _shell_print(f"--- job {job.number}: {_display_command(job.argv)} ---")
+        _shell_print(
+            f"--- job {job.number}: {_display_command(job.argv)} ---",
+            style_status_tokens=False,
+        )
         if job.running:
             _shell_print("--- following live output; press Ctrl-C to stop following ---")
             self._follow_log(job, lines)
         else:
-            _shell_print(_tail(job.log_path, lines))
-        _shell_print(f"--- end; full log: {job.log_path} ---")
+            _shell_print(_tail(job.log_path, lines), style_status_tokens=False)
+        _shell_print(
+            f"--- end; full log: {job.log_path} ---",
+            style_status_tokens=False,
+        )
 
     def _follow_log(self, job: Job, lines: int) -> None:
         """Print a running job's existing tail and stream appended output."""
@@ -575,7 +581,7 @@ class AgenticShell:
                 initial_start = max(0, initial_end - 200_000)
                 stream.seek(initial_start)
                 initial = stream.read(initial_end - initial_start)
-                _shell_print(_tail_from_text(initial, lines))
+                _shell_print(_tail_from_text(initial, lines), style_status_tokens=False)
                 # Keep the position at the end of the initial snapshot rather
                 # than seeking to the current EOF, so a concurrent write is
                 # still included in the first live read.

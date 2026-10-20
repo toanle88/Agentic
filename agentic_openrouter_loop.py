@@ -26,6 +26,7 @@ from agentic_openrouter_tools import (
     _openrouter_tool_call,
     _openrouter_tools,
 )
+from agentic_output import style_text
 from agentic_security import redact_secrets
 from agentic_telemetry import combine_usage, normalize_usage, record_operation
 
@@ -75,14 +76,25 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
     log_file.write_text("", encoding="utf-8")
     raw_file.write_text("", encoding="utf-8")
 
-    def emit(message: str) -> None:
+    def emit(message: str, *, style_status_tokens: bool = False,
+             generated_status: str | None = None) -> None:
         now = datetime.datetime.now().strftime("%H:%M:%S")
         line = f"[{now}] [{label}] {message}"
-        _console_print(line, flush=True)
+        if generated_status and message.startswith(generated_status):
+            status_start = len(line) - len(message)
+            rendered = (
+                style_text(line[:status_start], style_status_tokens=False)
+                + style_text(generated_status, style_status_tokens=True)
+                + style_text(line[status_start + len(generated_status):],
+                             style_status_tokens=False)
+            )
+        else:
+            rendered = style_text(line, style_status_tokens=style_status_tokens)
+        _console_print(rendered, flush=True)
         with log_file.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
 
-    emit(f"Started (OpenRouter/{model})")
+    emit(f"Started (OpenRouter/{model})", style_status_tokens=True)
     try:
         deadline = started + timeout if timeout is not None else None
         for turn in range(max_tool_turns):
@@ -159,7 +171,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
             raise RuntimeError(f"OpenRouter agent exceeded {max_tool_turns} tool turns")
     except RuntimeError as exc:
         message = redact_secrets(last_message or str(exc))
-        emit("ERROR: " + message)
+        emit("ERROR: " + message, generated_status="ERROR")
         output.write_text(message, encoding="utf-8")
         usage = combine_usage(usage_records, provider="openrouter")
         _record_provider_usage(
@@ -179,7 +191,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
         )
         return False, message
     seconds = int(time.monotonic() - started)
-    emit(f"Finished in {seconds}s (exit 0)")
+    emit(f"Finished in {seconds}s (exit 0)", style_status_tokens=True)
     last_message = redact_secrets(last_message)
     output.write_text(last_message, encoding="utf-8")
     usage = combine_usage(usage_records, provider="openrouter")

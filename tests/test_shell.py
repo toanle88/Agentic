@@ -94,7 +94,8 @@ class ShellTests(unittest.TestCase):
             colored = TTYBuffer()
             with patch.dict(os.environ, {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), redirect_stdout(colored):
                 shell.show_logs(['/logs', str(job.number), '5'])
-            self.assertIn('\033[32m', colored.getvalue())
+            self.assertIn('\033[34m[TESTS]\033[0m PASSED', colored.getvalue())
+            self.assertNotIn('\033[32mPASSED\033[0m', colored.getvalue())
 
             plain = StringIO()
             with redirect_stdout(plain):
@@ -121,7 +122,7 @@ class ShellTests(unittest.TestCase):
                      ['agentic'], 0, stdout='[TESTS] PASSED\n', stderr=''
                  )), redirect_stdout(output):
                 shell._run_runner_command(['agentic', 'doctor'])
-            self.assertIn('\033[32m[TESTS] PASSED', output.getvalue())
+            self.assertIn('\033[34m[TESTS]\033[0m \033[32mPASSED\033[0m', output.getvalue())
 
 
     def test_help_command_is_available(self):
