@@ -347,12 +347,17 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
               readonly: bool = False, schema: Path | None = None,
               model: str | None = None, reasoning_effort: str | None = None,
               timeout: int | None = None,
-              sandbox: dict[str, Any] | None = None) -> tuple[bool, str]:
+              sandbox: dict[str, Any] | None = None,
+              chat_restricted: bool = False) -> tuple[bool, str]:
     """Dispatch one developer/reviewer turn to the configured provider."""
     if isinstance(settings, AgentSettings):
         selected = settings.as_dict()
     else:
         selected = dict(settings or {})
+    if chat_restricted and not readonly and not (sandbox and sandbox.get("enabled")):
+        raise RuntimeError(
+            "Chat edit turns require an enabled sandbox; refusing unrestricted provider execution"
+        )
     provider = str(selected.get("provider", "codex"))
     provider_sandbox = None
     if sandbox is not None:
@@ -368,6 +373,7 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
         return run_codex(
             worktree, prompt, output=output, readonly=readonly, schema=schema,
             timeout=timeout, model=model, reasoning_effort=reasoning_effort,
+            **({"chat_restricted": True} if chat_restricted else {}),
             **({"sandbox": provider_sandbox} if provider_sandbox is not None else {}),
         )
     if provider == "openrouter":
@@ -381,6 +387,10 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
             router_kwargs["command_timeout"] = selected.get("command_timeout_seconds")
         if "allow_network" in selected:
             router_kwargs["allow_network"] = bool(selected.get("allow_network"))
+        if chat_restricted:
+            router_kwargs["allow_runner_source"] = _runner_source_change_allowed(
+                worktree, "agentic.py"
+            )
         if selected.get("json_mode"):
             router_kwargs["json_mode"] = True
         if provider_sandbox is not None:
@@ -388,11 +398,13 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
         return run_openrouter(
             worktree, prompt, output=output, readonly=readonly, schema=schema,
             timeout=timeout, model=model, reasoning_effort=reasoning_effort,
+            **({"chat_restricted": True} if chat_restricted else {}),
             **router_kwargs,
         )
     return run_cli_provider(
         worktree, prompt, output=output, provider=provider,
         readonly=readonly, timeout=timeout, model=model,
+        **({"chat_restricted": True} if chat_restricted else {}),
         **({"sandbox": provider_sandbox} if provider_sandbox is not None else {}),
     )
 

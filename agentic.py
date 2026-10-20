@@ -52,6 +52,12 @@ from agentic_context import (  # noqa: F401
     _compact_feedback,
     _issue_context,
 )
+from agentic_chat import (
+    capture_worktree_guard,
+    capture_worktree_snapshot,
+    run_chat_session,
+    validate_worktree_guard,
+)
 from agentic_prompts import (  # noqa: F401
     _developer_prompt_context,
     _developer_run_instruction_context,
@@ -95,7 +101,7 @@ from agentic_telemetry import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.37"
+__version__ = "1.1.38"
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 INSTRUCTION_CONTEXT_CHARS = _INSTRUCTION_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module
@@ -814,6 +820,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--interactive", action="store_true", help="Open the interactive background-job shell")
     parser.add_argument(
+        "--chat", action="store_true",
+        help="Open a human-directed chat session in an existing issue worktree",
+    )
+    parser.add_argument(
         "--config", default=None,
         help="Configuration file (default: agent_config.json in the target repository)",
     )
@@ -896,11 +906,66 @@ def execute(args: argparse.Namespace) -> int:
     root = _absolute_path(Path(git(repo, "rev-parse", "--show-toplevel")))
     if not _paths_equal(repo, root):
         raise RuntimeError("Run agentic.py from the project root or pass --repo pointing to that root")
+    if args.chat:
+        return execute_chat(args, repo)
+
     if args.runs:
         show_runs(repo)
         return 0
 
     return execute_locked(args, repo)
+
+
+def execute_chat(args: argparse.Namespace, repo: Path) -> int:
+    """Run a conversational session against an existing issue worktree only."""
+    if args.issue is None:
+        raise RuntimeError("--chat requires --issue N")
+    if any((args.interactive, args.task is not None, args.task_file is not None, args.list, args.runs,
+            args.new, args.review, args.publish, args.mark_done, args.instruction)):
+        raise RuntimeError(
+            "--chat can only be combined with --issue, --repo, --state-dir, and --config"
+        )
+    config_path = Path(args.config).resolve() if args.config else repo / "agent_config.json"
+    if not config_path.is_file():
+        raise RuntimeError(
+            f"No configuration found at {config_path}. Create a target-repository "
+            "agent_config.json or pass --config explicitly"
+        )
+    config = load_config(config_path)
+    preflight_security(config["security_mode"], config["sandbox"], repo=repo)
+    preflight_agent_settings(config["developer_agent"], sandbox=config["sandbox"])
+    state_dir = Path(args.state_dir).expanduser().resolve() if args.state_dir else default_state_dir()
+    github_repo, _ = github_metadata(repo)
+    issue = get_issue(repo, github_repo, args.issue)
+    previous = runs_for_issue(repo, args.issue)
+    if not previous:
+        raise RuntimeError(
+            f"No existing worktree for issue #{args.issue}; run the issue first before starting chat"
+        )
+    run = choose_existing(previous)
+    folder = logs_path(repo, run, state_dir)
+
+    def status_reader() -> str:
+        return capture_worktree_snapshot(run.worktree)
+
+    def guard_reader() -> dict[str, Any]:
+        return capture_worktree_guard(run.worktree)
+
+    def guard_validator(before: dict[str, Any]) -> str | None:
+        return validate_worktree_guard(run.worktree, before)
+
+    return run_chat_session(
+        issue,
+        run.worktree,
+        folder,
+        config,
+        run_agent=run_agent,
+        run_tests=run_tests,
+        lock_factory=lambda: worktree_lock(repo, run, state_dir),
+        status_reader=status_reader,
+        guard_reader=guard_reader,
+        guard_validator=guard_validator,
+    )
 
 
 def execute_locked(args: argparse.Namespace, repo: Path) -> int:
@@ -1169,6 +1234,12 @@ def main(argv: list[str] | None = None) -> int:
                     confirm=args.yes, remove_logs=args.remove_logs,
                     state_dir=cleanup_state_dir,
                 )
+        if args.chat:
+            if args.issue is None:
+                parser.error("--chat requires --issue N")
+            if args.interactive:
+                parser.error("--chat cannot be combined with --interactive")
+            return execute(args)
         if args.profile != "fast" and args.issue is None and args.task is None and args.task_file is None:
             parser.error("--profile requires --issue or --task; use /run ISSUE --profile slow in the interactive shell")
         # The interactive supervisor is the natural entry point when no

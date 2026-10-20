@@ -598,6 +598,9 @@ class PureTests(unittest.TestCase):
         self.assertIsNone(args.command)
         self.assertEqual(args.issue, 42)
         self.assertTrue(args.publish)
+        chat = agentic.build_parser().parse_args(['--chat', '--issue', '42'])
+        self.assertTrue(chat.chat)
+        self.assertEqual(chat.issue, 42)
         manual = agentic.build_parser().parse_args([
             '--issue', '42', '--mark-done', '--reason', 'human reviewed',
         ])

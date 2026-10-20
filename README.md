@@ -161,6 +161,7 @@ agentic --runs                           # list existing worktrees
 agentic status --json                     # machine-readable worktree status
 agentic runs --json                       # alias for status
 agentic --issue 119                      # create or resume issue 119
+agentic --chat --issue 119               # chat in an existing issue worktree
 agentic --issue 119 --instruction "Bump the version when complete"
 agentic --issue 119 --review              # rerun tests and review only
 agentic --issue 119 --mark-done                     # optional reason is recorded automatically
@@ -215,10 +216,12 @@ above it, and completion suggestions appear immediately above the prompt. The
 full editable row uses a subtle gray background with high-contrast prompt and
 text colors; `NO_COLOR=1`, `AGENTIC_PLAIN=1`, and non-TTY output use the normal
 terminal background without ANSI styling.
-Enter submits the complete buffer. /chat ISSUE MESSAGE starts an issue run
-with a one-off instruction; /chat MESSAGE creates a local task when
-task_source is local. PageUp/PageDown scroll the retained output independently
-of the editable prompt; new output follows the live tail again with PageDown.
+Enter submits the complete buffer. `/chat ISSUE` opens a conversational session
+in the existing issue worktree; it does not start an automated run. PageUp/
+PageDown scroll the retained output independently of the editable prompt; new
+output follows the live tail again with PageDown.
+The historical `/chat ISSUE MESSAGE` one-shot issue form and local-mode
+`/chat MESSAGE` form remain available.
 
 For direct foreground execution:
 
@@ -240,6 +243,7 @@ jobs. Use `/stop --all` to request termination for every running Agentic job.
 | --- | --- |
 | `agentic` | Open the interactive background-job shell. |
 | `agentic --issue N` | Create or resume issue `N` in the foreground. |
+| `agentic --chat --issue N` | Chat in an existing issue worktree; read-only by default, sandbox required for edits, and never publishes automatically. |
 | `agentic --issue N --instruction "..."` | Preserve an optional per-run instruction for development and review. |
 | `system_prompt` in `agent_config.json` | Apply persistent, bounded project guidance to developer and reviewer prompts. |
 | `agentic --issue N --profile slow` | Run the fast checks plus configured slow checks. |

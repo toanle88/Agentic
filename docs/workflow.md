@@ -44,6 +44,7 @@ Available commands:
      [--reason "why"] with --mark-done
 /run [--profile fast|slow]             Local mode: paste task, finish with /done
      [--review|--publish|--mark-done|--new]
+/chat ISSUE                            Open a chat session in an existing issue run
 /chat ISSUE MESSAGE                    Run an issue with a one-off instruction
 /chat MESSAGE                          Start a local task from a chat-style message
 /ps [--all]                            Show current or persisted job status
@@ -107,6 +108,39 @@ without an issue number, paste the requirements, and finish with `/done`.
 Pasting the same task again produces the same task identity and resumes its
 existing worktree. Local tasks can still use `/run --publish` to create a
 GitHub draft pull request.
+
+## Chat sessions
+
+Use chat after an issue run has created a worktree, especially when the run is
+blocked, exhausted its retries, or has failed checks or review findings:
+
+```bash
+agentic --chat --issue 119
+```
+
+The session reuses the selected existing issue worktree; it never creates a
+new worktree. `/chat 119` from the interactive shell opens the same foreground
+session. Each turn receives the issue, bounded run metadata, recent developer,
+test, investigation, and review evidence, plus earlier turns from the current
+session. `/context` prints the bounded context currently being supplied, and
+`/quit` exits without changing the run state.
+
+Explanations, diagnosis, and review requests use the provider's read-only
+mode. A request containing an explicit edit such as “fix the failing test” is
+the normal way to grant write access; ambiguous requests are confirmed first.
+Chat edit turns require `sandbox.enabled: true` (prefer
+`security_mode: "isolated"`). Trusted native provider processes are not used
+for edits because PATH wrappers cannot prevent an absolute executable or a
+child process from committing or publishing. Read-only chat remains available
+without a sandbox, and check-command preflight is deferred until checks are
+selected after an edit.
+After a successful edit, chat offers the configured checks and runs only the
+selected argv arrays. Chat outputs, conversation history, and selected checks
+are stored under the run's `chat/` directory, separate from automated
+developer attempts, retry accounting, review approval, and blocked/result
+markers. Chat does not automatically review, commit, push, or publish. Any
+later automated run or `--review` sees the resulting worktree and must validate
+it again before publication.
 
 ## Resume and retries
 

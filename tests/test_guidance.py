@@ -32,7 +32,9 @@ class GuidanceTests(unittest.TestCase):
         self.assertIsNotNone(match)
         manifest = match.group(1)
         for module in (
+            "agentic_chat",
             "agentic_dashboard_data",
+            "agentic_execution_guard",
             "agentic_execution_providers",
             "agentic_execution_stream",
             "agentic_openrouter_loop",

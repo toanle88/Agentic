@@ -219,25 +219,40 @@ class ShellTests(unittest.TestCase):
                 shell.execute('/status')
             self.assertEqual(shell.history, ['/status'])
 
-    def test_chat_issue_passes_instruction_as_one_argv_value(self):
+    def test_chat_issue_opens_foreground_chat_session(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            with patch.object(shell, '_run_foreground') as run_foreground:
+                shell.run_chat(['/chat', '69'])
+            run_foreground.assert_called_once_with([
+                sys.executable, '-u', str(shell.runner), '--repo', str(root.resolve()),
+                '--state-dir', str(shell.state_dir), '--issue', '69', '--chat',
+            ])
+            self.assertEqual(shell.active_task, 'issue #69')
+
+    def test_chat_requires_an_issue_number(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), session_dir=root / 'logs'
+            )
+            with self.assertRaisesRegex(ValueError, 'usage: /chat ISSUE'):
+                shell.run_chat(['/chat'])
+
+    def test_chat_issue_one_shot_preserves_instruction_argv(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
             with patch.object(shell, 'run_issue') as run_issue:
-                shell.run_chat(['/chat', '69', 'fix', 'the', 'prompt'])
-            run_issue.assert_called_once_with([
-                '/run', '69', '--instruction', 'fix the prompt',
-            ])
-            self.assertEqual(shell.active_task, 'issue #69')
+                shell.run_chat(['/chat', '69', 'first', 'line'])
+            run_issue.assert_called_once_with(['/run', '69', '--instruction', 'first line'])
 
-    def test_chat_local_message_writes_task_file_and_uses_task_file_argv(self):
+    def test_chat_local_one_shot_preserves_task_file_form(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            config = root / 'agent_config.json'
-            config.write_text('{"task_source":"local"}')
-            shell = agentic_shell.AgenticShell(
-                root, Path(sys.executable), config=config, session_dir=root / 'logs'
-            )
+            (root / 'agent_config.json').write_text('{"task_source":"local"}')
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), config=root / 'agent_config.json', session_dir=root / 'logs')
             with patch.object(shell, 'run_issue') as run_issue:
                 shell.run_chat(['/chat', 'add', 'exports'])
             args = run_issue.call_args.args[0]
@@ -245,16 +260,13 @@ class ShellTests(unittest.TestCase):
             self.assertEqual(Path(args[2]).read_text(), 'add exports\n')
             self.assertEqual(shell.active_task, 'local chat')
 
-    def test_chat_preserves_multiline_message_text(self):
+    def test_chat_preserves_multiline_issue_instruction(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
             with patch.object(shell, 'run_issue') as run_issue:
-                shell.run_chat(['/chat', '69', 'first', 'line', 'second', 'line'],
-                               '/chat 69 first line\nsecond line')
-            run_issue.assert_called_once_with([
-                '/run', '69', '--instruction', 'first line\nsecond line',
-            ])
+                shell.run_chat(['/chat', '69', 'first', 'line', 'second', 'line'], '/chat 69 first line\nsecond line')
+            run_issue.assert_called_once_with(['/run', '69', '--instruction', 'first line\nsecond line'])
 
 
     def test_parse_run_command(self):

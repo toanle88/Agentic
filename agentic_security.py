@@ -11,8 +11,8 @@ _SENSITIVE_ENV_NAME = re.compile(
 )
 _BEARER = re.compile(r"(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]{8,}")
 _KEY_VALUE = re.compile(
-    r"(?i)(\b(?:api[_-]?key(?![_-]?env)|access[_-]?token|auth(?:orization)?|"
-    r"password|passwd|secret|token)\b\s*[:=]\s*)([\"']?)([^\s,;\"'}]+)(\2)"
+    r"(?i)([\"']?\b(?:api[_-]?key(?![_-]?env)|access[_-]?token|auth(?:orization)?|"
+    r"password|passwd|secret|token)\b[\"']?\s*[:=]\s*)([\"']?)([^\s,;\"'}]+)(\2)"
 )
 
 

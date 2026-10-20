@@ -268,7 +268,9 @@ HELP = """Commands:
     /version                            show the Agentic version
 
   Session
-    /chat ISSUE MESSAGE                  run an issue with a one-off instruction
+    /chat ISSUE                          open a conversational session in an existing run
+    /chat ISSUE MESSAGE                  run an issue with a one-shot instruction
+    /chat MESSAGE                        start a local one-shot task from chat style (local mode)
     /stop JOB|--all                     stop one or all running jobs
     /help                               show this help
     /quit                               leave the shell; running jobs continue
@@ -323,7 +325,7 @@ SHELL_OPTIONS = {
 }
 COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/run": "start a background job or local task",
-    "/chat": "run an issue with a one-off instruction",
+    "/chat": "open a conversational session in an existing issue run",
     "/ps": "show running or persisted background jobs",
     "/logs": "follow or show captured terminal output",
     "/list": "list open GitHub issues",
