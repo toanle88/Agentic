@@ -95,6 +95,51 @@ class InteractiveInputTests(unittest.TestCase):
         self.assertEqual(state.mode, agentic_shell_input.TerminalMode.OUTPUT)
         self.assertFalse(state.normal_prompt_visible)
 
+    def test_submitted_input_becomes_plain_transcript_before_streamed_output(self):
+        state = agentic_shell_input._InteractiveOutputState()
+        output = TTYBuffer()
+
+        class OutputReader:
+            def __init__(self):
+                self.index = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read_key(self):
+                if self.index == 0:
+                    agentic_shell._shell_write_log('before-submit')
+                    key = ('CHAR', '/')
+                elif self.index == 1:
+                    key = ('CHAR', 'logs')
+                else:
+                    key = ('ENTER', '\n')
+                self.index += 1
+                return key
+
+        with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+             patch('agentic_shell.shutil.get_terminal_size',
+                   return_value=os.terminal_size((40, 8))), \
+             patch('sys.stdout', output):
+            result = agentic_shell._interactive_input(
+                '› ', agentic_shell._completion_items,
+                key_reader_factory=OutputReader, output_state=state,
+            )
+            state.write_without_editor('after-submit', ensure_newline=True)
+
+        self.assertEqual(result, '/logs')
+        retained = ''.join(state.history)
+        self.assertLess(retained.index('before-submit'), retained.index('› /logs'))
+        self.assertLess(retained.index('› /logs'), retained.index('after-submit'))
+        rendered = output.getvalue()
+        command_position = rendered.rfind('› /logs\n')
+        self.assertGreater(command_position, rendered.rfind('before-submit'))
+        self.assertIn('\033[48;5;236m', rendered[:command_position])
+        self.assertNotIn('\033[48;5;236m', rendered[command_position:])
+
     def test_output_cursor_is_recomputed_after_terminal_width_changes(self):
         state = agentic_shell_input._InteractiveOutputState()
         state.append('12345678', ensure_newline=False, columns=8)
