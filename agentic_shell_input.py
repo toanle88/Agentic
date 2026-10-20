@@ -835,12 +835,23 @@ def _parse_ansi_sequence(read_next: Callable[[], str | None]) -> tuple[str, str]
 
 
 class _KeyReader:
+    _ANSI_BYTE_TIMEOUT = 0.05
+
     def __init__(self, *, raw: bool = False) -> None:
         self._old_settings = None
         self._posix_fd: int | None = None
         self._posix_decoder: Any = None
         self._terminal_size: os.terminal_size | None = None
         self._raw = raw
+        # Keep an incomplete escape sequence across read_key calls. A PTY can
+        # deliver the bytes of one CSI sequence in separate reads, especially
+        # when input is forwarded by another process.
+        self._pending_ansi_sequence: str | None = None
+        # An isolated Escape is returned before its possible delayed CSI/SS3
+        # tail. Keep that state separate from a sequence which is genuinely
+        # in progress, and replay a delayed non-sequence as ordinary input.
+        self._pending_ansi_escape_reported = False
+        self._pending_posix_chars: list[str] = []
 
     def __enter__(self) -> "_KeyReader":
         self._terminal_size = shutil.get_terminal_size(fallback=(80, 24))
@@ -890,6 +901,8 @@ class _KeyReader:
 
     def _read_posix_char(self) -> str:
         """Read one character without allowing TextIOWrapper to buffer input."""
+        if self._pending_posix_chars:
+            return self._pending_posix_chars.pop(0)
         fd = self._posix_fd if self._posix_fd is not None else sys.stdin.fileno()
         decoder = self._posix_decoder
         if decoder is None:
@@ -930,6 +943,132 @@ class _KeyReader:
             while buffered and not terminator.startswith(buffered):
                 pasted.append(buffered[0])
                 buffered = buffered[1:]
+
+    @staticmethod
+    def _classify_posix_char(char: str) -> tuple[str, str]:
+        if not char:
+            return "CTRL_D", ""
+        if char in {"\r", "\n"}:
+            return "ENTER", char
+        if char == "\003":
+            return "CTRL_C", char
+        if char == "\004":
+            return "CTRL_D", char
+        if char in {"\b", "\x7f", "\x08"}:
+            return "BACKSPACE", char
+        if char == "\t":
+            return "TAB", char
+        if char == "\x01":
+            return "CTRL_A", char
+        if char == "\x05":
+            return "CTRL_E", char
+        if char == "\x0b":
+            return "CTRL_K", char
+        if char == "\x15":
+            return "CTRL_U", char
+        if char == "\x17":
+            return "CTRL_W", char
+        return "CHAR", char
+
+    @staticmethod
+    def _decode_complete_ansi(sequence: str) -> tuple[str, str] | None:
+        """Decode a buffered sequence, or return None while it is incomplete."""
+        if not sequence:
+            return None
+        if sequence[0] == "[":
+            if len(sequence) == 1:
+                return None
+            # CSI sequences end at a parameter-final letter or '~'.
+            if sequence[-1] != "~" and not sequence[-1].isalpha():
+                return None
+        elif sequence[0] == "O":
+            if len(sequence) == 1:
+                return None
+            if sequence[1] in {"1", "3", "4"} and len(sequence) == 2:
+                return None
+        else:
+            # The ESC has already been handled. The next ordinary character
+            # is independent input, not an escape sequence byte.
+            return "CHAR", sequence[0]
+
+        iterator = iter(sequence)
+        result = _parse_ansi_sequence(lambda: next(iterator, None))
+        return result
+
+    def _read_posix_char_if_ready(self, fd: int) -> str | None:
+        import select
+
+        if self._pending_posix_chars:
+            return self._read_posix_char()
+        deadline = time.monotonic() + self._ANSI_BYTE_TIMEOUT
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            try:
+                readable, _, _ = select.select([fd], [], [], remaining)
+            except InterruptedError:
+                continue
+            if not readable:
+                return None
+            return self._read_posix_char()
+
+    def _read_posix_ansi(
+        self, fd: int, *, initial: bool, stop_event: threading.Event | None,
+    ) -> tuple[str, str]:
+        sequence = self._pending_ansi_sequence or ""
+        escape_reported = self._pending_ansi_escape_reported
+        self._pending_ansi_sequence = None
+        self._pending_ansi_escape_reported = False
+        while True:
+            decoded = self._decode_complete_ansi(sequence)
+            if decoded is not None:
+                if escape_reported and decoded[0] == "ESCAPE" and sequence:
+                    # The Escape which could have introduced this sequence was
+                    # already returned on an earlier read. If the delayed
+                    # candidate is not a known terminal key, preserve it as
+                    # literal input and replay everything after its first byte.
+                    self._pending_posix_chars.extend(sequence[1:])
+                    return self._classify_posix_char(sequence[0])
+                return decoded
+            if stop_event is not None and stop_event.is_set():
+                self._pending_ansi_sequence = sequence
+                self._pending_ansi_escape_reported = escape_reported
+                return "STOP", ""
+            char = self._read_posix_char_if_ready(fd)
+            if char is None:
+                if _take_resize_pending() or self._terminal_resized():
+                    self._pending_ansi_sequence = sequence
+                    self._pending_ansi_escape_reported = escape_reported
+                    return "RESIZE", ""
+                self._pending_ansi_sequence = sequence
+                self._pending_ansi_escape_reported = escape_reported or initial
+                # The first ESC should behave like a normal Escape key. Once
+                # reported, subsequent idle polls must not redraw the editor.
+                return ("ESCAPE", "\x1b") if initial else ("IDLE", "")
+            if not char:
+                self._pending_ansi_sequence = None
+                self._pending_ansi_escape_reported = False
+                return "CTRL_D", ""
+            if char == "\x1b":
+                if sequence and escape_reported:
+                    self._pending_posix_chars.extend(sequence[1:])
+                    self._pending_posix_chars.append(char)
+                    self._pending_ansi_sequence = None
+                    self._pending_ansi_escape_reported = False
+                    return self._classify_posix_char(sequence[0])
+                self._pending_ansi_sequence = ""
+                self._pending_ansi_escape_reported = True
+                return "ESCAPE", "\x1b"
+            if not sequence and char not in {"[", "O"}:
+                # An ordinary byte after Escape is not part of an ANSI
+                # sequence. Return the Escape first and replay the byte so
+                # rapidly typed literal input is not lost.
+                self._pending_posix_chars.append(char)
+                self._pending_ansi_sequence = None
+                self._pending_ansi_escape_reported = False
+                return "ESCAPE", "\x1b"
+            sequence += char
 
     def read_key(self, stop_event: threading.Event | None = None) -> tuple[str, str]:
         if os.name == "nt":
@@ -1002,6 +1141,23 @@ class _KeyReader:
 
         import select
         fd = self._posix_fd if self._posix_fd is not None else sys.stdin.fileno()
+        if self._pending_ansi_sequence is not None:
+            key, value = self._read_posix_ansi(
+                fd, initial=False, stop_event=stop_event,
+            )
+            if key == "PASTE_START":
+                return "PASTE", self._read_paste()
+            return key, value
+        if self._pending_posix_chars:
+            char = self._read_posix_char()
+            if char == "\x1b":
+                key, value = self._read_posix_ansi(
+                    fd, initial=True, stop_event=stop_event,
+                )
+                if key == "PASTE_START":
+                    return "PASTE", self._read_paste()
+                return key, value
+            return self._classify_posix_char(char)
         while True:
             if stop_event is not None and stop_event.is_set():
                 return "STOP", ""
@@ -1016,37 +1172,14 @@ class _KeyReader:
         if stop_event is not None and stop_event.is_set():
             return "STOP", ""
         char = self._read_posix_char()
-        if not char:
-            return "CTRL_D", ""
-        if char in {"\r", "\n"}:
-            return "ENTER", char
-        if char == "\003":
-            return "CTRL_C", char
-        if char == "\004":
-            return "CTRL_D", char
-        if char in {"\b", "\x7f", "\x08"}:
-            return "BACKSPACE", char
-        if char == "\t":
-            return "TAB", char
-        if char == "\x01":
-            return "CTRL_A", char
-        if char == "\x05":
-            return "CTRL_E", char
-        if char == "\x0b":
-            return "CTRL_K", char
-        if char == "\x15":
-            return "CTRL_U", char
-        if char == "\x17":
-            return "CTRL_W", char
         if char == "\x1b":
-            def _read_posix() -> str | None:
-                r, _, _ = select.select([fd], [], [], 0.05)
-                return self._read_posix_char() if r else None
-            key, value = _parse_ansi_sequence(_read_posix)
+            key, value = self._read_posix_ansi(
+                fd, initial=True, stop_event=stop_event,
+            )
             if key == "PASTE_START":
                 return "PASTE", self._read_paste()
             return key, value
-        return "CHAR", char
+        return self._classify_posix_char(char)
 
 
 
@@ -1600,6 +1733,22 @@ def _interactive_input(
                 signal.signal(signal.SIGWINCH, resize_handler_previous)
             except (OSError, ValueError):
                 pass
+
+
+def _interactive_line(
+    prompt: str,
+    *,
+    history: list[str] | None = None,
+    completer: Callable[[str, int | None], list[tuple[str, str]]] | None = None,
+) -> str:
+    """Read one edited line on a TTY and retain plain-input behavior elsewhere."""
+    if _is_interactive_terminal():
+        return _interactive_input(
+            prompt,
+            completer or (lambda _line, _cursor: []),
+            history=history,
+        )
+    return input(prompt)
 
 
 

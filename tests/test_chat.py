@@ -128,6 +128,25 @@ class ChatTests(unittest.TestCase):
                 runner.write_text('changed\n')
                 self.assertIsNone(validate_worktree_guard(worktree, before))
 
+    def test_chat_uses_escape_aware_input_when_no_input_function_is_supplied(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            prompts = []
+            issue = agentic.Issue(45, 'Fix', 'Body')
+            with patch(
+                'agentic_shell_input._interactive_line',
+                side_effect=lambda prompt, **_kwargs: prompts.append(prompt) or '/quit',
+            ):
+                result = run_chat_session(
+                    issue, root / 'worktree', root / 'run',
+                    {'developer_agent': {'provider': 'codex'}, 'sandbox': {}, 'test_commands': []},
+                    run_agent=lambda *args, **kwargs: (True, ''),
+                    run_tests=lambda *args, **kwargs: (True, ''),
+                    output_fn=lambda _: None,
+                )
+            self.assertEqual(result, 0)
+            self.assertEqual(prompts, ['chat> '])
+
     def test_unsandboxed_edit_turn_is_refused_before_provider(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
