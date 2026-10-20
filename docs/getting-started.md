@@ -36,10 +36,34 @@ sudo apt install -y pipx
 pipx ensurepath
 ```
 
-Restart the shell if necessary, then install:
+Restart the shell if necessary. To install a published GitHub release, choose
+a version from the [releases page](https://github.com/toanle88/Agentic/releases)
+and install its wheel. For example:
+
+```bash
+AGENTIC_VERSION=1.0.0
+pipx install "https://github.com/toanle88/Agentic/releases/download/v${AGENTIC_VERSION}/agentic_runner-${AGENTIC_VERSION}-py3-none-any.whl"
+```
+
+To install the current default branch instead of a pinned release, use:
 
 ```bash
 pipx install git+https://github.com/toanle88/Agentic.git
+```
+
+To update an existing release installation, change `AGENTIC_VERSION` to the
+new release and run:
+
+```bash
+AGENTIC_VERSION=1.0.1
+pipx install --force "https://github.com/toanle88/Agentic/releases/download/v${AGENTIC_VERSION}/agentic_runner-${AGENTIC_VERSION}-py3-none-any.whl"
+agentic --version
+```
+
+To uninstall the release:
+
+```bash
+pipx uninstall agentic-runner
 ```
 
 Check the installation:
