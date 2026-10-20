@@ -377,18 +377,57 @@ def detect_test_commands(repo: Path) -> tuple[list[list[str]], str]:
     return [["git", "diff", "--check"]], "No test framework detected; using Git whitespace validation"
 
 
-def _append_gitignore_entry(repo: Path, entry: str) -> bool:
-    path = repo / ".gitignore"
+def _git_info_exclude_path(repo: Path) -> Path:
+    """Resolve Git's local exclude file without assuming a directory-style ``.git``."""
     try:
-        content = path.read_text(encoding="utf-8") if path.exists() else ""
-    except OSError as exc:
-        raise RuntimeError(f"Could not read {path}: {exc}") from exc
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-path", "info/exclude"],
+            cwd=repo,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(
+            f"Could not resolve Git info/exclude for {repo}: {exc}"
+        ) from exc
+    output = result.stdout.strip()
+    if result.returncode or not output:
+        detail = output or "Git returned no path"
+        raise RuntimeError(
+            f"Could not resolve Git info/exclude for {repo}: {detail}"
+        )
+    path = Path(output.splitlines()[-1])
+    return path if path.is_absolute() else (repo / path).resolve()
+
+
+def _append_git_exclude_entry(repo: Path, entry: str) -> tuple[Path, bool]:
+    """Add an entry to Git's local exclude file, preserving existing content."""
+    path = _git_info_exclude_path(repo)
+    try:
+        if path.exists():
+            with path.open("r", encoding="utf-8", newline="") as stream:
+                content = stream.read()
+        else:
+            content = ""
+    except (OSError, UnicodeError) as exc:
+        raise RuntimeError(f"Could not read Git info/exclude {path}: {exc}") from exc
     lines = {line.strip() for line in content.splitlines()}
     if entry in lines:
-        return False
-    prefix = "" if not content or content.endswith("\n") else "\n"
-    path.write_text(content + prefix + f"# Agentic local configuration\n{entry}\n", encoding="utf-8")
-    return True
+        return path, False
+    newline = "\r\n" if "\r\n" in content else "\r" if "\r" in content else "\n"
+    prefix = "" if not content or content.endswith(("\n", "\r")) else newline
+    updated = content + prefix + f"# Agentic local configuration{newline}{entry}{newline}"
+    try:
+        with path.open("w", encoding="utf-8", newline="") as stream:
+            stream.write(updated)
+    except (OSError, UnicodeError) as exc:
+        raise RuntimeError(f"Could not write Git info/exclude {path}: {exc}") from exc
+    return path, True
 
 
 def default_provider_settings(provider: str) -> dict[str, Any]:

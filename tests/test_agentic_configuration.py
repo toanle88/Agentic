@@ -64,15 +64,77 @@ class ConfigurationTests(unittest.TestCase):
     def test_init_detects_go_and_ignores_personal_config(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = Path(temp)
+            gitignore = repo / '.gitignore'
+            gitignore.write_text('# Existing shared rules\nagent_config.json\n', encoding='utf-8')
+            gitignore_before = gitignore.read_bytes()
             sh('git', 'init', '--initial-branch=main', str(repo), cwd=repo.parent)
             (repo / 'go.mod').write_text('module example.test/demo\n')
+            exclude = Path(sh(
+                'git', 'rev-parse', '--git-path', 'info/exclude', cwd=repo,
+            ).stdout.strip())
+            if not exclude.is_absolute():
+                exclude = (repo / exclude).resolve()
+            exclude.write_bytes(b'# Existing local rules\r\n')
             self.assertEqual(agentic.init_repository(repo, create_agents=True), 0)
             config = agentic.load_config(repo / 'agent_config.json')
             self.assertEqual(config['test_commands'], [['go', 'test', './...']])
             self.assertEqual(config['security_mode'], 'trusted')
             self.assertFalse(config['sandbox']['enabled'])
-            self.assertIn('agent_config.json', (repo / '.gitignore').read_text())
+            self.assertEqual(gitignore.read_bytes(), gitignore_before)
+            self.assertEqual(
+                exclude.read_bytes(),
+                b'# Existing local rules\r\n'
+                b'# Agentic local configuration\r\n'
+                b'agent_config.json\r\n',
+            )
             self.assertTrue((repo / 'AGENTS.md').is_file())
+            self.assertEqual(agentic.init_repository(repo), 0)
+            self.assertEqual(
+                exclude.read_text(encoding='utf-8').splitlines().count('agent_config.json'),
+                1,
+            )
+
+
+    def test_init_uses_resolved_exclude_for_linked_worktree(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = root / 'base'
+            worktree = root / 'worktree'
+            sh('git', 'init', '--initial-branch=main', str(base), cwd=root)
+            sh('git', 'config', 'user.email', 'agentic-test@example.invalid', cwd=base)
+            sh('git', 'config', 'user.name', 'Agentic Test', cwd=base)
+            (base / 'README.md').write_text('fixture\n')
+            sh('git', 'add', 'README.md', cwd=base)
+            sh('git', 'commit', '-m', 'fixture', cwd=base)
+            sh('git', 'worktree', 'add', '-b', 'linked', str(worktree), cwd=base)
+            self.assertTrue((worktree / '.git').is_file())
+            (worktree / 'go.mod').write_text('module example.test/linked\n')
+
+            self.assertEqual(agentic.init_repository(worktree), 0)
+
+            exclude = Path(sh(
+                'git', 'rev-parse', '--git-path', 'info/exclude', cwd=worktree,
+            ).stdout.strip())
+            if not exclude.is_absolute():
+                exclude = (worktree / exclude).resolve()
+            self.assertIn('agent_config.json', exclude.read_text(encoding='utf-8'))
+            self.assertFalse((worktree / '.gitignore').exists())
+
+
+    def test_init_reports_git_exclude_resolution_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            sh('git', 'init', '--initial-branch=main', str(repo), cwd=repo.parent)
+            failure = CompletedProcess(
+                ['git', 'rev-parse', '--git-path', 'info/exclude'],
+                128,
+                stdout='fatal: not a git repository\n',
+            )
+            with (patch('agentic.probe', return_value=(True, str(repo))),
+                  patch('agentic_config.subprocess.run', return_value=failure)):
+                with self.assertRaisesRegex(RuntimeError, 'Could not resolve Git info/exclude'):
+                    agentic.init_repository(repo)
+            self.assertFalse((repo / '.gitignore').exists())
 
 
     def test_init_can_generate_provider_specific_config(self):
