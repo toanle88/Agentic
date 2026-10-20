@@ -32,7 +32,9 @@ from agentic_shell_input import (  # noqa: F401
     SHELL_COMMANDS,
     SHELL_OPTIONS,
     _KeyReader,
+    _InteractiveOutputState,
     _apply_completion,
+    _activate_interactive_output,
     _clip_input_line,
     _completion_candidates,
     _completion_items,
@@ -45,6 +47,7 @@ from agentic_shell_input import (  # noqa: F401
     _parse_ansi_sequence,
     _print_help,
     _readline_module,
+    _restore_interactive_output,
     _replace_current_token,
     _shell_paint,
     _shell_print,
@@ -213,6 +216,7 @@ class AgenticShell:
         self.next_number = max(self.jobs, default=0) + 1
         self.history: list[str] = []
         self.active_task = "idle"
+        self._interactive_output_state: _InteractiveOutputState | None = None
 
     def _completion_matches(self, line: str, cursor: int | None = None) -> list[str]:
         return _completion_candidates(line, cursor, tuple(self.jobs), jobs=self.jobs)
@@ -265,6 +269,7 @@ class AgenticShell:
                 self._completion_items,
                 history=self.history,
                 status_line=status_line,
+                output_state=self._interactive_output_state,
             )
         if _readline_module() is not None:
             return input()
@@ -426,10 +431,31 @@ class AgenticShell:
         return argv
 
     def _run_foreground(self, argv: list[str]) -> None:
-        """Run a command with the shell's terminal attached for confirmation."""
-        result = subprocess.run(argv, cwd=self.repo, check=False)
-        if result.returncode:
-            raise RuntimeError(f"command failed with exit {result.returncode}")
+        """Stream command output while leaving terminal input available."""
+        if not _is_interactive_terminal():
+            result = subprocess.run(argv, cwd=self.repo, check=False)
+            if result.returncode:
+                raise RuntimeError(f"command failed with exit {result.returncode}")
+            return
+
+        process = subprocess.Popen(
+            argv,
+            cwd=self.repo,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if process.stdout is not None:
+            while True:
+                chunk = process.stdout.read(1)
+                if not chunk:
+                    break
+                _shell_write_log(chunk)
+        returncode = process.wait()
+        if returncode:
+            raise RuntimeError(f"command failed with exit {returncode}")
 
     def _run_runner_command(self, argv: list[str]) -> None:
         result = subprocess.run(
@@ -855,16 +881,28 @@ class AgenticShell:
     def run(self) -> int:
         active_jobs = sum(job.running for job in self.jobs.values())
         previous_jobs = sum(job.session_id != self.session_id for job in self.jobs.values())
-        _welcome_banner(
-            self.repo,
-            self.state_dir,
-            self.config,
-            active_jobs=active_jobs,
-            previous_jobs=previous_jobs,
+        output_state = (
+            _InteractiveOutputState()
+            if _is_interactive_terminal()
+            else None
         )
-        _print_help()
-        completion_state = self._configure_completion()
+        self._interactive_output_state = output_state
+        previous_output = (
+            _activate_interactive_output(output_state)
+            if output_state is not None
+            else None
+        )
+        completion_state = None
         try:
+            _welcome_banner(
+                self.repo,
+                self.state_dir,
+                self.config,
+                active_jobs=active_jobs,
+                previous_jobs=previous_jobs,
+            )
+            _print_help()
+            completion_state = self._configure_completion()
             while True:
                 self.refresh()
                 try:
@@ -880,6 +918,9 @@ class AgenticShell:
                 if not self.execute(line):
                     break
         finally:
+            if output_state is not None:
+                _restore_interactive_output(previous_output)
+            self._interactive_output_state = None
             self._restore_completion(completion_state)
         running = [job.number for job in self.jobs.values()
                    if job.running and job.session_id == self.session_id]

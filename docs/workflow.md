@@ -67,7 +67,12 @@ and their descriptions. Use the <kbd>↑</kbd> and <kbd>↓</kbd> arrow keys to 
 to dismiss. Supported options such as `/run --profile` and known job IDs for
 `/logs` and `/stop` are completed dynamically. On interactive terminals, Agentic
 renders the dropdown with live filtering and command descriptions using standard ANSI
-escapes with zero third-party dependencies.
+escapes with zero third-party dependencies. The editable prompt is anchored to
+the terminal's bottom row, with status, command output, and completion rows above
+it. Output is written through the editor redraw path and retained in an independently
+scrollable viewport; PageUp/PageDown review older output without moving the prompt,
+and PageDown returns to the live tail. A terminal resize notification also wakes an
+otherwise idle prompt so it can be redrawn at the new bottom row.
 
 Interactive terminals show a persistent two-line prompt with the configured
 developer model, working directory, and current task. Use Up/Down for command
@@ -75,7 +80,8 @@ history, Ctrl+C to cancel the current input, Esc to dismiss completion, and
 Shift+Enter or bracketed terminal paste for multiline input. Pasted newlines
 are inserted into the current buffer and are submitted with Enter. Redirected
 input and output continue to use the plain `input()` path without ANSI control
-sequences.
+sequences. Completion rows are reduced automatically when the terminal is short;
+`AGENTIC_PLAIN=1` keeps the platform's line-oriented plain-input fallback.
 
 `/run` starts a child process and returns immediately. `/ps` shows jobs started in the current shell; `/ps --all` also discovers job records from previous shell sessions. The child runner's durable logs remain available after the shell exits, and `/logs JOB` works for persisted jobs too. Use `/logs JOB` or `/logs PID` on a running job to follow new output until it exits; press Ctrl-C to stop following without stopping the job. Add `LINES` to control how much existing output is shown first. Running jobs are listed before completed jobs so active work is immediately visible. Use `/stop JOB` to stop one job or `/stop --all` to request termination for every running Agentic job visible to the shell, including jobs from previous shell sessions.
 
