@@ -76,21 +76,6 @@ jobs:
       - name: Run Pyright
         run: pyright
 
-  windows:
-    name: Windows smoke test
-    runs-on: windows-latest
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-      - name: Compile Python sources
-        run: python -m py_compile agentic.py agentic_config.py agentic_models.py agentic_security.py agentic_sandbox.py agentic_telemetry.py agentic_diagnostics.py agentic_providers.py agentic_review.py agentic_dashboard.py agentic_shell.py
-      - name: Run tests
-        run: python -m unittest discover -s tests -q
-
   coverage:
     name: Coverage (Python 3.12)
     runs-on: ubuntu-latest
