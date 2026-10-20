@@ -14,6 +14,12 @@ from agentic_output import strip_ansi
 
 from test_shell import _create_mock_reader
 
+
+class TTYBuffer(StringIO):
+    def isatty(self):
+        return True
+
+
 class InteractiveInputTests(unittest.TestCase):
     def test_output_cursor_is_recomputed_after_terminal_width_changes(self):
         state = agentic_shell_input._InteractiveOutputState()
@@ -209,6 +215,137 @@ class InteractiveInputTests(unittest.TestCase):
             plain_output.rfind('[JOB 1] finished'),
             plain_output.rfind('› /run '),
         )
+
+    def test_interactive_input_paints_a_full_width_row_on_a_tty(self):
+        reader = _create_mock_reader([('CHAR', 'x'), ('ENTER', '\n')])
+        output = TTYBuffer()
+        with patch.dict(os.environ, {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+             patch('agentic_shell.shutil.get_terminal_size',
+                   return_value=os.terminal_size((20, 8))), \
+             patch('sys.stdout', output):
+            result = agentic_shell._interactive_input(
+                '› ', agentic_shell._completion_items,
+                key_reader_factory=reader,
+            )
+
+        self.assertEqual(result, 'x')
+        rendered = output.getvalue()
+        self.assertIn(
+            '\033[48;5;236m\033[1;36m› \033[97mx' + ' ' * 17 + '\033[0m',
+            rendered,
+        )
+        self.assertIn('\033[97m', rendered)
+
+    def test_input_row_uses_display_width_for_wide_characters(self):
+        with patch.dict(os.environ, {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+             patch('sys.stdout', new=TTYBuffer()):
+            rendered = agentic_shell_input._input_row('› ', '界', 20)
+
+        self.assertEqual(
+            agentic_shell_input._terminal_text_width(strip_ansi(rendered)),
+            20,
+        )
+        self.assertTrue(strip_ansi(rendered).endswith(' ' * 16))
+
+    def test_clip_input_line_uses_display_width_for_wide_characters(self):
+        visible, cursor = agentic_shell_input._clip_input_line(
+            'abcdefgh界', len('abcdefgh界'), 2, 10,
+        )
+
+        self.assertEqual(visible, 'defgh界')
+        self.assertEqual(cursor, agentic_shell_input._terminal_text_width(visible))
+        self.assertLessEqual(
+            agentic_shell_input._terminal_text_width('› ' + visible),
+            9,
+        )
+
+    def test_clip_input_line_does_not_start_inside_a_wide_character(self):
+        visible, cursor = agentic_shell_input._clip_input_line(
+            '界界', len('界界'), 2, 6,
+        )
+
+        self.assertEqual(visible, '界')
+        self.assertEqual(cursor, 2)
+
+    def test_interactive_input_falls_back_without_a_background_when_color_is_disabled(self):
+        reader = _create_mock_reader([('CHAR', 'x'), ('ENTER', '\n')])
+        output = TTYBuffer()
+        with patch.dict(os.environ, {'NO_COLOR': '1', 'AGENTIC_PLAIN': ''}), \
+             patch('agentic_shell.shutil.get_terminal_size',
+                   return_value=os.terminal_size((12, 8))), \
+             patch('sys.stdout', output):
+            result = agentic_shell._interactive_input(
+                '› ', agentic_shell._completion_items,
+                key_reader_factory=reader,
+            )
+
+        self.assertEqual(result, 'x')
+        rendered = output.getvalue()
+        self.assertNotIn('\033[48;5;236m', rendered)
+        self.assertIn('› x' + ' ' * 9, strip_ansi(rendered))
+
+    def test_interactive_input_resizes_every_multiline_row_background(self):
+        reader = _create_mock_reader([
+            ('PASTE', 'first\nsecond'), ('ENTER', '\n'),
+        ])
+        output = TTYBuffer()
+        sizes = iter([
+            os.terminal_size((20, 8)),
+            os.terminal_size((10, 8)),
+            os.terminal_size((10, 8)),
+        ])
+        with patch.dict(os.environ, {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+             patch('agentic_shell.shutil.get_terminal_size',
+                   side_effect=lambda fallback: next(sizes, os.terminal_size((10, 8)))), \
+             patch('sys.stdout', output):
+            result = agentic_shell._interactive_input(
+                '› ', agentic_shell._completion_items,
+                key_reader_factory=reader,
+            )
+
+        self.assertEqual(result, 'first\nsecond')
+        rendered = output.getvalue()
+        self.assertIn(
+            '\033[48;5;236m\033[1;36m› \033[97mfirst   \033[0m',
+            rendered,
+        )
+        self.assertIn(
+            '\033[48;5;236m\033[1;36m  \033[97msecond  \033[0m',
+            rendered,
+        )
+
+    def test_interactive_output_resets_input_background_before_logs(self):
+        class OutputReader:
+            def __init__(self):
+                self.keys = [('CHAR', 'x'), ('ENTER', '\n')]
+                self.index = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read_key(self):
+                if self.index == 1:
+                    agentic_shell._shell_print('[JOB 1] finished')
+                key = self.keys[self.index]
+                self.index += 1
+                return key
+
+        output = TTYBuffer()
+        with patch.dict(os.environ, {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+             patch('agentic_shell.shutil.get_terminal_size',
+                   return_value=os.terminal_size((20, 8))), \
+             patch('sys.stdout', output):
+            agentic_shell._interactive_input(
+                '› ', agentic_shell._completion_items,
+                key_reader_factory=OutputReader,
+            )
+
+        rendered = output.getvalue()
+        log_position = rendered.index('[JOB 1] finished')
+        self.assertGreater(rendered.rfind('\033[0m', 0, log_position), -1)
 
     def test_interactive_split_output_chunks_keep_the_same_terminal_line(self):
         class OutputReader:
