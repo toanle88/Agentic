@@ -34,6 +34,7 @@ from agentic_shell_input import (  # noqa: F401
     SHELL_OPTIONS,
     _KeyReader,
     _InteractiveOutputState,
+    TerminalMode,
     _begin_foreground_output,
     _apply_completion,
     _activate_interactive_output,
@@ -443,6 +444,13 @@ class AgenticShell:
         self.history: list[str] = []
         self.active_task = "idle"
         self._interactive_output_state: _InteractiveOutputState | None = None
+        self.terminal_mode = TerminalMode.OUTPUT
+
+    def _set_terminal_mode(self, mode: TerminalMode) -> None:
+        """Set the explicit terminal owner and mirror it in the output view."""
+        self.terminal_mode = TerminalMode(mode)
+        if self._interactive_output_state is not None:
+            self._interactive_output_state.set_mode(self.terminal_mode)
 
     def _completion_matches(self, line: str, cursor: int | None = None) -> list[str]:
         return _completion_candidates(line, cursor, tuple(self.jobs), jobs=self.jobs)
@@ -489,25 +497,30 @@ class AgenticShell:
 
     def _input(self, prompt: str, status_line: str | None = None) -> str:
         """Read a shell line with completion where the terminal supports it."""
-        if _is_interactive_terminal():
-            return _interactive_input(
-                prompt,
-                self._completion_items,
-                history=self.history,
-                status_line=status_line,
-                output_state=self._interactive_output_state,
-            )
-        if _readline_module() is not None:
+        self._set_terminal_mode(TerminalMode.COMMAND_READY)
+        try:
+            if _is_interactive_terminal():
+                return _interactive_input(
+                    prompt,
+                    self._completion_items,
+                    history=self.history,
+                    status_line=status_line,
+                    output_state=self._interactive_output_state,
+                    terminal_mode=TerminalMode.COMMAND_READY,
+                )
+            if _readline_module() is not None:
+                return input()
+            if (
+                os.name == "nt"
+                and getattr(sys.stdin, "isatty", lambda: False)()
+                and getattr(sys.stdout, "isatty", lambda: False)()
+            ):
+                return _windows_input(prompt, self._completion_matches)
+            # A redirected shell must not put an interactive prompt on stdout.
+            # Callers can still provide input through a pipe or a test double.
             return input()
-        if (
-            os.name == "nt"
-            and getattr(sys.stdin, "isatty", lambda: False)()
-            and getattr(sys.stdout, "isatty", lambda: False)()
-        ):
-            return _windows_input(prompt, self._completion_matches)
-        # A redirected shell must not put an interactive prompt on stdout.
-        # Callers can still provide input through a pipe or a test double.
-        return input()
+        finally:
+            self._set_terminal_mode(TerminalMode.OUTPUT)
 
 
     def _record_path(self, number: int) -> Path:
@@ -690,8 +703,13 @@ class AgenticShell:
                 raise RuntimeError(f"command failed with exit {result.returncode}")
             return
 
+        mode = (
+            TerminalMode.CHAT if "--chat" in argv
+            else TerminalMode.CONFIRMATION
+        )
+        self._set_terminal_mode(mode)
         foreground, previous_output = _begin_foreground_output(
-            self._interactive_output_state
+            self._interactive_output_state, mode
         )
         resize_handler_previous = None
         resize_handler_installed = False
@@ -908,6 +926,7 @@ class AgenticShell:
                 foreground.clear_input()
                 foreground.finish()
                 _restore_interactive_output(previous_output)
+            self._set_terminal_mode(TerminalMode.OUTPUT)
 
     def _run_runner_command(self, argv: list[str]) -> None:
         result = subprocess.run(
@@ -1132,8 +1151,12 @@ class AgenticShell:
             style_status_tokens=False,
         )
         if job.running:
-            _shell_print("--- following live output; press Ctrl-C to stop following ---")
-            self._follow_log(job, lines)
+            self._set_terminal_mode(TerminalMode.LIVE_OUTPUT)
+            try:
+                _shell_print("--- following live output; press Ctrl-C to stop following ---")
+                self._follow_log(job, lines)
+            finally:
+                self._set_terminal_mode(TerminalMode.OUTPUT)
         else:
             _shell_print(_tail(job.log_path, lines), style_status_tokens=False)
         _shell_print(
@@ -1143,6 +1166,7 @@ class AgenticShell:
 
     def _follow_log(self, job: Job, lines: int) -> None:
         """Print a running job's existing tail and stream appended output."""
+        self._set_terminal_mode(TerminalMode.LIVE_OUTPUT)
         try:
             with job.log_path.open("r", encoding="utf-8", errors="replace") as stream:
                 stream.seek(0, os.SEEK_END)
@@ -1175,6 +1199,8 @@ class AgenticShell:
             _shell_print("\n--- live output follow stopped; job continues running ---")
         except OSError as exc:
             _shell_print(f"Could not read {job.log_path}: {exc}")
+        finally:
+            self._set_terminal_mode(TerminalMode.OUTPUT)
 
     def _request_stop(self, job: Job) -> bool:
         """Request termination for one running job and report the result."""
@@ -1284,6 +1310,7 @@ class AgenticShell:
         self._run_runner_command([sys.executable, "-u", str(self.runner), "--version"])
 
     def execute(self, line: str) -> bool:
+        self._set_terminal_mode(TerminalMode.OUTPUT)
         stripped = line.strip()
         if stripped and (not self.history or self.history[-1] != stripped):
             self.history.append(stripped)
@@ -1328,11 +1355,15 @@ class AgenticShell:
             elif command == "/version":
                 self.show_version(parts)
             elif command in {"/quit", "/exit"}:
+                self._set_terminal_mode(TerminalMode.EXIT)
                 return False
             else:
                 _shell_print(f"Unknown command: {command}. Use /help.")
         except (OSError, ValueError, RuntimeError) as exc:
             _shell_print(f"Error: {exc}")
+        finally:
+            if self.terminal_mode is not TerminalMode.EXIT:
+                self._set_terminal_mode(TerminalMode.OUTPUT)
         return True
 
     def run(self) -> int:
@@ -1344,6 +1375,7 @@ class AgenticShell:
             else None
         )
         self._interactive_output_state = output_state
+        self._set_terminal_mode(TerminalMode.OUTPUT)
         previous_output = (
             _activate_interactive_output(output_state)
             if output_state is not None
@@ -1375,6 +1407,7 @@ class AgenticShell:
                 if not self.execute(line):
                     break
         finally:
+            self._set_terminal_mode(TerminalMode.EXIT)
             if output_state is not None:
                 _restore_interactive_output(previous_output)
             self._interactive_output_state = None

@@ -506,6 +506,37 @@ class ShellTests(unittest.TestCase):
                  patch('builtins.input', return_value='/help') as read_input:
                 self.assertEqual(shell._input('› ', 'model · path · task: idle'), '/help')
             read_input.assert_called_once_with()
+            self.assertEqual(shell.terminal_mode, agentic_shell.TerminalMode.OUTPUT)
+
+    def test_input_mode_is_command_ready_only_while_reading(self):
+        with tempfile.TemporaryDirectory() as temp:
+            shell = agentic_shell.AgenticShell(
+                Path(temp), Path(sys.executable), session_dir=Path(temp) / 'logs'
+            )
+            modes = []
+
+            def read_input():
+                modes.append(shell.terminal_mode)
+                return '/quit'
+
+            with patch('agentic_shell._is_interactive_terminal', return_value=False), \
+                 patch('builtins.input', side_effect=read_input):
+                shell._input('› ')
+
+            self.assertEqual(modes, [agentic_shell.TerminalMode.COMMAND_READY])
+            self.assertEqual(shell.terminal_mode, agentic_shell.TerminalMode.OUTPUT)
+
+    def test_help_and_errors_restore_output_mode(self):
+        with tempfile.TemporaryDirectory() as temp:
+            shell = agentic_shell.AgenticShell(
+                Path(temp), Path(sys.executable), session_dir=Path(temp) / 'logs'
+            )
+            with patch('agentic_shell._print_help'):
+                self.assertTrue(shell.execute('/help'))
+            self.assertEqual(shell.terminal_mode, agentic_shell.TerminalMode.OUTPUT)
+
+            self.assertTrue(shell.execute('/unknown'))
+            self.assertEqual(shell.terminal_mode, agentic_shell.TerminalMode.OUTPUT)
 
     def test_ctrl_c_cancels_input_without_leaving_shell(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -779,6 +810,28 @@ class ShellTests(unittest.TestCase):
             self.assertIn('first', rendered)
             self.assertIn('second', rendered)
             self.assertIn('full log:', rendered)
+            self.assertEqual(shell.terminal_mode, agentic_shell.TerminalMode.OUTPUT)
+
+    def test_logs_follow_uses_live_output_mode_until_follow_finishes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            job = shell._launch([
+                sys.executable, '-c', 'import time; print("output", flush=True); time.sleep(.1)',
+            ])
+            transitions = []
+            original_set_mode = shell._set_terminal_mode
+
+            def record_mode(mode):
+                transitions.append(mode)
+                original_set_mode(mode)
+
+            with patch.object(shell, '_set_terminal_mode', side_effect=record_mode):
+                shell.show_logs(['/logs', str(job.number), '1'])
+
+            job.process.wait(timeout=5)
+            self.assertIn(agentic_shell.TerminalMode.LIVE_OUTPUT, transitions)
+            self.assertEqual(transitions[-1], agentic_shell.TerminalMode.OUTPUT)
 
 
     def test_background_job_completion_callback_runs_without_refresh(self):
@@ -1034,6 +1087,7 @@ class ShellTests(unittest.TestCase):
                 )
 
                 def wait(self):
+                    self.mode_at_wait = shell.terminal_mode
                     self.prompt_was_visible = (
                         "[PUBLISH] Publish this patch? Type 'publish' to approve: "
                         in output.getvalue()
@@ -1055,6 +1109,7 @@ class ShellTests(unittest.TestCase):
 
         rendered = output.getvalue()
         self.assertTrue(process.prompt_was_visible)
+        self.assertEqual(process.mode_at_wait, agentic_shell.TerminalMode.CONFIRMATION)
         self.assertLess(
             rendered.rfind('publication output'),
             rendered.rfind("[PUBLISH] Publish this patch? Type 'publish' to approve: "),
@@ -1088,6 +1143,7 @@ class ShellTests(unittest.TestCase):
                 stdout = PromptStream()
 
                 def wait(self):
+                    self.mode_at_wait = shell.terminal_mode
                     self.prompt_was_visible = 'Continue?' in output.getvalue()
                     owner = getattr(
                         agentic_shell_input._ACTIVE_INTERACTIVE_OUTPUT,
@@ -1113,7 +1169,36 @@ class ShellTests(unittest.TestCase):
                 agentic_shell_input._restore_interactive_output(previous)
 
         self.assertTrue(process.prompt_was_visible)
+        self.assertEqual(process.mode_at_wait, agentic_shell.TerminalMode.CONFIRMATION)
         self.assertEqual(process.editable_prompt, '')
+
+    def test_foreground_chat_owns_prompt_until_child_exits(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            state = agentic_shell_input._InteractiveOutputState()
+            previous = agentic_shell_input._activate_interactive_output(state)
+
+            class Process:
+                stdout = StringIO('chat> ')
+
+                def wait(self):
+                    self.mode_at_wait = shell.terminal_mode
+                    self.state_mode_at_wait = state.mode
+                    return 0
+
+            process = Process()
+            try:
+                with (patch('agentic_shell._is_interactive_terminal', return_value=True),
+                      patch('agentic_shell.subprocess.Popen', return_value=process),
+                      patch('sys.stdout', new_callable=StringIO)):
+                    shell._run_foreground(['--chat'])
+            finally:
+                agentic_shell_input._restore_interactive_output(previous)
+
+        self.assertEqual(process.mode_at_wait, agentic_shell.TerminalMode.CHAT)
+        self.assertEqual(process.state_mode_at_wait, agentic_shell.TerminalMode.CHAT)
+        self.assertEqual(shell.terminal_mode, agentic_shell.TerminalMode.OUTPUT)
 
     def test_foreground_child_output_styles_prefix_without_recoloring_body(self):
         class TTYBuffer(StringIO):

@@ -21,6 +21,38 @@ class TTYBuffer(StringIO):
 
 
 class InteractiveInputTests(unittest.TestCase):
+    def test_terminal_mode_controls_normal_prompt_visibility(self):
+        state = agentic_shell_input._InteractiveOutputState()
+
+        for mode in (
+            agentic_shell_input.TerminalMode.OUTPUT,
+            agentic_shell_input.TerminalMode.CHAT,
+            agentic_shell_input.TerminalMode.CONFIRMATION,
+            agentic_shell_input.TerminalMode.LIVE_OUTPUT,
+            agentic_shell_input.TerminalMode.EXIT,
+        ):
+            with self.subTest(mode=mode):
+                state.set_mode(mode)
+                self.assertFalse(state.normal_prompt_visible)
+
+        state.set_mode(agentic_shell_input.TerminalMode.COMMAND_READY)
+        self.assertTrue(state.normal_prompt_visible)
+
+    def test_interactive_input_restores_output_mode_after_submit(self):
+        state = agentic_shell_input._InteractiveOutputState()
+        reader = _create_mock_reader([('CHAR', 'x'), ('ENTER', '\n')])
+
+        with patch('sys.stdout', StringIO()):
+            result = agentic_shell._interactive_input(
+                '› ', agentic_shell._completion_items,
+                key_reader_factory=reader, output_state=state,
+                terminal_mode=agentic_shell_input.TerminalMode.COMMAND_READY,
+            )
+
+        self.assertEqual(result, 'x')
+        self.assertEqual(state.mode, agentic_shell_input.TerminalMode.OUTPUT)
+        self.assertFalse(state.normal_prompt_visible)
+
     def test_output_cursor_is_recomputed_after_terminal_width_changes(self):
         state = agentic_shell_input._InteractiveOutputState()
         state.append('12345678', ensure_newline=False, columns=8)

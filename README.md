@@ -222,6 +222,11 @@ Enter submits the complete buffer. `/chat ISSUE` opens a conversational session
 in the existing issue worktree; it does not start an automated run. PageUp/
 PageDown scroll the retained output independently of the editable prompt; new
 output follows the live tail again with PageDown.
+The normal command input line is shown only when the shell is ready for a new
+command. Chat and publication confirmation use their own prompts, while live
+`/logs` follow output temporarily hides the command line and restores it after
+following ends. Redirected or exiting shells do not render an interactive
+prompt.
 The historical `/chat ISSUE MESSAGE` one-shot issue form and local-mode
 `/chat MESSAGE` form remain available.
 

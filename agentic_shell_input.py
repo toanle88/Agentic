@@ -8,6 +8,7 @@ supervises child processes and stores a terminal-output copy for inspection.
 from __future__ import annotations
 
 import codecs
+from enum import Enum
 import os
 import shlex
 import shutil
@@ -37,6 +38,17 @@ _ACTIVE_INTERACTIVE_OUTPUT: Callable[[str, bool], None] | None = None
 _RESIZE_PENDING = False
 
 
+class TerminalMode(str, Enum):
+    """Identify which interactive view currently owns the terminal."""
+
+    COMMAND_READY = "command-ready"
+    CHAT = "chat"
+    CONFIRMATION = "confirmation"
+    LIVE_OUTPUT = "live-output"
+    OUTPUT = "output"
+    EXIT = "exit"
+
+
 class _InteractiveOutputState:
     """Retain output across prompt iterations for one interactive shell."""
 
@@ -46,6 +58,16 @@ class _InteractiveOutputState:
         self.cursor_wrap_pending = False
         self._cursor_columns: int | None = None
         self.live_status = False
+        self.mode = TerminalMode.OUTPUT
+
+    @property
+    def normal_prompt_visible(self) -> bool:
+        """Whether the normal command input line may be rendered."""
+        return self.mode is TerminalMode.COMMAND_READY
+
+    def set_mode(self, mode: TerminalMode) -> None:
+        """Record the current terminal owner without changing scrollback."""
+        self.mode = TerminalMode(mode)
 
     @staticmethod
     def _with_newline(text: str, ensure_newline: bool) -> str:
@@ -128,8 +150,13 @@ class _InteractiveOutputState:
 class _ForegroundOutputState:
     """Keep a child prompt in the last terminal rows while streaming output."""
 
-    def __init__(self, output_state: _InteractiveOutputState) -> None:
+    def __init__(
+        self,
+        output_state: _InteractiveOutputState,
+        mode: TerminalMode = TerminalMode.OUTPUT,
+    ) -> None:
         self.output_state = output_state
+        self.mode = TerminalMode(mode)
         self.prompt = ""
         self.input_text = ""
         self.input_cursor = 0
@@ -321,6 +348,8 @@ class _ForegroundOutputState:
             self.input_cursor = 0
             self.live_status = None
             self.output_scroll_lines = 0
+            self.mode = TerminalMode.OUTPUT
+            self.output_state.set_mode(TerminalMode.OUTPUT)
             sys.stdout.write("\033[r")
             sys.stdout.write(f"\033[{max(1, size.lines)};1H")
             sys.stdout.flush()
@@ -328,6 +357,7 @@ class _ForegroundOutputState:
 
 def _begin_foreground_output(
     output_state: _InteractiveOutputState | None,
+    mode: TerminalMode = TerminalMode.OUTPUT,
 ) -> tuple[_ForegroundOutputState | None, Callable[[str, bool], None] | None]:
     """Reserve the terminal bottom for a foreground child prompt."""
     global _ACTIVE_INTERACTIVE_OUTPUT
@@ -339,7 +369,8 @@ def _begin_foreground_output(
         if output_state is None:
             return None, None
         previous = _ACTIVE_INTERACTIVE_OUTPUT
-        foreground = _ForegroundOutputState(output_state)
+        foreground = _ForegroundOutputState(output_state, mode)
+        output_state.set_mode(mode)
         _ACTIVE_INTERACTIVE_OUTPUT = foreground.write
         foreground._render()
         return foreground, previous
@@ -1234,6 +1265,7 @@ def _interactive_input(
     key_reader_factory: Callable[[], Any] | None = None,
     status_line: str | None = None,
     output_state: _InteractiveOutputState | None = None,
+    terminal_mode: TerminalMode = TerminalMode.COMMAND_READY,
 ) -> str:
     """Read one or more shell lines with autocomplete, paste, and navigation."""
     line = ""
@@ -1246,6 +1278,7 @@ def _interactive_input(
     prev_cursor_row = 0
     candidates: list[tuple[str, str]] = []
     output_state = output_state or _InteractiveOutputState()
+    output_state.set_mode(terminal_mode)
     output_history = output_state.history
     output_scroll_lines = 0
 
@@ -1768,10 +1801,13 @@ def _interactive_input(
                 with _OUTPUT_LOCK:
                     if _ACTIVE_INTERACTIVE_OUTPUT is write_output:
                         _ACTIVE_INTERACTIVE_OUTPUT = previous_output
+                    output_state.set_mode(TerminalMode.OUTPUT)
                     clear_dropdown()
                     sys.stdout.write("\033[?2004l")
                     sys.stdout.flush()
     finally:
+        with _OUTPUT_LOCK:
+            output_state.set_mode(TerminalMode.OUTPUT)
         if resize_handler_installed:
             try:
                 signal.signal(signal.SIGWINCH, resize_handler_previous)
