@@ -2,6 +2,7 @@
 import json
 import subprocess
 import sys
+from io import StringIO
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
@@ -115,7 +116,15 @@ class WorkflowTests(_GitRepositoryTestCase):
         folder = agentic.logs_path(self.repo, run)
         issue = agentic.Issue(32, 'Tests fail', '')
         config = {'test_commands': [['go', 'test', './...']], 'max_files': None}
-        with (patch('agentic.run_tests', return_value=(False, 'AssertionError: expected 2')),
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        console = TTYBuffer()
+        report = '[REVIEW] AssertionError: PASSED /tmp/[REVIEW]/traceback.txt\nERROR: PASSED'
+        with (patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}),
+              patch('sys.stdout', console),
+              patch('agentic.run_tests', return_value=(False, report)),
               patch('agentic.prepare_patch') as prepare,
               patch('agentic.review') as review):
             passed, report, verdict, digest, base_sha = agentic.verify_and_review(
@@ -128,6 +137,11 @@ class WorkflowTests(_GitRepositoryTestCase):
         self.assertEqual(base_sha, '')
         prepare.assert_not_called()
         review.assert_not_called()
+        rendered = console.getvalue()
+        self.assertIn('\033[34m[TESTS]\033[0m \033[31mFailed\033[0m', rendered)
+        self.assertNotIn('\033[31mFAILED\033[0m', rendered)
+        self.assertNotIn('\033[32mPASSED\033[0m', rendered)
+        self.assertNotIn('\033[35m[REVIEW]\033[0m', rendered)
 
 
     def test_develop_returns_review_feedback_to_the_next_attempt(self):

@@ -24,23 +24,165 @@ class StreamingTests(unittest.TestCase):
             def isatty(self):
                 return True
 
+        plain = '[00:30:10] [TESTS] PASSED /tmp/result.txt'
         with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), patch('sys.stdout', new=TTYBuffer()):
             self.assertIn('\033[32m', style_text('[TESTS] PASSED'))
         with patch.dict('os.environ', {'NO_COLOR': '1'}), patch('sys.stdout', new=TTYBuffer()):
-            self.assertNotIn('\033[', style_text('[TESTS] PASSED'))
-        self.assertNotIn('\033[', style_text('[TESTS] PASSED'))
+            self.assertEqual(style_text(plain), plain)
+        self.assertEqual(style_text(plain), plain)
 
-    def test_style_text_marks_commands_and_file_changes(self):
+    def test_style_text_colors_prefixes_and_status_tokens_only(self):
         class TTYBuffer(StringIO):
             def isatty(self):
                 return True
 
         with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
              patch('sys.stdout', new=TTYBuffer()):
-            styled = style_text('[TESTS] Running: python -m unittest\n+added.py\n-removed.py')
-        self.assertIn('\033[36m[TESTS] Running:', styled)
-        self.assertIn('\033[32m+added.py', styled)
-        self.assertIn('\033[31m-removed.py', styled)
+            styled = style_text(
+                '[00:30:10] [TESTS] Finished in 0s (exit 1) /tmp/traceback.py\n'
+                '[REVIEW] APPROVED summary text'
+            )
+        self.assertIn('\033[90m[00:30:10]\033[0m', styled)
+        self.assertIn('\033[34m[TESTS]\033[0m', styled)
+        self.assertIn('\033[32mFinished\033[0m', styled)
+        self.assertIn('\033[31mexit 1\033[0m', styled)
+        self.assertIn('/tmp/traceback.py', styled)
+        self.assertIn('\033[35m[REVIEW]\033[0m \033[32mAPPROVED\033[0m summary text', styled)
+        self.assertNotIn('\033[34m[TESTS] Finished', styled)
+
+    def test_style_text_does_not_color_message_body_or_file_paths(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+             patch('sys.stdout', new=TTYBuffer()):
+            styled = style_text(
+                '[TESTS] AssertionError in /tmp/FAILED.txt '
+                '/tmp/[REVIEW]/result.txt [REVIEW] details'
+            )
+        self.assertEqual(
+            styled,
+            '\033[34m[TESTS]\033[0m AssertionError in /tmp/FAILED.txt '
+            '/tmp/[REVIEW]/result.txt [REVIEW] details',
+        )
+
+    def test_style_text_does_not_color_trailing_message_labels_or_paths(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+             patch('sys.stdout', new=TTYBuffer()):
+            self.assertEqual(style_text('message [REVIEW]'), 'message [REVIEW]')
+            self.assertEqual(style_text('message FAILED /tmp/result.txt'), 'message FAILED /tmp/result.txt')
+            self.assertEqual(style_text('/tmp/[REVIEW]'), '/tmp/[REVIEW]')
+            self.assertEqual(style_text('[REVIEW]/result.txt'), '[REVIEW]/result.txt')
+            self.assertEqual(style_text('[REVIEW]\\result.txt'), '[REVIEW]\\result.txt')
+            self.assertEqual(
+                style_text('[TESTS] report C:\\tmp\\FAILED.txt /tmp/[REVIEW]'),
+                '\033[34m[TESTS]\033[0m report C:\\tmp\\FAILED.txt /tmp/[REVIEW]',
+            )
+            self.assertEqual(
+                style_text('[TESTS] report /tmp/[PASSED] C:\\tmp\\[RETRY]'),
+                '\033[34m[TESTS]\033[0m report /tmp/[PASSED] C:\\tmp\\[RETRY]',
+            )
+            self.assertEqual(
+                style_text('[TESTS] report /tmp/[FAIL ] C:\\tmp\\[WARN ]'),
+                '\033[34m[TESTS]\033[0m report /tmp/[FAIL ] C:\\tmp\\[WARN ]',
+            )
+            self.assertEqual(
+                style_text('[TESTS] report /tmp/folder with space/[FAIL].txt'),
+                '\033[34m[TESTS]\033[0m report /tmp/folder with space/[FAIL].txt',
+            )
+            self.assertEqual(
+                style_text('[TESTS] report /tmp/folder with space/[RETRY]'),
+                '\033[34m[TESTS]\033[0m report /tmp/folder with space/[RETRY]',
+            )
+            self.assertEqual(
+                style_text('[TESTS] report /tmp/folder with space [RETRY]'),
+                '\033[34m[TESTS]\033[0m report /tmp/folder with space [RETRY]',
+            )
+
+    def test_style_text_colors_each_structured_prefix(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        expected = {
+            'DEVELOPER': '36', 'REVIEW': '35', 'TESTS': '34', 'RETRY': '33',
+            'GIT': '90', 'PATCH': '90', 'TIMEOUT': '33', 'BLOCKED': '33', 'STOP': '33',
+        }
+        with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+             patch('sys.stdout', new=TTYBuffer()):
+            for label, code in expected.items():
+                with self.subTest(label=label):
+                    self.assertEqual(
+                        style_text(f'[{label}] message'),
+                        f'\033[{code}m[{label}]\033[0m message',
+                    )
+            self.assertEqual(
+                style_text('[RETRY] WARNING: retrying'),
+                '\033[33m[RETRY]\033[0m \033[33mWARNING\033[0m: retrying',
+            )
+            self.assertEqual(
+                style_text('[TESTS] Finished in 0s (exit 124) [TIMEOUT]'),
+                '\033[34m[TESTS]\033[0m \033[32mFinished\033[0m in 0s '
+                '(\033[31mexit 124\033[0m) \033[33m[TIMEOUT]\033[0m',
+            )
+            self.assertEqual(
+                style_text('[TESTS] Finished in 0s (exit -9)'),
+                '\033[34m[TESTS]\033[0m \033[32mFinished\033[0m in 0s '
+                '(\033[31mexit -9\033[0m)',
+            )
+            self.assertEqual(
+                style_text('[STOP] no running jobs', style_status_tokens=False),
+                '\033[33m[STOP]\033[0m no running jobs',
+            )
+
+    def test_style_text_colors_padded_bracketed_warning_and_failure_statuses(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+             patch('sys.stdout', new=TTYBuffer()):
+            styled = style_text('[WARN ] dependency needs attention\n[FAIL ] command output')
+        self.assertEqual(
+            styled,
+            '\033[33m[WARN ]\033[0m dependency needs attention\n'
+            '\033[31m[FAIL ]\033[0m command output',
+        )
+
+    def test_style_text_can_skip_status_tokens_for_streamed_child_output(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+             patch('sys.stdout', new=TTYBuffer()):
+            styled = style_text(
+                '[00:30:10] [TESTS] ERROR PASSED /tmp/traceback.py',
+                style_status_tokens=False,
+            )
+        self.assertEqual(
+            styled,
+            '\033[90m[00:30:10]\033[0m '\
+            '\033[34m[TESTS]\033[0m ERROR PASSED /tmp/traceback.py',
+        )
+
+    def test_style_text_preserves_bounded_status_and_incoming_ansi(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+             patch('sys.stdout', new=TTYBuffer()):
+            styled = style_text('[TESTS] \033[32mPASSED\033[0m /tmp/PASSED.txt')
+        self.assertEqual(
+            styled,
+            '\033[34m[TESTS]\033[0m \033[32mPASSED\033[0m /tmp/PASSED.txt',
+        )
 
     def test_native_provider_processes_streams_and_records_usage(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -135,6 +277,48 @@ class StreamingTests(unittest.TestCase):
             self.assertEqual(metrics['operations'][0]['status'], 'completed')
             self.assertGreaterEqual(metrics['operations'][0]['duration_seconds'], 0)
 
+    def test_tty_codex_progress_colors_generated_status_tokens(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            script = ('import json,sys; '
+                      'print(json.dumps({"type":"error","message":'
+                      '"provider detail PASSED APPROVED FAILED /tmp/result.txt"}),flush=True); '
+                      'print(json.dumps({"type":"item.completed","item":'
+                      '{"type":"agent_message","text":'
+                      '"provider says PASSED APPROVED FAILED"}}),flush=True); '
+                      'print(json.dumps({"type":"item.completed","item":'
+                      '{"type":"command_execution","exit_code":1}}),flush=True)')
+            with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+                 patch('sys.stdout', new=TTYBuffer()) as out:
+                result = agentic.streamed_command(
+                    [sys.executable, '-c', script], root,
+                    label='DEVELOPER', log_file=root / 'developer.log',
+                    timeout=10, codex_json=True,
+                )
+
+            self.assertEqual(result.returncode, 0)
+            rendered = out.getvalue()
+            self.assertIn(
+                '\033[31mERROR\033[0m: provider detail PASSED APPROVED FAILED /tmp/result.txt',
+                rendered,
+            )
+            self.assertIn(
+                '\033[36m[DEVELOPER]\033[0m Agent: provider says PASSED APPROVED FAILED',
+                rendered,
+            )
+            self.assertNotIn('\033[32mPASSED\033[0m', rendered)
+            self.assertNotIn('\033[32mAPPROVED\033[0m', rendered)
+            self.assertNotIn('\033[31mFAILED\033[0m', rendered)
+            self.assertIn(
+                'Command \033[32mfinished\033[0m (\033[31mexit 1\033[0m)',
+                rendered,
+            )
+            self.assertNotIn('\033[36m[DEVELOPER] ERROR', rendered)
+
     def test_tty_streaming_colors_terminal_but_keeps_human_log_plain(self):
         class TTYBuffer(StringIO):
             def isatty(self):
@@ -151,6 +335,25 @@ class StreamingTests(unittest.TestCase):
             self.assertIn('\033[', out.getvalue())
             self.assertNotIn('\033[', (root / 'tests.log').read_text(encoding='utf-8'))
             self.assertIn('[TESTS] FAILED', (root / 'tests.log').read_text(encoding='utf-8'))
+
+    def test_streamed_child_status_words_keep_terminal_default_color(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+                 patch('sys.stdout', new=TTYBuffer()) as out:
+                result = agentic.streamed_command(
+                    [sys.executable, '-c', 'print("ERROR PASSED /tmp/traceback.py")'],
+                    root, label='TESTS', log_file=root / 'tests.log', timeout=10,
+                )
+            self.assertEqual(result.returncode, 0)
+            rendered = out.getvalue()
+            self.assertIn('\033[34m[TESTS]\033[0m ERROR PASSED /tmp/traceback.py', rendered)
+            self.assertNotIn('\033[31mERROR\033[0m', rendered)
+            self.assertNotIn('\033[32mPASSED\033[0m', rendered)
 
     def test_streamed_command_reports_heartbeat_during_silence(self):
         from io import StringIO

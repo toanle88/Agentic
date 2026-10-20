@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from io import StringIO
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
@@ -67,6 +68,64 @@ class OpenRouterTests(unittest.TestCase):
             self.assertEqual(metrics['operations'][0]['status'], 'completed')
             with self.assertRaisesRegex(ValueError, 'worktree'):
                 agentic_openrouter._safe_worktree_path(root, '../outside')
+
+    def test_openrouter_colors_console_prefixes_but_keeps_log_plain(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            response = {'choices': [{'message': {
+                'role': 'assistant', 'content': 'PASSED /tmp/result.txt',
+            }}]}
+            console = TTYBuffer()
+            with (patch.dict(agentic.os.environ, {
+                      'ROUTER_KEY': 'secret', 'NO_COLOR': '', 'AGENTIC_PLAIN': '',
+                  }, clear=False),
+                  patch('sys.stdout', console),
+                  patch('agentic_openrouter._openrouter_request', return_value=response)):
+                ok, message = agentic.run_openrouter(
+                    root, 'prompt', output=root / 'developer.txt', model='openai/test',
+                    api_key_env='ROUTER_KEY',
+                )
+
+            self.assertTrue(ok)
+            self.assertEqual(message, 'PASSED /tmp/result.txt')
+            self.assertIn('\033[90m[', console.getvalue())
+            self.assertIn('\033[36m[DEVELOPER]\033[0m', console.getvalue())
+            self.assertNotIn('\033[32mPASSED\033[0m', console.getvalue())
+            log = (root / 'developer.log').read_text(encoding='utf-8')
+            self.assertNotIn('\033[', log)
+            self.assertIn('[DEVELOPER] Finished in', log)
+
+    def test_openrouter_colors_generated_error_without_coloring_provider_message(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            console = TTYBuffer()
+            with (patch.dict(agentic.os.environ, {
+                      'ROUTER_KEY': 'secret', 'NO_COLOR': '', 'AGENTIC_PLAIN': '',
+                  }, clear=False),
+                  patch('sys.stdout', console),
+                  patch('agentic_openrouter._openrouter_request',
+                        side_effect=RuntimeError('provider says PASSED'))):
+                ok, message = agentic.run_openrouter(
+                    root, 'prompt', output=root / 'developer.txt', model='openai/test',
+                    api_key_env='ROUTER_KEY',
+                )
+
+            self.assertFalse(ok)
+            self.assertEqual(message, 'provider says PASSED')
+            rendered = console.getvalue()
+            self.assertIn('\033[31mERROR\033[0m: provider says PASSED', rendered)
+            self.assertNotIn('\033[32mPASSED\033[0m', rendered)
+            log = (root / 'developer.log').read_text(encoding='utf-8')
+            self.assertIn('ERROR: provider says PASSED', log)
+            self.assertNotIn('\033[', log)
 
     def test_openrouter_tools_cover_readonly_boundaries_and_file_operations(self):
         with tempfile.TemporaryDirectory() as temp:
