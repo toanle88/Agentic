@@ -11,8 +11,11 @@ import codecs
 import os
 import shlex
 import shutil
+import signal
 import sys
+import threading
 import time
+import unicodedata
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, cast
 
@@ -20,6 +23,211 @@ from agentic import __version__
 from agentic_output import paint, sanitize_terminal_text, strip_ansi, style_text
 if TYPE_CHECKING:
     from agentic_shell import Job
+
+
+_OUTPUT_LOCK = threading.RLock()
+_ACTIVE_INTERACTIVE_OUTPUT: Callable[[str, bool], None] | None = None
+_RESIZE_PENDING = False
+
+
+class _InteractiveOutputState:
+    """Retain output across prompt iterations for one interactive shell."""
+
+    def __init__(self) -> None:
+        self.history: list[str] = []
+        self.cursor_column = 1
+        self.cursor_wrap_pending = False
+        self._cursor_columns: int | None = None
+
+    @staticmethod
+    def _with_newline(text: str, ensure_newline: bool) -> str:
+        if ensure_newline and text and not text.endswith(("\n", "\r")):
+            return text + "\n"
+        return text
+
+    def append(self, text: str, ensure_newline: bool, columns: int) -> str:
+        """Record output and advance the live tail cursor."""
+        columns = max(1, columns)
+        self.recompute_cursor(columns)
+        output_text = self._with_newline(text, ensure_newline)
+        self.history.append(output_text)
+        for character in strip_ansi(output_text):
+            self.cursor_column, self.cursor_wrap_pending = _advance_terminal_cursor(
+                self.cursor_column,
+                self.cursor_wrap_pending,
+                character,
+                columns,
+            )
+        self._cursor_columns = columns
+        return output_text
+
+    def recompute_cursor(self, columns: int) -> None:
+        """Recalculate the logical tail after a terminal-width change."""
+        columns = max(1, columns)
+        if self._cursor_columns == columns:
+            return
+        cursor_column = 1
+        cursor_wrap_pending = False
+        for character in strip_ansi("".join(self.history)):
+            cursor_column, cursor_wrap_pending = _advance_terminal_cursor(
+                cursor_column,
+                cursor_wrap_pending,
+                character,
+                columns,
+            )
+        self.cursor_column = cursor_column
+        self.cursor_wrap_pending = cursor_wrap_pending
+        self._cursor_columns = columns
+
+    def mark_prompt_boundary(self, columns: int) -> None:
+        """Keep output after a completed prompt on a new logical line."""
+        columns = max(1, columns)
+        self.recompute_cursor(columns)
+        retained = strip_ansi("".join(self.history))
+        if retained and not retained.endswith(("\n", "\r")):
+            self.append("\n", ensure_newline=False, columns=columns)
+            return
+        self.cursor_column = 1
+        self.cursor_wrap_pending = False
+        self._cursor_columns = columns
+
+    def write_without_editor(self, text: str, ensure_newline: bool = True) -> None:
+        """Retain output while no prompt renderer is currently active."""
+        with _OUTPUT_LOCK:
+            columns = max(1, shutil.get_terminal_size(fallback=(80, 24)).columns)
+            output_text = self.append(text, ensure_newline, columns)
+            sys.stdout.write(output_text)
+            sys.stdout.flush()
+
+
+def _activate_interactive_output(
+    state: _InteractiveOutputState,
+) -> Callable[[str, bool], None] | None:
+    """Route shell output to a persistent viewport until the shell exits."""
+    global _ACTIVE_INTERACTIVE_OUTPUT
+    with _OUTPUT_LOCK:
+        previous = _ACTIVE_INTERACTIVE_OUTPUT
+        _ACTIVE_INTERACTIVE_OUTPUT = state.write_without_editor
+        return previous
+
+
+def _restore_interactive_output(
+    previous: Callable[[str, bool], None] | None,
+) -> None:
+    global _ACTIVE_INTERACTIVE_OUTPUT
+    with _OUTPUT_LOCK:
+        _ACTIVE_INTERACTIVE_OUTPUT = previous
+
+
+def _mark_resize_pending(_signum: int, _frame: Any) -> None:
+    """Record a terminal resize without doing work from the signal handler."""
+    global _RESIZE_PENDING
+    _RESIZE_PENDING = True
+
+
+def _take_resize_pending() -> bool:
+    global _RESIZE_PENDING
+    if not _RESIZE_PENDING:
+        return False
+    _RESIZE_PENDING = False
+    return True
+
+
+def _terminal_cell_width(character: str) -> int:
+    """Return the terminal display-cell width of one printable character."""
+    category = unicodedata.category(character)
+    if unicodedata.combining(character) or category in {"Cc", "Cf", "Mn", "Me"}:
+        return 0
+    return 2 if unicodedata.east_asian_width(character) in {"W", "F"} else 1
+
+
+def _advance_terminal_cursor(
+    column: int,
+    wrap_pending: bool,
+    character: str,
+    columns: int,
+) -> tuple[int, bool]:
+    """Advance a terminal cursor using display cells, not Python characters."""
+    if character in {"\n", "\r"}:
+        return 1, False
+    if character == "\b":
+        if wrap_pending:
+            column = columns
+            wrap_pending = False
+        return max(1, column - 1), False
+    if wrap_pending:
+        # Terminals defer the wrap after writing the last cell until the next
+        # printable character arrives. The next character therefore starts on
+        # the following row (which is the bottom row of our scroll region).
+        column = 1
+        wrap_pending = False
+    if character == "\t":
+        next_tab_stop = ((column - 1) // 8 + 1) * 8 + 1
+        return min(columns, next_tab_stop), False
+
+    cell_width = _terminal_cell_width(character)
+    if cell_width == 0:
+        # Zero-cell marks do not consume the deferred wrap state left by a
+        # printable character at the right margin.
+        return column, wrap_pending
+    if cell_width > columns - column + 1:
+        column = 1
+    last_cell = column + cell_width - 1
+    if last_cell >= columns:
+        return columns, True
+    return last_cell + 1, False
+
+
+def _output_history_lines(history: str, columns: int) -> list[str]:
+    """Wrap retained output into display rows for the output viewport."""
+    width_limit = max(1, columns)
+    lines: list[str] = []
+    current: list[str] = []
+    current_width = 0
+
+    def finish_line() -> None:
+        nonlocal current, current_width
+        lines.append("".join(current))
+        current = []
+        current_width = 0
+
+    for character in strip_ansi(history):
+        if character in {"\n", "\r"}:
+            finish_line()
+            continue
+        if character in {"\b", "\x7f"}:
+            if current:
+                current.pop()
+                current_width = max(0, current_width - 1)
+            continue
+        if character == "\t":
+            cell_width = 8 - (current_width % 8)
+            character = " " * cell_width
+        else:
+            cell_width = _terminal_cell_width(character)
+            if cell_width == 0:
+                current.append(character)
+                continue
+
+        if current and current_width + cell_width > width_limit:
+            finish_line()
+        if cell_width > width_limit:
+            # A wide character on a one-cell terminal still occupies the
+            # available row rather than being lost from the viewport.
+            current.append(character)
+            current_width = width_limit
+            finish_line()
+            continue
+        current.append(character)
+        current_width += cell_width
+        if current_width == width_limit:
+            # Defer the row break until another character or newline arrives,
+            # matching the terminal's pending-wrap behavior.
+            continue
+
+    if current or not lines:
+        finish_line()
+    return lines
 
 
 HELP = """Commands:
@@ -324,6 +532,10 @@ def _parse_ansi_sequence(read_next: Callable[[], str | None]) -> tuple[str, str]
             return "END", ""
         if value == "3~":
             return "DELETE", ""
+        if value in {"5~", "5;2~"}:
+            return "PAGE_UP", ""
+        if value in {"6~", "6;2~"}:
+            return "PAGE_DOWN", ""
         # Terminals that support modified keys commonly encode Shift+Enter as
         # CSI 13;2u or CSI 13;2~. Keep it distinct from submit/Enter.
         if value in {"13;2u", "13;2~", "27;2;13~"}:
@@ -361,8 +573,10 @@ class _KeyReader:
         self._old_settings = None
         self._posix_fd: int | None = None
         self._posix_decoder: Any = None
+        self._terminal_size: os.terminal_size | None = None
 
     def __enter__(self) -> "_KeyReader":
+        self._terminal_size = shutil.get_terminal_size(fallback=(80, 24))
         if os.name != "nt":
             try:
                 import termios
@@ -381,6 +595,16 @@ class _KeyReader:
             self._old_settings = None
             _enable_windows_ansi()
         return self
+
+    def _terminal_resized(self) -> bool:
+        current = shutil.get_terminal_size(fallback=(80, 24))
+        if self._terminal_size is None:
+            self._terminal_size = current
+            return False
+        if current == self._terminal_size:
+            return False
+        self._terminal_size = current
+        return True
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         if self._old_settings is not None:
@@ -437,6 +661,10 @@ class _KeyReader:
         if os.name == "nt":
             import msvcrt
             getwch = cast(Callable[[], str], getattr(msvcrt, "getwch"))
+            while not msvcrt.kbhit():
+                if _take_resize_pending() or self._terminal_resized():
+                    return "RESIZE", ""
+                time.sleep(0.05)
             char = getwch()
             if char in {"\r", "\n"}:
                 return "ENTER", char
@@ -487,6 +715,10 @@ class _KeyReader:
                     return "END", ""
                 if code == "S":
                     return "DELETE", ""
+                if code == "I":
+                    return "PAGE_UP", ""
+                if code == "Q":
+                    return "PAGE_DOWN", ""
                 if code == "\x0f":
                     return "UP", ""
                 return "SPECIAL", code
@@ -494,6 +726,15 @@ class _KeyReader:
 
         import select
         fd = self._posix_fd if self._posix_fd is not None else sys.stdin.fileno()
+        while True:
+            try:
+                readable, _, _ = select.select([fd], [], [], 0.1)
+            except InterruptedError:
+                readable = []
+            if readable:
+                break
+            if _take_resize_pending() or self._terminal_resized():
+                return "RESIZE", ""
         char = self._read_posix_char()
         if not char:
             return "CTRL_D", ""
@@ -535,6 +776,7 @@ def _interactive_input(
     history: list[str] | None = None,
     key_reader_factory: Callable[[], Any] | None = None,
     status_line: str | None = None,
+    output_state: _InteractiveOutputState | None = None,
 ) -> str:
     """Read one or more shell lines with autocomplete, paste, and navigation."""
     line = ""
@@ -543,131 +785,245 @@ def _interactive_input(
     navigated = False
     dismissed = False
     prev_dropdown_lines = 0
-    prev_input_lines = 1
+    prev_editor_lines = 0
     prev_cursor_row = 0
-    first_render = True
     candidates: list[tuple[str, str]] = []
+    output_state = output_state or _InteractiveOutputState()
+    output_history = output_state.history
+    output_scroll_lines = 0
 
     hist_entries = list(history) if history else []
     hist_index = len(hist_entries)
     saved_input = ""
 
+    def _clear_previous_editor(buf: list[str]) -> None:
+        """Clear the old bottom-anchored region from its current cursor."""
+        if not prev_editor_lines:
+            return
+        buf.append("\r")
+        if prev_cursor_row:
+            buf.append(f"\033[{prev_cursor_row}A")
+        for index in range(prev_editor_lines):
+            buf.append("\033[2K")
+            if index < prev_editor_lines - 1:
+                buf.append("\n")
+        if prev_editor_lines > 1:
+            buf.append(f"\033[{prev_editor_lines - 1}A\r")
+
     def render() -> None:
-        nonlocal prev_dropdown_lines, prev_input_lines, prev_cursor_row
-        nonlocal selected_index, navigated, candidates, first_render
-        columns = shutil.get_terminal_size(fallback=(80, 24)).columns
-        lines_avail = shutil.get_terminal_size(fallback=(80, 24)).lines
+        nonlocal prev_dropdown_lines, prev_editor_lines, prev_cursor_row
+        nonlocal selected_index, navigated, candidates, output_scroll_lines
+        with _OUTPUT_LOCK:
+            size = shutil.get_terminal_size(fallback=(80, 24))
+            columns = max(1, size.columns)
+            rows = max(1, size.lines)
+            output_state.recompute_cursor(columns)
 
-        if first_render and status_line:
-            status = sanitize_terminal_text(status_line)
-            sys.stdout.write(_shell_paint(_fit_terminal_text(status, columns - 1), "90") + "\n")
-            first_render = False
-        elif first_render:
-            first_render = False
-
-        if not dismissed and line.lstrip().startswith("/"):
-            try:
-                candidates = completer(line, cursor_pos)
-            except Exception:
+            if not dismissed and line.lstrip().startswith("/"):
+                try:
+                    candidates = completer(line, cursor_pos)
+                except Exception:
+                    candidates = []
+            else:
                 candidates = []
-        else:
-            candidates = []
 
-        if not candidates:
-            selected_index = 0
-            navigated = False
-            visible_items: list[tuple[str, str]] = []
-            visible_selected = -1
-        else:
-            selected_index = max(0, min(selected_index, len(candidates) - 1))
-            max_visible = min(8, max(2, lines_avail - 4), len(candidates))
-            window_start = max(0, min(selected_index - max_visible // 2, len(candidates) - max_visible))
-            visible_items = candidates[window_start : window_start + max_visible]
-            visible_selected = selected_index - window_start
+            input_parts = line.split("\n")
+            cursor_row = line[:cursor_pos].count("\n")
+            cursor_column = cursor_pos - (line.rfind("\n", 0, cursor_pos) + 1)
+            status_strings: list[str] = []
+            if status_line is not None:
+                status = _fit_terminal_text(sanitize_terminal_text(status_line), columns - 1)
+                status_strings.append(_shell_paint(status, "90"))
 
-        new_dropdown_lines = len(visible_items)
-        use_color = not (os.environ.get("NO_COLOR") or os.environ.get("AGENTIC_PLAIN"))
+            # Keep the cursor visible when a pasted buffer is taller than the
+            # terminal. The remaining rows are then available to completion.
+            max_input_lines = max(1, rows - len(status_strings))
+            input_start = max(0, min(
+                cursor_row - max_input_lines + 1,
+                len(input_parts) - max_input_lines,
+            ))
+            input_end = min(len(input_parts), input_start + max_input_lines)
+            visible_parts = input_parts[input_start:input_end]
+            visible_cursor_row = cursor_row - input_start
 
-        dropdown_strings: list[str] = []
-        if visible_items:
-            cmd_col = min(24, max((len(c) for c, _ in visible_items), default=12) + 2)
-            max_content_len = 0
-            for idx, (cmd, desc) in enumerate(visible_items):
-                is_active = (idx == visible_selected)
-                prefix = "> " if is_active else "  "
-                raw_len = len(prefix) + cmd_col + 2 + len(desc)
-                if raw_len > max_content_len:
-                    max_content_len = raw_len
-
-            banner_width = min(columns - 2, max(50, max_content_len + 2))
-
-            for idx, (cmd, desc) in enumerate(visible_items):
-                is_active = (idx == visible_selected)
-                prefix = "> " if is_active else "  "
-                desc_col = max(10, columns - len(prefix) - cmd_col - 4)
-                desc_text = desc if len(desc) <= desc_col else (desc[:desc_col - 3] + "...")
-
-                if use_color:
-                    if is_active:
-                        content = f"{prefix}{cmd:<{cmd_col}}  {desc_text}".ljust(banner_width)
-                        if len(content) > columns - 1:
-                            content = content[:columns - 1]
-                        dropdown_strings.append(f"\033[44;97m{content}\033[0m")
-                    else:
-                        line_str = f"{prefix}\033[97m{cmd:<{cmd_col}}\033[0m  \033[90m{desc_text}\033[0m"
-                        dropdown_strings.append(line_str)
+            if not candidates:
+                selected_index = 0
+                navigated = False
+                visible_items: list[tuple[str, str]] = []
+                visible_selected = -1
+            else:
+                selected_index = max(0, min(selected_index, len(candidates) - 1))
+                available_dropdown = max(0, rows - len(status_strings) - len(visible_parts))
+                max_visible = min(8, available_dropdown, len(candidates))
+                if max_visible:
+                    window_start = max(
+                        0,
+                        min(selected_index - max_visible // 2,
+                            len(candidates) - max_visible),
+                    )
+                    visible_items = candidates[window_start:window_start + max_visible]
+                    visible_selected = selected_index - window_start
                 else:
-                    content = f"{prefix}{cmd:<{cmd_col}}  {desc_text}".ljust(banner_width)
-                    if len(content) > columns - 1:
-                        content = content[:columns - 1]
-                    dropdown_strings.append(content)
+                    visible_items = []
+                    visible_selected = -1
 
-        input_parts = line.split("\n")
-        cursor_row = line[:cursor_pos].count("\n")
-        cursor_column = cursor_pos - (line.rfind("\n", 0, cursor_pos) + 1)
-        display_lines: list[str] = []
-        cursor_display = 0
-        for row, part in enumerate(input_parts):
-            row_prompt = prompt if row == 0 else "  "
-            row_cursor = cursor_column if row == cursor_row else len(part)
-            visible, visible_cursor = _clip_input_line(
-                part, row_cursor, len(row_prompt), columns,
-            )
-            if row == cursor_row:
-                cursor_display = visible_cursor
-            display_lines.append(
-                _shell_paint(row_prompt, "1;36") + _shell_paint(visible, "37")
-            )
+            use_color = not (os.environ.get("NO_COLOR") or os.environ.get("AGENTIC_PLAIN"))
+            dropdown_strings: list[str] = []
+            if visible_items:
+                cmd_col = min(24, max((len(c) for c, _ in visible_items), default=12) + 2)
+                max_content_len = max(
+                    len("> " if idx == visible_selected else "  ") + cmd_col + 2 + len(desc)
+                    for idx, (_, desc) in enumerate(visible_items)
+                )
+                banner_width = max(1, min(columns - 1, max_content_len + 2))
+                for idx, (cmd, desc) in enumerate(visible_items):
+                    is_active = idx == visible_selected
+                    prefix = "> " if is_active else "  "
+                    desc_col = max(1, columns - len(prefix) - cmd_col - 4)
+                    if len(desc) > desc_col:
+                        desc = desc[:max(0, desc_col - 3)] + "..." if desc_col >= 4 else desc[:desc_col]
+                    content = f"{prefix}{cmd:<{cmd_col}}  {desc}".ljust(banner_width)
+                    content = content[:max(1, columns - 1)]
+                    if use_color and is_active:
+                        dropdown_strings.append(f"\033[44;97m{content}\033[0m")
+                    elif use_color:
+                        dropdown_strings.append(
+                            f"{prefix}\033[97m{cmd:<{cmd_col}}\033[0m  \033[90m{desc}\033[0m"
+                        )
+                    else:
+                        dropdown_strings.append(content)
 
-        buf: list[str] = []
-        if prev_input_lines + prev_dropdown_lines:
-            if prev_cursor_row:
-                buf.append(f"\033[{prev_cursor_row}A")
-            buf.append("\r")
-            old_lines = prev_input_lines + prev_dropdown_lines
-            for index in range(old_lines):
-                buf.append("\033[2K")
-                if index < old_lines - 1:
+            display_lines: list[str] = []
+            cursor_display = 0
+            for offset, part in enumerate(visible_parts):
+                original_row = input_start + offset
+                row_prompt = prompt if original_row == 0 else "  "
+                row_cursor = cursor_column if original_row == cursor_row else len(part)
+                visible, visible_cursor = _clip_input_line(
+                    part, row_cursor, len(row_prompt), columns,
+                )
+                if original_row == cursor_row:
+                    cursor_display = visible_cursor
+                display_lines.append(
+                    _shell_paint(row_prompt, "1;36") + _shell_paint(visible, "37")
+                )
+
+            editor_lines = len(status_strings) + len(dropdown_strings) + len(display_lines)
+            output_lines = _output_history_lines("".join(output_history), columns)
+            output_rows = max(0, rows - editor_lines)
+            max_output_scroll = max(0, len(output_lines) - output_rows)
+            output_scroll_lines = min(output_scroll_lines, max_output_scroll)
+            top_row = max(1, rows - editor_lines + 1)
+            cursor_from_top = (
+                len(status_strings) + len(dropdown_strings) + visible_cursor_row
+            )
+            buf: list[str] = []
+            _clear_previous_editor(buf)
+            buf.append("\033[r")
+            if output_rows and output_history:
+                output_end = len(output_lines) - output_scroll_lines
+                output_start = max(0, output_end - output_rows)
+                visible_output = output_lines[output_start:output_end]
+                buf.append(f"\033[1;{output_rows}r\033[1;1H")
+                for index in range(output_rows):
+                    buf.append("\033[2K")
+                    if index < len(visible_output):
+                        buf.append(visible_output[index])
+                    if index < output_rows - 1:
+                        buf.append("\n")
+                buf.append("\033[r")
+            buf.append(f"\033[{top_row};1H")
+            if prev_editor_lines:
+                for index in range(editor_lines):
+                    buf.append("\033[2K")
+                    if index < editor_lines - 1:
+                        buf.append("\n")
+                if editor_lines > 1:
+                    buf.append(f"\033[{editor_lines - 1}A\r")
+            for index, status in enumerate(status_strings):
+                if index:
                     buf.append("\n")
-            if old_lines > 1:
-                buf.append(f"\033[{old_lines - 1}A\r")
-        buf.append(display_lines[0])
-        for display_line in display_lines[1:]:
-            buf.append(f"\n\033[2K{display_line}")
-        for s in dropdown_strings:
-            buf.append(f"\n\033[2K{s}")
-        cursor_col = len(prompt) + cursor_display + 1 if cursor_row == 0 else 2 + cursor_display + 1
-        if cursor_row + new_dropdown_lines:
-            buf.append(f"\033[{cursor_row + new_dropdown_lines}A")
-        if cursor_row:
-            buf.append(f"\033[{cursor_row}B")
-        buf.append(f"\033[{cursor_col}G")
+                buf.append(status)
+            for dropdown in dropdown_strings:
+                buf.append("\n" if buf else "")
+                buf.append(dropdown)
+            for index, display_line in enumerate(display_lines):
+                if status_strings or dropdown_strings or index:
+                    buf.append("\n")
+                buf.append(display_line)
+            cursor_up = editor_lines - 1 - cursor_from_top
+            if cursor_up:
+                buf.append(f"\033[{cursor_up}A")
+            cursor_col = (
+                len(prompt) + cursor_display + 1
+                if cursor_row == 0
+                else 2 + cursor_display + 1
+            )
+            buf.append(f"\033[{max(1, cursor_col)}G")
+            sys.stdout.write("".join(buf))
+            sys.stdout.flush()
+            prev_dropdown_lines = len(dropdown_strings)
+            prev_editor_lines = editor_lines
+            prev_cursor_row = cursor_from_top
 
-        sys.stdout.write("".join(buf))
-        sys.stdout.flush()
-        prev_dropdown_lines = new_dropdown_lines
-        prev_input_lines = len(display_lines)
-        prev_cursor_row = cursor_row
+    def write_output(text: str, ensure_newline: bool = True) -> None:
+        """Write output above the editor and restore the editor below it."""
+        nonlocal prev_editor_lines
+        with _OUTPUT_LOCK:
+            size = shutil.get_terminal_size(fallback=(80, 24))
+            columns = max(1, size.columns)
+            rows = max(1, size.lines)
+            output_state.recompute_cursor(columns)
+            old_editor_lines = prev_editor_lines
+            clear: list[str] = []
+            _clear_previous_editor(clear)
+            if clear:
+                sys.stdout.write("".join(clear))
+
+            # The editor occupies the bottom rows. Scroll only the rows above
+            # it so streamed output cannot overwrite the status or prompt.
+            output_bottom = max(1, rows - old_editor_lines)
+            output_state.cursor_column = min(max(1, output_state.cursor_column), columns)
+            if output_state.cursor_wrap_pending and text:
+                output_state.cursor_column = 1
+                output_state.cursor_wrap_pending = False
+            sys.stdout.write(f"\033[1;{output_bottom}r")
+            sys.stdout.write(f"\033[{output_bottom};{output_state.cursor_column}H")
+            prev_editor_lines = 0
+            output_text = output_state.append(text, ensure_newline, columns)
+
+            if output_scroll_lines:
+                # A user reviewing older output should not be pulled back to
+                # the live tail by an arriving log chunk.
+                prev_editor_lines = 0
+                sys.stdout.write("\033[r")
+                sys.stdout.flush()
+                render()
+                return
+
+            sys.stdout.write(output_text)
+
+            sys.stdout.write("\033[r")
+            sys.stdout.flush()
+            render()
+
+    def scroll_output(delta: int) -> None:
+        """Move the retained output viewport without moving the editor."""
+        nonlocal output_scroll_lines
+        with _OUTPUT_LOCK:
+            size = shutil.get_terminal_size(fallback=(80, 24))
+            columns = max(1, size.columns)
+            rows = max(1, size.lines)
+            output_rows = max(0, rows - prev_editor_lines)
+            if not output_rows:
+                return
+            output_lines = _output_history_lines("".join(output_history), columns)
+            max_scroll = max(0, len(output_lines) - output_rows)
+            page = max(1, output_rows - 1)
+            output_scroll_lines = max(
+                0, min(max_scroll, output_scroll_lines + delta * page)
+            )
+        render()
 
     def clear_dropdown() -> None:
         nonlocal dismissed
@@ -677,202 +1033,242 @@ def _interactive_input(
 
     def finish_input() -> None:
         """Leave the cursor after the complete editable buffer."""
-        if prev_cursor_row < prev_input_lines - 1:
-            sys.stdout.write(f"\033[{prev_input_lines - 1 - prev_cursor_row}B")
-        sys.stdout.write("\r\n")
-        sys.stdout.flush()
+        with _OUTPUT_LOCK:
+            size = shutil.get_terminal_size(fallback=(80, 24))
+            output_state.mark_prompt_boundary(max(1, size.columns))
+            if prev_cursor_row < prev_editor_lines - 1:
+                sys.stdout.write(f"\033[{prev_editor_lines - 1 - prev_cursor_row}B")
+            sys.stdout.write("\r\n")
+            sys.stdout.flush()
 
     reader_factory = key_reader_factory or _KeyReader
-    with reader_factory() as reader:
-        sys.stdout.write("\033[?2004h")
-        render()
+    resize_handler_previous = None
+    resize_handler_installed = False
+    if os.name != "nt" and hasattr(signal, "SIGWINCH"):
         try:
-            while True:
-                key, char = reader.read_key()
+            resize_handler_previous = signal.getsignal(signal.SIGWINCH)
+            signal.signal(signal.SIGWINCH, _mark_resize_pending)
+            resize_handler_installed = True
+        except (OSError, ValueError):
+            # Embedded callers and non-main threads cannot install signal
+            # handlers; the reader's size polling remains a safe fallback.
+            resize_handler_previous = None
+    global _ACTIVE_INTERACTIVE_OUTPUT
+    try:
+        with reader_factory() as reader:
+            with _OUTPUT_LOCK:
+                previous_output = _ACTIVE_INTERACTIVE_OUTPUT
+                _ACTIVE_INTERACTIVE_OUTPUT = write_output
+                sys.stdout.write("\033[?2004h")
+                render()
+            try:
+                while True:
+                    key, char = reader.read_key()
 
-                if key == "ENTER":
-                    current_token = line[_token_start(line, cursor_pos):cursor_pos]
-                    if candidates and (
-                        navigated
-                        or (current_token and current_token != candidates[selected_index][0])
-                    ):
-                        candidate = candidates[selected_index][0]
-                        line, cursor_pos = _apply_completion(
-                            line,
-                            cursor_pos,
-                            candidate,
-                            add_space=candidate in {"/run", "/logs", "/stop", "--profile"},
-                        )
-                        navigated = False
+                    if key == "RESIZE":
                         render()
                         continue
-                    clear_dropdown()
-                    finish_input()
-                    return line
 
-                if key == "TAB":
-                    if candidates:
-                        candidate = candidates[selected_index][0]
-                        line, cursor_pos = _apply_completion(
-                            line, cursor_pos, candidate, add_space=True
-                        )
-                        navigated = False
-                        render()
+                    if key == "PAGE_UP":
+                        scroll_output(1)
                         continue
-                    render()
-                    continue
 
-                if key == "DOWN":
-                    if candidates:
-                        selected_index = (selected_index + 1) % len(candidates)
-                        navigated = True
-                    elif hist_entries:
-                        if hist_index < len(hist_entries) - 1:
-                            hist_index += 1
-                            line = hist_entries[hist_index]
-                            cursor_pos = len(line)
-                        elif hist_index == len(hist_entries) - 1:
-                            hist_index = len(hist_entries)
-                            line = saved_input
-                            cursor_pos = len(line)
-                    render()
-                    continue
+                    if key == "PAGE_DOWN":
+                        scroll_output(-1)
+                        continue
 
-                if key == "UP":
-                    if candidates:
-                        selected_index = (selected_index - 1) % len(candidates)
-                        navigated = True
-                    elif hist_entries:
-                        if hist_index == len(hist_entries):
-                            saved_input = line
-                        if hist_index > 0:
-                            hist_index -= 1
-                            line = hist_entries[hist_index]
-                            cursor_pos = len(line)
-                    render()
-                    continue
-
-                if key == "LEFT":
-                    if cursor_pos > 0:
-                        cursor_pos -= 1
-                    render()
-                    continue
-
-                if key == "RIGHT":
-                    if cursor_pos < len(line):
-                        cursor_pos += 1
-                    render()
-                    continue
-
-                if key in {"HOME", "CTRL_A"}:
-                    cursor_pos = 0
-                    render()
-                    continue
-
-                if key in {"END", "CTRL_E"}:
-                    cursor_pos = len(line)
-                    render()
-                    continue
-
-                if key == "BACKSPACE":
-                    if cursor_pos > 0:
-                        line = line[:cursor_pos - 1] + line[cursor_pos:]
-                        cursor_pos -= 1
-                        dismissed = False
-                        selected_index = 0
-                        navigated = False
-                    render()
-                    continue
-
-                if key == "DELETE":
-                    if cursor_pos < len(line):
-                        line = line[:cursor_pos] + line[cursor_pos + 1:]
-                        dismissed = False
-                        selected_index = 0
-                        navigated = False
-                    render()
-                    continue
-
-                if key == "ESCAPE":
-                    if candidates:
-                        dismissed = True
+                    if key == "ENTER":
+                        current_token = line[_token_start(line, cursor_pos):cursor_pos]
+                        if candidates and (
+                            navigated
+                            or (current_token and current_token != candidates[selected_index][0])
+                        ):
+                            candidate = candidates[selected_index][0]
+                            line, cursor_pos = _apply_completion(
+                                line,
+                                cursor_pos,
+                                candidate,
+                                add_space=candidate in {"/run", "/logs", "/stop", "--profile"},
+                            )
+                            navigated = False
+                            render()
+                            continue
                         clear_dropdown()
-                    render()
-                    continue
+                        finish_input()
+                        return line
 
-                if key == "CTRL_C":
-                    clear_dropdown()
-                    sys.stdout.write("\n")
-                    sys.stdout.flush()
-                    raise KeyboardInterrupt
+                    if key == "TAB":
+                        if candidates:
+                            candidate = candidates[selected_index][0]
+                            line, cursor_pos = _apply_completion(
+                                line, cursor_pos, candidate, add_space=True
+                            )
+                            navigated = False
+                            render()
+                            continue
+                        render()
+                        continue
 
-                if key == "CTRL_D":
-                    if not line:
+                    if key == "DOWN":
+                        if candidates:
+                            selected_index = (selected_index + 1) % len(candidates)
+                            navigated = True
+                        elif hist_entries:
+                            if hist_index < len(hist_entries) - 1:
+                                hist_index += 1
+                                line = hist_entries[hist_index]
+                                cursor_pos = len(line)
+                            elif hist_index == len(hist_entries) - 1:
+                                hist_index = len(hist_entries)
+                                line = saved_input
+                                cursor_pos = len(line)
+                        render()
+                        continue
+
+                    if key == "UP":
+                        if candidates:
+                            selected_index = (selected_index - 1) % len(candidates)
+                            navigated = True
+                        elif hist_entries:
+                            if hist_index == len(hist_entries):
+                                saved_input = line
+                            if hist_index > 0:
+                                hist_index -= 1
+                                line = hist_entries[hist_index]
+                                cursor_pos = len(line)
+                        render()
+                        continue
+
+                    if key == "LEFT":
+                        if cursor_pos > 0:
+                            cursor_pos -= 1
+                        render()
+                        continue
+
+                    if key == "RIGHT":
+                        if cursor_pos < len(line):
+                            cursor_pos += 1
+                        render()
+                        continue
+
+                    if key in {"HOME", "CTRL_A"}:
+                        cursor_pos = 0
+                        render()
+                        continue
+
+                    if key in {"END", "CTRL_E"}:
+                        cursor_pos = len(line)
+                        render()
+                        continue
+
+                    if key == "BACKSPACE":
+                        if cursor_pos > 0:
+                            line = line[:cursor_pos - 1] + line[cursor_pos:]
+                            cursor_pos -= 1
+                            dismissed = False
+                            selected_index = 0
+                            navigated = False
+                        render()
+                        continue
+
+                    if key == "DELETE":
+                        if cursor_pos < len(line):
+                            line = line[:cursor_pos] + line[cursor_pos + 1:]
+                            dismissed = False
+                            selected_index = 0
+                            navigated = False
+                        render()
+                        continue
+
+                    if key == "ESCAPE":
+                        if candidates:
+                            dismissed = True
+                            clear_dropdown()
+                        render()
+                        continue
+
+                    if key == "CTRL_C":
                         clear_dropdown()
                         sys.stdout.write("\n")
                         sys.stdout.flush()
-                        raise EOFError
-                    render()
-                    continue
+                        raise KeyboardInterrupt
 
-                if key in {"NEWLINE", "PASTE"}:
-                    inserted = char.replace("\r\n", "\n").replace("\r", "\n")
-                    if key == "NEWLINE":
-                        inserted = "\n"
-                    line = line[:cursor_pos] + inserted + line[cursor_pos:]
-                    cursor_pos += len(inserted)
-                    dismissed = False
-                    selected_index = 0
-                    navigated = False
-                    render()
-                    continue
+                    if key == "CTRL_D":
+                        if not line:
+                            clear_dropdown()
+                            sys.stdout.write("\n")
+                            sys.stdout.flush()
+                            raise EOFError
+                        render()
+                        continue
 
-                if key == "CTRL_U":
-                    line = line[cursor_pos:]
-                    cursor_pos = 0
-                    dismissed = False
-                    selected_index = 0
-                    navigated = False
-                    render()
-                    continue
-
-                if key == "CTRL_K":
-                    line = line[:cursor_pos]
-                    dismissed = False
-                    selected_index = 0
-                    navigated = False
-                    render()
-                    continue
-
-                if key == "CTRL_W":
-                    if cursor_pos > 0:
-                        end = cursor_pos
-                        while end > 0 and line[end - 1].isspace():
-                            end -= 1
-                        start = end
-                        while start > 0 and not line[start - 1].isspace():
-                            start -= 1
-                        line = line[:start] + line[cursor_pos:]
-                        cursor_pos = start
+                    if key in {"NEWLINE", "PASTE"}:
+                        inserted = char.replace("\r\n", "\n").replace("\r", "\n")
+                        if key == "NEWLINE":
+                            inserted = "\n"
+                        line = line[:cursor_pos] + inserted + line[cursor_pos:]
+                        cursor_pos += len(inserted)
                         dismissed = False
                         selected_index = 0
                         navigated = False
                         render()
-                    continue
+                        continue
 
-                if key == "CHAR":
-                    line = line[:cursor_pos] + char + line[cursor_pos:]
-                    cursor_pos += len(char)
-                    dismissed = False
-                    selected_index = 0
-                    navigated = False
-                    render()
-                    continue
+                    if key == "CTRL_U":
+                        line = line[cursor_pos:]
+                        cursor_pos = 0
+                        dismissed = False
+                        selected_index = 0
+                        navigated = False
+                        render()
+                        continue
 
-        finally:
-            clear_dropdown()
-            sys.stdout.write("\033[?2004l")
-            sys.stdout.flush()
+                    if key == "CTRL_K":
+                        line = line[:cursor_pos]
+                        dismissed = False
+                        selected_index = 0
+                        navigated = False
+                        render()
+                        continue
+
+                    if key == "CTRL_W":
+                        if cursor_pos > 0:
+                            end = cursor_pos
+                            while end > 0 and line[end - 1].isspace():
+                                end -= 1
+                            start = end
+                            while start > 0 and not line[start - 1].isspace():
+                                start -= 1
+                            line = line[:start] + line[cursor_pos:]
+                            cursor_pos = start
+                            dismissed = False
+                            selected_index = 0
+                            navigated = False
+                            render()
+                        continue
+
+                    if key == "CHAR":
+                        line = line[:cursor_pos] + char + line[cursor_pos:]
+                        cursor_pos += len(char)
+                        dismissed = False
+                        selected_index = 0
+                        navigated = False
+                        render()
+                        continue
+
+            finally:
+                with _OUTPUT_LOCK:
+                    if _ACTIVE_INTERACTIVE_OUTPUT is write_output:
+                        _ACTIVE_INTERACTIVE_OUTPUT = previous_output
+                    clear_dropdown()
+                    sys.stdout.write("\033[?2004l")
+                    sys.stdout.flush()
+    finally:
+        if resize_handler_installed:
+            try:
+                signal.signal(signal.SIGWINCH, resize_handler_previous)
+            except (OSError, ValueError):
+                pass
 
 
 
@@ -944,21 +1340,37 @@ def _shell_paint(text: str, code: str) -> str:
     return paint(sanitize_terminal_text(text), code)
 
 
+def _write_shell_output(text: str, *, ensure_newline: bool = True) -> None:
+    """Write shell output through the active editor when one is present."""
+    with _OUTPUT_LOCK:
+        if _ACTIVE_INTERACTIVE_OUTPUT is not None:
+            _ACTIVE_INTERACTIVE_OUTPUT(text, ensure_newline)
+            return
+        sys.stdout.write(text)
+
+
 def _shell_print(message: Any = "", *, end: str = "\n", flush: bool = False,
                  style_status_tokens: bool = True) -> None:
     """Print shell status or replayed log text with terminal-only styling."""
     text = style_text(message, style_status_tokens=style_status_tokens)
-    print(text, end=end, flush=flush)
+    _write_shell_output(text + end)
+    if flush:
+        sys.stdout.flush()
 
 
 def _shell_print_raw(message: Any = "", *, end: str = "\n", flush: bool = False) -> None:
     """Print machine-oriented child output without adding terminal decoration."""
-    print(strip_ansi(message), end=end, flush=flush)
+    _write_shell_output(strip_ansi(message) + end)
+    if flush:
+        sys.stdout.flush()
 
 
 def _shell_write_log(text: str) -> None:
     """Write appended log text without bypassing the TTY styling boundary."""
-    sys.stdout.write(style_text(text, style_status_tokens=False))
+    _write_shell_output(
+        style_text(text, style_status_tokens=False),
+        ensure_newline=False,
+    )
     sys.stdout.flush()
 
 
@@ -988,7 +1400,7 @@ def _help_line(line: str) -> str:
 def _print_help() -> None:
     """Print command help with a colorful terminal-only presentation."""
     for line in HELP.rstrip().splitlines():
-        print(_help_line(line))
+        _write_shell_output(_help_line(line) + "\n")
 
 
 def _fit_terminal_text(text: str, width: int) -> str:
@@ -1018,19 +1430,23 @@ def _welcome_banner(repo: Path, state_dir: Path | None = None,
                     config: Path | None = None, active_jobs: int = 0,
                     previous_jobs: int = 0) -> None:
     """Print the interactive shell welcome screen."""
+    def write_line(text: str = "") -> None:
+        """Send banner lines through the retained interactive output path."""
+        _write_shell_output(text + "\n")
+
     columns = shutil.get_terminal_size(fallback=(80, 24)).columns
     # A framed banner is useful on normal terminals, but should not wrap on
     # split panes or small CI terminals.
     if columns < 62:
-        print(_shell_paint(f"AGENTIC v{__version__}", "1;36"))
-        print(_shell_paint(
+        write_line(_shell_paint(f"AGENTIC v{__version__}", "1;36"))
+        write_line(_shell_paint(
             f"Interactive coding workflow - {_fit_terminal_text(repo.name, max(columns - 34, 8))}",
             "36",
         ))
-        print(f"{active_jobs} running job(s); use /help for commands.")
+        write_line(f"{active_jobs} running job(s); use /help for commands.")
         if previous_jobs:
-            print(_shell_paint(f"{previous_jobs} previous job(s); use /ps --all to inspect.", "33"))
-        print(_shell_paint("Use /help for commands. Jobs continue after /quit.", "90"))
+            write_line(_shell_paint(f"{previous_jobs} previous job(s); use /ps --all to inspect.", "33"))
+        write_line(_shell_paint("Use /help for commands. Jobs continue after /quit.", "90"))
         return
 
     width = min(columns, 88)
@@ -1058,20 +1474,20 @@ def _welcome_banner(repo: Path, state_dir: Path | None = None,
     if previous_jobs:
         job_text += f" · {previous_jobs} previous"
 
-    print()
-    print(_shell_paint(border(left, right), "36"))
-    print(_shell_paint(row(f"{marker}  A G E N T I C  v{__version__}"), "1;36"))
-    print(_shell_paint(row("   Interactive issue-driven coding workflow"), "36"))
-    print(_shell_paint(divider + horizontal * inner + ("┤" if unicode_banner else "+"), "36"))
-    print(row(f"Repository  {repo}"))
-    print(row(f"State       {state_text}"))
-    print(row(f"Config      {config_text}"))
-    print(row(f"Jobs        {job_text}"))
-    print(_shell_paint(row("Commands    /run ISSUE   /ps   /logs JOB|PID   /help   /quit"), "36"))
-    print(_shell_paint(border(bottom_left, bottom_right), "36"))
+    write_line()
+    write_line(_shell_paint(border(left, right), "36"))
+    write_line(_shell_paint(row(f"{marker}  A G E N T I C  v{__version__}"), "1;36"))
+    write_line(_shell_paint(row("   Interactive issue-driven coding workflow"), "36"))
+    write_line(_shell_paint(divider + horizontal * inner + ("┤" if unicode_banner else "+"), "36"))
+    write_line(row(f"Repository  {repo}"))
+    write_line(row(f"State       {state_text}"))
+    write_line(row(f"Config      {config_text}"))
+    write_line(row(f"Jobs        {job_text}"))
+    write_line(_shell_paint(row("Commands    /run ISSUE   /ps   /logs JOB|PID   /help   /quit"), "36"))
+    write_line(_shell_paint(border(bottom_left, bottom_right), "36"))
     if previous_jobs:
-        print(_shell_paint("Tip: use /ps --all to inspect jobs from previous sessions.", "33"))
-    print()
+        write_line(_shell_paint("Tip: use /ps --all to inspect jobs from previous sessions.", "33"))
+    write_line()
 
 
 # Explicitly export private compatibility helpers to the facade.

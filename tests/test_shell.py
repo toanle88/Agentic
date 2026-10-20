@@ -10,6 +10,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import agentic
 import agentic_shell
+import agentic_shell_input
 from agentic import state_paths
 
 
@@ -36,6 +37,30 @@ class ShellTests(unittest.TestCase):
         self.assertIn('/doctor', output.getvalue())
         self.assertIn('/cleanup', output.getvalue())
         self.assertIn('/status', output.getvalue())
+
+    def test_run_retains_startup_help_in_interactive_output_viewport(self):
+        from contextlib import redirect_stdout
+
+        with tempfile.TemporaryDirectory() as temp:
+            state = agentic_shell_input._InteractiveOutputState()
+            shell = agentic_shell.AgenticShell(
+                Path(temp), Path(sys.executable), session_dir=Path(temp) / 'logs'
+            )
+            output = StringIO()
+
+            def quit_shell(_prompt, _status_line):
+                self.assertIs(shell._interactive_output_state, state)
+                return '/quit'
+
+            with patch('agentic_shell._is_interactive_terminal', return_value=True), \
+                 patch('agentic_shell._InteractiveOutputState', return_value=state), \
+                 patch.object(shell, '_input', side_effect=quit_shell), \
+                 redirect_stdout(output):
+                self.assertEqual(shell.run(), 0)
+
+        self.assertIn('A G E N T I C', ''.join(state.history))
+        self.assertIn('Commands:', ''.join(state.history))
+        self.assertIn('/help', ''.join(state.history))
 
 
     def test_welcome_banner_does_not_emit_color_when_output_is_not_a_terminal(self):
@@ -560,8 +585,12 @@ class ShellTests(unittest.TestCase):
             shell = agentic_shell.AgenticShell(
                 root, Path(sys.executable), session_dir=root / 'logs'
             )
-            result = type('Result', (), {'returncode': 0})()
-            with (patch('agentic_shell.subprocess.run', return_value=result) as run,
+            process = type('Process', (), {
+                'stdout': StringIO('publication output\n'),
+                'wait': lambda self: 0,
+            })()
+            with (patch('agentic_shell._is_interactive_terminal', return_value=True),
+                  patch('agentic_shell.subprocess.Popen', return_value=process) as run,
                   patch.object(shell, '_launch') as launch,
                   patch('sys.stdout', new_callable=StringIO) as output):
                 shell.run_issue(['/run', '119', '--publish'])
@@ -570,7 +599,31 @@ class ShellTests(unittest.TestCase):
             argv = run.call_args.args[0]
             self.assertIn('--publish', argv)
             self.assertNotIn('stdin', run.call_args.kwargs)
+            self.assertEqual(run.call_args.kwargs['stdout'], agentic_shell.subprocess.PIPE)
+            self.assertEqual(run.call_args.kwargs['stderr'], agentic_shell.subprocess.STDOUT)
             self.assertIn('foreground', output.getvalue())
+
+    def test_foreground_publish_output_is_retained_by_interactive_viewport(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), session_dir=root / 'logs'
+            )
+            state = agentic_shell_input._InteractiveOutputState()
+            previous = agentic_shell_input._activate_interactive_output(state)
+            process = type('Process', (), {
+                'stdout': StringIO('publication output\n'),
+                'wait': lambda self: 0,
+            })()
+            try:
+                with (patch('agentic_shell._is_interactive_terminal', return_value=True),
+                      patch('agentic_shell.subprocess.Popen', return_value=process),
+                      patch('sys.stdout', new_callable=StringIO)):
+                    shell.run_issue(['/run', '119', '--publish'])
+            finally:
+                agentic_shell_input._restore_interactive_output(previous)
+
+        self.assertIn('publication output', ''.join(state.history))
 
 
     def test_shell_preserves_instruction_as_one_runner_argv_value(self):
@@ -638,10 +691,30 @@ class ShellTests(unittest.TestCase):
             shell = agentic_shell.AgenticShell(
                 root, Path(sys.executable), session_dir=root / 'logs'
             )
-            result = type('Result', (), {'returncode': 1})()
-            with patch('agentic_shell.subprocess.run', return_value=result):
+            process = type('Process', (), {
+                'stdout': StringIO('publication failed\n'),
+                'wait': lambda self: 1,
+            })()
+            with (patch('agentic_shell._is_interactive_terminal', return_value=True),
+                  patch('agentic_shell.subprocess.Popen', return_value=process)):
                 with self.assertRaisesRegex(RuntimeError, 'exit 1'):
                     shell.run_issue(['/run', '119', '--publish'])
+
+    def test_foreground_publish_preserves_separate_streams_when_non_interactive(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), session_dir=root / 'logs'
+            )
+            with (patch('agentic_shell._is_interactive_terminal', return_value=False),
+                  patch('agentic_shell.subprocess.run', return_value=type(
+                      'Result', (), {'returncode': 0}
+                  )()) as run,
+                  patch('agentic_shell.subprocess.Popen') as popen):
+                shell._run_foreground(['publish'])
+
+            run.assert_called_once_with(['publish'], cwd=root, check=False)
+            popen.assert_not_called()
 
 
     def test_shell_stop_and_log_tail_handle_running_and_missing_jobs(self):

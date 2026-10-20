@@ -209,9 +209,13 @@ Redirected output and persisted logs are plain text.
 Interactive input keeps a two-line status prompt with the developer provider
 and model, working directory, and active task. Up/Down recalls command history;
 Ctrl+C cancels the current input, Esc dismisses completion, and bracketed
-terminal paste or Shift+Enter inserts multiline text. Enter submits the complete
-buffer. /chat ISSUE MESSAGE starts an issue run with a one-off instruction;
-/chat MESSAGE creates a local task when task_source is local.
+terminal paste or Shift+Enter inserts multiline text. The editable prompt stays
+at the bottom of an interactive terminal; status and command output remain
+above it, and completion suggestions appear immediately above the prompt.
+Enter submits the complete buffer. /chat ISSUE MESSAGE starts an issue run
+with a one-off instruction; /chat MESSAGE creates a local task when
+task_source is local. PageUp/PageDown scroll the retained output independently
+of the editable prompt; new output follows the live tail again with PageDown.
 
 For direct foreground execution:
 
