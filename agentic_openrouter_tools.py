@@ -235,7 +235,14 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                 return "ERROR: write_file is unavailable during review"
             target = _safe_worktree_path(worktree, arguments.get("path", ""), write=True)
             relative = str(target.relative_to(worktree.resolve()))
-            if forbidden(relative) and not (allow_runner_source and relative == "agentic.py"):
+            relative_parts = [part.lower() for part in Path(relative).parts]
+            self_hosted_ci = (
+                len(relative_parts) >= 3
+                and relative_parts[:2] == [".github", "workflows"]
+            )
+            if forbidden(relative) and not (
+                allow_runner_source and (relative == "agentic.py" or self_hosted_ci)
+            ):
                 return f"ERROR: protected file {relative!r} cannot be changed"
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(arguments.get("content", ""), encoding="utf-8")

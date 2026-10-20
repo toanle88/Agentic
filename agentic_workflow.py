@@ -18,7 +18,7 @@ import shutil
 import tempfile
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from agentic_config import (
@@ -610,8 +610,11 @@ def _common_repository_root(path: Path) -> Path | None:
 
 
 def _runner_source_change_allowed(worktree: Path, filename: str) -> bool:
-    """Allow only Agentic's own runner source during self-hosted development."""
-    if filename != "agentic.py":
+    """Allow Agentic runner and CI sources during self-hosted development."""
+    parts = [part.lower() for part in PurePosixPath(filename).parts]
+    is_runner_source = filename == "agentic.py"
+    is_ci_workflow = len(parts) >= 3 and parts[:2] == [".github", "workflows"]
+    if not (is_runner_source or is_ci_workflow):
         return False
     target_root = _common_repository_root(worktree)
     runner_root = _common_repository_root(SCRIPT_DIR)

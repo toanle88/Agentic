@@ -135,7 +135,7 @@ Set `AGENTIC_STATE_DIR` or pass `--state-dir PATH` to choose another root. A sha
 - Test commands run under the host account by default. When `security_mode` is `isolated`, provider and test processes run in the configured container instead; use explicit `sandbox.pass_env` names for credentials.
 - The developer receives write access to its worktree; the reviewer is invoked in the provider's read-only or restricted review mode.
 - Native provider CLIs receive provider-specific non-interactive permissions. Gemini and Claude use their read-only review modes; Copilot is restricted to its available read/review tools and denied common Git mutations. OpenRouter uses an Agentic-owned scoped tool loop.
-- The runner refuses protected changes including Agentic configuration, agent instructions, secrets, private keys, `.codex/`, and GitHub workflows.
+- The runner refuses protected changes including Agentic configuration, agent instructions, secrets, private keys, and `.codex/`. GitHub workflows are also protected for ordinary repositories; only a checkout sharing Agentic's Git common root may update its own CI workflows.
 - Issue text, repository files, and test output are untrusted input to the selected provider.
 - Provider and test output is redacted before it is persisted or shown in the dashboard; use a trusted checkout because redaction cannot identify every possible secret.
 - GitHub issue intake is the default; local task intake is opt-in through `task_source: "local"`.

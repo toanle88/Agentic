@@ -69,6 +69,27 @@ class OpenRouterTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'worktree'):
                 agentic_openrouter._safe_worktree_path(root, '../outside')
 
+    def test_openrouter_self_hosted_exception_allows_ci_but_not_policy_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            result = agentic_openrouter._openrouter_tool_call(
+                root, 'write_file', {
+                    'path': '.github/workflows/ci.yml',
+                    'content': 'name: CI\n',
+                }, readonly=False, allow_runner_source=True,
+            )
+            self.assertEqual(result, 'Wrote .github/workflows/ci.yml')
+            self.assertEqual(
+                (root / '.github/workflows/ci.yml').read_text(), 'name: CI\n',
+            )
+            blocked = agentic_openrouter._openrouter_tool_call(
+                root, 'write_file', {
+                    'path': 'AGENTS.md',
+                    'content': 'do not weaken policy\n',
+                }, readonly=False, allow_runner_source=True,
+            )
+            self.assertIn('protected file', blocked)
+
     def test_openrouter_colors_console_prefixes_but_keeps_log_plain(self):
         class TTYBuffer(StringIO):
             def isatty(self):
