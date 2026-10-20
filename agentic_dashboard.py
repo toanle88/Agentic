@@ -144,7 +144,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
           <label class="sr-only" for="search">Search runs</label>
           <input id="search" type="search" placeholder="Search issue, task, or branch…">
           <label class="sr-only" for="status">Filter status</label>
-          <select id="status"><option value="all">All statuses</option><option value="blocked">Blocked</option><option value="needs-fix">Needs fix</option><option value="investigation-invalid">Investigation invalid</option><option value="awaiting-development">Awaiting development</option><option value="approved">Approved</option><option value="in-progress">In progress</option><option value="tests-failed">Tests failed</option><option value="awaiting-review">Awaiting review</option></select>
+          <select id="status"><option value="all">All statuses</option><option value="blocked">Blocked</option><option value="no_changes">No changes</option><option value="retry_exhausted">Retry exhausted</option><option value="needs-fix">Needs fix</option><option value="investigation-invalid">Investigation invalid</option><option value="awaiting-development">Awaiting development</option><option value="approved">Approved</option><option value="in-progress">In progress</option><option value="tests-failed">Tests failed</option><option value="awaiting-review">Awaiting review</option></select>
         </div>
         <div class="run-list" id="run-list" aria-live="polite"></div>
       </div>
@@ -157,6 +157,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
     const labels = {{
       "approved": "Approved", "needs-fix": "Needs fix", "in-progress": "In progress",
       "tests-failed": "Tests failed", "awaiting-review": "Awaiting review", "no-activity": "No activity", "blocked": "Blocked",
+      "no_changes": "No changes", "retry_exhausted": "Retry exhausted",
       "investigation-invalid": "Investigation invalid", "awaiting-development": "Awaiting development"
     }};
     const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}}[char]));
@@ -244,7 +245,8 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
       const skipped = run.review.skipped?.length ? `<section class="callout"><strong>Skipped validation</strong><ul class="findings">${{run.review.skipped.map(item => `<li>${{esc(item)}}</li>`).join("")}}</ul></section>` : "";
       const blockedSummary = run.blocked?.developer_summary ? `<p><strong>Developer blocker:</strong> ${{esc(run.blocked.developer_summary)}}</p>` : "";
       const blockedLogs = run.blocked?.logs_path ? `<p><strong>Run logs:</strong> ${{esc(run.blocked.logs_path)}}</p>` : "";
-      const blocked = run.blocked ? `<section class="callout rejected"><strong>Blocked</strong><p>${{esc(run.blocked.reason || "Repeated unchanged review blocker")}}</p>${{blockedSummary}}${{blockedLogs}}</section>` : "";
+      const blocked = run.blocked && run.status !== "no_changes" && run.result?.status !== "NO_CHANGES" ? `<section class="callout rejected"><strong>Blocked</strong><p>${{esc(run.blocked.reason || "Repeated unchanged review blocker")}}</p>${{blockedSummary}}${{blockedLogs}}</section>` : "";
+      const result = run.result ? `<section class="callout rejected"><strong>Result · ${{esc(labels[run.status] || run.status)}}</strong><p>${{esc(run.result.reason || "No result summary recorded.")}}</p>${{run.result.logs_path ? `<p><strong>Run logs:</strong> ${{esc(run.result.logs_path)}}</p>` : ""}}${{run.result.next_action ? `<p><strong>Next:</strong> ${{esc(run.result.next_action)}}</p>` : ""}}</section>` : "";
       const investigationFindings = run.investigation.findings?.length ? `<ul class="findings">${{run.investigation.findings.map(item => `<li>${{esc(item)}}</li>`).join("")}}</ul>` : `<p class="subtle">No findings recorded.</p>`;
       const recurring = run.review.recurring?.length ? `<section class="callout rejected"><strong>Recurring findings</strong><ul class="findings">${{run.review.recurring.map(item => `<li>[${{esc(item.severity)}}] ${{esc(item.text)}} <span class="meta">(${{esc(item.count)}} reviews)</span></li>`).join("")}}</ul></section>` : "";
       const policy = run.usage?.security_policy;
@@ -262,6 +264,7 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str)
       const files = run.files.length ? run.files.map(file => `<details><summary>${{esc(file.kind)}} · ${{esc(file.name)}} <span class="meta">${{esc(file.updated)}}</span></summary><pre>${{esc(file.content)}}</pre></details>`).join("") : `<div class="empty">No log files recorded.</div>`;
       detail.innerHTML = `<div class="detail-top"><div><h2>${{esc(run.label)}}</h2><div class="branch">${{esc(run.branch)}}</div></div>${{badge(run.status)}}</div>
         ${{blocked}}
+        ${{result}}
         <div class="meta" style="margin-top:12px"><span>${{esc(run.attempts)}} developer attempt${{run.attempts === 1 ? "" : "s"}}</span><span>Last activity: ${{esc(run.last_activity)}}</span><span>${{esc(run.file_count)}} log files</span></div>
         <section class="callout"><strong>Run metrics</strong><p>${{esc(tokenValue(run) == null ? "Provider usage unavailable" : `${{formatTokens(tokenValue(run))}} tokens`)}}${{run.usage.estimated_cost_usd == null ? "" : ` · $${{Number(run.usage.estimated_cost_usd).toFixed(4)}} estimated`}} · ${{esc(runDuration(run))}} · ${{esc(run.usage?.metrics?.operation_count || 0)}} operations</p>${{tokenBreakdown}}</section>
         <section class="callout"><strong>Investigation feedback</strong><p>${{esc(run.investigation.summary)}}</p>${{investigationFindings}}</section>

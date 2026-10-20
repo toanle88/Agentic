@@ -165,6 +165,61 @@ class DashboardTests(unittest.TestCase):
             self.assertIn("The upstream service is unavailable.", html)
             self.assertIn(str(run), html)
 
+    def test_terminal_result_statuses_are_visible_and_legacy_blockers_still_parse(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            exhausted = root / "agent-issue-61-deadbeef"
+            exhausted.mkdir(parents=True)
+            (exhausted / "result.json").write_text(json.dumps({
+                "status": "RETRY_EXHAUSTED",
+                "attempts": 4,
+                "max_retries": 3,
+                "reason": "Tests failed: assertion mismatch",
+                "logs_path": str(exhausted),
+                "next_action": "rerun --issue 61",
+            }))
+            no_changes = root / "agent-issue-62-deadbeef"
+            no_changes.mkdir(parents=True)
+            (no_changes / "blocked.json").write_text(json.dumps({
+                "status": "blocked",
+                "kind": "no-code-changes",
+                "developer_summary": "Missing upstream contract.",
+                "logs_path": str(no_changes),
+            }))
+            snapshots = {item["issue"]: item for item in agentic_dashboard.collect_runs(root)}
+            self.assertEqual(snapshots[61]["status"], "retry_exhausted")
+            self.assertEqual(snapshots[61]["result"]["attempts"], 4)
+            self.assertEqual(snapshots[62]["status"], "no_changes")
+            rendered = agentic_dashboard.render_dashboard(list(snapshots.values()), "demo", root.name)
+            self.assertIn("Retry exhausted", rendered)
+            self.assertIn("No changes", rendered)
+            self.assertIn("Missing upstream contract.", rendered)
+            self.assertIn(
+                'run.blocked && run.status !== "no_changes" && '
+                'run.result?.status !== "NO_CHANGES"',
+                rendered,
+            )
+
+    def test_malformed_terminal_result_status_is_ignored(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            for suffix, invalid_status in (("array", []), ("object", {})):
+                run = root / f"agent-issue-63-{suffix}"
+                run.mkdir(parents=True)
+                (run / "developer-001.txt").write_text("Developer output\n")
+                (run / "result.json").write_text(json.dumps({
+                    "status": invalid_status,
+                    "attempts": 1,
+                }))
+
+            snapshots = {
+                item["id"]: item for item in agentic_dashboard.collect_runs(root)
+            }
+            self.assertEqual(snapshots["agent-issue-63-array"]["status"], "awaiting-review")
+            self.assertIsNone(snapshots["agent-issue-63-array"]["result"])
+            self.assertEqual(snapshots["agent-issue-63-object"]["status"], "awaiting-review")
+            self.assertIsNone(snapshots["agent-issue-63-object"]["result"])
+
     def test_investigation_feedback_is_visible_before_development(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / ".demo-agent-runs"

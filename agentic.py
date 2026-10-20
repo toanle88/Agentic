@@ -93,7 +93,7 @@ from agentic_telemetry import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.30"
+__version__ = "1.1.31"
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 INSTRUCTION_CONTEXT_CHARS = _INSTRUCTION_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module
@@ -1062,7 +1062,20 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
             system_prompt=system_prompt,
         )
     if not completed:
-        raise RuntimeError("Unable to complete the task; resume later with --issue N")
+        terminal_result = None
+        try:
+            candidate = json.loads((folder / "result.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            candidate = None
+        if isinstance(candidate, dict):
+            status = candidate.get("status")
+            next_action = candidate.get("next_action")
+            if (
+                status in {"RETRY_EXHAUSTED", "BLOCKED", "NO_CHANGES"}
+                and isinstance(next_action, str)
+            ):
+                terminal_result = f"{status}: {next_action}"
+        raise RuntimeError(terminal_result or "Unable to complete the task; resume the preserved worktree")
     return 0
 
 

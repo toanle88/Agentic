@@ -178,13 +178,30 @@ def print_review_summary(verdict: dict[str, Any]) -> None:
                 ))
 
 
-def print_run_summary(run: Run, status: str, next_action: str) -> None:
-    color = "32" if status in {"APPROVED", "VALIDATED"} else "33"
+def print_run_summary(run: Run, status: str, next_action: str, *,
+                      attempts: int | None = None,
+                      max_retries: int | None = None,
+                      reason: str = "",
+                      logs_path: Path | None = None) -> None:
+    color = "32" if status in {"APPROVED", "VALIDATED", "MANUALLY APPROVED"} else "33"
     separator = _unicode_or_ascii("─" * 72, "-" * 72)
     _console_print("\n" + separator)
     _console_print(f"RESULT:   {_paint(status, color)}")
     _console_print(f"Branch:   {run.branch}")
     _console_print(f"Worktree: {run.worktree}")
+    if attempts is not None:
+        retry_detail = (
+            f" (configured retries: {max_retries})"
+            if max_retries is not None else ""
+        )
+        configured_attempts = (
+            f"/{max_retries + 1}" if max_retries is not None else ""
+        )
+        _console_print(f"Attempts: {attempts}{configured_attempts}{retry_detail}")
+    if reason:
+        _console_print(f"Reason:   {reason}")
+    if logs_path is not None:
+        _console_print(f"Logs:     {logs_path}")
     _console_print(f"Next:     {next_action}")
     _console_print(separator, flush=True)
 

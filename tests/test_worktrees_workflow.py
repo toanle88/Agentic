@@ -1,5 +1,6 @@
 """Focused workflow tests."""
 import json
+import shlex
 import subprocess
 import sys
 from io import StringIO
@@ -15,6 +16,50 @@ from test_worktrees import _GitRepositoryTestCase
 
 
 class WorkflowTests(_GitRepositoryTestCase):
+    def test_local_resume_action_materializes_task_file_invocation(self):
+        task_file = self.repo / "task.md"
+        task_file.write_text("Implement the local task.\n")
+        issue = agentic.Issue.from_local_text(task_file.read_text(), task_file)
+
+        action = agentic_workflow._resume_action(issue, self.repo / "logs")
+
+        resume_file = self.repo / "logs" / "resume-task.md"
+        self.assertIn(shlex.join([
+            "python", "agentic.py", "--task-file", str(resume_file.resolve()),
+        ]), action)
+        self.assertEqual(resume_file.read_text(encoding="utf-8"), issue.body)
+        self.assertNotIn("rerun the local task", action)
+
+    def test_local_resume_action_materializes_inline_task_without_displaying_body(self):
+        body = "Add CSV export\n\x1b[31mPreserve the header order.\n"
+        issue = agentic.Issue.from_local_text(body)
+        folder = self.repo / "logs"
+        folder.mkdir()
+
+        action = agentic_workflow._resume_action(issue, folder)
+
+        task_file = folder / "resume-task.md"
+        command = shlex.join(["python", "agentic.py", "--task-file", str(task_file.resolve())])
+        self.assertIn(command, action)
+        self.assertNotIn(issue.body, action)
+        self.assertNotIn("\x1b", action)
+        self.assertNotIn("--task ", action)
+        self.assertEqual(task_file.read_text(encoding="utf-8"), issue.body)
+
+    def test_local_resume_action_reuses_materialized_task_file(self):
+        issue = agentic.Issue.from_local_text("Add CSV export\nPreserve the header order.")
+        folder = self.repo / "logs"
+        folder.mkdir()
+        task_file = folder / "resume-task.md"
+        task_file.write_text("original task\n", encoding="utf-8")
+
+        action = agentic_workflow._resume_action(issue, folder)
+
+        self.assertIn(shlex.join([
+            "python", "agentic.py", "--task-file", str(task_file.resolve()),
+        ]), action)
+        self.assertEqual(task_file.read_text(encoding="utf-8"), "original task\n")
+
     def test_no_code_changes_exception_preserves_public_identity(self):
         run = agentic.create_worktree(self.repo, 'main', 13)
 
@@ -109,6 +154,90 @@ class WorkflowTests(_GitRepositoryTestCase):
         self.assertEqual(review.call_args.kwargs['agent'], config['reviewer_agent'])
         self.assertEqual(review.call_args.kwargs['system_prompt'], config['system_prompt'])
         record.assert_called_once_with(folder, approved)
+
+
+    def test_successful_review_clears_obsolete_terminal_markers(self):
+        run = agentic.create_worktree(self.repo, 'main', 40)
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(40, 'Clear terminal markers', '')
+        (folder / 'blocked.json').write_text(json.dumps({
+            'status': 'blocked',
+            'result_status': 'BLOCKED',
+            'patch_digest': 'old-digest',
+        }))
+        (folder / 'result.json').write_text(json.dumps({
+            'status': 'RETRY_EXHAUSTED',
+            'attempts': 4,
+            'max_retries': 3,
+        }))
+        config = {
+            'test_commands': [['python', '-c', 'print("ok")']],
+            'max_files': None,
+            'reviewer_agent': {'provider': 'codex'},
+        }
+        patch_value = ('base-sha', 'new-digest', 'one file changed')
+        approved = {'approved': True, 'summary': 'Good', 'findings': [], 'skipped': []}
+        with (patch('agentic.run_tests', return_value=(True, 'tests passed')),
+              patch('agentic.prepare_patch', side_effect=[patch_value, patch_value]),
+              patch('agentic.review', return_value=approved)):
+            result = agentic.verify_and_review(run, issue, 'main', config, folder)
+
+        self.assertTrue(result[0])
+        self.assertFalse((folder / 'blocked.json').exists())
+        self.assertFalse((folder / 'result.json').exists())
+        self.assertTrue((folder / 'review-approval.json').exists())
+
+    def test_rejected_review_clears_obsolete_terminal_markers(self):
+        run = agentic.create_worktree(self.repo, 'main', 41)
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(41, 'Clear rejected terminal markers', '')
+        (folder / 'blocked.json').write_text(json.dumps({
+            'status': 'blocked',
+            'result_status': 'BLOCKED',
+            'patch_digest': 'old-digest',
+        }))
+        (folder / 'result.json').write_text(json.dumps({
+            'status': 'RETRY_EXHAUSTED',
+            'attempts': 4,
+            'max_retries': 3,
+        }))
+        config = {
+            'test_commands': [['python', '-c', 'print("ok")']],
+            'max_files': None,
+            'reviewer_agent': {'provider': 'codex'},
+        }
+        rejected = {
+            'approved': False, 'summary': 'Still missing the contract',
+            'findings': ['Define the contract'], 'skipped': [],
+        }
+        with (patch('agentic.run_tests', return_value=(True, 'tests passed')),
+              patch('agentic.prepare_patch', return_value=('base-sha', 'new-digest', 'changed')),
+              patch('agentic.review', return_value=rejected)):
+            result = agentic.verify_and_review(run, issue, 'main', config, folder)
+
+        self.assertFalse(result[0])
+        self.assertFalse((folder / 'blocked.json').exists())
+        self.assertFalse((folder / 'result.json').exists())
+
+    def test_failed_review_clears_obsolete_terminal_markers(self):
+        run = agentic.create_worktree(self.repo, 'main', 42)
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(42, 'Clear failed terminal markers', '')
+        (folder / 'blocked.json').write_text(json.dumps({
+            'status': 'blocked', 'patch_digest': 'old-digest',
+        }))
+        (folder / 'result.json').write_text(json.dumps({'status': 'BLOCKED'}))
+        config = {'test_commands': [['python', '-c', 'print("ok")']], 'max_files': None}
+        with (patch('agentic.run_tests', return_value=(False, 'tests failed')),
+              patch('agentic.prepare_patch') as prepare,
+              patch('agentic.review') as review):
+            result = agentic.verify_and_review(run, issue, 'main', config, folder)
+
+        self.assertFalse(result[0])
+        self.assertFalse((folder / 'blocked.json').exists())
+        self.assertFalse((folder / 'result.json').exists())
+        prepare.assert_not_called()
+        review.assert_not_called()
 
 
     def test_verify_and_review_stops_before_review_when_tests_fail(self):
@@ -206,7 +335,15 @@ class WorkflowTests(_GitRepositoryTestCase):
         rendered = output.getvalue()
         for attempt in range(1, 7):
             self.assertIn(f'attempt {attempt}/6', rendered)
-        self.assertIn('Attempts exhausted after 6 attempts', rendered)
+        self.assertIn('RESULT:   RETRY_EXHAUSTED', rendered)
+        self.assertIn('Attempts: 6/6 (configured retries: 5)', rendered)
+        self.assertIn('Reason:   Tests failed: AssertionError: expected a changed result', rendered)
+        self.assertIn(f'Logs:     {folder}', rendered)
+        self.assertIn('then python agentic.py --issue 38', rendered)
+        result = json.loads((folder / 'result.json').read_text(encoding='utf-8'))
+        self.assertEqual(result['status'], 'RETRY_EXHAUSTED')
+        self.assertEqual(result['attempts'], 6)
+        self.assertEqual(result['max_retries'], 5)
 
 
     def test_develop_runs_only_initial_attempt_when_retries_are_zero(self):
@@ -227,7 +364,64 @@ class WorkflowTests(_GitRepositoryTestCase):
 
         run_agent.assert_called_once()
         self.assertIn('attempt 1/1', output.getvalue())
-        self.assertIn('Attempts exhausted after 1 attempt', output.getvalue())
+        self.assertIn('RESULT:   RETRY_EXHAUSTED', output.getvalue())
+        self.assertIn('Attempts: 1/1 (configured retries: 0)', output.getvalue())
+
+
+    def test_develop_local_retry_exhaustion_reports_reusable_task_file_command(self):
+        run = agentic.create_worktree(self.repo, 'main', 43)
+        folder = agentic.logs_path(self.repo, run)
+        task_file = self.repo / 'local-task.md'
+        task_file.write_text('Implement the local task.\n')
+        issue = agentic.Issue.from_local_text(task_file.read_text(), task_file)
+        config = {
+            'max_retries': 0,
+            'max_files': None,
+            'developer_agent': {'provider': 'codex'},
+        }
+        with (patch('agentic.run_agent', return_value=(True, 'implemented')),
+              patch('agentic.verify_and_review', return_value=(
+                  False, 'AssertionError: expected a changed result', {}, '', '',
+              )),
+              patch('sys.stdout', new_callable=StringIO) as output):
+            self.assertFalse(agentic.develop(run, issue, 'main', config, folder))
+
+        command = shlex.join([
+            'python', 'agentic.py', '--task-file',
+            str((folder / 'resume-task.md').resolve()),
+        ])
+        self.assertIn(f'then {command}', output.getvalue())
+        result = json.loads((folder / 'result.json').read_text(encoding='utf-8'))
+        self.assertIn(command, result['next_action'])
+
+    def test_develop_inline_retry_resume_does_not_persist_task_body(self):
+        run = agentic.create_worktree(self.repo, 'main', 44)
+        folder = agentic.logs_path(self.repo, run)
+        body = 'Implement it\n\x1b]0;injected title\x07\n' + ('x' * 5_000)
+        issue = agentic.Issue.from_local_text(body)
+        config = {
+            'max_retries': 0,
+            'max_files': None,
+            'developer_agent': {'provider': 'codex'},
+        }
+        with (patch('agentic.run_agent', return_value=(True, 'implemented')),
+              patch('agentic.verify_and_review', return_value=(
+                  False, 'AssertionError: expected a changed result', {}, '', '',
+              )),
+              patch('sys.stdout', new_callable=StringIO) as output):
+            self.assertFalse(agentic.develop(run, issue, 'main', config, folder))
+
+        result = json.loads((folder / 'result.json').read_text(encoding='utf-8'))
+        action = result['next_action']
+        self.assertLess(len(action), 1_000)
+        self.assertNotIn(body, action)
+        self.assertNotIn('\x1b', action)
+        self.assertNotIn('\x07', action)
+        self.assertIn('--task-file', action)
+        self.assertEqual((folder / 'resume-task.md').read_text(encoding='utf-8'), body)
+        self.assertNotIn(body, output.getvalue())
+        self.assertNotIn('\x1b', output.getvalue())
+        self.assertNotIn('\x07', output.getvalue())
 
 
     def test_develop_does_not_retry_environment_failures(self):
@@ -271,7 +465,8 @@ class WorkflowTests(_GitRepositoryTestCase):
             )
 
         self.assertTrue(result)
-        self.assertIn('RESULT:   BLOCKED', output.getvalue())
+        self.assertIn('RESULT:   NO_CHANGES', output.getvalue())
+        self.assertIn('Attempts: 1/6 (configured retries: 5)', output.getvalue())
         self.assertIn('Checks passed, but the developer produced no code changes', output.getvalue())
         self.assertIn(developer_report, output.getvalue())
         self.assertIn(str(folder), output.getvalue())
@@ -279,9 +474,12 @@ class WorkflowTests(_GitRepositoryTestCase):
         review.assert_not_called()
         blocked = json.loads((folder / 'blocked.json').read_text(encoding='utf-8'))
         self.assertEqual(blocked['kind'], 'no-code-changes')
+        self.assertEqual(blocked['result_status'], 'NO_CHANGES')
         self.assertEqual(blocked['developer_summary'], developer_report)
         self.assertEqual(blocked['developer_log'], 'developer-001.txt')
         self.assertEqual(blocked['logs_path'], str(folder))
+        result_record = json.loads((folder / 'result.json').read_text(encoding='utf-8'))
+        self.assertEqual(result_record['status'], 'NO_CHANGES')
 
         with patch('agentic.run_agent') as resumed_agent:
             self.assertTrue(agentic.develop(run, issue, 'main', config, folder))
@@ -314,12 +512,20 @@ class WorkflowTests(_GitRepositoryTestCase):
         with (patch('agentic.run_agent', side_effect=[
                   (True, developer_reports[0]), (True, developer_reports[1]),
               ]) as run_agent,
-              patch('agentic.verify_and_review', return_value=review)):
+              patch('agentic.verify_and_review', return_value=review),
+              patch('sys.stdout', new_callable=StringIO) as output):
             self.assertTrue(agentic.develop(run, issue, 'main', config, folder))
         self.assertEqual(run_agent.call_count, 2)
         blocked = json.loads((folder / 'blocked.json').read_text())
         self.assertEqual(blocked['status'], 'blocked')
+        self.assertEqual(blocked['result_status'], 'BLOCKED')
         self.assertEqual(blocked['patch_digest'], 'same-digest')
+        self.assertIn('Production adapter is unavailable', blocked['summary'])
+        rendered = output.getvalue()
+        self.assertIn('RESULT:   BLOCKED', rendered)
+        self.assertIn('Attempts: 2/4 (configured retries: 3)', rendered)
+        self.assertIn('Production adapter is unavailable', rendered)
+        self.assertIn(f'Logs:     {folder}', rendered)
 
         with (patch('agentic.prepare_patch', return_value=('base', 'same-digest', 'summary')),
               patch('agentic.run_agent') as resumed_agent):
@@ -450,6 +656,48 @@ class WorkflowTests(_GitRepositoryTestCase):
             json.loads((run_folder / 'run.json').read_text())['instruction'],
             'Preserve the CSV header order',
         )
+
+
+    def test_execute_local_retry_failure_reports_saved_resume_command(self):
+        config_path = self.repo / 'local-agent-config.json'
+        config_path.write_text(json.dumps({
+            'task_source': 'local',
+            'test_commands': [[sys.executable, '-c', 'print("ok")']],
+        }))
+        task_file = self.repo / 'task.md'
+        task_file.write_text('Implement the local task.\n')
+        state_dir = Path(self.tmp.name) / 'agentic-state'
+        args = agentic.build_parser().parse_args([
+            '--repo', str(self.repo), '--config', str(config_path),
+            '--state-dir', str(state_dir), '--task-file', str(task_file),
+        ])
+        fake_run = agentic.Run(None, 'agent/task-local-aabbccddeeff', Path('/tmp/fake-worktree'))
+        run_folder = agentic.logs_path(self.repo, fake_run, state_dir)
+        command = shlex.join([
+            'python', 'agentic.py', '--task-file', str(task_file.resolve()),
+        ])
+
+        def incomplete(*_args, **_kwargs):
+            (run_folder / 'result.json').write_text(json.dumps({
+                'status': 'RETRY_EXHAUSTED', 'next_action': (
+                    f'inspect the run logs at {run_folder}, then {command}'
+                ),
+            }))
+            return False
+
+        with (patch('agentic.preflight_test_commands'),
+              patch('agentic.preflight_agent_settings'),
+              patch('agentic.create_local_worktree', return_value=fake_run),
+              patch('agentic._run_investigation', return_value={
+                  'summary': 'Valid local task', 'findings': [],
+              }),
+              patch('agentic.run_tests', return_value=(True, 'ok')),
+              patch('agentic.develop', side_effect=incomplete)):
+            with self.assertRaisesRegex(RuntimeError, r'RETRY_EXHAUSTED: .*--task-file') as raised:
+                agentic.execute_locked(args, self.repo)
+
+        self.assertNotIn('--issue N', str(raised.exception))
+        self.assertIn(command, str(raised.exception))
 
 
     def test_investigation_feedback_does_not_block_development(self):
