@@ -1084,13 +1084,13 @@ class ShellTests(unittest.TestCase):
             class Process:
                 stdout = StringIO(
                     'publication output\n'
-                    "[PUBLISH] Publish this patch? Type 'publish' to approve: "
+                    "[PUBLISH] Publish this patch? [y/N]: "
                 )
 
                 def wait(self):
                     self.mode_at_wait = shell.terminal_mode
                     self.prompt_was_visible = (
-                        "[PUBLISH] Publish this patch? Type 'publish' to approve: "
+                        "[PUBLISH] Publish this patch? [y/N]: "
                         in output.getvalue()
                     )
                     return 0
@@ -1113,17 +1113,19 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(process.mode_at_wait, agentic_shell.TerminalMode.CONFIRMATION)
         self.assertLess(
             rendered.rfind('publication output'),
-            rendered.rfind("[PUBLISH] Publish this patch? Type 'publish' to approve: "),
+            rendered.rfind("[PUBLISH] Publish this patch? [y/N]: "),
         )
         self.assertIn(
-            "[PUBLISH] Publish this patch? Type 'publish' to approve: ",
+            "[PUBLISH] Publish this patch? [y/N]: ",
             ''.join(state.history),
         )
 
     def test_foreground_publish_waiting_prompts_are_editable(self):
         prompts = (
             "[PUBLISH] Waiting for worktree selection. Enter a number or 'q' to cancel: ",
+            "[PUBLISH] Publish this patch? [y/N]: ",
             "[PUBLISH] Waiting for publication confirmation. Type 'publish' to continue or 'q' to cancel: ",
+            "[PUBLISH] Publish this patch? Type 'publish' to approve: ",
         )
         for prompt in prompts:
             with self.subTest(prompt=prompt):

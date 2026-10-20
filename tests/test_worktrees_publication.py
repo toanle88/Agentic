@@ -79,8 +79,7 @@ class PublicationTests(_GitRepositoryTestCase):
               patch('agentic.command', wraps=agentic.command) as mock_command):
             agentic.publish(run, issue, 'fake/repo', 'main', cfg, folder)
             confirm.assert_called_once_with(
-                "\n[PUBLISH] Waiting for publication confirmation. "
-                "Type 'publish' to continue or 'q' to cancel: ",
+                "\n[PUBLISH] Publish this patch? [y/N]: ",
                 system_prefix='PUBLISH',
             )
             verify.assert_not_called()
@@ -115,6 +114,34 @@ class PublicationTests(_GitRepositoryTestCase):
         self.assertEqual(confirm.call_count, 2)
         self.assertTrue(any('Invalid confirmation' in call.args[0] for call in status.call_args_list))
         self.assertFalse(any(c.args[0][:3] == ['git', 'push', '-u'] for c in mock_command.call_args_list))
+
+
+    def test_publish_empty_and_n_confirmations_cancel_without_publishing(self):
+        for issue_number, response in ((153, ''), (154, 'n')):
+            with self.subTest(response=response):
+                run = agentic.create_worktree(self.repo, 'main', issue_number)
+                (run.worktree / 'fix.py').write_text('fixed=True\n')
+                folder = agentic.logs_path(self.repo, run)
+                issue = agentic.Issue(issue_number, 'Fix feature', '')
+                cfg = {
+                    'test_commands': [[sys.executable, '-c', 'print("ok")']],
+                    'max_retries': 1,
+                    'max_files': 10,
+                }
+                base_sha, digest, _ = agentic.prepare_patch(run.worktree, 'main', 10)
+                agentic.record_review_approval(
+                    run, issue, 'main', base_sha, digest,
+                    {'approved': True, 'summary': 'Good', 'findings': [], 'skipped': []},
+                    cfg, folder,
+                )
+                with (patch('agentic.check_existing_pr', return_value=[]),
+                      patch('agentic_shell_input._interactive_line', return_value=response),
+                      patch('agentic.command', wraps=agentic.command) as mock_command):
+                    agentic.publish(run, issue, 'fake/repo', 'main', cfg, folder)
+                self.assertFalse(any(
+                    call_item.args[0][:3] == ['git', 'push', '-u']
+                    for call_item in mock_command.call_args_list
+                ))
 
 
     def test_publish_ctrl_c_reports_cancellation_without_publishing(self):
@@ -172,7 +199,7 @@ class PublicationTests(_GitRepositoryTestCase):
 
         def mutate_on_confirm(*args):
             (run.worktree / 'fix.py').write_text('after\n')
-            return 'publish'
+            return 'y'
 
         with (patch('agentic.check_existing_pr', return_value=[]),
               patch('builtins.input', side_effect=mutate_on_confirm)):
@@ -181,7 +208,7 @@ class PublicationTests(_GitRepositoryTestCase):
         self.assertEqual(agentic.git(run.worktree, 'log', '-1', '--format=%s'), 'initial')
 
 
-    def test_publish_commits_pushes_and_opens_draft_pr_after_confirmation(self):
+    def test_publish_accepts_legacy_alias_and_opens_draft_pr(self):
         run = agentic.create_worktree(self.repo, 'main', 30)
         (run.worktree / 'fix.py').write_text('fixed=True\n')
         folder = agentic.logs_path(self.repo, run)
@@ -256,7 +283,7 @@ class PublicationTests(_GitRepositoryTestCase):
         with (patch('agentic.check_existing_pr', return_value=[]),
               patch('agentic.prepare_patch', return_value=('base-sha', 'digest', 'summary')),
               patch('agentic.git', side_effect=fail_on_push),
-              patch('builtins.input', return_value='publish'),
+              patch('builtins.input', return_value='yes'),
               patch('agentic._status_print') as status):
             with self.assertRaisesRegex(RuntimeError, 'remote rejected the push'):
                 agentic.publish(run, issue, 'owner/repo', 'main', config, folder)
@@ -295,7 +322,7 @@ class PublicationTests(_GitRepositoryTestCase):
               )),
               patch('agentic.git'),
               patch('agentic.command', side_effect=fake_command),
-              patch('builtins.input', return_value='publish')):
+              patch('builtins.input', return_value='y')):
             agentic.publish(
                 run, issue, 'owner/repo', 'main', config, folder,
                 manual_approval=approval,

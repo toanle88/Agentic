@@ -276,8 +276,10 @@ agentic --issue 119 --publish
 
 `--review` establishes the approval by running the configured checks and the
 independent reviewer. `--publish` does not run checks or review; it verifies
-that the current patch still matches the recorded approval, asks for the exact
-`publish` confirmation, and then creates the draft PR.
+that the current patch still matches the recorded approval, then asks for a
+safe default-no confirmation: enter `y` or `yes` to continue, or `n`, `no`,
+`q`, or an empty response to cancel. The legacy `publish` approval alias
+remains accepted for compatibility.
 
 If the automated review is repeatedly rejecting a finding that a human has
 explicitly judged out of scope, mark the existing worktree complete with an
@@ -292,7 +294,8 @@ agentic --issue 119 --publish
 records the current patch digest outside the repository. The `--reason` option
 is optional; when omitted, Agentic records `Manually marked done by user`.
 Publication uses the recorded approval, refuses any patch changed after the
-approval, asks for the exact `publish` confirmation, and opens only a draft PR.
+approval, asks for the safe default-no confirmation described above, and opens
+only a draft PR.
 It does not run tests or an automated review. If the code or issue changes,
 rerun development or `--review` first; for a manual completion, mark it done
 again with a new reason.
@@ -304,9 +307,10 @@ and asks you to run development or `--review` first.
 When multiple worktrees are available, Agentic prints a waiting message and
 asks for a number from the displayed list; enter `q` (or press Ctrl-C) to
 cancel. It confirms the selected worktree before continuing. Before any
-commit or push, it prints a second waiting message; enter `publish` to approve
-or `q` to cancel. Invalid responses explain the accepted values and repeat the
-prompt. While a foreground child is running, its output and progress stay
+commit or push, it prints `[PUBLISH] Publish this patch? [y/N]:`; enter `y` or
+`yes` to approve, or press Enter, `n`, `no`, or `q` to cancel. The legacy
+`publish` approval alias is also accepted. Invalid responses explain the
+accepted values and repeat the prompt. While a foreground child is running, its output and progress stay
 above a reserved bottom input area; these prompts remain visible there and are
 redrawn on terminal resize. The same layout applies to the foreground
 `/chat ISSUE` session. At a publication prompt, enter `/stop` to cancel the
@@ -317,9 +321,9 @@ For a local task, use `agentic --task-file task.md --publish` or resume from
 the saved task file created by the interactive shell.
 
 Agentic verifies that the patch still matches its recorded approval and asks
-for the exact confirmation word `publish`. It does not run tests or review
-during publication. Only after confirmation does it commit, push the issue
-branch, and open a draft pull request. The draft state leaves a final human
+for the safe default-no confirmation. It does not run tests or review during
+publication. Only after confirmation does it commit, push the issue branch,
+and open a draft pull request. The draft state leaves a final human
 review step before merging.
 
 When Agentic is run from a checkout of its own repository, changes to its
