@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, cast
 
 from agentic import __version__
-from agentic_output import paint, strip_ansi, style_text
+from agentic_output import paint, sanitize_terminal_text, strip_ansi, style_text
 if TYPE_CHECKING:
     from agentic_shell import Job
 
@@ -49,6 +49,7 @@ HELP = """Commands:
     /version                            show the Agentic version
 
   Session
+    /chat ISSUE MESSAGE                  run an issue with a one-off instruction
     /stop JOB|--all                     stop one or all running jobs
     /help                               show this help
     /quit                               leave the shell; running jobs continue
@@ -74,6 +75,7 @@ HELP_SECTION_COLORS = {
 SHELL_COMMANDS = (
     "/run",
     "/ps",
+    "/chat",
     "/logs",
     "/list",
     "/runs",
@@ -91,6 +93,7 @@ SHELL_COMMANDS = (
 )
 SHELL_OPTIONS = {
     "/run": ("--profile", "--instruction", "--review", "--publish", "--mark-done", "--reason", "--new", "--task-file"),
+    "/chat": (),
     "/ps": ("--all",),
     "/runs": ("--json",),
     "/status": ("--json",),
@@ -101,6 +104,7 @@ SHELL_OPTIONS = {
 }
 COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/run": "start a background job or local task",
+    "/chat": "run an issue with a one-off instruction",
     "/ps": "show running or persisted background jobs",
     "/logs": "follow or show captured terminal output",
     "/list": "list open GitHub issues",
@@ -292,7 +296,40 @@ def _enable_windows_ansi() -> None:
 
 def _parse_ansi_sequence(read_next: Callable[[], str | None]) -> tuple[str, str]:
     seq = read_next()
-    if seq in {"[", "O"}:
+    if seq == "[":
+        sequence: list[str] = []
+        while True:
+            code = read_next()
+            if code is None:
+                return "ESCAPE", "\x1b"
+            sequence.append(code)
+            if code == "~" or code.isalpha():
+                break
+        value = "".join(sequence)
+        if value == "200~":
+            return "PASTE_START", ""
+        if value == "201~":
+            return "PASTE_END", ""
+        if value in {"A", "Z", "1;2A"}:
+            return "UP", ""
+        if value == "B":
+            return "DOWN", ""
+        if value == "C":
+            return "RIGHT", ""
+        if value == "D":
+            return "LEFT", ""
+        if value in {"H", "1~", "7~"}:
+            return "HOME", ""
+        if value in {"F", "4~", "8~"}:
+            return "END", ""
+        if value == "3~":
+            return "DELETE", ""
+        # Terminals that support modified keys commonly encode Shift+Enter as
+        # CSI 13;2u or CSI 13;2~. Keep it distinct from submit/Enter.
+        if value in {"13;2u", "13;2~", "27;2;13~"}:
+            return "NEWLINE", "\n"
+        return "ESCAPE", "\x1b"
+    if seq == "O":
         code = read_next()
         if code == "A":
             return "UP", ""
@@ -370,6 +407,32 @@ class _KeyReader:
             if char:
                 return char
 
+    def _read_paste(self) -> str:
+        """Read a bracketed paste body, including embedded newlines."""
+        terminator = "\x1b[201~"
+        buffered = ""
+        pasted: list[str] = []
+        if os.name == "nt":
+            import msvcrt
+            getwch = cast(Callable[[], str], getattr(msvcrt, "getwch"))
+            read_next = getwch
+        else:
+            read_next = self._read_posix_char
+        while True:
+            char = read_next()
+            if not char:
+                pasted.append(buffered)
+                return "".join(pasted)
+            buffered += char
+            if buffered.endswith(terminator):
+                pasted.append(buffered[:-len(terminator)])
+                return "".join(pasted)
+            # Keep only the possible prefix of the terminator. This avoids
+            # swallowing ordinary pasted text when an escape is present.
+            while buffered and not terminator.startswith(buffered):
+                pasted.append(buffered[0])
+                buffered = buffered[1:]
+
     def read_key(self) -> tuple[str, str]:
         if os.name == "nt":
             import msvcrt
@@ -394,7 +457,10 @@ class _KeyReader:
                         if msvcrt.kbhit():
                             return getwch()
                     return None
-                return _parse_ansi_sequence(_read_win)
+                key, value = _parse_ansi_sequence(_read_win)
+                if key == "PASTE_START":
+                    return "PASTE", self._read_paste()
+                return key, value
             if char == "\x01":
                 return "CTRL_A", char
             if char == "\x05":
@@ -455,7 +521,10 @@ class _KeyReader:
             def _read_posix() -> str | None:
                 r, _, _ = select.select([fd], [], [], 0.05)
                 return self._read_posix_char() if r else None
-            return _parse_ansi_sequence(_read_posix)
+            key, value = _parse_ansi_sequence(_read_posix)
+            if key == "PASTE_START":
+                return "PASTE", self._read_paste()
+            return key, value
         return "CHAR", char
 
 
@@ -465,14 +534,18 @@ def _interactive_input(
     completer: Callable[[str, int | None], list[tuple[str, str]]],
     history: list[str] | None = None,
     key_reader_factory: Callable[[], Any] | None = None,
+    status_line: str | None = None,
 ) -> str:
-    """Read a shell line with live dropdown autocomplete, colors, and navigation."""
+    """Read one or more shell lines with autocomplete, paste, and navigation."""
     line = ""
     cursor_pos = 0
     selected_index = 0
     navigated = False
     dismissed = False
     prev_dropdown_lines = 0
+    prev_input_lines = 1
+    prev_cursor_row = 0
+    first_render = True
     candidates: list[tuple[str, str]] = []
 
     hist_entries = list(history) if history else []
@@ -480,9 +553,17 @@ def _interactive_input(
     saved_input = ""
 
     def render() -> None:
-        nonlocal prev_dropdown_lines, selected_index, navigated, candidates
+        nonlocal prev_dropdown_lines, prev_input_lines, prev_cursor_row
+        nonlocal selected_index, navigated, candidates, first_render
         columns = shutil.get_terminal_size(fallback=(80, 24)).columns
         lines_avail = shutil.get_terminal_size(fallback=(80, 24)).lines
+
+        if first_render and status_line:
+            status = sanitize_terminal_text(status_line)
+            sys.stdout.write(_shell_paint(_fit_terminal_text(status, columns - 1), "90") + "\n")
+            first_render = False
+        elif first_render:
+            first_render = False
 
         if not dismissed and line.lstrip().startswith("/"):
             try:
@@ -541,48 +622,69 @@ def _interactive_input(
                         content = content[:columns - 1]
                     dropdown_strings.append(content)
 
+        input_parts = line.split("\n")
+        cursor_row = line[:cursor_pos].count("\n")
+        cursor_column = cursor_pos - (line.rfind("\n", 0, cursor_pos) + 1)
+        display_lines: list[str] = []
+        cursor_display = 0
+        for row, part in enumerate(input_parts):
+            row_prompt = prompt if row == 0 else "  "
+            row_cursor = cursor_column if row == cursor_row else len(part)
+            visible, visible_cursor = _clip_input_line(
+                part, row_cursor, len(row_prompt), columns,
+            )
+            if row == cursor_row:
+                cursor_display = visible_cursor
+            display_lines.append(
+                _shell_paint(row_prompt, "1;36") + _shell_paint(visible, "37")
+            )
+
         buf: list[str] = []
-        display_prompt = _shell_paint(prompt, "1;36")
-        display_line, display_cursor = _clip_input_line(
-            line, cursor_pos, len(prompt), columns,
-        )
-        buf.append(f"\r\033[2K{display_prompt}{display_line}")
+        if prev_input_lines + prev_dropdown_lines:
+            if prev_cursor_row:
+                buf.append(f"\033[{prev_cursor_row}A")
+            buf.append("\r")
+            old_lines = prev_input_lines + prev_dropdown_lines
+            for index in range(old_lines):
+                buf.append("\033[2K")
+                if index < old_lines - 1:
+                    buf.append("\n")
+            if old_lines > 1:
+                buf.append(f"\033[{old_lines - 1}A\r")
+        buf.append(display_lines[0])
+        for display_line in display_lines[1:]:
+            buf.append(f"\n\033[2K{display_line}")
         for s in dropdown_strings:
             buf.append(f"\n\033[2K{s}")
-        if prev_dropdown_lines > new_dropdown_lines:
-            for _ in range(prev_dropdown_lines - new_dropdown_lines):
-                buf.append("\n\033[2K")
-        total_down = max(new_dropdown_lines, prev_dropdown_lines)
-        if total_down > 0:
-            buf.append(f"\033[{total_down}A")
-        cursor_col = len(prompt) + display_cursor + 1
+        cursor_col = len(prompt) + cursor_display + 1 if cursor_row == 0 else 2 + cursor_display + 1
+        if cursor_row + new_dropdown_lines:
+            buf.append(f"\033[{cursor_row + new_dropdown_lines}A")
+        if cursor_row:
+            buf.append(f"\033[{cursor_row}B")
         buf.append(f"\033[{cursor_col}G")
 
         sys.stdout.write("".join(buf))
         sys.stdout.flush()
         prev_dropdown_lines = new_dropdown_lines
+        prev_input_lines = len(display_lines)
+        prev_cursor_row = cursor_row
 
     def clear_dropdown() -> None:
-        nonlocal prev_dropdown_lines
+        nonlocal dismissed
         if prev_dropdown_lines > 0:
-            buf = []
-            for _ in range(prev_dropdown_lines):
-                buf.append("\n\033[2K")
-            buf.append(f"\033[{prev_dropdown_lines}A")
-            display_prompt = _shell_paint(prompt, "1;36")
-            columns = shutil.get_terminal_size(fallback=(80, 24)).columns
-            display_line, display_cursor = _clip_input_line(
-                line, cursor_pos, len(prompt), columns,
-            )
-            buf.append(f"\r\033[2K{display_prompt}{display_line}")
-            cursor_col = len(prompt) + display_cursor + 1
-            buf.append(f"\033[{cursor_col}G")
-            sys.stdout.write("".join(buf))
-            sys.stdout.flush()
-            prev_dropdown_lines = 0
+            dismissed = True
+            render()
+
+    def finish_input() -> None:
+        """Leave the cursor after the complete editable buffer."""
+        if prev_cursor_row < prev_input_lines - 1:
+            sys.stdout.write(f"\033[{prev_input_lines - 1 - prev_cursor_row}B")
+        sys.stdout.write("\r\n")
+        sys.stdout.flush()
 
     reader_factory = key_reader_factory or _KeyReader
     with reader_factory() as reader:
+        sys.stdout.write("\033[?2004h")
         render()
         try:
             while True:
@@ -605,8 +707,7 @@ def _interactive_input(
                         render()
                         continue
                     clear_dropdown()
-                    sys.stdout.write("\n")
-                    sys.stdout.flush()
+                    finish_input()
                     return line
 
                 if key == "TAB":
@@ -714,6 +815,18 @@ def _interactive_input(
                     render()
                     continue
 
+                if key in {"NEWLINE", "PASTE"}:
+                    inserted = char.replace("\r\n", "\n").replace("\r", "\n")
+                    if key == "NEWLINE":
+                        inserted = "\n"
+                    line = line[:cursor_pos] + inserted + line[cursor_pos:]
+                    cursor_pos += len(inserted)
+                    dismissed = False
+                    selected_index = 0
+                    navigated = False
+                    render()
+                    continue
+
                 if key == "CTRL_U":
                     line = line[cursor_pos:]
                     cursor_pos = 0
@@ -758,6 +871,8 @@ def _interactive_input(
 
         finally:
             clear_dropdown()
+            sys.stdout.write("\033[?2004l")
+            sys.stdout.flush()
 
 
 
@@ -826,7 +941,7 @@ def _readline_module():
 
 def _shell_paint(text: str, code: str) -> str:
     """Add terminal color without leaking escape codes into captured output."""
-    return paint(text, code)
+    return paint(sanitize_terminal_text(text), code)
 
 
 def _shell_print(message: Any = "", *, end: str = "\n", flush: bool = False,

@@ -14,6 +14,7 @@ from test_shell import _create_mock_reader
 
 class InteractiveInputTests(unittest.TestCase):
     def test_completion_suggests_commands_options_and_job_ids(self):
+        self.assertIn('/chat', agentic_shell._completion_candidates('/ch'))
         self.assertEqual(
             agentic_shell._completion_candidates('/r'),
             ['/run', '/runs'],
@@ -239,6 +240,65 @@ class InteractiveInputTests(unittest.TestCase):
                     agentic_shell._completion_items,
                     key_reader_factory=reader_d,
                 )
+
+    def test_interactive_input_accepts_bracketed_paste_as_multiline_text(self):
+        keys = [('PASTE', 'first line\nsecond line'), ('ENTER', '\n')]
+        reader = _create_mock_reader(keys)
+        output = StringIO()
+        with patch('sys.stdout', output):
+            result = agentic_shell._interactive_input(
+                '› ',
+                agentic_shell._completion_items,
+                key_reader_factory=reader,
+                status_line='GPT model · /tmp/repo · task: idle',
+            )
+        self.assertEqual(result, 'first line\nsecond line')
+        self.assertIn('GPT model · /tmp/repo · task: idle', output.getvalue())
+        self.assertIn('\033[?2004h', output.getvalue())
+        self.assertIn('\033[?2004l', output.getvalue())
+
+    def test_interactive_input_sanitizes_status_before_painting(self):
+        reader = _create_mock_reader([('ENTER', '\n')])
+        output = StringIO()
+        with patch('sys.stdout', output):
+            result = agentic_shell._interactive_input(
+                '› ',
+                agentic_shell._completion_items,
+                key_reader_factory=reader,
+                status_line='model\x1b[31m\r\nrepo\x07',
+            )
+        self.assertEqual(result, '')
+        rendered_status = output.getvalue().split('\033[?2004h', 1)[1].split('\n', 1)[0]
+        self.assertIn('model', rendered_status)
+        self.assertIn('repo', rendered_status)
+        self.assertNotIn('\x1b[31m', rendered_status)
+        self.assertNotIn('\r', rendered_status)
+        self.assertNotIn('\x07', rendered_status)
+
+    def test_interactive_input_redraws_after_terminal_resize(self):
+        keys = [('CHAR', 'a'), ('CHAR', 'b'), ('ENTER', '\n')]
+        reader = _create_mock_reader(keys)
+        sizes = iter([os.terminal_size((80, 24)), os.terminal_size((20, 8))])
+        with patch('agentic_shell.shutil.get_terminal_size',
+                   side_effect=lambda fallback: next(sizes, os.terminal_size((20, 8)))), \
+             patch('sys.stdout', new_callable=StringIO):
+            result = agentic_shell._interactive_input(
+                '› ', agentic_shell._completion_items,
+                key_reader_factory=reader,
+            )
+        self.assertEqual(result, 'ab')
+
+    def test_parse_ansi_sequence_supports_paste_and_shift_enter(self):
+        cases = [
+            (['[', '2', '0', '0', '~'], ('PASTE_START', '')),
+            (['[', '2', '0', '1', '~'], ('PASTE_END', '')),
+            (['[', '1', '3', ';', '2', 'u'], ('NEWLINE', '\n')),
+            (['[', '2', '7', ';', '2', ';', '1', '3', '~'], ('NEWLINE', '\n')),
+        ]
+        for seq, expected in cases:
+            iterator = iter(seq)
+            result = agentic_shell._parse_ansi_sequence(lambda: next(iterator, None))
+            self.assertEqual(result, expected)
 
 
     def test_interactive_terminal_detection(self):

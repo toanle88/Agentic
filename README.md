@@ -190,10 +190,10 @@ agentic
 Then run and monitor an issue:
 
 ```text
-agentic> /run 119
-agentic> /list
-agentic> /ps
-agentic> /logs 1 80
+› /run 119
+› /list
+› /ps
+› /logs 1 80
 ```
 
 Typing `/` opens an interactive autocomplete dropdown with command descriptions,
@@ -206,6 +206,13 @@ visible. Set `AGENTIC_ASCII=1` for terminals that do not render box-drawing
 characters, or `NO_COLOR=1` / `AGENTIC_PLAIN=1` for plain, uncolored output.
 Redirected output and persisted logs are plain text.
 
+Interactive input keeps a two-line status prompt with the developer provider
+and model, working directory, and active task. Up/Down recalls command history;
+Ctrl+C cancels the current input, Esc dismisses completion, and bracketed
+terminal paste or Shift+Enter inserts multiline text. Enter submits the complete
+buffer. /chat ISSUE MESSAGE starts an issue run with a one-off instruction;
+/chat MESSAGE creates a local task when task_source is local.
+
 For direct foreground execution:
 
 ```bash
@@ -214,7 +221,7 @@ agentic --issue 119
 
 Running the same issue again resumes its existing worktree. Use `--new` only when you intentionally want a separate worktree.
 
-Interactive shell commands include `/run`, `/ps`, `/logs`, `/list`, `/runs`,
+Interactive shell commands include `/run`, `/chat`, `/ps`, `/logs`, `/list`, `/runs`,
 `/status`, `/dashboard`, `/init`, `/doctor`, `/cleanup`, `/version`, `/help`,
 `/stop`, and `/quit`. Use `/run --task-file PATH` for a local task already saved
 in a file. `/runs` lists Agentic worktrees; `/ps --all` lists persisted shell

@@ -128,6 +128,109 @@ class ShellTests(unittest.TestCase):
     def test_help_command_is_available(self):
         self.assertEqual(agentic_shell.build_parser().parse_args(['help']).command, 'help')
 
+    def test_status_line_contains_model_repository_and_active_task(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / 'agent_config.json'
+            config.write_text('{"developer":{"provider":"openrouter","model":"openai/test-model"}}')
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), config=config, session_dir=root / 'logs'
+            )
+            shell.active_task = 'issue #69'
+            status = shell._status_line()
+            self.assertIn('openrouter · openai/test-model', status)
+            self.assertIn(str(root.resolve()), status)
+            self.assertIn('task: issue #69', status)
+
+    def test_status_line_filters_terminal_controls_from_dynamic_fields(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / 'agent_config.json'
+            config.write_text(
+                '{"developer":{"provider":"openrouter\\u001b[31m\\u0007",'
+                '"model":"model\\r\\nname"}}'
+            )
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), config=config, session_dir=root / 'logs'
+            )
+            shell.active_task = 'task\x1b]0;spoof\x07\nnext'
+            status = shell._status_line()
+            self.assertNotRegex(status, r'[\x00-\x1f\x7f-\x9f]')
+            self.assertNotIn('\x1b', status)
+            self.assertIn('openrouter', status)
+            self.assertIn('model', status)
+            self.assertIn('name', status)
+            self.assertIn('task next', status)
+
+    def test_non_tty_input_does_not_emit_an_interactive_prompt(self):
+        with tempfile.TemporaryDirectory() as temp:
+            shell = agentic_shell.AgenticShell(
+                Path(temp), Path(sys.executable), session_dir=Path(temp) / 'logs'
+            )
+            with patch('agentic_shell._is_interactive_terminal', return_value=False), \
+                 patch('builtins.input', return_value='/help') as read_input:
+                self.assertEqual(shell._input('› ', 'model · path · task: idle'), '/help')
+            read_input.assert_called_once_with()
+
+    def test_ctrl_c_cancels_input_without_leaving_shell(self):
+        with tempfile.TemporaryDirectory() as temp:
+            shell = agentic_shell.AgenticShell(
+                Path(temp), Path(sys.executable), session_dir=Path(temp) / 'logs'
+            )
+            with patch.object(shell, '_input', side_effect=[KeyboardInterrupt, '/quit']), \
+                 patch.object(agentic_shell, '_welcome_banner'), \
+                 patch.object(agentic_shell, '_print_help'), \
+                 patch('agentic_shell._shell_print') as shell_print:
+                self.assertEqual(shell.run(), 0)
+            shell_print.assert_any_call('Input cancelled')
+
+    def test_execute_records_submitted_history_for_arrow_navigation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            shell = agentic_shell.AgenticShell(
+                Path(temp), Path(sys.executable), session_dir=Path(temp) / 'logs'
+            )
+            with patch.object(shell, 'show_status'):
+                shell.execute('/status')
+                shell.execute('/status')
+            self.assertEqual(shell.history, ['/status'])
+
+    def test_chat_issue_passes_instruction_as_one_argv_value(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            with patch.object(shell, 'run_issue') as run_issue:
+                shell.run_chat(['/chat', '69', 'fix', 'the', 'prompt'])
+            run_issue.assert_called_once_with([
+                '/run', '69', '--instruction', 'fix the prompt',
+            ])
+            self.assertEqual(shell.active_task, 'issue #69')
+
+    def test_chat_local_message_writes_task_file_and_uses_task_file_argv(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / 'agent_config.json'
+            config.write_text('{"task_source":"local"}')
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), config=config, session_dir=root / 'logs'
+            )
+            with patch.object(shell, 'run_issue') as run_issue:
+                shell.run_chat(['/chat', 'add', 'exports'])
+            args = run_issue.call_args.args[0]
+            self.assertEqual(args[:2], ['/run', '--task-file'])
+            self.assertEqual(Path(args[2]).read_text(), 'add exports\n')
+            self.assertEqual(shell.active_task, 'local chat')
+
+    def test_chat_preserves_multiline_message_text(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            with patch.object(shell, 'run_issue') as run_issue:
+                shell.run_chat(['/chat', '69', 'first', 'line', 'second', 'line'],
+                               '/chat 69 first line\nsecond line')
+            run_issue.assert_called_once_with([
+                '/run', '69', '--instruction', 'first line\nsecond line',
+            ])
+
 
     def test_parse_run_command(self):
         self.assertEqual(agentic_shell._parse_job_command(['/run', '119']), ('119', []))

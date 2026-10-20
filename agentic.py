@@ -94,7 +94,7 @@ from agentic_telemetry import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.33"
+__version__ = "1.1.34"
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 INSTRUCTION_CONTEXT_CHARS = _INSTRUCTION_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module
