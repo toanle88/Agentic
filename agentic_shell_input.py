@@ -14,6 +14,7 @@ import shutil
 import signal
 import sys
 import threading
+import textwrap
 import time
 import unicodedata
 from pathlib import Path
@@ -479,56 +480,85 @@ def _output_history_lines(history: str, columns: int) -> list[str]:
     return lines
 
 
-HELP = """Commands:
-
-  Run
-    /run ISSUE [--profile fast|slow] [--instruction "text"]
-                                      [--review|--publish|--mark-done|--new]
-                                      [--reason "why"] with --mark-done
-                                      start a background job
-    /run [--profile fast|slow] [--instruction "text"]
-                                      [--review|--publish|--mark-done|--new]
-                                      local mode: paste a task, finish with /done
-    /run --task-file PATH [OPTIONS]    local mode: use an existing task file
-
-  Inspect
-    /ps [--all]                         show current or persisted jobs
-    /logs JOB|PID [LINES]               follow or show captured terminal output
-    /list                               list open GitHub issues
-    /runs [--json]                      list existing Agentic worktrees
-    /status [--json]                    show Agentic worktree status
-    /dashboard [OUTPUT]                 generate and open the HTML dashboard
-
-  Setup and cleanup
-    /init [OPTIONS]                     initialize target-repository configuration
-    /doctor [--json] [--commands]      diagnose prerequisites; optionally run checks
-    /cleanup --issue N [OPTIONS]        preview or remove clean worktrees
-    /version                            show the Agentic version
-
-  Session
-    /chat ISSUE                          open a conversational session in an existing run
-    /chat ISSUE MESSAGE                  run an issue with a one-shot instruction
-    /chat MESSAGE                        start a local one-shot task from chat style (local mode)
-    /stop JOB|--all                     stop one or all running jobs
-    /help                               show this help
-    /quit                               leave the shell; running jobs continue
-
-Notes:
-  Jobs have no supervisor timeout. Configured Agentic test/Codex timeouts,
-  if any, still apply inside the child runner.
-
-  Type / to open autocomplete. Use Up/Down to navigate, Enter or Tab to
-  select, and Esc to dismiss. Options and known job IDs are completed too.
-"""
-
-
 HELP_SECTION_COLORS = {
     "Commands:": "1;36",
     "Run": "36",
     "Inspect": "36",
+    "Setup and cleanup": "36",
     "Session": "36",
     "Notes:": "1;33",
 }
+
+
+_HELP_SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+    (
+        "Run",
+        (
+            (
+                '/run ISSUE [--profile fast|slow] [--instruction "text"] '
+                '[--review|--publish|--mark-done|--new] [--reason "why"] '
+                "with --mark-done",
+                "start a background job",
+            ),
+            (
+                '/run [--profile fast|slow] [--instruction "text"] '
+                '[--review|--publish|--mark-done|--new]',
+                "local mode: paste a task, finish with /done",
+            ),
+            (
+                "/run --task-file PATH [OPTIONS]",
+                "local mode: use an existing task file",
+            ),
+        ),
+    ),
+    (
+        "Inspect",
+        (
+            ("/ps [--all]", "show current or persisted jobs"),
+            ("/logs JOB|PID [LINES]", "follow or show captured terminal output"),
+            ("/list", "list open GitHub issues"),
+            ("/runs [--json]", "list existing Agentic worktrees"),
+            ("/status [--json]", "show Agentic worktree status"),
+            ("/dashboard [OUTPUT]", "generate and open the HTML dashboard"),
+        ),
+    ),
+    (
+        "Setup and cleanup",
+        (
+            ("/init [OPTIONS]", "initialize target-repository configuration"),
+            (
+                "/doctor [--json] [--commands]",
+                "diagnose prerequisites; optionally run checks",
+            ),
+            ("/cleanup --issue N [OPTIONS]", "preview or remove clean worktrees"),
+            ("/version", "show the Agentic version"),
+        ),
+    ),
+    (
+        "Session",
+        (
+            (
+                "/chat ISSUE",
+                "open a conversational session in an existing run",
+            ),
+            ("/chat ISSUE MESSAGE", "run an issue with a one-shot instruction"),
+            (
+                "/chat MESSAGE",
+                "start a local one-shot task from chat style (local mode)",
+            ),
+            ("/stop JOB|--all", "stop one or all running jobs"),
+            ("/help", "show this help"),
+            ("/quit", "leave the shell; running jobs continue"),
+        ),
+    ),
+)
+
+_HELP_NOTES = (
+    "Jobs have no supervisor timeout. Configured Agentic test/Codex timeouts, "
+    "if any, still apply inside the child runner.",
+    "Type / to open autocomplete. Use Up/Down to navigate, Enter or Tab to "
+    "select, and Esc to dismiss. Options and known job IDs are completed too.",
+)
 
 
 SHELL_COMMANDS = (
@@ -1908,6 +1938,148 @@ def _shell_clear_transient() -> None:
             owner.live_status = False
 
 
+def _wrap_help_text(
+    text: str,
+    width: int,
+    *,
+    initial_indent: str = "",
+    subsequent_indent: str = "",
+) -> list[str]:
+    """Wrap help text without allowing indentation to exceed the viewport."""
+    width = max(1, width)
+    initial_indent = initial_indent[:max(0, width - 1)]
+    subsequent_indent = subsequent_indent[:max(0, width - 1)]
+    return textwrap.wrap(
+        text,
+        width=width,
+        initial_indent=initial_indent,
+        subsequent_indent=subsequent_indent,
+        break_long_words=True,
+        break_on_hyphens=False,
+    ) or [initial_indent]
+
+
+def _help_heading(text: str, columns: int, indent: str = "  ") -> list[str]:
+    """Render a heading at a safe indentation for very narrow terminals."""
+    return _wrap_help_text(
+        text,
+        columns,
+        initial_indent=indent,
+        subsequent_indent=indent,
+    )
+
+
+def _help_two_column_entry(
+    syntax: str,
+    description: str,
+    columns: int,
+    description_column: int,
+) -> list[str]:
+    """Render one command with syntax on the left and text on the right."""
+    left_indent = "    "
+    left_width = max(1, description_column - len(left_indent) - 1)
+    syntax_lines = _wrap_help_text(
+        syntax,
+        left_width,
+        subsequent_indent="  ",
+    )
+    description_lines = _wrap_help_text(
+        description,
+        max(1, columns - description_column),
+    )
+    rendered: list[str] = []
+    first_description = description_lines[0]
+    first_syntax = left_indent + syntax_lines[0]
+    rendered.append(
+        first_syntax
+        + " " * max(1, description_column - len(first_syntax))
+        + first_description
+    )
+    for index in range(1, max(len(syntax_lines), len(description_lines))):
+        syntax_line = (
+            left_indent + syntax_lines[index]
+            if index < len(syntax_lines)
+            else ""
+        )
+        if index < len(description_lines):
+            description_text = description_lines[index]
+            if syntax_line:
+                rendered.append(
+                    syntax_line
+                    + " " * max(1, description_column - len(syntax_line))
+                    + description_text
+                )
+            else:
+                rendered.append((" " * description_column) + description_text)
+        else:
+            rendered.append(syntax_line)
+    return rendered
+
+
+def _help_stacked_entry(syntax: str, description: str, columns: int) -> list[str]:
+    """Render help vertically when two columns would be too cramped."""
+    syntax_lines = _wrap_help_text(
+        syntax,
+        max(1, columns - 4),
+        initial_indent="    ",
+        subsequent_indent="      ",
+    )
+    description_lines = _wrap_help_text(
+        description,
+        columns,
+        initial_indent="      ",
+        subsequent_indent="      ",
+    )
+    return syntax_lines + description_lines
+
+
+def _render_help_lines(columns: int = 80) -> list[str]:
+    """Build the interactive help screen for the current terminal width."""
+    columns = max(1, columns)
+    lines = _help_heading("Commands:", columns, indent="")
+    lines.append("")
+
+    # Keep the description column stable on normal terminals. Below this
+    # threshold, a stacked layout keeps both syntax and descriptions readable
+    # instead of forcing a two-column layout into a handful of cells.
+    two_column = columns >= 64
+    description_column = min(42, max(24, columns // 2))
+    for section, entries in _HELP_SECTIONS:
+        lines.extend(_help_heading(section, columns))
+        for syntax, description in entries:
+            if two_column:
+                lines.extend(
+                    _help_two_column_entry(
+                        syntax,
+                        description,
+                        columns,
+                        description_column,
+                    )
+                )
+            else:
+                lines.extend(_help_stacked_entry(syntax, description, columns))
+        lines.append("")
+
+    lines.extend(_help_heading("Notes:", columns, indent=""))
+    for index, note in enumerate(_HELP_NOTES):
+        lines.extend(
+            _wrap_help_text(
+                note,
+                columns,
+                initial_indent="  ",
+                subsequent_indent="  ",
+            )
+        )
+        if index < len(_HELP_NOTES) - 1:
+            lines.append("")
+    return lines
+
+
+# Keep the historical public constant available to integrations. The actual
+# renderer uses the live terminal width so help remains useful after resizing.
+HELP = "\n".join(_render_help_lines()) + "\n"
+
+
 def _help_line(line: str) -> str:
     """Color one help line while preserving its plain-text layout."""
     stripped = line.strip()
@@ -1932,8 +2104,9 @@ def _help_line(line: str) -> str:
 
 
 def _print_help() -> None:
-    """Print command help with a colorful terminal-only presentation."""
-    for line in HELP.rstrip().splitlines():
+    """Print width-aware command help with terminal-only presentation."""
+    columns = max(1, shutil.get_terminal_size(fallback=(80, 24)).columns)
+    for line in _render_help_lines(columns):
         _write_shell_output(_help_line(line) + "\n")
 
 

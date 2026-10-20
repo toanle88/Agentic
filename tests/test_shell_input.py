@@ -325,6 +325,45 @@ class InteractiveInputTests(unittest.TestCase):
         self.assertIn('Commands:', ''.join(state.history))
         self.assertIn('/help', ''.join(state.history))
 
+    def test_help_wide_layout_aligns_wrapped_descriptions_and_options(self):
+        lines = agentic_shell_input._render_help_lines(80)
+
+        self.assertLessEqual(max(map(len, lines)), 80)
+        self.assertEqual(
+            next(
+                line.index('start a background job')
+                for line in lines
+                if 'start a background job' in line
+            ),
+            40,
+        )
+        self.assertEqual(
+            next(line.index('/done') for line in lines if '/done' in line),
+            40,
+        )
+        self.assertTrue(
+            any(
+                line.startswith('      ')
+                and line.strip().startswith(('[', 'publish|'))
+                for line in lines
+            )
+        )
+
+    def test_help_narrow_layout_wraps_without_truncating_commands(self):
+        lines = agentic_shell_input._render_help_lines(40)
+        plain = '\n'.join(lines)
+        compact = ' '.join(plain.split())
+
+        self.assertLessEqual(max(map(len, lines)), 40)
+        for command in (
+            '/run', '/ps', '/logs', '/list', '/runs', '/status', '/dashboard',
+            '/init', '/doctor', '/cleanup', '/version', '/chat', '/stop',
+            '/help', '/quit',
+        ):
+            self.assertIn(command, plain)
+        self.assertIn('start a background job', plain)
+        self.assertIn('leave the shell; running jobs continue', compact)
+
     def test_interactive_input_keeps_completion_above_bottom_prompt(self):
         keys = [('CHAR', '/'), ('ENTER', '\n'), ('ENTER', '\n')]
         reader = _create_mock_reader(keys)
