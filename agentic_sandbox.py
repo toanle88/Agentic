@@ -8,14 +8,27 @@ from typing import Any
 
 
 SUPPORTED_ENGINES = ("docker", "podman")
+SUPPORTED_LANGUAGES = ("python", "node", "go", "rust", "java", "dotnet")
 DEFAULT_SANDBOX_IMAGE = "agentic-runner:latest"
 ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _relative_path_setting(name: str, value: Any, *, default: str | None = None) -> str | None:
+    if value is None:
+        return default
+    if not isinstance(value, str) or not value.strip() or any(char in value for char in "\r\n\x00"):
+        raise ValueError(f"sandbox.{name} must be a nonempty relative path")
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"sandbox.{name} must stay within the repository")
+    return value
 
 
 def validate_sandbox(raw: Any) -> dict[str, Any]:
     if raw is None:
         return {
             "enabled": False, "engine": "docker", "image": DEFAULT_SANDBOX_IMAGE,
+            "dockerfile": None, "build_context": ".", "language": None,
             "allow_network": False, "pass_env": [],
         }
     if not isinstance(raw, dict):
@@ -23,6 +36,9 @@ def validate_sandbox(raw: Any) -> dict[str, Any]:
     enabled = raw.get("enabled", False)
     engine = raw.get("engine", "docker")
     image = raw.get("image")
+    dockerfile = _relative_path_setting("dockerfile", raw.get("dockerfile"))
+    build_context = _relative_path_setting("build_context", raw.get("build_context"), default=".")
+    language = raw.get("language")
     allow_network = raw.get("allow_network", False)
     pass_env = raw.get("pass_env", [])
     if type(enabled) is not bool:
@@ -33,6 +49,10 @@ def validate_sandbox(raw: Any) -> dict[str, Any]:
         image = DEFAULT_SANDBOX_IMAGE
     if not isinstance(image, str) or not image.strip() or any(char in image for char in "\r\n"):
         raise ValueError("sandbox.image must be a nonempty single-line string when sandbox.enabled is true")
+    if language is not None and language not in SUPPORTED_LANGUAGES:
+        raise ValueError(
+            f"sandbox.language must be one of: {', '.join(SUPPORTED_LANGUAGES)} or null"
+        )
     if type(allow_network) is not bool:
         raise ValueError("sandbox.allow_network must be a boolean")
     if not isinstance(pass_env, list) or any(
@@ -43,9 +63,36 @@ def validate_sandbox(raw: Any) -> dict[str, Any]:
         "enabled": enabled,
         "engine": engine,
         "image": image,
+        "dockerfile": dockerfile,
+        "build_context": build_context,
+        "language": language,
         "allow_network": allow_network,
         "pass_env": list(pass_env),
     }
+
+
+def sandbox_build_command(settings: dict[str, Any], repo: Path) -> list[str] | None:
+    """Build a configured image using only paths inside the target repository."""
+    policy = validate_sandbox(settings)
+    dockerfile = policy.get("dockerfile")
+    if not policy["enabled"] or not dockerfile:
+        return None
+    root = repo.resolve()
+    dockerfile_path = (root / dockerfile).resolve()
+    context_path = (root / policy["build_context"]).resolve()
+    for path, label in ((dockerfile_path, "sandbox.dockerfile"), (context_path, "sandbox.build_context")):
+        try:
+            path.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"{label} must stay within the repository") from exc
+    if not dockerfile_path.is_file():
+        raise ValueError(f"Configured sandbox Dockerfile does not exist: {dockerfile}")
+    if not context_path.is_dir():
+        raise ValueError(f"Configured sandbox build context is not a directory: {policy['build_context']}")
+    return [
+        policy["engine"], "build", "--pull=false", "--tag", policy["image"],
+        "--file", str(dockerfile_path), str(context_path),
+    ]
 
 
 def _git_metadata(root: Path) -> tuple[Path, Path | None] | None:

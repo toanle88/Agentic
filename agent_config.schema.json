@@ -33,6 +33,9 @@
         "enabled": { "type": "boolean", "default": false },
         "engine": { "enum": ["docker", "podman"], "default": "docker" },
         "image": { "type": "string", "minLength": 1 },
+        "dockerfile": { "type": ["string", "null"], "minLength": 1, "description": "Repository-relative Dockerfile to build before use" },
+        "build_context": { "type": "string", "minLength": 1, "default": ".", "description": "Repository-relative Docker build context" },
+        "language": { "enum": ["python", "node", "go", "rust", "java", "dotnet", null] },
         "allow_network": { "type": "boolean", "default": false },
         "pass_env": {
           "type": "array",

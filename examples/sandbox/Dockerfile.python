@@ -1,0 +1,12 @@
+FROM python:3.12.7-slim-bookworm
+
+# Keep the base small; add project packages and tools below.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy or install project-specific dependencies here, for example:
+# COPY requirements.txt .
+# RUN pip install --no-cache-dir -r requirements.txt
+# Install the selected Agentic provider CLI here as well.
+WORKDIR /workspace

@@ -36,6 +36,7 @@ from agentic_config import (  # noqa: F401
     _append_gitignore_entry,
     default_provider_settings,
     detect_test_commands,
+    detect_project_language,
     load_config,
     preflight_agent_settings,
     preflight_security,
@@ -84,7 +85,7 @@ from agentic_review import (  # noqa: F401
     parse_review_result,
     record_review_findings, review_history_feedback,
 )
-from agentic_sandbox import DEFAULT_SANDBOX_IMAGE, validate_sandbox
+from agentic_sandbox import DEFAULT_SANDBOX_IMAGE, SUPPORTED_LANGUAGES, validate_sandbox
 from agentic_security import redact_secrets  # noqa: F401
 from agentic_telemetry import (
     read_run_instruction,
@@ -586,7 +587,10 @@ def develop(*args, **kwargs):
 def init_repository(repo: Path, *, force: bool = False, create_agents: bool = False,
                      provider: str = "codex", reviewer_provider: str | None = None,
                      security_mode: str = DEFAULT_INIT_SECURITY_MODE,
-                     sandbox_image: str | None = None) -> int:
+                     sandbox_image: str | None = None,
+                     sandbox_dockerfile: str | None = None,
+                     sandbox_context: str = ".",
+                     sandbox_language: str | None = None) -> int:
     """Create personal target-repository setup without overwriting it by default."""
     if security_mode not in SECURITY_MODES:
         raise ValueError(f"security_mode must be one of: {', '.join(SECURITY_MODES)}")
@@ -599,16 +603,24 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
         raise RuntimeError(f"Run init from the repository root or pass --repo {root}")
     config_path = repo / AGENT_CONFIG_FILENAME
     commands, detection = detect_test_commands(repo)
+    detected_language, _ = detect_project_language(repo)
+    sandbox_language = sandbox_language or detected_language
+    if sandbox_language is not None and sandbox_language not in SUPPORTED_LANGUAGES:
+        raise ValueError(
+            f"sandbox language must be one of: {', '.join(SUPPORTED_LANGUAGES)}"
+        )
     reviewer_provider = reviewer_provider or provider
     if security_mode == "isolated":
         sandbox_image = sandbox_image or os.environ.get("AGENTIC_SANDBOX_IMAGE")
-        if not sandbox_image:
+        if not sandbox_image and not sandbox_dockerfile:
             raise ValueError(
-                "isolated init requires --sandbox-image or AGENTIC_SANDBOX_IMAGE; "
+                "isolated init requires --sandbox-image, --sandbox-dockerfile, or "
+                "AGENTIC_SANDBOX_IMAGE; "
                 "use --security-mode trusted when host execution is appropriate"
             )
     else:
         sandbox_image = sandbox_image or DEFAULT_SANDBOX_IMAGE
+    sandbox_image = sandbox_image or DEFAULT_SANDBOX_IMAGE
     developer_settings = default_provider_settings(provider)
     reviewer_settings = default_provider_settings(reviewer_provider)
     reviewer_settings["timeout_seconds"] = DEFAULT_REVIEWER_TIMEOUT
@@ -616,6 +628,9 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
         "enabled": security_mode == "isolated",
         "engine": "docker",
         "image": sandbox_image,
+        "dockerfile": sandbox_dockerfile,
+        "build_context": sandbox_context,
+        "language": sandbox_language,
         "allow_network": False,
         "pass_env": sandbox_env_for_providers(provider, reviewer_provider),
     })
@@ -847,6 +862,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--sandbox-image", default=None,
         help="With isolated init, container image to use (or set AGENTIC_SANDBOX_IMAGE)",
     )
+    parser.add_argument(
+        "--sandbox-dockerfile", default=None,
+        help="With isolated init, build the sandbox image from this repository-relative Dockerfile",
+    )
+    parser.add_argument(
+        "--sandbox-context", default=".",
+        help="With --sandbox-dockerfile, repository-relative Docker build context (default: .)",
+    )
+    parser.add_argument(
+        "--sandbox-language", choices=SUPPORTED_LANGUAGES, default=None,
+        help="With init, override the detected language used to choose a sandbox template",
+    )
     parser.add_argument("--yes", action="store_true", help="Confirm a cleanup operation")
     parser.add_argument("--remove-logs", action="store_true", help="With cleanup, also delete matching run logs")
     parser.add_argument("--all", dest="all_runs", action="store_true", help="With cleanup, select all clean Agentic worktrees")
@@ -902,6 +929,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
         config["test_commands"] if args.publish
         else test_commands_for_profile(config, args.profile)
     )
+    preflight_security(config["security_mode"], config["sandbox"], repo=repo)
     if not args.publish:
         preflight_test_commands(repo, test_commands, sandbox=config["sandbox"])
     # Manual completion and publication use recorded state and do not need
@@ -910,7 +938,6 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
         preflight_agent_settings(
             config["developer_agent"], config["reviewer_agent"], sandbox=config["sandbox"]
         )
-    preflight_security(config["security_mode"], config["sandbox"])
     state_dir = Path(args.state_dir).expanduser().resolve() if args.state_dir else default_state_dir()
     task_deadline = time.monotonic() + config["task_timeout_seconds"]
 
@@ -1108,6 +1135,9 @@ def main(argv: list[str] | None = None) -> int:
                 provider=args.provider, reviewer_provider=args.reviewer_provider,
                 security_mode="isolated" if args.secure else args.security_mode,
                 sandbox_image=args.sandbox_image,
+                sandbox_dockerfile=args.sandbox_dockerfile,
+                sandbox_context=args.sandbox_context,
+                sandbox_language=args.sandbox_language,
             )
         if args.secure:
             parser.error("--secure is only valid with init")
