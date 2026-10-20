@@ -311,6 +311,27 @@ class InteractiveInputTests(unittest.TestCase):
         self.assertIn('\033[7;1H\033[2Kfirst line', rendered)
         self.assertIn('second: ', rendered)
 
+    def test_foreground_output_preserves_ansi_styles_when_redrawn(self):
+        state = agentic_shell_input._InteractiveOutputState()
+        output = TTYBuffer()
+        foreground = agentic_shell_input._ForegroundOutputState(state)
+        with patch.dict(os.environ, {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+             patch('sys.stdout', output), \
+             patch('agentic_shell_input.shutil.get_terminal_size',
+                   return_value=os.terminal_size((80, 8))):
+            foreground.set_prompt('chat> ', system_prefix='CHAT', system_prefix_text='chat> ')
+            foreground.write('\033[96m[CHAT]\033[0m Agent response:\nplain response\n')
+
+        self.assertIn('\033[96m[CHAT]\033[0m', output.getvalue())
+
+    def test_output_history_backspace_skips_ansi_tokens(self):
+        styled = '\033[31mabc\033[0m\bX'
+
+        self.assertEqual(
+            agentic_shell_input._output_history_lines(styled, 80),
+            ['\033[31mab\033[0mX'],
+        )
+
     def test_foreground_prompt_redraw_preserves_typed_child_input(self):
         state = agentic_shell_input._InteractiveOutputState()
         output = TTYBuffer()
@@ -741,7 +762,7 @@ class InteractiveInputTests(unittest.TestCase):
             )
 
         rendered = output.getvalue()
-        log_position = rendered.index('[JOB 1] finished')
+        log_position = rendered.index('finished')
         self.assertGreater(rendered.rfind('\033[0m', 0, log_position), -1)
 
     def test_interactive_split_output_chunks_keep_the_same_terminal_line(self):

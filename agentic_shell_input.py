@@ -10,6 +10,7 @@ from __future__ import annotations
 import codecs
 from enum import Enum
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -37,6 +38,9 @@ if TYPE_CHECKING:
 _OUTPUT_LOCK = threading.RLock()
 _ACTIVE_INTERACTIVE_OUTPUT: Callable[[str, bool], None] | None = None
 _RESIZE_PENDING = False
+_ANSI_SEQUENCE = re.compile(
+    r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))"
+)
 
 
 class TerminalMode(str, Enum):
@@ -508,15 +512,20 @@ def _output_history_lines(history: str, columns: int) -> list[str]:
         current = []
         current_width = 0
 
-    for character in strip_ansi(history):
+    def add_character(character: str) -> None:
+        nonlocal current_width
         if character in {"\n", "\r"}:
             finish_line()
-            continue
+            return
         if character in {"\b", "\x7f"}:
-            if current:
-                current.pop()
+            for index in range(len(current) - 1, -1, -1):
+                previous = current[index]
+                if _ANSI_SEQUENCE.fullmatch(previous):
+                    continue
+                del current[index]
                 current_width = max(0, current_width - 1)
-            continue
+                break
+            return
         if character == "\t":
             cell_width = 8 - (current_width % 8)
             character = " " * cell_width
@@ -524,7 +533,7 @@ def _output_history_lines(history: str, columns: int) -> list[str]:
             cell_width = _terminal_cell_width(character)
             if cell_width == 0:
                 current.append(character)
-                continue
+                return
 
         if current and current_width + cell_width > width_limit:
             finish_line()
@@ -534,13 +543,22 @@ def _output_history_lines(history: str, columns: int) -> list[str]:
             current.append(character)
             current_width = width_limit
             finish_line()
-            continue
+            return
         current.append(character)
         current_width += cell_width
         if current_width == width_limit:
             # Defer the row break until another character or newline arrives,
             # matching the terminal's pending-wrap behavior.
-            continue
+            return
+
+    position = 0
+    for match in _ANSI_SEQUENCE.finditer(history):
+        for character in history[position:match.start()]:
+            add_character(character)
+        current.append(match.group())
+        position = match.end()
+    for character in history[position:]:
+        add_character(character)
 
     if current or not lines:
         finish_line()
