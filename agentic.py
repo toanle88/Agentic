@@ -89,11 +89,12 @@ from agentic_security import redact_secrets  # noqa: F401
 from agentic_telemetry import (
     read_run_instruction,
     record_run_instruction,
+    record_issue_metadata,
     record_security_policy,
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.32"
+__version__ = "1.1.33"
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 INSTRUCTION_CONTEXT_CHARS = _INSTRUCTION_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module
@@ -987,6 +988,10 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
         record_run_instruction(folder, requested_instruction)
     instruction = read_run_instruction(folder)
     system_prompt = config.get("system_prompt")
+    record_issue_metadata(
+        folder, number=issue.number, title=issue.title,
+        state=issue.state, source=issue.source,
+    )
     record_security_policy(folder, config)
     manual_approval = load_publication_approval(folder)
     print_run_header(issue, run, fresh)

@@ -228,6 +228,7 @@ class StreamingTests(unittest.TestCase):
                         run_record = json.loads((root / 'run.json').read_text(encoding='utf-8'))
                         invocation = run_record['usage_by_invocation'][-1]
                         self.assertEqual(invocation['role'], 'reviewer')
+                        self.assertEqual(invocation['model'], 'test-model')
                         self.assertEqual(invocation['prompt_chars'], len('review this patch'))
                         if provider == 'copilot':
                             self.assertIsNone(invocation['total_tokens'])

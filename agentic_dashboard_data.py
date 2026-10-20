@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable
 
+from agentic_review import finding_severity
 from agentic_security import redact_secrets
 from agentic_telemetry import read_run_usage
 
@@ -23,6 +24,43 @@ RUN_NAME = re.compile(
 NUMBERED_FILE = re.compile(r"^(?P<prefix>.+)-(?P<number>\d+)(?P<suffix>\.[^.]+)$")
 MAX_TEXT = 5_000
 MAX_FILES_PER_RUN = 24
+SEVERITY_RANK = {
+    "BLOCKER": 7,
+    "CRITICAL": 6,
+    "MAJOR": 5,
+    "HIGH": 4,
+    "MEDIUM": 3,
+    "MINOR": 2,
+    "LOW": 1,
+}
+
+
+def filter_runs(runs: Iterable[dict[str, Any]], *, query: str = "",
+                status: str = "all", issue: str = "all", stage: str = "all",
+                severity: str = "all", model: str = "all",
+                provider: str = "all") -> list[dict[str, Any]]:
+    """Apply the dashboard's global search and run filters to snapshots."""
+    needle = str(query).casefold()
+    visible: list[dict[str, Any]] = []
+    for run in runs:
+        issue_value = "local" if run.get("issue") is None else str(run.get("issue"))
+        searchable = json.dumps(run, ensure_ascii=False, sort_keys=True).casefold()
+        if needle and needle not in searchable:
+            continue
+        if status != "all" and run.get("status") != status:
+            continue
+        if issue != "all" and issue_value != issue:
+            continue
+        if stage != "all" and run.get("stage") != stage:
+            continue
+        if severity != "all" and run.get("severity") != severity:
+            continue
+        if model != "all" and model not in run.get("models", []):
+            continue
+        if provider != "all" and provider not in run.get("providers", []):
+            continue
+        visible.append(run)
+    return visible
 
 
 def collect_runs_from_roots(logs_roots: Iterable[Path]) -> list[dict[str, Any]]:
@@ -115,6 +153,35 @@ def _parse_json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _finding_severity(value: Any, finding_text: str) -> str:
+    severity = str(value).strip().upper()
+    if severity in SEVERITY_RANK:
+        return severity
+    if severity not in {"", "UNSPECIFIED"}:
+        explicit = finding_severity(severity)
+        if explicit != "UNSPECIFIED":
+            return explicit
+    return finding_severity(finding_text)
+
+
+def _finding_records(values: Any) -> tuple[list[str], list[dict[str, str]]]:
+    """Keep legacy finding text while exposing bounded filter metadata."""
+    if not isinstance(values, list):
+        values = [values]
+    text: list[str] = []
+    records: list[dict[str, str]] = []
+    for value in values:
+        if isinstance(value, dict):
+            finding_text = str(value.get("text", value.get("message", "")))
+            severity = _finding_severity(value.get("severity", "UNSPECIFIED"), finding_text)
+        else:
+            finding_text = str(value)
+            severity = _finding_severity("UNSPECIFIED", finding_text)
+        text.append(finding_text)
+        records.append({"text": finding_text, "severity": severity})
+    return text, records
+
+
 def _review(folder: Path) -> tuple[dict[str, Any], Path | None]:
     path = _latest(
         path for path in _numbered_files(folder, ["review"])
@@ -147,7 +214,7 @@ def _review(folder: Path) -> tuple[dict[str, Any], Path | None]:
     if path is None:
         return {
             "status": "not-run", "summary": "No review result recorded.",
-            "findings": [], "skipped": [], "recurring": recurring,
+            "findings": [], "finding_records": [], "skipped": [], "recurring": recurring,
         }, None
     raw = _parse_json_object(_read(path, 100_000))
     if raw is None:
@@ -160,18 +227,16 @@ def _review(folder: Path) -> tuple[dict[str, Any], Path | None]:
         return {
             "status": "invalid",
             "summary": f"Review output is not valid JSON: {error}",
-            "findings": [], "skipped": [], "recurring": recurring,
+            "findings": [], "finding_records": [], "skipped": [], "recurring": recurring,
         }, path
-    findings = raw.get("findings", [])
-    if not isinstance(findings, list):
-        findings = [str(findings)]
+    findings, finding_records = _finding_records(raw.get("findings", []))
     skipped = raw.get("skipped", [])
     if not isinstance(skipped, list):
         skipped = [str(skipped)]
     return {
         "status": "approved" if raw.get("approved") is True else "rejected",
         "summary": str(raw.get("summary", "No review summary.")),
-        "findings": [str(item) for item in findings],
+        "findings": findings, "finding_records": finding_records,
         "skipped": [str(item) for item in skipped],
         "recurring": recurring, "file": path.name, "updated": _timestamp(path),
     }, path
@@ -327,6 +392,45 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
     issue = match.group("issue")
     task = match.group("task")
     usage = read_run_usage(folder)
+    invocations = usage.get("by_invocation", [])
+    if not isinstance(invocations, list):
+        invocations = []
+    providers = sorted({
+        str(item.get("provider")) for item in invocations
+        if isinstance(item, dict) and item.get("provider")
+    } | ({str(usage["provider"])} if usage.get("provider") else set()))
+    models = sorted({
+        str(item.get("model")) for item in invocations
+        if isinstance(item, dict) and item.get("model")
+    })
+    severity_values = [
+        item.get("severity", "UNSPECIFIED")
+        for item in review.get("finding_records", [])
+        if isinstance(item, dict)
+    ] + [
+        item.get("severity", "UNSPECIFIED")
+        for item in review.get("recurring", [])
+        if isinstance(item, dict)
+    ]
+    severity = max(
+        (str(value).upper() for value in severity_values),
+        key=lambda value: SEVERITY_RANK.get(value, 0),
+        default="NONE",
+    )
+    if result is not None:
+        stage = "blocked" if result.get("status") == "BLOCKED" else "completed"
+    elif blocked is not None:
+        stage = "blocked"
+    elif review["status"] in {"approved", "rejected", "invalid"}:
+        stage = "review"
+    elif tests["status"] in {"passed", "failed", "unknown"}:
+        stage = "tests"
+    elif developer_paths or status == "in-progress":
+        stage = "development"
+    elif investigation["state"] != "not-run":
+        stage = "investigation"
+    else:
+        stage = "idle"
     if issue is not None:
         label = f"Issue #{issue}"
         branch = f"agent/issue-{issue}-{match.group('issue_token')}"
@@ -335,9 +439,28 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
         label = f"Local task: {task}"
         branch = f"agent/task-{task}-{match.group('task_token')}"
         issue_value = None
+    raw_issue_metadata = usage.get("issue_metadata")
+    if isinstance(raw_issue_metadata, dict) and issue_value is not None:
+        issue_metadata: dict[str, Any] = {
+            "number": issue_value,
+            "title": str(raw_issue_metadata.get("title") or "Title unavailable"),
+            "state": str(raw_issue_metadata.get("state") or "UNKNOWN").upper(),
+            "source": str(raw_issue_metadata.get("source") or "github"),
+        }
+    elif issue_value is None:
+        issue_metadata = {
+            "number": None, "title": task, "state": "LOCAL", "source": "local",
+        }
+    else:
+        issue_metadata = {
+            "number": issue_value, "title": "Title unavailable",
+            "state": "UNKNOWN", "source": "github",
+        }
     snapshot: dict[str, Any] = {
         "id": folder.name, "issue": issue_value, "label": label, "branch": branch,
         "status": status, "investigation": investigation, "attempts": developer["attempts"],
+        "stage": stage, "severity": severity, "providers": providers, "models": models,
+        "issue_metadata": issue_metadata,
         "last_activity": _timestamp(last_activity) if last_activity else "unknown",
         "review": review, "blocked": blocked, "result": result, "tests": tests,
         "developer": developer,
