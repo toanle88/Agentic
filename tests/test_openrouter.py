@@ -39,7 +39,7 @@ class OpenRouterTests(unittest.TestCase):
                 }}]},
                 {'choices': [{'message': {'role': 'assistant', 'content': 'done'}}]},
             ])
-    
+
             class Response:
                 def __init__(self, value):
                     self.value = value
@@ -49,10 +49,10 @@ class OpenRouterTests(unittest.TestCase):
                     return False
                 def read(self):
                     return json.dumps(self.value).encode()
-    
+
             def fake_urlopen(request, *args, **kwargs):
                 return Response(next(responses))
-    
+
             with (patch.dict(agentic.os.environ, {'MY_OPENROUTER_KEY': 'secret'}, clear=False),
                   patch('agentic_openrouter.urllib.request.urlopen', side_effect=fake_urlopen)):
                 ok, message = agentic.run_openrouter(
@@ -133,7 +133,7 @@ class OpenRouterTests(unittest.TestCase):
             (root / 'src').mkdir()
             (root / 'src' / 'main.go').write_text('package main\n')
             (root / '.git').mkdir()
-    
+
             names = [item['function']['name'] for item in agentic_openrouter._openrouter_tools(True)]
             self.assertEqual(names, ['list_files', 'read_file', 'run_command'])
             self.assertIn('src/main.go', agentic_openrouter._openrouter_tool_call(
@@ -177,7 +177,7 @@ class OpenRouterTests(unittest.TestCase):
             allowed, reason = agentic_openrouter._openrouter_command_allowed(argv, readonly=False)
             self.assertFalse(allowed, argv)
             self.assertTrue(reason)
-    
+
         allowed, reason = agentic_openrouter._openrouter_command_allowed(
             ['curl', 'https://example.test'], readonly=False, allow_network=True
         )
@@ -189,7 +189,7 @@ class OpenRouterTests(unittest.TestCase):
             allowed, reason = agentic_openrouter._openrouter_command_allowed(argv, readonly=True)
             self.assertFalse(allowed, argv)
             self.assertTrue(reason)
-    
+
         allowed, reason = agentic_openrouter._openrouter_command_allowed(
             ['python', '-m', 'unittest'], readonly=False
         )
@@ -265,7 +265,7 @@ class OpenRouterTests(unittest.TestCase):
 
     def test_openrouter_request_translates_http_network_and_payload_errors(self):
         from io import BytesIO
-    
+
         class Response:
             def __init__(self, body):
                 self.body = body
@@ -275,7 +275,7 @@ class OpenRouterTests(unittest.TestCase):
                 return False
             def read(self):
                 return self.body
-    
+
         cases = [
             (agentic_openrouter.urllib.error.HTTPError(
                 'https://router.test', 401, 'unauthorized', {}, BytesIO(b'bad key')
@@ -292,7 +292,7 @@ class OpenRouterTests(unittest.TestCase):
                         'https://router.test/chat/completions', 'secret', {}, timeout=2
                     )
                 self.assertIn(expected, str(raised.exception))
-    
+
         for body, message in [(b'[]', 'non-object'), (b'{"error":"quota"}', 'quota')]:
             with self.subTest(message=message), patch(
                 'agentic_openrouter.urllib.request.urlopen', return_value=Response(body)

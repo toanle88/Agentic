@@ -76,7 +76,7 @@ class Job:
     number: int
     argv: list[str]
     log_path: Path
-    process: subprocess.Popen[bytes] | None
+    process: subprocess.Popen[Any] | None
     started: float
     log_handle: TextIO | None
     record_path: Path
