@@ -81,7 +81,7 @@ from agentic_execution import (  # noqa: F401
     run_codex,
     streamed_command,
 )
-from agentic_output import style_system_text, style_text
+from agentic_output import style_system_text, style_text, tag_system_prefix
 from agentic_openrouter import (  # noqa: F401
     run_openrouter,
 )
@@ -121,7 +121,19 @@ def _status_print(message: Any, *, file: Any = None, flush: bool = False,
 
 def _chat_output(message: Any) -> None:
     """Render chat's generated category while leaving the response body plain."""
-    _console_print(style_system_text(message, style_status_tokens=False), flush=True)
+    prefix = getattr(message, "system_prefix", None)
+    rendered_message = str(message)
+    if prefix and os.environ.get("AGENTIC_SHELL_SYSTEM_PREFIXES"):
+        rendered_message = tag_system_prefix(rendered_message, prefix)
+    if prefix:
+        rendered = style_system_text(
+            rendered_message,
+            system_prefix=prefix,
+            style_status_tokens=False,
+        )
+    else:
+        rendered = style_system_text(rendered_message, style_status_tokens=False)
+    _console_print(rendered, flush=True)
 
 
 PROVIDER_SANDBOX_ENV = _agentic_config.PROVIDER_SANDBOX_ENV

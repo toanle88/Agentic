@@ -11,6 +11,12 @@ _ANSI_SEQUENCE = re.compile(
     r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))"
 )
 _TERMINAL_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_SYSTEM_PREFIX_MARKER = "\x1eAGENTIC_SYSTEM_PREFIX:"
+_SYSTEM_PREFIX_MARKER_END = "\x1f"
+_SYSTEM_PREFIX_MARKER_RE = re.compile(
+    rf"^{re.escape(_SYSTEM_PREFIX_MARKER)}([A-Za-z][A-Za-z0-9 _-]{{0,39}})"
+    rf"{re.escape(_SYSTEM_PREFIX_MARKER_END)}"
+)
 
 
 def strip_ansi(value: Any) -> str:
@@ -25,6 +31,20 @@ def sanitize_terminal_text(value: Any) -> str:
         lambda match: " " if match.group() in "\t\n\r\v\f" else "",
         text,
     )
+
+
+def tag_system_prefix(value: Any, prefix: str) -> str:
+    """Tag generated output for a cooperating foreground shell renderer."""
+    return f"{_SYSTEM_PREFIX_MARKER}{prefix}{_SYSTEM_PREFIX_MARKER_END}{value}"
+
+
+def untag_system_prefix(value: Any) -> tuple[str, str | None]:
+    """Remove an internal generated-prefix tag and return its category."""
+    text = str(value)
+    match = _SYSTEM_PREFIX_MARKER_RE.match(text)
+    if not match:
+        return text, None
+    return text[match.end():], match.group(1).strip().upper()
 
 
 def color_enabled(stream: Any = None) -> bool:
@@ -188,6 +208,7 @@ def _styled_spans(
     *,
     style_status_tokens: bool = True,
     system_prefix: str | None = None,
+    system_prefix_text: str | None = None,
 ) -> list[tuple[int, int, str]]:
     """Find terminal-only spans without styling message bodies or paths."""
     spans: list[tuple[int, int, str]] = []
@@ -196,7 +217,18 @@ def _styled_spans(
         spans.append((timestamp.start(1), timestamp.end(1), "90"))
 
     prefix = _PREFIX_RE.match(line) if system_prefix is None else None
-    if system_prefix == "":
+    explicit_label = None
+    if system_prefix_text is not None and system_prefix is not None:
+        expected_text = str(system_prefix_text)
+        if expected_text:
+            explicit = re.compile(
+                r"^\s*(?:\[\d{2}:\d{2}:\d{2}\]\s*)?"
+                rf"({re.escape(expected_text)})",
+            ).match(line)
+            if explicit:
+                prefix = explicit
+                explicit_label = system_prefix.strip("[]").strip().upper()
+    elif system_prefix == "":
         prefix = _SYSTEM_PREFIX_RE.match(line)
     elif system_prefix is not None:
         expected = system_prefix.strip()
@@ -211,7 +243,7 @@ def _styled_spans(
             if explicit:
                 prefix = explicit
     if prefix:
-        label = prefix.group(1)[1:-1].strip().upper()
+        label = explicit_label or prefix.group(1)[1:-1].strip().upper()
         code = _prefix_color(label, line)
         spans.append((prefix.start(1), prefix.end(1), code))
 
@@ -283,6 +315,7 @@ def style_system_text(
     stream: Any = None,
     *,
     system_prefix: str | None = None,
+    system_prefix_text: str | None = None,
     style_status_tokens: bool = True,
 ) -> str:
     """Style a known system message without classifying its message body.
@@ -291,9 +324,11 @@ def style_system_text(
     Callers that own a generated prefix can use this helper for a new category
     by supplying ``system_prefix``; the prefix is matched only at the start of
     each rendered line and receives the neutral fallback when no palette entry
-    exists.  Without an explicit prefix, only the first line accepts a new
-    system label.  This keeps provider responses and user text after a prefix
-    out of the classification boundary.
+    exists.  ``system_prefix_text`` can identify an exact generated prompt when
+    its visible text is not bracketed, without classifying arbitrary user text.
+    Without an explicit prefix, only the first line accepts a new system label.
+    This keeps provider responses and user text after a prefix out of the
+    classification boundary.
     """
     text = strip_ansi(value)
     if not color_enabled(stream):
@@ -310,6 +345,7 @@ def style_system_text(
             body,
             style_status_tokens=style_status_tokens,
             system_prefix=generated_prefix,
+            system_prefix_text=system_prefix_text,
         )
         if not spans:
             output.append(body + ending)

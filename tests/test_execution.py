@@ -164,6 +164,28 @@ class StreamingTests(unittest.TestCase):
         self.assertEqual(inferred, '\033[90m[FUTURE_STAGE]\033[0m provider text')
         self.assertEqual(plain, '\033[90m[FUTURE_STAGE]\033[0m provider text')
 
+    def test_style_system_text_styles_exact_unbracketed_prompts_only(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+             patch('sys.stdout', new=TTYBuffer()):
+            styled = style_system_text(
+                'chat> ',
+                system_prefix='CHAT',
+                system_prefix_text='chat>',
+                style_status_tokens=False,
+            )
+            user_text = style_system_text(
+                'user text containing chat> ',
+                system_prefix='CHAT',
+                system_prefix_text='chat>',
+                style_status_tokens=False,
+            )
+        self.assertEqual(styled, '\033[96mchat>\033[0m ')
+        self.assertEqual(user_text, 'user text containing chat> ')
+
     def test_style_system_text_preserves_wrapping_and_plain_output(self):
         class TTYBuffer(StringIO):
             def isatty(self):

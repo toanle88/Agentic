@@ -27,6 +27,15 @@ CHAT_FILES = (
     "tests-*.txt", "test-command-*.txt", "developer-*.txt", "developer-*.log",
 )
 
+
+class _GeneratedChatOutput(str):
+    """Carry a generated category without changing its visible text."""
+
+    def __new__(cls, value: str, system_prefix: str) -> "_GeneratedChatOutput":
+        item = super().__new__(cls, value)
+        item.system_prefix = system_prefix
+        return item
+
 _EDIT_RE = re.compile(
     r"\b(?:apply|change|create|delete|edit|fix|implement|modify|remove|repair|refactor|resolve|update|write)\b",
     re.IGNORECASE,
@@ -293,7 +302,16 @@ def run_chat_session(
         ]
 
         def read_chat_line(prompt: str) -> str:
-            message = _interactive_line(prompt, history=input_history)
+            # Chat owns every prompt passed through this input function,
+            # including confirmations and post-edit check selection. Keep the
+            # exact visible prompt while giving the shared formatter an
+            # explicit generated-text boundary.
+            message = _interactive_line(
+                prompt,
+                history=input_history,
+                system_prefix="CHAT",
+                system_prefix_text=prompt,
+            )
             if message.strip() and (not input_history or input_history[-1] != message):
                 input_history.append(message)
             return message
@@ -337,7 +355,7 @@ def run_chat_session(
                 "Configure sandbox.enabled=true (prefer security_mode=isolated) and retry."
             )
             remember(response)
-            output_fn(f"[CHAT] Agent response:\n{response}")
+            output_fn(_GeneratedChatOutput(f"[CHAT] Agent response:\n{response}", "CHAT"))
             continue
         before_status = status_reader() if may_edit and status_reader is not None else ""
         before_guard = guard_reader() if may_edit and guard_reader is not None else None
@@ -378,7 +396,7 @@ def run_chat_session(
             "(The provider returned no response.)" if ok
             else "Provider turn failed: no error detail"
         )
-        output_fn(f"[CHAT] Agent response:\n{visible_response}")
+        output_fn(_GeneratedChatOutput(f"[CHAT] Agent response:\n{visible_response}", "CHAT"))
         after_status = status_reader() if may_edit and status_reader is not None else ""
         changed = may_edit and status_reader is not None and after_status != before_status
         if may_edit and changed:
@@ -392,6 +410,9 @@ def run_chat_session(
                         timeout=config.get("effective_test_timeout_seconds"), sandbox=config.get("sandbox"),
                     )
                 output_fn(
-                    "[TESTS] Selected checks passed."
-                    if passed else f"[TESTS] Selected checks failed:\n{report[-3000:]}"
+                    _GeneratedChatOutput(
+                        "[TESTS] Selected checks passed."
+                        if passed else f"[TESTS] Selected checks failed:\n{report[-3000:]}",
+                        "TESTS",
+                    )
                 )

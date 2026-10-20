@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, TextIO
 
 from agentic import __version__  # noqa: F401
-from agentic_output import is_transient_progress, sanitize_terminal_text
+from agentic_output import is_transient_progress, sanitize_terminal_text, untag_system_prefix
 from agentic_shell_input import (  # noqa: F401
     COMMAND_DESCRIPTIONS,
     HELP,
@@ -231,7 +231,7 @@ def _is_foreground_prompt(text: str) -> bool:
 
 
 _FOREGROUND_PROMPT_PREFIXES = {
-    "chat> ": None,
+    "chat> ": "CHAT",
     "[PUBLISH] Publish this patch? Type 'publish' to approve: ": "PUBLISH",
 }
 
@@ -239,6 +239,11 @@ _FOREGROUND_PROMPT_PREFIXES = {
 def _foreground_prompt_prefix(text: str) -> str | None:
     """Return styling metadata for a recognized child prompt."""
     return _FOREGROUND_PROMPT_PREFIXES.get(text)
+
+
+def _foreground_prompt_prefix_text(text: str) -> str | None:
+    """Return the exact generated text for an unbracketed child prompt."""
+    return text if text == "chat> " else None
 
 
 def _display_escape(character: str) -> str:
@@ -767,6 +772,10 @@ class AgenticShell:
                 popen_kwargs["creationflags"] = getattr(
                     subprocess, "CREATE_NEW_PROCESS_GROUP", 0
                 )
+            if "--chat" in argv:
+                child_environment = os.environ.copy()
+                child_environment["AGENTIC_SHELL_SYSTEM_PREFIXES"] = "1"
+                popen_kwargs["env"] = child_environment
             real_tty = bool(
                 getattr(sys.stdin, "isatty", lambda: False)()
                 and getattr(sys.stdout, "isatty", lambda: False)()
@@ -792,6 +801,7 @@ class AgenticShell:
                 def emit_line(line: str, *, terminated: bool) -> None:
                     nonlocal prompt_was_displayed
                     line = line.rstrip("\r")
+                    line, generated_prefix = untag_system_prefix(line)
                     if line and prompt_was_displayed:
                         # Child output does not mean the active prompt was
                         # submitted. Keep its prompt and typed buffer in the
@@ -799,16 +809,19 @@ class AgenticShell:
                         prompt_was_displayed = False
                     if is_transient_progress(line):
                         _shell_write_transient(line)
-                    elif terminated:
+                    elif terminated or generated_prefix:
                         _shell_print(
                             _normalize_foreground_output(line),
                             style_status_tokens=False,
+                            system_prefix=generated_prefix,
                             flush=True,
                         )
                     elif line and _is_foreground_prompt(line):
                         if foreground is not None:
                             foreground.set_prompt(
-                                line, system_prefix=_foreground_prompt_prefix(line),
+                                line,
+                                system_prefix=_foreground_prompt_prefix(line),
+                                system_prefix_text=_foreground_prompt_prefix_text(line),
                             )
                         else:
                             _shell_print(line, end="", style_status_tokens=False, flush=True)
@@ -860,7 +873,9 @@ class AgenticShell:
                             and _is_foreground_prompt(pending)
                         ):
                             foreground.set_prompt(
-                                pending, system_prefix=_foreground_prompt_prefix(pending),
+                                pending,
+                                system_prefix=_foreground_prompt_prefix(pending),
+                                system_prefix_text=_foreground_prompt_prefix_text(pending),
                             )
                             pending = ""
                             prompt_was_displayed = True
