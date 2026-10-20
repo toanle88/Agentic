@@ -75,11 +75,12 @@ class PublicationTests(_GitRepositoryTestCase):
         with (patch('agentic.check_existing_pr', return_value=[]),
               patch('agentic.verify_and_review') as verify,
               patch('agentic.run_tests') as tests,
-              patch('builtins.input', return_value='no') as confirm,
+              patch('agentic_shell_input._interactive_line', return_value='no') as confirm,
               patch('agentic.command', wraps=agentic.command) as mock_command):
             agentic.publish(run, issue, 'fake/repo', 'main', cfg, folder)
             confirm.assert_called_once_with(
-                "\n[PUBLISH] Publish this patch? Type 'publish' to approve: "
+                "\n[PUBLISH] Publish this patch? Type 'publish' to approve: ",
+                system_prefix='PUBLISH',
             )
             verify.assert_not_called()
             tests.assert_not_called()

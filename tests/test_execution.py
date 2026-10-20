@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import agentic
 import agentic_execution
-from agentic_output import is_transient_progress, style_text
+from agentic_output import is_transient_progress, style_system_text, style_text
 
 
 def sh(*args, cwd):
@@ -112,7 +112,8 @@ class StreamingTests(unittest.TestCase):
         expected = {
             'DEVELOPER': '36', 'REVIEW': '35', 'TESTS': '34', 'RETRY': '33',
             'GIT': '33', 'PATCH': '95', 'ERROR': '31', 'RESULT': '31',
-            'TIMEOUT': '33', 'BLOCKED': '33', 'STOP': '33',
+            'CHAT': '96', 'COST': '90', 'NO_CHANGES': '33', 'CANCEL': '33',
+            'DOCTOR': '36', 'TIMEOUT': '33', 'BLOCKED': '33', 'STOP': '33',
         }
         with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
              patch('sys.stdout', new=TTYBuffer()):
@@ -140,6 +141,62 @@ class StreamingTests(unittest.TestCase):
                 style_text('[STOP] no running jobs', style_status_tokens=False),
                 '\033[33m[STOP]\033[0m no running jobs',
             )
+
+    def test_style_system_text_supports_future_prefixes_without_coloring_body(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+             patch('sys.stdout', new=TTYBuffer()):
+            styled = style_system_text(
+                '[FUTURE_STAGE] [REVIEW] provider text\n[REVIEW] user text',
+                system_prefix='FUTURE_STAGE', style_status_tokens=False,
+            )
+            generic = style_text('[FUTURE_STAGE] provider text')
+            inferred = style_system_text('[FUTURE_STAGE] provider text')
+            plain = style_system_text('[FUTURE_STAGE] provider text', system_prefix='FUTURE_STAGE')
+        self.assertEqual(
+            styled,
+            '\033[90m[FUTURE_STAGE]\033[0m [REVIEW] provider text\n[REVIEW] user text',
+        )
+        self.assertEqual(generic, '[FUTURE_STAGE] provider text')
+        self.assertEqual(inferred, '\033[90m[FUTURE_STAGE]\033[0m provider text')
+        self.assertEqual(plain, '\033[90m[FUTURE_STAGE]\033[0m provider text')
+
+    def test_style_system_text_preserves_wrapping_and_plain_output(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        message = '[CHAT] Agent response:\n[REVIEW] body\nnext line\n'
+        with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+             patch('sys.stdout', new=TTYBuffer()):
+            styled = style_system_text(message, system_prefix='CHAT', style_status_tokens=False)
+        self.assertEqual(
+            styled,
+            '\033[96m[CHAT]\033[0m Agent response:\n[REVIEW] body\nnext line\n',
+        )
+
+        with patch.dict('os.environ', {'NO_COLOR': '1'}):
+            self.assertEqual(
+                style_system_text(message, system_prefix='CHAT'),
+                message,
+            )
+
+    def test_chat_output_styles_category_without_recoloring_response(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        output = TTYBuffer()
+        with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+             patch('sys.stdout', new=output):
+            agentic._chat_output('[CHAT] Agent response: FAILED\n[REVIEW] provider text')
+        self.assertEqual(
+            output.getvalue(),
+            '\033[96m[CHAT]\033[0m Agent response: FAILED\n[REVIEW] provider text\n',
+        )
 
     def test_stage_prefix_colors_follow_outcomes_without_painting_body(self):
         class TTYBuffer(StringIO):

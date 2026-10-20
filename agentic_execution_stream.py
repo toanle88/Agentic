@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from agentic_models import Issue, Run
-from agentic_output import is_transient_progress, paint, strip_ansi, style_text
+from agentic_output import is_transient_progress, paint, strip_ansi, style_system_text, style_text
 from agentic_sandbox import sandbox_command
 from agentic_security import redact_secrets
 from agentic_telemetry import record_operation, record_usage
@@ -78,7 +78,13 @@ def _record_provider_usage(output: Path, readonly: bool, usage: dict[str, Any], 
             parts.append(f"{tokens:,} tokens")
         if cost is not None:
             parts.append(f"${cost:.4f}")
-        _console_print(style_text(f"[COST] {role.title()}: {' '.join(parts)}"), flush=True)
+        _console_print(
+            style_system_text(
+                f"[COST] {role.title()}: {' '.join(parts)}",
+                system_prefix="COST",
+            ),
+            flush=True,
+        )
 
 
 def _console_text(value: Any, stream: Any = None) -> str:

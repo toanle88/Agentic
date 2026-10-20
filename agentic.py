@@ -81,7 +81,7 @@ from agentic_execution import (  # noqa: F401
     run_codex,
     streamed_command,
 )
-from agentic_output import style_text
+from agentic_output import style_system_text, style_text
 from agentic_openrouter import (  # noqa: F401
     run_openrouter,
 )
@@ -101,7 +101,7 @@ from agentic_telemetry import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.45"
+__version__ = "1.1.46"
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 INSTRUCTION_CONTEXT_CHARS = _INSTRUCTION_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module
@@ -109,9 +109,19 @@ INSTRUCTION_CONTEXT_CHARS = _INSTRUCTION_CONTEXT_CHARS
 DEFAULT_SECURITY_MODE = _agentic_config.DEFAULT_SECURITY_MODE
 
 
-def _status_print(message: Any, *, file: Any = None, flush: bool = False) -> None:
+def _status_print(message: Any, *, file: Any = None, flush: bool = False,
+                  system_prefix: str | None = None) -> None:
     """Print human-facing status with TTY-only styling."""
-    _console_print(style_text(message, file), file=file, flush=flush)
+    if system_prefix is None:
+        rendered = style_text(message, file)
+    else:
+        rendered = style_system_text(message, file, system_prefix=system_prefix)
+    _console_print(rendered, file=file, flush=flush)
+
+
+def _chat_output(message: Any) -> None:
+    """Render chat's generated category while leaving the response body plain."""
+    _console_print(style_system_text(message, style_status_tokens=False), flush=True)
 
 
 PROVIDER_SANDBOX_ENV = _agentic_config.PROVIDER_SANDBOX_ENV
@@ -965,6 +975,7 @@ def execute_chat(args: argparse.Namespace, repo: Path) -> int:
         status_reader=status_reader,
         guard_reader=guard_reader,
         guard_validator=guard_validator,
+        output_fn=_chat_output,
     )
 
 

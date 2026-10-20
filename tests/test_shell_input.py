@@ -21,6 +21,48 @@ class TTYBuffer(StringIO):
 
 
 class InteractiveInputTests(unittest.TestCase):
+    def test_publish_prompt_styles_display_copy_and_preserves_raw_prompt(self):
+        output = TTYBuffer()
+        raw_prompt = '[PUBLISH] Publish this patch? Type \'publish\' to approve: '
+        with patch('agentic_shell_input.sys.stdout', new=output), \
+             patch('agentic_shell_input.shutil.get_terminal_size',
+                   return_value=os.terminal_size((80, 8))), \
+             patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}):
+            state = agentic_shell_input._InteractiveOutputState()
+            foreground = agentic_shell_input._ForegroundOutputState(state)
+            foreground.set_prompt(raw_prompt, system_prefix='PUBLISH')
+            foreground.set_input('publish')
+
+        rendered = output.getvalue()
+        self.assertIn('\033[33m[PUBLISH]\033[0m', rendered)
+        self.assertIn('\033[0m', rendered)
+        self.assertIn(raw_prompt + 'publish', strip_ansi(rendered))
+        self.assertEqual(foreground.prompt, raw_prompt)
+        self.assertEqual(foreground.input_text, 'publish')
+
+    def test_publish_prompt_is_plain_when_color_is_disabled(self):
+        raw_prompt = '[PUBLISH] Publish this patch? Type \'publish\' to approve: '
+        with patch.dict('os.environ', {'NO_COLOR': '1'}):
+            rendered = agentic_shell_input._input_row(
+                raw_prompt, 'publish', 80, system_prefix='PUBLISH',
+            )
+        self.assertNotIn('\033[', rendered)
+        self.assertIn(raw_prompt + 'publish', rendered)
+
+    def test_shell_print_can_style_explicit_future_system_prefix(self):
+        output = TTYBuffer()
+        with patch('agentic_shell_input.sys.stdout', new=output), \
+             patch.object(agentic_shell_input, '_ACTIVE_INTERACTIVE_OUTPUT', None), \
+             patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}):
+            agentic_shell_input._shell_print(
+                '[FUTURE] shell message\n[REVIEW] user text',
+                system_prefix='FUTURE', style_status_tokens=False,
+            )
+        self.assertEqual(
+            output.getvalue(),
+            '\033[90m[FUTURE]\033[0m shell message\n[REVIEW] user text\n',
+        )
+
     def test_terminal_mode_controls_normal_prompt_visibility(self):
         state = agentic_shell_input._InteractiveOutputState()
 
