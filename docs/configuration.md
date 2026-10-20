@@ -65,7 +65,7 @@ Use commands that are actually supported by the target repository. Agentic does 
 | `task_source` | `github` or `local` | `github` | Selects where work requirements come from. GitHub mode uses issue numbers; local mode accepts `--task`, `--task-file`, or pasted tasks from `/run`. |
 | `test_commands` | array of argv arrays | required | Checks run inside the worktree. Each command must be an array such as `["go", "test", "./..."]`; shell strings are not accepted. |
 | `slow_test_commands` | array of argv arrays | `[]` | Additional checks run after `test_commands` when `--profile slow` is selected. Profiles select checks, not the provider model or reasoning setting. |
-| `max_retries` | integer `0..3` | `3` | Extra developer attempts after the first attempt. `3` permits up to four total attempts. |
+| `max_retries` | integer `0..5` | `3` | Extra developer attempts after the first attempt. `5` permits up to six total attempts. |
 | `max_files` | integer `1..100` or `null` | `null` | Maximum distinct files in the proposed patch. `null` disables this limit. |
 | `codex_model` | string or `null` | `null` | Model passed to Codex. `null` inherits the Codex CLI configuration. |
 | `codex_reasoning_effort` | string or `null` | `null` | Reasoning setting passed to Codex, such as `max`. `null` inherits the Codex CLI configuration. |
@@ -212,7 +212,7 @@ The legacy `codex_*` settings remain supported for existing configurations.
 When a `developer` or `reviewer` object supplies the same setting, the nested
 value wins. New configurations should use the nested provider objects.
 
-Timeout values must be between 1 second and 24 hours when set. `max_retries` is limited to 0 through 3 by the configuration validator.
+Timeout values must be between 1 second and 24 hours when set. `max_retries` is limited to 0 through 5 by the configuration validator.
 
 ### Prompt guidance
 

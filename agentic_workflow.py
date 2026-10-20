@@ -1116,11 +1116,16 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
                 item for item in previous_verdict.get("findings", [])
                 if isinstance(item, str)
             ]
-    for attempt in range(config["max_retries"] + 1):
+    maximum_attempts = config["max_retries"] + 1
+    attempt_word = "attempt" if maximum_attempts == 1 else "attempts"
+    for attempt in range(maximum_attempts):
         if deadline is not None and time.monotonic() >= deadline:
             _status_print("[TIMEOUT] Overall task deadline reached")
             return False
-        _status_print(f"\n[DEVELOPER] Working on {issue.reference}, attempt {attempt + 1}")
+        _status_print(
+            f"\n[DEVELOPER] Working on {issue.reference}, "
+            f"attempt {attempt + 1}/{maximum_attempts}"
+        )
         output = next_log(folder, "developer")
         agent_kwargs: dict[str, Any] = {
             "settings": config.get("developer_agent"),
@@ -1244,7 +1249,10 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
         _status_print("[RETRY] Returning evidence to developer (if retries remain)")
         # Preserve all files, only unstage to make subsequent git diff easier to inspect.
         git(run.worktree, "reset", "--quiet")
-    _status_print(f"\nAttempts exhausted; worktree preserved: {run.worktree}")
+    _status_print(
+        f"\nAttempts exhausted after {maximum_attempts} {attempt_word}; "
+        f"worktree preserved: {run.worktree}"
+    )
     return False
 
 

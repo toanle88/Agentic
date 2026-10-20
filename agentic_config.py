@@ -173,8 +173,8 @@ def load_config(path: Path) -> dict[str, Any]:
     codex_model = data.get("codex_model")
     reasoning_effort = data.get("codex_reasoning_effort")
     system_prompt = data.get("system_prompt")
-    if type(retries) is not int or not 0 <= retries <= 3:
-        raise ValueError("max_retries must be an integer from 0 to 3")
+    if type(retries) is not int or not 0 <= retries <= 5:
+        raise ValueError("max_retries must be an integer from 0 to 5")
     if max_files is not None and (type(max_files) is not int or not 1 <= max_files <= 100):
         raise ValueError("max_files must be null or an integer from 1 to 100")
     if codex_timeout is not None and (type(codex_timeout) is not int or not 1 <= codex_timeout <= 86400):

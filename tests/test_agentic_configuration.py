@@ -618,6 +618,25 @@ class ConfigurationTests(unittest.TestCase):
             }))
             self.assertEqual(agentic.load_config(local)['task_source'], 'local')
 
+            for retries in (0, 5):
+                configured_retries = Path(temp) / f'retries-{retries}.json'
+                configured_retries.write_text(json.dumps({
+                    'test_commands': [['go', 'test', './...']],
+                    'max_retries': retries,
+                }))
+                self.assertEqual(
+                    agentic.load_config(configured_retries)['max_retries'], retries,
+                )
+
+            for index, retries in enumerate((-1, 6, 1.5, '5', True)):
+                invalid_retries = Path(temp) / f'invalid-retries-{index}.json'
+                invalid_retries.write_text(json.dumps({
+                    'test_commands': [['go', 'test', './...']],
+                    'max_retries': retries,
+                }))
+                with self.assertRaisesRegex(ValueError, 'max_retries'):
+                    agentic.load_config(invalid_retries)
+
             invalid = Path(temp) / 'invalid.json'
             invalid.write_text(json.dumps({
                 'task_source': 'jira',
