@@ -167,8 +167,42 @@ processes in a hardened Docker or Podman container:
 }
 ```
 
-The image must be built and contain the selected provider CLI and all tools
-needed by the configured checks. Agentic mounts the task worktree writable for
+The sandbox can use an existing image or build one from a repository-owned
+Dockerfile. A Dockerfile requires an image tag and an optional repository-
+relative build context; Agentic runs the build with an argv array before the
+isolated checks and provider processes start:
+
+```json
+{
+  "security_mode": "isolated",
+  "sandbox": {
+    "enabled": true,
+    "engine": "docker",
+    "image": "my-project-agentic:latest",
+    "dockerfile": "Dockerfile.agentic",
+    "build_context": ".",
+    "language": "python",
+    "allow_network": false,
+    "pass_env": ["OPENAI_API_KEY"]
+  }
+}
+```
+
+`dockerfile` and `build_context` must be relative paths inside the target
+repository. The build is opt-in: omitted Dockerfile settings do not change
+existing image-only behavior, and trusted mode never builds or runs a
+container. See the [language-specific starter templates](../examples/sandbox/README.md)
+for pinned Python, Node.js, Go, Rust, Java, and .NET examples. Templates
+include comments for adding project dependencies, native packages, test tools,
+and the selected provider CLI.
+
+`agentic init` records a best-effort language hint from common project markers.
+Use `--sandbox-language` or set `sandbox.language` to override it. Detection is
+only a hint; it does not install tools or make a sandbox mandatory.
+
+The image must contain the selected provider CLI and all tools needed by the
+configured checks. When `sandbox.dockerfile` is configured, Agentic builds the
+image first. Agentic mounts the task worktree writable for
 developer processes, linked-worktree Git metadata read-only for both developer
 and reviewer processes, and the run-output directory. It makes the container
 root filesystem read-only, drops Linux capabilities, applies process/resource

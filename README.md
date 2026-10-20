@@ -101,7 +101,7 @@ agentic init --secure --sandbox-image your-project-agentic-runner:latest
 ```
 
 See the [sandbox image guide](examples/sandbox/README.md) for the required
-provider and project tooling.
+provider and project tooling, including pinned language-specific Dockerfiles.
 
 Provider-ready templates are in [`examples/provider-configs/`](examples/provider-configs/). Copy one to the target repository, or let initialization create it:
 
@@ -251,7 +251,7 @@ jobs. Use `/stop --all` to request termination for every running Agentic job.
 | `agentic --runs` | List existing Agentic worktrees. |
 | `agentic status --json` | Emit machine-readable worktree status. |
 | `agentic runs --json` | Alias for `status --json`. |
-| `agentic init [--provider NAME] [--security-mode MODE] [--sandbox-image IMAGE]` | Create ignored target configuration and detect a starter check. |
+| `agentic init [--provider NAME] [--security-mode MODE] [--sandbox-image IMAGE] [--sandbox-dockerfile PATH]` | Create ignored target configuration and detect a starter check. |
 | `agentic doctor` | Diagnose Git, GitHub CLI, selected provider CLIs/API key, config, and check prerequisites. |
 | `agentic --state-dir PATH ...` | Store worktrees and runtime artifacts in a chosen location. |
 | `agentic cleanup --issue N` | Preview removal of a clean issue worktree; add `--yes` to confirm. |

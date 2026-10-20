@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import agentic
+import agentic_config
 import agentic_diagnostics
 
 from test_agentic import sh
@@ -57,6 +58,9 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(args.security_mode, 'isolated')
         self.assertFalse(args.secure)
         self.assertIsNone(args.sandbox_image)
+        self.assertIsNone(args.sandbox_dockerfile)
+        self.assertEqual(args.sandbox_context, '.')
+        self.assertIsNone(args.sandbox_language)
 
         defaults = agentic.build_parser().parse_args(['init'])
         self.assertEqual(defaults.security_mode, 'trusted')
@@ -94,6 +98,22 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(config['security_mode'], 'isolated')
         self.assertTrue(config['sandbox']['enabled'])
         self.assertEqual(config['sandbox']['image'], 'test-image')
+
+
+    def test_init_can_build_a_language_specific_sandbox(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            sh('git', 'init', '--initial-branch=main', str(repo), cwd=repo.parent)
+            (repo / 'package.json').write_text('{"scripts": {"test": "npm test"}}\n')
+            (repo / 'Dockerfile.agentic').write_text('FROM node:22.11.0-bookworm-slim\n')
+            self.assertEqual(agentic.init_repository(
+                repo, security_mode='isolated', sandbox_dockerfile='Dockerfile.agentic',
+            ), 0)
+            config = agentic.load_config(repo / 'agent_config.json')
+        self.assertEqual(config['sandbox']['dockerfile'], 'Dockerfile.agentic')
+        self.assertEqual(config['sandbox']['build_context'], '.')
+        self.assertEqual(config['sandbox']['language'], 'node')
+        self.assertEqual(config['sandbox']['image'], agentic.DEFAULT_SANDBOX_IMAGE)
 
 
     def test_init_trusted_mode_warns_about_host_account_permissions(self):
@@ -278,6 +298,66 @@ class ConfigurationTests(unittest.TestCase):
             agentic.validate_sandbox({
                 'enabled': True, 'image': 'test-image', 'pass_env': ['bad-name'],
             })
+
+
+    def test_sandbox_dockerfile_and_language_configuration_is_validated(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'agent_config.json'
+            path.write_text(json.dumps({
+                'test_commands': [['python', '-m', 'unittest']],
+                'security_mode': 'isolated',
+                'sandbox': {
+                    'enabled': True, 'engine': 'docker', 'image': 'project:latest',
+                    'dockerfile': 'Dockerfile.agentic', 'build_context': 'container',
+                    'language': 'python',
+                },
+            }))
+            config = agentic.load_config(path)
+        self.assertEqual(config['sandbox']['dockerfile'], 'Dockerfile.agentic')
+        self.assertEqual(config['sandbox']['build_context'], 'container')
+        self.assertEqual(config['sandbox']['language'], 'python')
+
+        base = {'test_commands': [['python', '-m', 'unittest']], 'sandbox': {
+            'enabled': True, 'image': 'project:latest',
+        }}
+        with tempfile.TemporaryDirectory() as temp:
+            for name, value in (('dockerfile', '../Dockerfile'), ('build_context', '/tmp')):
+                path = Path(temp) / f'{name}.json'
+                sandbox = {**base['sandbox'], name: value}
+                path.write_text(json.dumps({**base, 'sandbox': sandbox}))
+                with self.assertRaisesRegex(ValueError, f'sandbox.{name}'):
+                    agentic.load_config(path)
+
+
+    def test_preflight_builds_a_configured_sandbox_with_argv(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            dockerfile = repo / 'Dockerfile.agentic'
+            dockerfile.write_text('FROM python:3.12.7-slim-bookworm\n')
+            sandbox = {
+                'enabled': True, 'engine': 'docker', 'image': 'project:latest',
+                'dockerfile': 'Dockerfile.agentic', 'build_context': '.',
+            }
+            completed = CompletedProcess([], 0, stdout='built\n')
+            with (patch('agentic_config.shutil.which', return_value='/usr/bin/docker'),
+                  patch('agentic_config.subprocess.run', return_value=completed) as run):
+                agentic.preflight_security('isolated', sandbox, repo=repo)
+        run.assert_called_once_with(
+            ['docker', 'build', '--pull=false', '--tag', 'project:latest',
+             '--file', str(dockerfile.resolve()), str(repo.resolve())],
+            cwd=repo, stdout=agentic_config.subprocess.PIPE,
+            stderr=agentic_config.subprocess.STDOUT, text=True, encoding='utf-8',
+            errors='replace', timeout=1800, check=False,
+        )
+
+
+    def test_project_language_detection_supports_explicit_markers(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            (repo / 'global.json').write_text('{}')
+            self.assertEqual(agentic.detect_project_language(repo)[0], 'dotnet')
+            (repo / 'pom.xml').write_text('<project/>')
+            self.assertEqual(agentic.detect_project_language(repo)[0], 'java')
 
 
     def test_doctor_reports_repository_config_and_provider_health(self):

@@ -1,0 +1,9 @@
+FROM mcr.microsoft.com/dotnet/sdk:8.0.404-bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add project-specific SDK workloads, native libraries, and provider CLIs here.
+# RUN dotnet workload install <workload>
+WORKDIR /workspace
