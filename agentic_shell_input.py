@@ -20,7 +20,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, cast
 
 from agentic import __version__
-from agentic_output import paint, sanitize_terminal_text, strip_ansi, style_text
+from agentic_output import (
+    color_enabled,
+    paint,
+    sanitize_terminal_text,
+    strip_ansi,
+    style_text,
+)
 if TYPE_CHECKING:
     from agentic_shell import Job
 
@@ -139,6 +145,11 @@ def _terminal_cell_width(character: str) -> int:
     if unicodedata.combining(character) or category in {"Cc", "Cf", "Mn", "Me"}:
         return 0
     return 2 if unicodedata.east_asian_width(character) in {"W", "F"} else 1
+
+
+def _terminal_text_width(text: str) -> int:
+    """Return the terminal display-cell width of text without ANSI styling."""
+    return sum(_terminal_cell_width(character) for character in strip_ansi(text))
 
 
 def _advance_terminal_cursor(
@@ -437,11 +448,40 @@ def _clip_input_line(line: str, cursor: int, prompt_width: int,
                      columns: int) -> tuple[str, int]:
     """Keep the editable line on one physical terminal row while scrolling."""
     available = max(1, columns - prompt_width - 1)
-    if len(line) <= available:
-        return line, cursor
-    start = min(max(0, cursor - available), len(line) - available)
-    visible = line[start:start + available]
-    return visible, cursor - start
+    cursor = max(0, min(cursor, len(line)))
+    total_width = _terminal_text_width(line)
+    cursor_width = _terminal_text_width(line[:cursor])
+    if total_width <= available:
+        return line, cursor_width
+
+    # Choose a display-cell window around the cursor, then move its edges to
+    # character boundaries so a wide glyph is never split by clipping.
+    start_width = min(max(0, cursor_width - available), total_width - available)
+    start = 0
+    consumed_width = 0
+    while start < len(line):
+        character_width = _terminal_cell_width(line[start])
+        if consumed_width + character_width > start_width:
+            if character_width and consumed_width < start_width:
+                # The target falls inside a wide glyph. Skip that glyph
+                # instead of starting in the middle of its two cells.
+                start += 1
+            break
+        consumed_width += character_width
+        start += 1
+
+    end = start
+    visible_width = 0
+    while end < len(line):
+        character_width = _terminal_cell_width(line[end])
+        if character_width and visible_width + character_width > available:
+            break
+        visible_width += character_width
+        end += 1
+
+    visible = line[start:end]
+    visible_cursor = min(max(cursor, start), end)
+    return visible, _terminal_text_width(line[start:visible_cursor])
 
 
 def _describe_candidate(candidate: str, command: str = "",
@@ -900,13 +940,11 @@ def _interactive_input(
                 row_prompt = prompt if original_row == 0 else "  "
                 row_cursor = cursor_column if original_row == cursor_row else len(part)
                 visible, visible_cursor = _clip_input_line(
-                    part, row_cursor, len(row_prompt), columns,
+                    part, row_cursor, _terminal_text_width(row_prompt), columns,
                 )
                 if original_row == cursor_row:
                     cursor_display = visible_cursor
-                display_lines.append(
-                    _shell_paint(row_prompt, "1;36") + _shell_paint(visible, "37")
-                )
+                display_lines.append(_input_row(row_prompt, visible, columns))
 
             editor_lines = len(status_strings) + len(dropdown_strings) + len(display_lines)
             output_lines = _output_history_lines("".join(output_history), columns)
@@ -955,9 +993,9 @@ def _interactive_input(
             if cursor_up:
                 buf.append(f"\033[{cursor_up}A")
             cursor_col = (
-                len(prompt) + cursor_display + 1
+                _terminal_text_width(prompt) + cursor_display + 1
                 if cursor_row == 0
-                else 2 + cursor_display + 1
+                else _terminal_text_width("  ") + cursor_display + 1
             )
             buf.append(f"\033[{max(1, cursor_col)}G")
             sys.stdout.write("".join(buf))
@@ -1338,6 +1376,22 @@ def _readline_module():
 def _shell_paint(text: str, code: str) -> str:
     """Add terminal color without leaking escape codes into captured output."""
     return paint(sanitize_terminal_text(text), code)
+
+
+def _input_row(prompt: str, text: str, columns: int) -> str:
+    """Render one full-width editable row with a resettable TTY background."""
+    safe_prompt = sanitize_terminal_text(prompt)
+    safe_text = sanitize_terminal_text(text)
+    content = safe_prompt + safe_text
+    padding = " " * max(0, columns - _terminal_text_width(content))
+    if not color_enabled():
+        return content + padding
+    return (
+        "\033[48;5;236m"
+        f"\033[1;36m{safe_prompt}"
+        f"\033[97m{safe_text}{padding}"
+        "\033[0m"
+    )
 
 
 def _write_shell_output(text: str, *, ensure_newline: bool = True) -> None:
