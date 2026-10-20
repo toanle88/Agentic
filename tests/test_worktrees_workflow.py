@@ -186,6 +186,50 @@ class WorkflowTests(_GitRepositoryTestCase):
         self.assertIn('Evidence:', second_prompt)
 
 
+    def test_develop_reports_attempts_and_stops_after_five_retries(self):
+        run = agentic.create_worktree(self.repo, 'main', 38)
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(38, 'Retry limit', 'Implement it')
+        config = {
+            'max_retries': 5,
+            'max_files': None,
+            'developer_agent': {'provider': 'codex'},
+        }
+        with (patch('agentic.run_agent', return_value=(True, 'implemented')) as run_agent,
+              patch('agentic.verify_and_review', return_value=(
+                  False, 'AssertionError: expected a changed result', {}, '', '',
+              )),
+              patch('sys.stdout', new_callable=StringIO) as output):
+            self.assertFalse(agentic.develop(run, issue, 'main', config, folder))
+
+        self.assertEqual(run_agent.call_count, 6)
+        rendered = output.getvalue()
+        for attempt in range(1, 7):
+            self.assertIn(f'attempt {attempt}/6', rendered)
+        self.assertIn('Attempts exhausted after 6 attempts', rendered)
+
+
+    def test_develop_runs_only_initial_attempt_when_retries_are_zero(self):
+        run = agentic.create_worktree(self.repo, 'main', 39)
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(39, 'No retries', 'Implement it')
+        config = {
+            'max_retries': 0,
+            'max_files': None,
+            'developer_agent': {'provider': 'codex'},
+        }
+        with (patch('agentic.run_agent', return_value=(True, 'implemented')) as run_agent,
+              patch('agentic.verify_and_review', return_value=(
+                  False, 'AssertionError: expected a changed result', {}, '', '',
+              )),
+              patch('sys.stdout', new_callable=StringIO) as output):
+            self.assertFalse(agentic.develop(run, issue, 'main', config, folder))
+
+        run_agent.assert_called_once()
+        self.assertIn('attempt 1/1', output.getvalue())
+        self.assertIn('Attempts exhausted after 1 attempt', output.getvalue())
+
+
     def test_develop_does_not_retry_environment_failures(self):
         run = agentic.create_worktree(self.repo, 'main', 34)
         folder = agentic.logs_path(self.repo, run)
@@ -207,7 +251,7 @@ class WorkflowTests(_GitRepositoryTestCase):
         folder = agentic.logs_path(self.repo, run)
         issue = agentic.Issue(37, 'No patch blocker', 'Implement the blocked task')
         config = {
-            'max_retries': 3,
+            'max_retries': 5,
             'max_files': None,
             'developer_agent': {'provider': 'codex'},
         }
@@ -217,7 +261,7 @@ class WorkflowTests(_GitRepositoryTestCase):
             output.write_text(developer_report, encoding='utf-8')
             return True, developer_report
 
-        with (patch('agentic.run_agent', side_effect=fake_developer),
+        with (patch('agentic.run_agent', side_effect=fake_developer) as run_agent,
               patch('agentic.run_tests', return_value=(True, 'All configured checks passed')),
               patch('agentic.review') as review,
               patch('sys.stdout', new_callable=StringIO) as output):
@@ -231,6 +275,7 @@ class WorkflowTests(_GitRepositoryTestCase):
         self.assertIn('Checks passed, but the developer produced no code changes', output.getvalue())
         self.assertIn(developer_report, output.getvalue())
         self.assertIn(str(folder), output.getvalue())
+        run_agent.assert_called_once()
         review.assert_not_called()
         blocked = json.loads((folder / 'blocked.json').read_text(encoding='utf-8'))
         self.assertEqual(blocked['kind'], 'no-code-changes')
