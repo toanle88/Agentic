@@ -1165,10 +1165,7 @@ def _publish(run: Run, issue: Issue, github_repo: str, base: str,
     # used by its input forwarder.
     from agentic_shell_input import _interactive_line
 
-    prompt = (
-        "\n[PUBLISH] Waiting for publication confirmation. "
-        "Type 'publish' to continue or 'q' to cancel: "
-    )
+    prompt = "\n[PUBLISH] Publish this patch? [y/N]: "
     while True:
         try:
             confirm = _interactive_line(prompt, system_prefix="PUBLISH").strip().casefold()
@@ -1178,17 +1175,15 @@ def _publish(run: Run, issue: Issue, github_repo: str, base: str,
                 "branch/worktree kept intact"
             )
             return
-        if confirm == "publish":
+        if confirm in {"y", "yes", "publish"}:
             _status_print("[PUBLISH] Publication approved; starting publication.", flush=True)
             break
-        # Keep the historical `no` response as a cancellation alias while the
-        # user-facing prompt advertises the clearer `q` shortcut.
-        if confirm in {"q", "no"}:
+        if confirm in {"", "n", "no", "q"}:
             _status_print("[PUBLISH] Publication cancelled; branch/worktree kept intact")
             return
         _status_print(
-            "[PUBLISH] Invalid confirmation. Type 'publish' to continue or "
-            "'q' to cancel."
+            "[PUBLISH] Invalid confirmation. Enter 'y' or 'yes' to publish, "
+            "or 'n', 'no', 'q', or Enter to cancel."
         )
     # A human confirmation is not permission to publish a different patch.
     _, new_digest, _ = prepare_patch(run.worktree, base, config["max_files"])

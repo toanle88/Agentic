@@ -23,7 +23,7 @@ class TTYBuffer(StringIO):
 class InteractiveInputTests(unittest.TestCase):
     def test_publish_prompt_styles_display_copy_and_preserves_raw_prompt(self):
         output = TTYBuffer()
-        raw_prompt = '[PUBLISH] Publish this patch? Type \'publish\' to approve: '
+        raw_prompt = '[PUBLISH] Publish this patch? [y/N]: '
         with patch('agentic_shell_input.sys.stdout', new=output), \
              patch('agentic_shell_input.shutil.get_terminal_size',
                    return_value=os.terminal_size((80, 8))), \
@@ -31,23 +31,23 @@ class InteractiveInputTests(unittest.TestCase):
             state = agentic_shell_input._InteractiveOutputState()
             foreground = agentic_shell_input._ForegroundOutputState(state)
             foreground.set_prompt(raw_prompt, system_prefix='PUBLISH')
-            foreground.set_input('publish')
+            foreground.set_input('y')
 
         rendered = output.getvalue()
         self.assertIn('\033[33m[PUBLISH]\033[0m', rendered)
         self.assertIn('\033[0m', rendered)
-        self.assertIn(raw_prompt + 'publish', strip_ansi(rendered))
+        self.assertIn(raw_prompt + 'y', strip_ansi(rendered))
         self.assertEqual(foreground.prompt, raw_prompt)
-        self.assertEqual(foreground.input_text, 'publish')
+        self.assertEqual(foreground.input_text, 'y')
 
     def test_publish_prompt_is_plain_when_color_is_disabled(self):
-        raw_prompt = '[PUBLISH] Publish this patch? Type \'publish\' to approve: '
+        raw_prompt = '[PUBLISH] Publish this patch? [y/N]: '
         with patch.dict('os.environ', {'NO_COLOR': '1'}):
             rendered = agentic_shell_input._input_row(
-                raw_prompt, 'publish', 80, system_prefix='PUBLISH',
+                raw_prompt, 'y', 80, system_prefix='PUBLISH',
             )
         self.assertNotIn('\033[', rendered)
-        self.assertIn(raw_prompt + 'publish', rendered)
+        self.assertIn(raw_prompt + 'y', rendered)
 
     def test_chat_prompt_styles_exact_unbracketed_text(self):
         output = TTYBuffer()
