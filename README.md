@@ -213,9 +213,11 @@ Ctrl+C cancels the current input, Esc dismisses completion, and bracketed
 terminal paste or Shift+Enter inserts multiline text. The editable prompt stays
 at the bottom of an interactive terminal; status and command output remain
 above it, and completion suggestions appear immediately above the prompt. The
-full editable row uses a subtle gray background with high-contrast prompt and
+full editable area uses a subtle gray background with high-contrast prompt and
 text colors; `NO_COLOR=1`, `AGENTIC_PLAIN=1`, and non-TTY output use the normal
-terminal background without ANSI styling.
+terminal background without ANSI styling. The area normally has one blank row
+above and below the input; on short terminals, padding collapses before the
+prompt or available completion rows are removed.
 Enter submits the complete buffer. `/chat ISSUE` opens a conversational session
 in the existing issue worktree; it does not start an automated run. PageUp/
 PageDown scroll the retained output independently of the editable prompt; new

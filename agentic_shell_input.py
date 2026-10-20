@@ -877,9 +877,44 @@ def _interactive_input(
                 status = _fit_terminal_text(sanitize_terminal_text(status_line), columns - 1)
                 status_strings.append(_shell_paint(status, "90"))
 
+            # Keep the prompt visible on very short terminals. The status line
+            # is useful, but it must not push the editable row below the
+            # viewport.
+            if rows <= len(status_strings):
+                status_strings = []
+
+            # The input region normally has one blank row above and below the
+            # editable rows. On short terminals, preserve the prompt, one
+            # output row when history exists, and a small completion viewport
+            # before spending rows on padding.
+            output_history_text = "".join(output_history)
+            output_lines = _output_history_lines(output_history_text, columns)
+            output_reserve = min(1, len(output_lines)) if output_history_text else 0
+            available_rows = max(0, rows - len(status_strings))
+            completion_reserve = min(
+                2,
+                len(candidates),
+                max(0, available_rows - 1 - output_reserve),
+            )
+            padding_budget = max(
+                0,
+                available_rows - 1 - completion_reserve - output_reserve,
+            )
+            top_padding_rows = min(1, padding_budget)
+            bottom_padding_rows = min(
+                1, max(0, padding_budget - top_padding_rows),
+            )
+            max_input_lines = max(
+                1,
+                available_rows
+                - completion_reserve
+                - top_padding_rows
+                - bottom_padding_rows
+                - output_reserve,
+            )
+
             # Keep the cursor visible when a pasted buffer is taller than the
             # terminal. The remaining rows are then available to completion.
-            max_input_lines = max(1, rows - len(status_strings))
             input_start = max(0, min(
                 cursor_row - max_input_lines + 1,
                 len(input_parts) - max_input_lines,
@@ -895,7 +930,15 @@ def _interactive_input(
                 visible_selected = -1
             else:
                 selected_index = max(0, min(selected_index, len(candidates) - 1))
-                available_dropdown = max(0, rows - len(status_strings) - len(visible_parts))
+                available_dropdown = max(
+                    0,
+                    rows
+                    - len(status_strings)
+                    - top_padding_rows
+                    - bottom_padding_rows
+                    - output_reserve
+                    - len(visible_parts),
+                )
                 max_visible = min(8, available_dropdown, len(candidates))
                 if max_visible:
                     window_start = max(
@@ -948,14 +991,31 @@ def _interactive_input(
                     cursor_display = visible_cursor
                 display_lines.append(_input_row(row_prompt, visible, columns))
 
-            editor_lines = len(status_strings) + len(dropdown_strings) + len(display_lines)
-            output_lines = _output_history_lines("".join(output_history), columns)
+            input_padding = [
+                _input_row("", "", columns)
+                for _ in range(top_padding_rows)
+            ]
+            input_padding.extend(
+                _input_row("", "", columns)
+                for _ in range(bottom_padding_rows)
+            )
+            editor_rows = (
+                status_strings
+                + dropdown_strings
+                + input_padding[:top_padding_rows]
+                + display_lines
+                + input_padding[top_padding_rows:]
+            )
+            editor_lines = len(editor_rows)
             output_rows = max(0, rows - editor_lines)
             max_output_scroll = max(0, len(output_lines) - output_rows)
             output_scroll_lines = min(output_scroll_lines, max_output_scroll)
             top_row = max(1, rows - editor_lines + 1)
             cursor_from_top = (
-                len(status_strings) + len(dropdown_strings) + visible_cursor_row
+                len(status_strings)
+                + len(dropdown_strings)
+                + top_padding_rows
+                + visible_cursor_row
             )
             buf: list[str] = []
             _clear_previous_editor(buf)
@@ -980,17 +1040,10 @@ def _interactive_input(
                         buf.append("\n")
                 if editor_lines > 1:
                     buf.append(f"\033[{editor_lines - 1}A\r")
-            for index, status in enumerate(status_strings):
+            for index, editor_row in enumerate(editor_rows):
                 if index:
                     buf.append("\n")
-                buf.append(status)
-            for dropdown in dropdown_strings:
-                buf.append("\n" if buf else "")
-                buf.append(dropdown)
-            for index, display_line in enumerate(display_lines):
-                if status_strings or dropdown_strings or index:
-                    buf.append("\n")
-                buf.append(display_line)
+                buf.append(editor_row)
             cursor_up = editor_lines - 1 - cursor_from_top
             if cursor_up:
                 buf.append(f"\033[{cursor_up}A")

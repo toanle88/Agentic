@@ -70,9 +70,11 @@ to dismiss. Supported options such as `/run --profile` and known job IDs for
 renders the dropdown with live filtering and command descriptions using standard ANSI
 escapes with zero third-party dependencies. The editable prompt is anchored to
 the terminal's bottom row, with status, command output, and completion rows above
-it. Its full-width editable rows use a subtle gray background and readable
+it. Its full-width padded editable area uses a subtle gray background and readable
 foreground colors; `NO_COLOR=1` and `AGENTIC_PLAIN=1` fall back to the normal
-terminal background. Output is written through the editor redraw path and retained in an independently
+terminal background. The area normally has one blank row above and below the
+input; on short terminals, padding collapses before the prompt or available
+completion rows are removed. Output is written through the editor redraw path and retained in an independently
 scrollable viewport; PageUp/PageDown review older output without moving the prompt,
 and PageDown returns to the live tail. A terminal resize notification also wakes an
 otherwise idle prompt so it can be redrawn at the new bottom row.
