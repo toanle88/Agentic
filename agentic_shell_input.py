@@ -124,6 +124,209 @@ class _InteractiveOutputState:
             self.live_status = True
 
 
+class _ForegroundOutputState:
+    """Keep a child prompt in the last terminal rows while streaming output."""
+
+    def __init__(self, output_state: _InteractiveOutputState) -> None:
+        self.output_state = output_state
+        self.prompt = ""
+        self.input_text = ""
+        self.input_cursor = 0
+        self.live_status: str | None = None
+        self.output_scroll_lines = 0
+
+    @staticmethod
+    def _sanitize_prompt(prompt: str) -> str:
+        safe = strip_ansi(prompt).replace("\r", "\n")
+        return "\n".join(sanitize_terminal_text(line) for line in safe.split("\n"))
+
+    @classmethod
+    def _prompt_lines(cls, prompt: str, columns: int) -> list[str]:
+        safe_prompt = cls._sanitize_prompt(prompt)
+        return _output_history_lines(safe_prompt, columns) or [""]
+
+    @staticmethod
+    def _cursor_position(text: str, cursor: int, columns: int) -> tuple[int, int]:
+        """Return the wrapped row and column for an editable cursor."""
+        row = 0
+        width = 0
+        cursor = max(0, min(cursor, len(text)))
+        for character in text[:cursor]:
+            if character in {"\n", "\r"}:
+                row += 1
+                width = 0
+                continue
+            cell_width = _terminal_cell_width(character)
+            if cell_width == 0:
+                continue
+            if width and width + cell_width > columns:
+                row += 1
+                width = 0
+            width = min(columns, width + cell_width)
+        return row, max(1, min(columns, width + 1))
+
+    def _prompt_text(self) -> str:
+        return self.prompt + self.input_text
+
+    def _render(self) -> None:
+        with _OUTPUT_LOCK:
+            size = shutil.get_terminal_size(fallback=(80, 24))
+            columns = max(1, size.columns)
+            rows = max(1, size.lines)
+            prompt_text = self._prompt_text()
+            prompt_lines = self._prompt_lines(prompt_text, columns)
+            prompt_rows = min(rows, max(1, len(prompt_lines)))
+            output_rows = max(0, rows - prompt_rows)
+
+            output_text = "".join(self.output_state.history)
+            if self.live_status:
+                if output_text and not output_text.endswith(("\n", "\r")):
+                    output_text += "\n"
+                output_text += self.live_status
+            output_lines = _output_history_lines(output_text, columns)
+            max_scroll = max(0, len(output_lines) - output_rows)
+            self.output_scroll_lines = min(self.output_scroll_lines, max_scroll)
+            output_end = len(output_lines) - self.output_scroll_lines
+            output_start = max(0, output_end - output_rows)
+            visible_output = output_lines[output_start:output_end] if output_rows else []
+
+            if output_rows:
+                sys.stdout.write(f"\033[1;{output_rows}r")
+                for index in range(output_rows):
+                    sys.stdout.write(f"\033[{index + 1};1H\033[2K")
+                    if index < len(visible_output):
+                        sys.stdout.write(visible_output[index])
+                sys.stdout.write("\033[r")
+
+            prompt_start = output_rows + 1
+            prompt_start_index = max(0, len(prompt_lines) - prompt_rows)
+            visible_prompt_lines = prompt_lines[prompt_start_index:]
+            for index in range(prompt_rows):
+                sys.stdout.write(f"\033[{prompt_start + index};1H\033[2K")
+                if index < len(visible_prompt_lines):
+                    sys.stdout.write(visible_prompt_lines[index])
+            cursor_row, cursor_column = self._cursor_position(
+                prompt_text,
+                len(self.prompt) + self.input_cursor,
+                columns,
+            )
+            cursor_row = max(0, min(prompt_rows - 1, cursor_row - prompt_start_index))
+            sys.stdout.write(
+                f"\033[{prompt_start + cursor_row};{max(1, cursor_column)}H"
+            )
+            sys.stdout.flush()
+
+    def write(self, text: str, ensure_newline: bool = True) -> None:
+        """Append output above the child prompt and redraw the reserved rows."""
+        self.live_status = None
+        columns = max(1, shutil.get_terminal_size(fallback=(80, 24)).columns)
+        self.output_state.append(text, ensure_newline, columns)
+        self._render()
+
+    def commit_prompt(self) -> None:
+        """Move the completed child prompt into scrollback before new output."""
+        if not (self.prompt or self.input_text):
+            return
+        with _OUTPUT_LOCK:
+            columns = max(1, shutil.get_terminal_size(fallback=(80, 24)).columns)
+            self.output_state.append(
+                self._prompt_text(), ensure_newline=True, columns=columns
+            )
+            self.prompt = ""
+            self.input_text = ""
+            self.input_cursor = 0
+            self._render()
+
+    def set_prompt(self, text: str) -> None:
+        """Show arbitrary child prompt text in the reserved bottom area."""
+        self.live_status = None
+        if self.prompt or self.input_text:
+            self.commit_prompt()
+        self.prompt = self._sanitize_prompt(text)
+        self._render()
+
+    def set_input(self, text: str, cursor: int | None = None) -> None:
+        """Redraw the child prompt with the shell-owned input buffer."""
+        self.input_text = self._sanitize_prompt(text)
+        self.input_cursor = len(self.input_text) if cursor is None else max(
+            0, min(cursor, len(self.input_text))
+        )
+        self._render()
+
+    def write_transient(self, text: str) -> None:
+        """Show replaceable progress above the child prompt."""
+        self.live_status = sanitize_terminal_text(text)
+        self._render()
+
+    def clear_transient(self) -> None:
+        if self.live_status is not None:
+            self.live_status = None
+            self._render()
+
+    def refresh(self) -> None:
+        """Redraw after a terminal resize while the child is waiting."""
+        self._render()
+
+    def scroll(self, delta: int) -> None:
+        """Move the output viewport without moving the active child prompt."""
+        with _OUTPUT_LOCK:
+            size = shutil.get_terminal_size(fallback=(80, 24))
+            columns = max(1, size.columns)
+            rows = max(1, size.lines)
+            prompt_rows = min(
+                rows,
+                max(1, len(self._prompt_lines(self._prompt_text(), columns))),
+            )
+            output_rows = max(0, rows - prompt_rows)
+            output_lines = _output_history_lines(
+                "".join(self.output_state.history), columns
+            )
+            max_scroll = max(0, len(output_lines) - output_rows)
+            page = max(1, output_rows - 1)
+            self.output_scroll_lines = max(
+                0,
+                min(max_scroll, self.output_scroll_lines + delta * page),
+            )
+            self._render()
+
+    def finish(self) -> None:
+        """Restore the normal terminal scroll region after the child exits."""
+        with _OUTPUT_LOCK:
+            size = shutil.get_terminal_size(fallback=(80, 24))
+            columns = max(1, size.columns)
+            if self.prompt or self.input_text:
+                self.output_state.append(
+                    self._prompt_text(), ensure_newline=True, columns=columns
+                )
+            self.prompt = ""
+            self.input_text = ""
+            self.input_cursor = 0
+            self.live_status = None
+            self.output_scroll_lines = 0
+            sys.stdout.write("\033[r")
+            sys.stdout.write(f"\033[{max(1, size.lines)};1H")
+            sys.stdout.flush()
+
+
+def _begin_foreground_output(
+    output_state: _InteractiveOutputState | None,
+) -> tuple[_ForegroundOutputState | None, Callable[[str, bool], None] | None]:
+    """Reserve the terminal bottom for a foreground child prompt."""
+    global _ACTIVE_INTERACTIVE_OUTPUT
+    with _OUTPUT_LOCK:
+        if output_state is None:
+            owner = getattr(_ACTIVE_INTERACTIVE_OUTPUT, "__self__", None)
+            if isinstance(owner, _InteractiveOutputState):
+                output_state = owner
+        if output_state is None:
+            return None, None
+        previous = _ACTIVE_INTERACTIVE_OUTPUT
+        foreground = _ForegroundOutputState(output_state)
+        _ACTIVE_INTERACTIVE_OUTPUT = foreground.write
+        foreground._render()
+        return foreground, previous
+
+
 def _activate_interactive_output(
     state: _InteractiveOutputState,
 ) -> Callable[[str, bool], None] | None:
@@ -1505,7 +1708,7 @@ def _shell_write_transient(text: str) -> None:
     """Draw provider progress as one live row when the shell owns the TTY."""
     callback = _ACTIVE_INTERACTIVE_OUTPUT
     owner = getattr(callback, "__self__", None)
-    if isinstance(owner, _InteractiveOutputState):
+    if isinstance(owner, (_InteractiveOutputState, _ForegroundOutputState)):
         owner.write_transient(text)
         return
     _shell_print(text, style_status_tokens=False, flush=True)
@@ -1515,6 +1718,9 @@ def _shell_clear_transient() -> None:
     """Remove a live provider status before returning to the shell prompt."""
     callback = _ACTIVE_INTERACTIVE_OUTPUT
     owner = getattr(callback, "__self__", None)
+    if isinstance(owner, _ForegroundOutputState):
+        owner.clear_transient()
+        return
     if isinstance(owner, _InteractiveOutputState) and owner.live_status:
         with _OUTPUT_LOCK:
             sys.stdout.write("\r\033[2K")
