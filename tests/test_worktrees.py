@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import agentic
+import agentic_worktrees
 
 
 def sh(*args, cwd):
@@ -41,6 +42,52 @@ class GitTest(_GitRepositoryTestCase):
         (run.worktree / 'new.py').write_text('x=2\n')
         self.assertFalse((self.repo / 'new.py').exists())
         self.assertEqual(agentic.pending_files(run.worktree), ['new.py'])
+
+    def test_choose_existing_retries_invalid_input_and_confirms_selection(self):
+        runs = [
+            agentic.Run(42, 'agent/issue-42-aaaabbbb', self.repo / 'one'),
+            agentic.Run(42, 'agent/issue-42-ccccdddd', self.repo / 'two'),
+        ]
+        with (patch('builtins.input', side_effect=['3', '2']),
+              patch.object(agentic_worktrees, '_status_print') as status):
+            selected = agentic.choose_existing(runs, prompt_prefix='PUBLISH')
+
+        self.assertEqual(selected, runs[1])
+        messages = [call.args[0] for call in status.call_args_list]
+        self.assertIn(
+            "[PUBLISH] Invalid worktree selection. Enter a number from 1 to 2 or 'q' to cancel.",
+            messages,
+        )
+        self.assertIn(
+            f"[PUBLISH] Worktree 2 selected: {runs[1].branch} ({runs[1].worktree})",
+            messages,
+        )
+
+    def test_choose_existing_retries_non_ascii_and_oversized_digits(self):
+        runs = [
+            agentic.Run(42, 'agent/issue-42-aaaabbbb', self.repo / 'one'),
+            agentic.Run(42, 'agent/issue-42-ccccdddd', self.repo / 'two'),
+        ]
+        with (patch('builtins.input', side_effect=['²', '9' * 5000, '1']),
+              patch.object(agentic_worktrees, '_status_print') as status):
+            selected = agentic.choose_existing(runs, prompt_prefix='PUBLISH')
+
+        self.assertEqual(selected, runs[0])
+        invalid_messages = [
+            call.args[0] for call in status.call_args_list
+            if 'Invalid worktree selection' in call.args[0]
+        ]
+        self.assertEqual(len(invalid_messages), 2)
+
+    def test_choose_existing_q_and_ctrl_c_are_cancellation(self):
+        run = agentic.Run(42, 'agent/issue-42-aaaabbbb', self.repo / 'one')
+        runs = [run, agentic.Run(42, 'agent/issue-42-ccccdddd', self.repo / 'two')]
+        for user_input in ('q', KeyboardInterrupt):
+            with self.subTest(user_input=user_input), \
+                    patch('builtins.input', side_effect=[user_input]), \
+                    patch.object(agentic_worktrees, '_status_print'):
+                with self.assertRaises(agentic_worktrees.UserCancelled):
+                    agentic.choose_existing(runs, prompt_prefix='PUBLISH')
 
 
     def test_status_json_reports_worktree_without_parsing_terminal_output(self):

@@ -301,8 +301,13 @@ In the interactive shell, `/run ... --publish` runs in the foreground so the
 shell can receive the exact publication confirmation. Other `/run` operations
 remain background jobs. If no valid approval is recorded, publication stops
 and asks you to run development or `--review` first.
-While a foreground child is running, its output and progress stay above a
-reserved bottom input area; confirmation prompts remain visible there and are
+When multiple worktrees are available, Agentic prints a waiting message and
+asks for a number from the displayed list; enter `q` (or press Ctrl-C) to
+cancel. It confirms the selected worktree before continuing. Before any
+commit or push, it prints a second waiting message; enter `publish` to approve
+or `q` to cancel. Invalid responses explain the accepted values and repeat the
+prompt. While a foreground child is running, its output and progress stay
+above a reserved bottom input area; these prompts remain visible there and are
 redrawn on terminal resize. The same layout applies to the foreground
 `/chat ISSUE` session. At a publication prompt, enter `/stop` to cancel the
 foreground operation; Agentic also records its foreground job ID so `/stop JOB`
