@@ -323,10 +323,10 @@ branch, and open a draft pull request. The draft state leaves a final human
 review step before merging.
 
 When Agentic is run from a checkout of its own repository, changes to its
-`agentic.py` runner are allowed through patch validation so Agentic can develop
-itself. The protected-file policy remains active for every other repository and
-still blocks `agent_config.json`, `AGENTS.md`, credentials, and other sensitive
-paths.
+`agentic.py` runner and `.github/workflows/` CI files are allowed through patch
+validation so Agentic can develop and verify itself. The protected-file policy
+remains active for every other repository and still blocks `agent_config.json`,
+`AGENTS.md`, credentials, and other sensitive paths.
 
 ## Logs and dashboard
 
