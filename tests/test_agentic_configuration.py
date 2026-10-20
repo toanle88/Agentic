@@ -480,6 +480,118 @@ class ConfigurationTests(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertTrue(payload['ok'])
         self.assertTrue(any(item['name'] == 'Agentic config' for item in payload['checks']))
+        self.assertTrue(all('category' in item for item in payload['checks']))
+
+
+    def test_doctor_separates_github_access_checks_and_local_mode_skips_them(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            config = repo / 'agent_config.json'
+            config.write_text(json.dumps({
+                'task_source': 'local',
+                'test_commands': [[sys.executable, '-c', 'pass']],
+                'developer': {'provider': 'copilot'},
+                'reviewer': {'provider': 'copilot'},
+            }))
+            probed = []
+
+            def fake_probe(argv, cwd, **kwargs):
+                probed.append(argv)
+                return True, 'ok'
+
+            def fake_which(name):
+                return '/usr/bin/' + Path(name).name
+
+            with (patch('agentic.installed_git_version', return_value=(2, 48, 0)),
+                  patch('agentic.probe', side_effect=fake_probe),
+                  patch('agentic.shutil.which', side_effect=fake_which),
+                  patch.dict('os.environ', {}, clear=True),
+                  patch('sys.stdout', new_callable=io.StringIO) as output):
+                result = agentic.doctor(repo, config, json_output=True)
+
+        payload = json.loads(output.getvalue())
+        github_checks = [item for item in payload['checks'] if item['category'] == 'github']
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            {item['name'] for item in github_checks},
+            {'GitHub repository access', 'GitHub issue access'},
+        )
+        self.assertTrue(all(item['status'] == 'skip' for item in github_checks))
+        self.assertTrue(all(item['required'] is False for item in github_checks))
+        self.assertFalse(any(argv and argv[0].endswith('gh') for argv in probed))
+        provider_checks = [
+            item for item in payload['checks']
+            if item['category'] == 'agent' and 'provider (copilot)' in item['name']
+        ]
+        self.assertEqual(
+            [item['name'] for item in provider_checks],
+            ['Developer provider (copilot)', 'Reviewer provider (copilot)'],
+        )
+
+
+    def test_doctor_probes_github_repository_and_issue_access_separately(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            config = repo / 'agent_config.json'
+            config.write_text(json.dumps({'test_commands': [[sys.executable, '-c', 'pass']]}))
+            probed = []
+
+            def fake_probe(argv, cwd, **kwargs):
+                probed.append(argv)
+                return True, 'ok'
+
+            with (patch('agentic.installed_git_version', return_value=(2, 48, 0)),
+                  patch('agentic.probe', side_effect=fake_probe),
+                  patch('agentic.shutil.which', return_value='/usr/bin/tool'),
+                  patch('sys.stdout', new_callable=io.StringIO) as output):
+                result = agentic.doctor(repo, config, json_output=True)
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(result, 0)
+        self.assertTrue(any(item['name'] == 'GitHub repository access' for item in payload['checks']))
+        self.assertTrue(any(item['name'] == 'GitHub issue access' for item in payload['checks']))
+        self.assertIn(
+            ['/usr/bin/tool', 'repo', 'view', '--json', 'nameWithOwner'], probed,
+        )
+        self.assertIn(
+            ['/usr/bin/tool', 'issue', 'list', '--limit', '1', '--json', 'number'], probed,
+        )
+
+
+    def test_doctor_skips_undocumented_native_auth_status_probes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            config = repo / 'agent_config.json'
+            config.write_text(json.dumps({
+                'test_commands': [[sys.executable, '-c', 'pass']],
+                'developer': {'provider': 'gemini'},
+                'reviewer': {'provider': 'copilot'},
+            }))
+            probed = []
+
+            def fake_probe(argv, cwd, **kwargs):
+                probed.append(argv)
+                return True, 'ok'
+
+            with (patch('agentic.installed_git_version', return_value=(2, 48, 0)),
+                  patch('agentic.probe', side_effect=fake_probe),
+                  patch('agentic.shutil.which', side_effect=lambda name: f'/usr/bin/{name}'),
+                  patch('sys.stdout', new_callable=io.StringIO) as output):
+                result = agentic.doctor(repo, config, json_output=True)
+
+        payload = json.loads(output.getvalue())
+        auth_checks = {
+            item['name']: item for item in payload['checks']
+            if item['category'] == 'agent' and 'authentication' in item['name']
+        }
+        self.assertEqual(result, 0)
+        for provider, role in (('gemini', 'Developer'), ('copilot', 'Reviewer')):
+            check = auth_checks[f'{role} agent authentication ({provider})']
+            self.assertEqual(check['status'], 'skip')
+            self.assertFalse(check['required'])
+            self.assertIn('no documented noninteractive', check['detail'])
+        self.assertNotIn(['/usr/bin/gemini', 'auth', 'status'], probed)
+        self.assertNotIn(['/usr/bin/copilot', 'auth', 'status'], probed)
 
 
     def test_doctor_reports_configuration_failure_reason_in_human_and_json_output(self):

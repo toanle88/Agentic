@@ -301,6 +301,17 @@ mutating. Without `--worktree`, checks run from the repository passed with
 `--repo` (normally the current checkout). Results identify each command and
 its exit status; command output is not included in JSON diagnostics.
 
+Doctor output is grouped into repository prerequisites, GitHub task access,
+and agent access. Repository checks cover Git, the repository and `origin`,
+and worktree path compatibility. GitHub mode separately checks repository and
+issue read access. When `task_source` is `local`, those two GitHub checks are
+reported as skipped because they are not required. Agent checks are emitted
+for the developer and reviewer independently, even when they use the same
+provider. Codex and Claude include a read-only authentication-status probe;
+Gemini and Copilot report authentication as skipped because doctor does not
+invoke their documented login flows or infer provider state from unrelated
+commands. Provider output and credentials are never printed.
+
 ## Choosing checks
 
 Use a fast, deterministic set for normal iteration. Include the checks needed to prove the issue, for example:

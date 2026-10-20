@@ -23,6 +23,16 @@ from agentic_sandbox import sandbox_command
 
 AGENT_CONFIG_FILENAME = "agent_config.json"
 
+# These are documented, read-only provider status commands.  Their output is
+# deliberately discarded; only the exit status is used to distinguish an
+# authenticated provider from an installed but unusable CLI.  Native providers
+# without a documented noninteractive status command are handled as an
+# explicit, nonblocking skip below.
+PROVIDER_AUTH_STATUS_ARGS = {
+    "codex": ("login", "status"),
+    "claude": ("auth", "status"),
+}
+
 
 def _run_configured_command(
     argv: list[str], cwd: Path, *, timeout: int | None,
@@ -124,34 +134,130 @@ def run_doctor(
         raise ValueError("profile must be 'fast' or 'slow'")
     repo = repo.resolve()
     command_worktree = (worktree or repo).resolve()
-    checks: list[tuple[str, bool, str, bool]] = []
+    checks: list[dict[str, object]] = []
+
+    def add_check(
+        category: str,
+        label: str,
+        ok: bool,
+        detail: str,
+        required: bool = True,
+        status: str | None = None,
+    ) -> None:
+        checks.append({
+            "category": category,
+            "name": label,
+            "ok": ok,
+            "required": required,
+            "status": status or ("ok" if ok else ("fail" if required else "warn")),
+            "detail": detail,
+        })
+
+    def add_skip(category: str, label: str, detail: str) -> None:
+        add_check(category, label, False, detail, required=False, status="skip")
+
     command_results: list[dict[str, object]] = []
     git_version = installed_git_version()
-    checks.append(("Git", git_version is not None, ".".join(map(str, git_version)) if git_version else "not found", True))
+    add_check(
+        "repository", "Git executable", git_version is not None,
+        ".".join(map(str, git_version)) if git_version else "not found",
+    )
     root_ok, _ = probe(["git", "rev-parse", "--show-toplevel"], repo)
-    checks.append(("Git repository", root_ok, "repository detected" if root_ok else "not a repository", True))
+    add_check(
+        "repository", "Git repository", root_ok,
+        "repository detected" if root_ok else "not a repository",
+    )
     if root_ok:
         origin_ok, _ = probe(["git", "remote", "get-url", "origin"], repo)
-        checks.append(("origin remote", origin_ok, "origin remote configured" if origin_ok else "missing origin remote", True))
+        add_check(
+            "repository", "origin remote", origin_ok,
+            "origin remote configured" if origin_ok else "missing origin remote",
+        )
     else:
-        checks.append(("origin remote", False, "skipped", True))
-    gh_path = shutil.which("gh")
-    gh_ok, _ = probe(
-        [gh_path or "gh", "auth", "status", "--active", "--hostname", "github.com"],
-        repo, timeout=30,
-    ) if gh_path else (False, "gh not found")
-    checks.append(("GitHub CLI auth", gh_ok, "authenticated" if gh_ok else "not authenticated", True))
+        add_skip("repository", "origin remote", "requires a Git repository")
+
+    if git_version is None:
+        add_skip(
+            "repository", "Worktree path compatibility",
+            "requires the Git executable",
+        )
+    elif os.name == "nt" or os.environ.get("WSL_DISTRO_NAME"):
+        paths_ok = relative_worktree_paths_supported()
+        add_check(
+            "repository", "Worktree path compatibility", paths_ok,
+            "relative paths supported" if paths_ok else
+            "Git 2.48+ is required in WSL and Windows Git",
+            required=False if not paths_ok else True,
+        )
+    else:
+        add_check(
+            "repository", "Worktree path compatibility", True,
+            "native Git paths are compatible",
+        )
     target_config = (config_path or repo / AGENT_CONFIG_FILENAME).resolve()
     if target_config.is_file():
         try:
             loaded = load_config(target_config)
+            gh_path = None if loaded["task_source"] == "local" else shutil.which("gh")
+            if loaded["task_source"] == "local":
+                add_skip(
+                    "github", "GitHub repository access",
+                    "local task mode; not required",
+                )
+                add_skip(
+                    "github", "GitHub issue access",
+                    "local task mode; not required",
+                )
+            elif not gh_path:
+                add_check(
+                    "github", "GitHub CLI authentication", False,
+                    "GitHub CLI (gh) not found on PATH",
+                )
+                add_check(
+                    "github", "GitHub repository access", False,
+                    "GitHub CLI (gh) not found on PATH",
+                )
+                add_check(
+                    "github", "GitHub issue access", False,
+                    "GitHub CLI (gh) not found on PATH",
+                )
+            else:
+                gh_auth_ok, _ = probe(
+                    [gh_path, "auth", "status", "--active", "--hostname", "github.com"],
+                    repo, timeout=30,
+                )
+                add_check(
+                    "github", "GitHub CLI authentication", gh_auth_ok,
+                    "authenticated" if gh_auth_ok else "not authenticated",
+                )
+                repo_access_ok, _ = probe(
+                    [gh_path, "repo", "view", "--json", "nameWithOwner"],
+                    repo, timeout=30,
+                )
+                add_check(
+                    "github", "GitHub repository access", repo_access_ok,
+                    "repository is accessible" if repo_access_ok else
+                    "repository is not accessible",
+                )
+                issue_access_ok, _ = probe(
+                    [gh_path, "issue", "list", "--limit", "1", "--json", "number"],
+                    repo, timeout=30,
+                )
+                add_check(
+                    "github", "GitHub issue access", issue_access_ok,
+                    "issues are readable" if issue_access_ok else
+                    "issues are not readable",
+                )
             preflight_test_commands(
                 command_worktree if run_commands and command_worktree.is_dir() else repo,
                 loaded["test_commands"] + loaded["slow_test_commands"],
                 sandbox=loaded.get("sandbox"),
             )
-            checks.append(("Agentic config", True, str(target_config), True))
-            checks.append(("Configured checks", True, f"{len(loaded['test_commands'])} fast / {len(loaded['slow_test_commands'])} slow", True))
+            add_check("repository", "Agentic config", True, str(target_config))
+            add_check(
+                "repository", "Configured checks", True,
+                f"{len(loaded['test_commands'])} fast / {len(loaded['slow_test_commands'])} slow",
+            )
             worktree_ok = True
             if run_commands:
                 worktree_ok = command_worktree.is_dir()
@@ -177,57 +283,63 @@ def run_doctor(
                         )
                     else:
                         worktree_ok = False
-                checks.append((
-                    "Command worktree", worktree_ok,
-                    str(command_worktree) if worktree_ok else f"not a Git worktree: {command_worktree}",
-                    True,
-                ))
+                add_check(
+                    "repository", "Command worktree", worktree_ok,
+                    str(command_worktree) if worktree_ok else
+                    f"not a Git worktree: {command_worktree}",
+                )
             if loaded["security_mode"] == "isolated":
-                checks.append(("Security mode", True, "isolated execution requested", True))
+                add_check("repository", "Security mode", True, "isolated execution requested")
             else:
-                checks.append((
-                    "Security mode", False,
+                add_check(
+                    "repository", "Security mode", False,
                     "trusted host execution; use security_mode=isolated for untrusted code",
-                    False,
-                ))
+                    required=False,
+                )
             sandbox = loaded.get("sandbox", {})
             if sandbox.get("enabled"):
                 engine = sandbox["engine"]
                 engine_path = shutil.which(engine)
                 image_ok = False
-                checks.append(("Sandbox engine", engine_path is not None,
-                               f"{engine} is available" if engine_path else f"{engine} not found", True))
+                add_check(
+                    "repository", "Sandbox engine", engine_path is not None,
+                    f"{engine} is available" if engine_path else f"{engine} not found",
+                )
                 if engine_path:
                     image_ok, _ = probe(
                         [engine_path, "image", "inspect", sandbox["image"]], repo, timeout=30
                     )
-                    checks.append((
-                        "Sandbox image", image_ok,
+                    add_check(
+                        "repository", "Sandbox image", image_ok,
                         "sandbox image is available" if image_ok else "sandbox image is not available",
-                        True,
-                    ))
+                    )
                 if sandbox.get("allow_network"):
-                    checks.append((
-                        "Sandbox network", False,
+                    add_check(
+                        "repository", "Sandbox network", False,
                         "enabled for developer and read-only reviewer; disable unless outbound access is required",
-                        False,
-                    ))
+                        required=False,
+                    )
                 else:
-                    checks.append((
-                        "Sandbox network", True,
+                    add_check(
+                        "repository", "Sandbox network", True,
                         "disabled for developer and read-only reviewer",
-                        False,
-                    ))
-            providers = []
+                        required=False,
+                    )
             for role, settings in (("developer", loaded["developer_agent"]), ("reviewer", loaded["reviewer_agent"])):
                 provider = settings["provider"]
-                if provider in providers:
-                    continue
-                providers.append(provider)
+                role_name = role.title()
                 if provider == "openrouter":
                     env_name = settings["api_key_env"]
-                    checks.append((f"{role.title()} provider ({provider})", bool(os.environ.get(env_name)),
-                                   f"${env_name} is set" if os.environ.get(env_name) else f"${env_name} is missing", True))
+                    add_skip(
+                        "agent", f"{role_name} provider ({provider})",
+                        "API provider has no local executable",
+                    )
+                    credentials_ok = bool(os.environ.get(env_name))
+                    add_check(
+                        "agent", f"{role_name} agent authentication ({provider})",
+                        credentials_ok,
+                        f"${env_name} is set" if credentials_ok else f"${env_name} is missing",
+                    )
                 elif loaded.get("sandbox", {}).get("enabled"):
                     pass_env = sandbox_env_for_provider(provider, loaded["sandbox"])
                     missing_env = [name for name in pass_env if not os.environ.get(name)]
@@ -237,15 +349,13 @@ def run_doctor(
                             if not missing_env else
                             "missing: " + ", ".join(f"${name}" for name in missing_env)
                         )
-                        checks.append((
-                            f"{role.title()} sandbox credentials", not missing_env, detail, True,
-                        ))
+                        add_check("agent", f"{role_name} sandbox credentials", not missing_env, detail)
                     else:
-                        checks.append((
-                            f"{role.title()} provider ({provider})", False,
+                        add_check(
+                            "agent", f"{role_name} agent authentication ({provider})", False,
                             "provider credentials must be provisioned in the image or sandbox.pass_env",
-                            False,
-                        ))
+                            required=False,
+                        )
                     if engine_path and image_ok:
                         provider_ok, _provider_output = probe(
                             [engine_path, "run", "--rm", "--network", "none",
@@ -253,19 +363,17 @@ def run_doctor(
                              loaded["sandbox"]["image"], "--version"],
                             repo, timeout=30,
                         )
-                        checks.append((
-                            f"{role.title()} provider ({provider})", provider_ok,
+                        add_check(
+                            "agent", f"{role_name} provider ({provider})", provider_ok,
                             "provider executable is available in the sandbox image"
                             if provider_ok else
                             "provider executable failed its --version check in the sandbox image",
-                            True,
-                        ))
+                        )
                     else:
-                        checks.append((
-                            f"{role.title()} provider ({provider})", False,
+                        add_check(
+                            "agent", f"{role_name} provider ({provider})", False,
                             "provider executable was not probed because the sandbox engine or image is unavailable",
-                            True,
-                        ))
+                        )
                 else:
                     executable = shutil.which(provider)
                     ok, _provider_output = probe([executable, "--version"], repo) if executable else (False, "")
@@ -275,7 +383,34 @@ def run_doctor(
                         detail = "executable failed its --version check"
                     else:
                         detail = "executable not found on PATH"
-                    checks.append((f"{role.title()} provider ({provider})", ok, detail, True))
+                    add_check("agent", f"{role_name} provider ({provider})", ok, detail)
+                    auth_args = PROVIDER_AUTH_STATUS_ARGS.get(provider)
+                    if executable and ok and auth_args:
+                        auth_ok, _auth_output = probe(
+                            [executable, *auth_args], repo, timeout=30,
+                        )
+                        auth_detail = (
+                            "provider authentication is available" if auth_ok else
+                            "provider is not authenticated or its auth status could not be checked"
+                        )
+                    elif not executable:
+                        auth_ok = False
+                        auth_detail = "authentication was not checked because the executable is unavailable"
+                    elif not ok:
+                        auth_ok = False
+                        auth_detail = "authentication was not checked because the executable failed its version check"
+                    else:
+                        auth_ok = False
+                        auth_detail = (
+                            "provider CLI has no documented noninteractive authentication "
+                            "status check"
+                        )
+                    add_check(
+                        "agent", f"{role_name} agent authentication ({provider})",
+                        auth_ok, auth_detail,
+                        required=bool(auth_args),
+                        status=None if auth_args else "skip",
+                    )
             if run_commands and worktree_ok:
                 commands = list(loaded["test_commands"])
                 if profile == "slow":
@@ -298,24 +433,28 @@ def run_doctor(
                                 sandbox=loaded.get("sandbox"),
                             ))
                 except RuntimeError as exc:
-                    checks.append(("Command worktree lock", False, str(exc), True))
+                    add_check("repository", "Command worktree lock", False, str(exc))
                 else:
                     commands_ok = all(item["status"] == "passed" for item in command_results)
-                    checks.append((
-                        "Configured command execution", commands_ok,
+                    add_check(
+                        "repository", "Configured command execution", commands_ok,
                         _configured_command_detail(command_results, profile, command_worktree),
-                        True,
-                    ))
+                    )
         except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
-            checks.append(("Agentic config", False, str(exc), True))
+            add_check("repository", "Agentic config", False, str(exc))
     else:
-        checks.append(("Agentic config", False, f"missing: {target_config} (run agentic init)", True))
-    if git_version is not None and os.environ.get("WSL_DISTRO_NAME"):
-        if relative_worktree_paths_supported():
-            checks.append(("WSL/Windows worktree paths", True, "relative paths supported", False))
-        else:
-            checks.append(("WSL/Windows worktree paths", False, "Git 2.48+ is required in WSL and Windows Git", False))
-    success = all(ok or not required for _, ok, _, required in checks)
+        add_check(
+            "repository", "Agentic config", False,
+            f"missing: {target_config} (run agentic init)",
+        )
+    success = all(
+        bool(check["ok"]) or not bool(check["required"])
+        for check in checks
+    )
+    category_order = {"repository": 0, "github": 1, "agent": 2}
+    display_checks = sorted(
+        checks, key=lambda check: category_order.get(str(check["category"]), 99),
+    )
     if json_output:
         print(json.dumps({
             "repository": str(repo),
@@ -324,13 +463,13 @@ def run_doctor(
             "command_worktree": str(command_worktree) if run_commands else None,
             "checks": [
                 {
-                    "name": label,
-                    "ok": ok,
-                    "required": required,
-                    "status": "ok" if ok else ("fail" if required else "warn"),
-                    "detail": _doctor_public_detail(label, ok, required, _detail),
+                    **check,
+                    "detail": _doctor_public_detail(
+                        str(check["name"]), bool(check["ok"]),
+                        bool(check["required"]), str(check["detail"]),
+                    ),
                 }
-                for label, ok, _detail, required in checks
+                for check in display_checks
             ],
             "command_results": command_results,
         }, indent=2))
@@ -339,8 +478,22 @@ def run_doctor(
         print(f"Repository: {repo}")
         if run_commands:
             print(f"Command worktree: {command_worktree}")
-        for label, ok, detail, required in checks:
-            state = "OK" if ok else ("FAIL" if required else "WARN")
+        category_titles = {
+            "repository": "Repository prerequisites",
+            "github": "GitHub task access",
+            "agent": "Agent access",
+        }
+        current_category = None
+        for check in display_checks:
+            category = str(check["category"])
+            if category != current_category:
+                print(category_titles.get(category, category.title()))
+                current_category = category
+            label = str(check["name"])
+            ok = bool(check["ok"])
+            required = bool(check["required"])
+            detail = str(check["detail"])
+            state = str(check["status"]).upper()
             print(
                 style_system_text(
                     f"[{state:<4}] {label}: {_doctor_public_detail(label, ok, required, detail)}",
