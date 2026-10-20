@@ -1597,13 +1597,25 @@ def _interactive_input(
             render()
 
     def finish_input() -> None:
-        """Leave the cursor after the complete editable buffer."""
+        """Commit a submitted line as plain transcript output."""
         with _OUTPUT_LOCK:
             size = shutil.get_terminal_size(fallback=(80, 24))
-            output_state.mark_prompt_boundary(max(1, size.columns))
-            if prev_cursor_row < prev_editor_lines - 1:
-                sys.stdout.write(f"\033[{prev_editor_lines - 1 - prev_cursor_row}B")
-            sys.stdout.write("\r\n")
+            columns = max(1, size.columns)
+            output_state.mark_prompt_boundary(columns)
+            if line:
+                clear: list[str] = []
+                _clear_previous_editor(clear)
+                if clear:
+                    sys.stdout.write("".join(clear))
+                submitted = sanitize_terminal_text(prompt + line)
+                output_text = output_state.append(
+                    submitted, ensure_newline=True, columns=columns
+                )
+                sys.stdout.write(output_text)
+            else:
+                if prev_cursor_row < prev_editor_lines - 1:
+                    sys.stdout.write(f"\033[{prev_editor_lines - 1 - prev_cursor_row}B")
+                sys.stdout.write("\r\n")
             sys.stdout.flush()
 
     reader_factory = key_reader_factory or _KeyReader
