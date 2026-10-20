@@ -209,6 +209,22 @@ class ChatTests(unittest.TestCase):
             history = (folder / 'chat' / 'history.jsonl').read_text()
             self.assertIn('assistant answer', history)
 
+    def test_session_marks_agent_response_as_chat_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            outputs = []
+            issue = agentic.Issue(45, 'Fix', 'Body')
+            inputs = iter(['explain this error', '/quit'])
+            result = run_chat_session(
+                issue, root / 'worktree', root / 'run',
+                {'developer_agent': {'provider': 'codex'}, 'sandbox': {}, 'test_commands': []},
+                run_agent=lambda *args, **kwargs: (True, 'assistant answer'),
+                run_tests=lambda *args, **kwargs: (True, ''),
+                input_fn=lambda prompt: next(inputs), output_fn=outputs.append,
+            )
+            self.assertEqual(result, 0)
+            self.assertTrue(any(item.startswith('[CHAT] Agent response:') for item in outputs))
+
     def test_session_runs_selected_checks_when_failed_edit_changed_worktree(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

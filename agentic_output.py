@@ -48,7 +48,7 @@ def paint(text: Any, code: str, stream: Any = None) -> str:
 _TIMESTAMP_RE = re.compile(r"^\s*(\[\d{2}:\d{2}:\d{2}\])")
 _PREFIX_RE = re.compile(
     r"^\s*(?:\[\d{2}:\d{2}:\d{2}\]\s*)?"
-    r"(\[(?:DEVELOPER|REVIEW|TESTS|RETRY|GIT|PATCH|INVESTIGATION|BASELINE|"
+    r"(\[(?:DEVELOPER|REVIEW|TESTS|RETRY|GIT|PATCH|ERROR|RESULT|CHAT|INVESTIGATION|BASELINE|"
     r"PUBLISH|SKIP|INIT|CLEAN|SYSTEM|COST|JOB [^\]]+|DASHBOARD|MANUAL|"
     r"TIMEOUT|BLOCKED|STOP|RESUME|DRY RUN)\])"
     r"(?=\s|$)",
@@ -76,12 +76,54 @@ _PREFIX_COLORS = {
     "REVIEW": "35",
     "TESTS": "34",
     "RETRY": "33",
+    "GIT": "33",
+    "PATCH": "95",
+    "ERROR": "31",
+    "RESULT": "32",
+    "CHAT": "96",
     "TIMEOUT": "33",
     "BLOCKED": "33",
     "STOP": "33",
     "PUBLISH": "33",
     "SKIP": "33",
 }
+
+
+def _contains_failure(text: str) -> bool:
+    text = re.sub(r"(?:[A-Za-z]:)?[^\s]*[\\/][^\s]*", " ", text)
+    return bool(re.search(
+        r"\b(?:ERROR|FAIL(?:ED|URE)?|REJECTED|BLOCKED|UNAVAILABLE|"
+        r"TIM(?:E)?OUT|TIMED\s+OUT|EXIT\s+-?[1-9]\d*)\b",
+        text,
+        re.IGNORECASE,
+    ))
+
+
+def _contains_success(text: str) -> bool:
+    text = re.sub(r"(?:[A-Za-z]:)?[^\s]*[\\/][^\s]*", " ", text)
+    return bool(re.search(
+        r"\b(?:PASSED|APPROVED|VALIDATED|COMPLETED|SUCCESS|FINISHED|"
+        r"CLEAN|EXIT\s+0)\b",
+        text,
+        re.IGNORECASE,
+    ))
+
+
+def _prefix_color(label: str, line: str) -> str:
+    """Choose a stage color without applying it to the message body."""
+    if label == "TESTS":
+        if _contains_failure(line):
+            return "31"
+        if _contains_success(line):
+            return "32"
+    elif label == "GIT":
+        if _contains_failure(line):
+            return "31"
+    elif label == "RESULT":
+        return "32" if _contains_success(line) and not _contains_failure(line) else "31"
+    elif label == "ERROR":
+        return "31"
+    return _PREFIX_COLORS.get(label, "90")
 
 
 def _status_color(token: str) -> str:
@@ -127,13 +169,13 @@ def _styled_spans(line: str, *, style_status_tokens: bool = True) -> list[tuple[
     prefix = _PREFIX_RE.match(line)
     if prefix:
         label = prefix.group(1)[1:-1].upper()
-        code = _PREFIX_COLORS.get(label, "90")
+        code = _prefix_color(label, line)
         spans.append((prefix.start(1), prefix.end(1), code))
 
     if style_status_tokens:
         for prefix in _STRUCTURED_SUFFIX_RE.finditer(line):
             label = prefix.group(1)[1:-1].upper()
-            code = _PREFIX_COLORS.get(label, "90")
+            code = _prefix_color(label, line)
             span = (prefix.start(1), prefix.end(1), code)
             if _is_path_bracketed_status(line, span[0], span[1]):
                 continue
@@ -191,3 +233,26 @@ def style_text(value: Any, stream: Any = None, *, style_status_tokens: bool = Tr
         ending = line[len(body):]
         output.append(_style_line(body, stream, style_status_tokens=style_status_tokens) + ending)
     return "".join(output)
+
+
+_TRANSIENT_PROGRESS_RE = re.compile(
+    r"^(?:\[\d{2}:\d{2}:\d{2}\]\s*)?(?:\[[^\]]+\]\s*)?(?:"
+    r"(?:Codex|Gemini|Claude|Copilot) session started|"
+    r"Agent is working|Still running \(|Running command:|Using tool:"
+    r")",
+    re.IGNORECASE,
+)
+_TRANSIENT_COMPLETION_RE = re.compile(
+    r"^(?:\[\d{2}:\d{2}:\d{2}\]\s*)?(?:\[[^\]]+\]\s*)?(?:"
+    r"Agent finished its turn(?:\s+\([^)]*\))?|"
+    r"(?:Codex|Gemini|Claude|Copilot) agent finished|"
+    r"Command finished(?:\s+\(exit 0\))?"
+    r")\s*$",
+    re.IGNORECASE,
+)
+
+
+def is_transient_progress(value: Any) -> bool:
+    """Return whether a provider line can be replaced by live terminal status."""
+    text = strip_ansi(value).replace("\r", " ").replace("\n", " ").strip()
+    return bool(_TRANSIENT_PROGRESS_RE.match(text) or _TRANSIENT_COMPLETION_RE.match(text))

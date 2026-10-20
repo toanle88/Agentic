@@ -7,6 +7,7 @@ import json
 import os
 import queue
 import signal
+import shutil
 import subprocess
 import sys
 import threading
@@ -15,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from agentic_models import Issue, Run
-from agentic_output import paint, strip_ansi, style_text
+from agentic_output import is_transient_progress, paint, strip_ansi, style_text
 from agentic_sandbox import sandbox_command
 from agentic_security import redact_secrets
 from agentic_telemetry import record_operation, record_usage
@@ -115,6 +116,17 @@ def _console_print(*values: Any, sep: str = " ", end: str = "\n",
                    sep=sep, end=end, file=target, flush=flush)
 
 
+def _fit_live_status(value: str) -> str:
+    """Keep a redrawable status row inside the current terminal width."""
+    width = max(1, shutil.get_terminal_size(fallback=(80, 24)).columns)
+    text = strip_ansi(value).replace("\r", " ").replace("\n", " ")
+    if len(text) <= width - 1:
+        return text
+    if width <= 4:
+        return text[:width]
+    return text[:width - 4] + "..."
+
+
 def _unicode_or_ascii(unicode_text: str, ascii_text: str, stream: Any = None) -> str:
     target = stream or sys.stdout
     encoding = getattr(target, "encoding", None) or "utf-8"
@@ -186,10 +198,9 @@ def print_run_summary(run: Run, status: str, next_action: str, *,
                       max_retries: int | None = None,
                       reason: str = "",
                       logs_path: Path | None = None) -> None:
-    color = "32" if status in {"APPROVED", "VALIDATED", "MANUALLY APPROVED"} else "33"
     separator = _unicode_or_ascii("─" * 72, "-" * 72)
     _console_print("\n" + separator)
-    _console_print(f"RESULT:   {_paint(status, color)}")
+    _console_print(style_text(f"[RESULT] {status}"))
     _console_print(f"Branch:   {run.branch}")
     _console_print(f"Worktree: {run.worktree}")
     if attempts is not None:
@@ -345,9 +356,19 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
     raw_file = raw_path.open("w", encoding="utf-8") if raw_path else None
     try:
         with log_file.open("w", encoding="utf-8", buffering=1) as human_log:
+            live_status = False
+            live_status_enabled = bool(getattr(sys.stdout, "isatty", lambda: False)())
+
+            def clear_live_status() -> None:
+                nonlocal live_status
+                if live_status and live_status_enabled:
+                    _console_print("\r\033[2K", end="", flush=True)
+                live_status = False
+
             def display(message: str, *, style_status_tokens: bool = False,
-                        generated_status_spans: list[tuple[int, int]] | None = None) -> None:
-                nonlocal last_notice
+                        generated_status_spans: list[tuple[int, int]] | None = None,
+                        transient: bool = False) -> None:
+                nonlocal last_notice, live_status
                 now = datetime.datetime.now().strftime("%H:%M:%S")
                 prefix = f"[{now}] [{label}]"
                 formatted = strip_ansi(f"{prefix} {message}")
@@ -357,10 +378,17 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                     )
                 else:
                     rendered = style_text(formatted, style_status_tokens=style_status_tokens)
-                _console_print(
-                    rendered,
-                    flush=True,
-                )
+                if transient and live_status_enabled:
+                    clear_live_status()
+                    rendered = style_text(
+                        _fit_live_status(formatted),
+                        style_status_tokens=style_status_tokens,
+                    )
+                    _console_print("\r" + rendered, end="", flush=True)
+                    live_status = True
+                else:
+                    clear_live_status()
+                    _console_print(rendered, flush=True)
                 human_log.write(formatted + "\n")
                 last_notice = time.monotonic()
 
@@ -379,8 +407,12 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                 try:
                     line = lines.get(timeout=1)
                 except queue.Empty:
+                    now = time.monotonic()
                     if now - last_notice >= heartbeat:
-                        display(f"Still running ({int(now - started)}s elapsed)...", style_status_tokens=True)
+                        display(
+                            f"Still running ({int(now - started)}s elapsed)...",
+                            style_status_tokens=True, transient=True,
+                        )
                     continue
                 if line is None:
                     break
@@ -400,6 +432,7 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                         generated_status_spans=(
                             _generated_progress_spans(displayed) if codex_json else None
                         ),
+                        transient=is_transient_progress(f"[{label}] {displayed}"),
                     )
             proc.wait()
             seconds = int(time.monotonic() - started)

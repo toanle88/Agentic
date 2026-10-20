@@ -267,7 +267,7 @@ class WorkflowTests(_GitRepositoryTestCase):
         prepare.assert_not_called()
         review.assert_not_called()
         rendered = console.getvalue()
-        self.assertIn('\033[34m[TESTS]\033[0m \033[31mFailed\033[0m', rendered)
+        self.assertIn('\033[31m[TESTS]\033[0m \033[31mFailed\033[0m', rendered)
         self.assertNotIn('\033[31mFAILED\033[0m', rendered)
         self.assertNotIn('\033[32mPASSED\033[0m', rendered)
         self.assertNotIn('\033[35m[REVIEW]\033[0m', rendered)
@@ -335,7 +335,7 @@ class WorkflowTests(_GitRepositoryTestCase):
         rendered = output.getvalue()
         for attempt in range(1, 7):
             self.assertIn(f'attempt {attempt}/6', rendered)
-        self.assertIn('RESULT:   RETRY_EXHAUSTED', rendered)
+        self.assertIn('[RESULT] RETRY_EXHAUSTED', rendered)
         self.assertIn('Attempts: 6/6 (configured retries: 5)', rendered)
         self.assertIn('Reason:   Tests failed: AssertionError: expected a changed result', rendered)
         self.assertIn(f'Logs:     {folder}', rendered)
@@ -364,7 +364,7 @@ class WorkflowTests(_GitRepositoryTestCase):
 
         run_agent.assert_called_once()
         self.assertIn('attempt 1/1', output.getvalue())
-        self.assertIn('RESULT:   RETRY_EXHAUSTED', output.getvalue())
+        self.assertIn('[RESULT] RETRY_EXHAUSTED', output.getvalue())
         self.assertIn('Attempts: 1/1 (configured retries: 0)', output.getvalue())
 
 
@@ -465,7 +465,7 @@ class WorkflowTests(_GitRepositoryTestCase):
             )
 
         self.assertTrue(result)
-        self.assertIn('RESULT:   NO_CHANGES', output.getvalue())
+        self.assertIn('[RESULT] NO_CHANGES', output.getvalue())
         self.assertIn('Attempts: 1/6 (configured retries: 5)', output.getvalue())
         self.assertIn('Checks passed, but the developer produced no code changes', output.getvalue())
         self.assertIn(developer_report, output.getvalue())
@@ -524,7 +524,7 @@ class WorkflowTests(_GitRepositoryTestCase):
         self.assertEqual(blocked['issue_digest'], agentic.issue_fingerprint(issue))
         self.assertIn('Production adapter is unavailable', blocked['summary'])
         rendered = output.getvalue()
-        self.assertIn('RESULT:   BLOCKED', rendered)
+        self.assertIn('[RESULT] BLOCKED', rendered)
         self.assertIn('Attempts: 2/4 (configured retries: 3)', rendered)
         self.assertIn('Production adapter is unavailable', rendered)
         self.assertIn(f'Logs:     {folder}', rendered)

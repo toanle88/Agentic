@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Callable, TextIO
 
 from agentic import __version__  # noqa: F401
-from agentic_output import sanitize_terminal_text
+from agentic_output import is_transient_progress, sanitize_terminal_text
 from agentic_shell_input import (  # noqa: F401
     COMMAND_DESCRIPTIONS,
     HELP,
@@ -52,7 +52,9 @@ from agentic_shell_input import (  # noqa: F401
     _shell_paint,
     _shell_print,
     _shell_print_raw,
+    _shell_clear_transient,
     _shell_write_log,
+    _shell_write_transient,
     _supports_banner_unicode,
     _token_start,
     _welcome_banner,
@@ -448,11 +450,50 @@ class AgenticShell:
             errors="replace",
         )
         if process.stdout is not None:
+            pending = ""
+            previous_was_carriage_return = False
+            prompt_was_displayed = False
+
+            def emit_line(line: str, *, terminated: bool) -> None:
+                nonlocal prompt_was_displayed
+                line = line.rstrip("\r")
+                if line and prompt_was_displayed:
+                    _shell_print("", flush=True)
+                    prompt_was_displayed = False
+                if is_transient_progress(line):
+                    _shell_write_transient(line)
+                elif terminated:
+                    _shell_print(line, style_status_tokens=False, flush=True)
+                elif line:
+                    _shell_print(line, end="", style_status_tokens=False, flush=True)
+
             while True:
                 chunk = process.stdout.read(1)
                 if not chunk:
                     break
-                _shell_write_log(chunk)
+                if chunk == "\r":
+                    if pending:
+                        emit_line(pending, terminated=True)
+                        pending = ""
+                    previous_was_carriage_return = True
+                    continue
+                if chunk == "\n":
+                    if pending:
+                        emit_line(pending, terminated=True)
+                        pending = ""
+                    elif not previous_was_carriage_return:
+                        emit_line("", terminated=True)
+                    previous_was_carriage_return = False
+                    continue
+                pending += chunk
+                previous_was_carriage_return = False
+                if pending.endswith("chat> "):
+                    emit_line(pending, terminated=False)
+                    pending = ""
+                    prompt_was_displayed = True
+            if pending:
+                emit_line(pending, terminated=False)
+            _shell_clear_transient()
         returncode = process.wait()
         if returncode:
             raise RuntimeError(f"command failed with exit {returncode}")

@@ -147,6 +147,20 @@ class InteractiveInputTests(unittest.TestCase):
             ],
         )
 
+    def test_transient_status_is_not_retained_in_shell_scrollback(self):
+        state = agentic_shell_input._InteractiveOutputState()
+        output = TTYBuffer()
+        with patch('sys.stdout', output), \
+             patch('agentic_shell_input.shutil.get_terminal_size',
+                   return_value=os.terminal_size((40, 8))):
+            state.write_transient('[12:00:00] [DEVELOPER] Still running (3s elapsed)...')
+            state.write_without_editor('[DEVELOPER] Finished in 3s (exit 0)\n')
+
+        self.assertFalse(state.live_status)
+        self.assertNotIn('Still running', ''.join(state.history))
+        self.assertIn('[DEVELOPER] Finished in 3s (exit 0)', ''.join(state.history))
+        self.assertIn('\r\033[2K', output.getvalue())
+
     def test_help_output_is_retained_by_the_interactive_viewport(self):
         state = agentic_shell_input._InteractiveOutputState()
         previous = agentic_shell_input._activate_interactive_output(state)

@@ -4,6 +4,8 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -26,7 +28,7 @@ from agentic_openrouter_tools import (
     _openrouter_tool_call,
     _openrouter_tools,
 )
-from agentic_output import style_text
+from agentic_output import is_transient_progress, strip_ansi, style_text
 from agentic_security import redact_secrets
 from agentic_telemetry import combine_usage, normalize_usage, record_operation
 
@@ -79,11 +81,31 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
     usage_records: list[dict[str, Any]] = []
     log_file.write_text("", encoding="utf-8")
     raw_file.write_text("", encoding="utf-8")
+    live_status = False
+    live_status_enabled = bool(getattr(sys.stdout, "isatty", lambda: False)())
+
+    def clear_live_status() -> None:
+        nonlocal live_status
+        if live_status and live_status_enabled:
+            print("\r\033[2K", end="", flush=True)
+        live_status = False
+
+    def fit_live_status(value: str) -> str:
+        width = max(1, shutil.get_terminal_size(fallback=(80, 24)).columns)
+        text = strip_ansi(value).replace("\r", " ").replace("\n", " ")
+        if len(text) <= width - 1:
+            return text
+        if width <= 4:
+            return text[:width]
+        return text[:width - 4] + "..."
 
     def emit(message: str, *, style_status_tokens: bool = False,
-             generated_status: str | None = None) -> None:
+             generated_status: str | None = None,
+             transient: bool = False) -> None:
+        nonlocal live_status
         now = datetime.datetime.now().strftime("%H:%M:%S")
         line = f"[{now}] [{label}] {message}"
+        transient = transient or is_transient_progress(line)
         if generated_status and message.startswith(generated_status):
             status_start = len(line) - len(message)
             rendered = (
@@ -94,7 +116,16 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
             )
         else:
             rendered = style_text(line, style_status_tokens=style_status_tokens)
-        _console_print(rendered, flush=True)
+        if transient and live_status_enabled:
+            clear_live_status()
+            rendered = style_text(
+                fit_live_status(line), style_status_tokens=style_status_tokens,
+            )
+            _console_print("\r" + rendered, end="", flush=True)
+            live_status = True
+        else:
+            clear_live_status()
+            _console_print(rendered, flush=True)
         with log_file.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
 
@@ -153,7 +184,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                     arguments = {}
                 if not isinstance(arguments, dict):
                     arguments = {}
-                emit(f"Using tool: {name}")
+                emit(f"Using tool: {name}", transient=True)
                 tool_timeout = command_timeout
                 if deadline is not None:
                     remaining_tool_time = max(1, int(deadline - time.monotonic()))
