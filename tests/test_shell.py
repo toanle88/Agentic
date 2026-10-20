@@ -1,4 +1,5 @@
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -15,6 +16,233 @@ from agentic import state_paths
 
 
 class ShellTests(unittest.TestCase):
+    @unittest.skipUnless(os.name != 'nt', 'POSIX process-group behavior only')
+    def test_foreground_ctrl_c_from_pty_reaches_child_without_interrupting_shell(self):
+        import io
+        import pty
+        import termios
+        import time
+
+        master, slave = pty.openpty()
+        raw_slave = os.fdopen(slave, 'rb', buffering=0)
+        terminal_input = io.TextIOWrapper(raw_slave, encoding='utf-8')
+        process = subprocess.Popen(
+            [sys.executable, '-c', 'import time; time.sleep(30)'],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+        class Foreground:
+            def set_input(self, _text, _cursor):
+                pass
+
+        forwarder = agentic_shell._ForegroundInputForwarder(process, Foreground())
+        try:
+            with patch.object(agentic_shell_input.sys, 'stdin', terminal_input):
+                forwarder.start()
+                deadline = time.monotonic() + 3
+                while forwarder.reader._posix_fd is None and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                fd = forwarder.reader._posix_fd
+                if fd is None:
+                    self.fail('foreground reader did not open the PTY')
+                while (
+                    termios.tcgetattr(fd)[3] & termios.ISIG
+                    and time.monotonic() < deadline
+                ):
+                    time.sleep(0.01)
+                self.assertFalse(termios.tcgetattr(fd)[3] & termios.ISIG)
+                os.write(master, b'\003')
+                deadline = time.monotonic() + 3
+                while process.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                forwarder.stop()
+            self.assertEqual(forwarder.cancel_reason, 'Ctrl-C')
+            self.assertIsNotNone(process.poll())
+        finally:
+            forwarder.stop()
+            if process.poll() is None:
+                os.killpg(os.getpgid(process.pid), agentic_shell.signal.SIGKILL)
+                process.wait(timeout=3)
+            if process.stdin is not None:
+                process.stdin.close()
+            terminal_input.close()
+            os.close(master)
+
+    @unittest.skipUnless(os.name != 'nt', 'POSIX process-group behavior only')
+    def test_foreground_cancel_signals_descendants_in_child_process_group(self):
+        import time
+
+        with tempfile.TemporaryDirectory() as temp:
+            marker = Path(temp) / 'terminated'
+            ready = Path(temp) / 'ready'
+            descendant_code = (
+                'import signal, time\n'
+                'def stop(_signum, _frame):\n'
+                f'    open({str(marker)!r}, "w").write("terminated")\n'
+                '    raise SystemExit\n'
+                'signal.signal(signal.SIGTERM, stop)\n'
+                f'open({str(ready)!r}, "w").write("ready")\n'
+                'time.sleep(30)\n'
+            )
+            parent_code = (
+                'import os, subprocess, sys, time\n'
+                'descendant = subprocess.Popen([sys.executable, "-c", sys.argv[1]])\n'
+                'while not os.path.exists(sys.argv[2]): time.sleep(0.01)\n'
+                'print(descendant.pid, flush=True)\n'
+                'time.sleep(30)\n'
+            )
+            process = subprocess.Popen(
+                [sys.executable, '-c', parent_code, descendant_code, str(ready)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                start_new_session=True,
+            )
+
+            class Foreground:
+                def set_input(self, _text, _cursor):
+                    pass
+
+            forwarder = agentic_shell._ForegroundInputForwarder(process, Foreground())
+            try:
+                descendant_pid = int(process.stdout.readline())
+                forwarder._cancel('/stop', agentic_shell.signal.SIGTERM)
+                process.wait(timeout=3)
+                deadline = time.monotonic() + 3
+                while not marker.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(marker.exists())
+                self.assertNotEqual(descendant_pid, process.pid)
+            finally:
+                forwarder.stop()
+                if process.poll() is None:
+                    os.killpg(os.getpgid(process.pid), agentic_shell.signal.SIGKILL)
+                    process.wait(timeout=3)
+                if process.stdout is not None:
+                    process.stdout.close()
+                if process.stdin is not None:
+                    process.stdin.close()
+
+    def test_foreground_input_forwarder_sends_publish_line_to_child(self):
+        class Reader:
+            _posix_fd = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read_key(self):
+                if not hasattr(self, 'keys'):
+                    self.keys = iter(
+                        [('CHAR', char) for char in 'publish']
+                        + [('ENTER', '\n'), ('STOP', '')]
+                    )
+                return next(self.keys)
+
+        class Foreground:
+            def __init__(self):
+                self.inputs = []
+
+            def commit_prompt(self):
+                pass
+
+            def set_input(self, text, cursor):
+                self.inputs.append((text, cursor))
+
+        stdin = StringIO()
+        process = type('Process', (), {'stdin': stdin})()
+        forwarder = agentic_shell._ForegroundInputForwarder(process, Foreground())
+        forwarder.reader = Reader()
+        with patch.object(forwarder, '_set_noecho'):
+            forwarder._run()
+
+        self.assertEqual(stdin.getvalue(), 'publish\n')
+        self.assertIsNone(forwarder.cancel_reason)
+
+    def test_foreground_input_forwarder_stop_cancels_without_forwarding(self):
+        class Reader:
+            _posix_fd = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read_key(self):
+                if not hasattr(self, 'keys'):
+                    self.keys = iter(
+                        [('CHAR', char) for char in '/stop'] + [('ENTER', '\n')]
+                    )
+                return next(self.keys)
+
+        class Foreground:
+            def commit_prompt(self):
+                pass
+
+            def set_input(self, text, cursor):
+                pass
+
+        class Process:
+            stdin = StringIO()
+
+            def __init__(self):
+                self.signals = []
+
+            def send_signal(self, signum):
+                self.signals.append(signum)
+
+        process = Process()
+        forwarder = agentic_shell._ForegroundInputForwarder(process, Foreground())
+        forwarder.reader = Reader()
+        with patch.object(forwarder, '_set_noecho'):
+            forwarder._run()
+
+        self.assertEqual(forwarder.cancel_reason, '/stop')
+        self.assertEqual(process.signals, [agentic_shell.signal.SIGTERM])
+        self.assertEqual(process.stdin.getvalue(), '')
+
+    def test_foreground_input_forwarder_ctrl_c_cancels_child(self):
+        class Reader:
+            _posix_fd = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read_key(self):
+                return 'CTRL_C', '\003'
+
+        class Foreground:
+            def set_input(self, text, cursor):
+                pass
+
+        class Process:
+            stdin = StringIO()
+
+            def __init__(self):
+                self.signals = []
+
+            def send_signal(self, signum):
+                self.signals.append(signum)
+
+        process = Process()
+        forwarder = agentic_shell._ForegroundInputForwarder(process, Foreground())
+        forwarder.reader = Reader()
+        with patch.object(forwarder, '_set_noecho'):
+            forwarder._run()
+
+        self.assertEqual(forwarder.cancel_reason, 'Ctrl-C')
+        self.assertEqual(process.signals, [agentic_shell.signal.SIGINT])
+
     def test_foreground_input_forwarder_scrolls_on_page_keys(self):
         class Reader:
             _posix_fd = None
@@ -689,12 +917,13 @@ class ShellTests(unittest.TestCase):
             class Process:
                 stdout = StringIO(
                     'publication output\n'
-                    "Commit, PUSH and open a DRAFT PR? Type 'publish' to approve: "
+                    "[PUBLISH] Publish this patch? Type 'publish' to approve: "
                 )
 
                 def wait(self):
                     self.prompt_was_visible = (
-                        "Type 'publish' to approve: " in output.getvalue()
+                        "[PUBLISH] Publish this patch? Type 'publish' to approve: "
+                        in output.getvalue()
                     )
                     return 0
 
@@ -715,9 +944,12 @@ class ShellTests(unittest.TestCase):
         self.assertTrue(process.prompt_was_visible)
         self.assertLess(
             rendered.rfind('publication output'),
-            rendered.rfind("Type 'publish' to approve: "),
+            rendered.rfind("[PUBLISH] Publish this patch? Type 'publish' to approve: "),
         )
-        self.assertIn("Type 'publish' to approve: ", ''.join(state.history))
+        self.assertIn(
+            "[PUBLISH] Publish this patch? Type 'publish' to approve: ",
+            ''.join(state.history),
+        )
 
     def test_foreground_child_arbitrary_prompt_is_shown_while_it_waits(self):
         with tempfile.TemporaryDirectory() as temp:

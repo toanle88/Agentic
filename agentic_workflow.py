@@ -1147,7 +1147,9 @@ def publish(run: Run, issue: Issue, github_repo: str, base: str,
     _base_sha, digest, _summary = validate_publication_approval(
         run, issue, base, config, approval,
     )
-    confirm = input("\nCommit, PUSH and open a DRAFT PR? Type 'publish' to approve: ").strip()
+    confirm = input(
+        "\n[PUBLISH] Publish this patch? Type 'publish' to approve: "
+    ).strip()
     if confirm != "publish":
         _status_print("Publication cancelled; branch/worktree kept intact")
         return

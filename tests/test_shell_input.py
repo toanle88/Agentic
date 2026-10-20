@@ -191,6 +191,24 @@ class InteractiveInputTests(unittest.TestCase):
         self.assertEqual(foreground.input_cursor, 4)
         self.assertIn('Continue? publ', output.getvalue())
 
+    def test_foreground_prompt_keeps_input_typed_before_prompt_arrives(self):
+        state = agentic_shell_input._InteractiveOutputState()
+        output = TTYBuffer()
+        foreground = agentic_shell_input._ForegroundOutputState(state)
+        with patch('sys.stdout', output), \
+             patch('agentic_shell_input.shutil.get_terminal_size',
+                   return_value=os.terminal_size((30, 6))):
+            foreground.set_input('publ', 4)
+            foreground.set_prompt('[PUBLISH] Publish this patch? ')
+
+        self.assertEqual(foreground.input_text, 'publ')
+        self.assertEqual(foreground.input_cursor, 4)
+        self.assertNotIn('publ\n', ''.join(state.history))
+        self.assertIn(
+            '[PUBLISH] Publish this patch? publ',
+            strip_ansi(output.getvalue()),
+        )
+
     def test_foreground_output_keeps_typed_child_input_active(self):
         state = agentic_shell_input._InteractiveOutputState()
         output = TTYBuffer()
@@ -232,6 +250,37 @@ class InteractiveInputTests(unittest.TestCase):
         self.assertNotIn('output-1', visible)
         self.assertIn('output-8', visible)
         self.assertIn('Continue? ', visible)
+
+    def test_foreground_long_output_and_resize_keep_publish_prompt_active(self):
+        state = agentic_shell_input._InteractiveOutputState()
+        output = TTYBuffer()
+        foreground = agentic_shell_input._ForegroundOutputState(state)
+        sizes = iter([os.terminal_size((80, 8)), os.terminal_size((32, 5))])
+        last_size = os.terminal_size((32, 5))
+
+        def terminal_size(*_args, **_kwargs):
+            nonlocal last_size
+            try:
+                last_size = next(sizes)
+            except StopIteration:
+                pass
+            return last_size
+
+        with patch('sys.stdout', output), \
+             patch('agentic_shell_input.shutil.get_terminal_size',
+                   side_effect=terminal_size):
+            foreground.set_prompt('[PUBLISH] Publish this patch? ')
+            foreground.set_input('publish', 7)
+            for index in range(200):
+                foreground.write(f'patch line {index:03d} ' + ('x' * 60) + '\n')
+            foreground.refresh()
+
+        self.assertGreater(len(''.join(state.history)), 10_000)
+        self.assertEqual(foreground.input_text, 'publish')
+        self.assertIn(
+            '[PUBLISH] Publish this patch? publish',
+            strip_ansi(output.getvalue()),
+        )
 
     def test_foreground_prompt_clips_multiline_text_to_active_bottom_rows(self):
         state = agentic_shell_input._InteractiveOutputState()

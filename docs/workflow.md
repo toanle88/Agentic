@@ -302,7 +302,9 @@ and asks you to run development or `--review` first.
 While a foreground child is running, its output and progress stay above a
 reserved bottom input area; confirmation prompts remain visible there and are
 redrawn on terminal resize. The same layout applies to the foreground
-`/chat ISSUE` session.
+`/chat ISSUE` session. At a publication prompt, enter `/stop` to cancel the
+foreground operation; Agentic also records its foreground job ID so `/stop JOB`
+from another shell can terminate it.
 
 For a local task, use `agentic --task-file task.md --publish` or resume from
 the saved task file created by the interactive shell.
