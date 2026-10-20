@@ -3,9 +3,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import agentic_dashboard
+from agentic_models import StatePaths
+from agentic_dashboard_data import filter_runs
 
 
 class DashboardTests(unittest.TestCase):
@@ -366,6 +369,204 @@ class DashboardTests(unittest.TestCase):
             ]), 0)
             self.assertTrue(output.is_file())
             self.assertIn('Agentic run dashboard', output.read_text())
+
+    def test_dashboard_serve_mode_rebuilds_data_for_each_request(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            logs = root / "logs"
+            logs.mkdir()
+            output = root / "dashboard.html"
+            with patch.object(agentic_dashboard, "_serve_dashboard") as serve:
+                self.assertEqual(agentic_dashboard.main([
+                    "--repo", str(root), "--logs", str(logs),
+                    "--output", str(output), "--serve", "--port", "0",
+                ]), 0)
+            serve.assert_called_once()
+            self.assertEqual(serve.call_args.args[0], output)
+            render_current = serve.call_args.args[1]
+            self.assertNotIn("Issue #73", output.read_text())
+            first = render_current()
+            run = logs / "agent-issue-73-deadbeef"
+            run.mkdir()
+            (run / "developer-001.txt").write_text("Fresh activity\n")
+            second = render_current()
+            self.assertIn("Issue #73", second)
+            self.assertNotEqual(first, second)
+
+    def test_dashboard_renders_navigable_views_filters_and_log_actions(self):
+        html = agentic_dashboard.render_dashboard([], "demo", ".demo-agent-runs")
+        for view in ("dashboard", "runs", "logs", "tokens", "issues", "settings"):
+            self.assertIn(f'data-view="{view}"', html)
+        for control in ("search", "status", "issue", "stage", "severity", "model", "provider"):
+            self.assertIn(f'id="{control}"', html)
+        self.assertIn('data-copy=', html)
+        self.assertIn('data-download=', html)
+        self.assertIn("async function refreshDashboard", html)
+        self.assertIn("window.setInterval(refreshDashboard,30000)", html)
+        self.assertIn(
+            'dataset.theme=document.documentElement.dataset.theme==="light"?"dark":"light"',
+            html,
+        )
+        self.assertIn('value="investigation-invalid"', html)
+        self.assertIn('value="awaiting-development"', html)
+        self.assertIn('value="no-activity"', html)
+        for severity in ("BLOCKER", "CRITICAL", "MAJOR", "HIGH", "MEDIUM", "MINOR", "LOW"):
+            self.assertIn(f'value="{severity}"', html)
+        self.assertIn("Latest recorded run activity, newest first.", html)
+        self.assertIn("Issue status", html)
+
+    def test_dashboard_filter_contract_matches_and_excludes_runs(self):
+        runs = [
+            {
+                "id": "issue-1", "issue": 1, "status": "needs-fix",
+                "stage": "review", "severity": "HIGH",
+                "models": ["model-a"], "providers": ["provider-a"],
+                "review": {"summary": "database timeout"},
+                "files": [{"content": "connection error"}],
+            },
+            {
+                "id": "issue-2", "issue": 2, "status": "approved",
+                "stage": "completed", "severity": "NONE",
+                "models": ["model-b"], "providers": ["provider-b"],
+                "review": {"summary": "ready"},
+                "files": [{"content": "all checks passed"}],
+            },
+            {
+                "id": "local", "issue": None, "status": "blocked",
+                "stage": "blocked", "severity": "CRITICAL",
+                "models": ["model-a"], "providers": ["provider-b"],
+                "review": {"summary": "blocked by database timeout"},
+                "files": [{"content": "fatal error"}],
+            },
+        ]
+
+        cases = [
+            ({"query": "connection error"}, ["issue-1"]),
+            ({"query": "ready"}, ["issue-2"]),
+            ({"status": "approved"}, ["issue-2"]),
+            ({"issue": "1"}, ["issue-1"]),
+            ({"stage": "blocked"}, ["local"]),
+            ({"severity": "HIGH"}, ["issue-1"]),
+            ({"model": "model-b"}, ["issue-2"]),
+            ({"provider": "provider-a"}, ["issue-1"]),
+        ]
+        for filters, expected in cases:
+            with self.subTest(filters=filters):
+                self.assertEqual(
+                    [run["id"] for run in filter_runs(runs, **filters)], expected,
+                )
+        self.assertEqual(
+            [run["id"] for run in filter_runs(runs, query="not present")], [],
+        )
+
+    def test_dashboard_preserves_issue_title_and_state_metadata(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            run = root / "agent-issue-72-deadbeef"
+            run.mkdir(parents=True)
+            (run / "run.json").write_text(json.dumps({
+                "issue_metadata": {
+                    "number": 72,
+                    "title": "Redesign dashboard navigation",
+                    "state": "OPEN",
+                    "source": "github",
+                },
+            }))
+            snapshot = agentic_dashboard.collect_runs(root)[0]
+            self.assertEqual(snapshot["issue_metadata"]["title"], "Redesign dashboard navigation")
+            self.assertEqual(snapshot["issue_metadata"]["state"], "OPEN")
+            html = agentic_dashboard.render_dashboard([snapshot], "demo", root.name)
+            self.assertIn("Redesign dashboard navigation", html)
+            self.assertIn('"state":"OPEN"', html)
+
+    def test_dashboard_snapshot_normalizes_finding_severity_and_model_metadata(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            run = root / "agent-issue-71-deadbeef"
+            run.mkdir(parents=True)
+            (run / "review-001.json").write_text(json.dumps({
+                "approved": False,
+                "summary": "Needs dashboard coverage",
+                "findings": [{"severity": "high", "text": "Add a browser regression test."}],
+            }))
+            (run / "run.json").write_text(json.dumps({
+                "usage_by_invocation": [{
+                    "name": "developer-001", "provider": "openrouter",
+                    "model": "openai/example", "total_tokens": 12,
+                }],
+            }))
+            snapshot = agentic_dashboard.collect_runs(root)[0]
+            self.assertEqual(snapshot["severity"], "HIGH")
+            self.assertEqual(snapshot["providers"], ["openrouter"])
+            self.assertEqual(snapshot["models"], ["openai/example"])
+            self.assertEqual(snapshot["review"]["findings"], ["Add a browser regression test."])
+            self.assertEqual(snapshot["review"]["finding_records"][0]["severity"], "HIGH")
+
+    def test_dashboard_parses_legacy_finding_severity_and_blocked_stage(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            blocked = root / "agent-issue-74-deadbeef"
+            blocked.mkdir(parents=True)
+            (blocked / "review-001.json").write_text(json.dumps({
+                "approved": False,
+                "summary": "Blocking review findings",
+                "findings": [
+                    "P0: Preserve the read-only boundary.",
+                    "[MINOR] Improve copy.",
+                    "P3: Improve copy.",
+                ],
+            }))
+            (blocked / "blocked.json").write_text(json.dumps({"status": "blocked"}))
+            (blocked / "result.json").write_text(json.dumps({"status": "BLOCKED"}))
+            snapshot = agentic_dashboard.collect_runs(root)[0]
+            self.assertEqual(snapshot["severity"], "BLOCKER")
+            self.assertEqual(snapshot["review"]["finding_records"][0]["severity"], "BLOCKER")
+            self.assertEqual(snapshot["review"]["finding_records"][1]["severity"], "MINOR")
+            self.assertEqual(snapshot["review"]["finding_records"][2]["severity"], "LOW")
+            self.assertEqual(snapshot["stage"], "blocked")
+            self.assertEqual(
+                [run["id"] for run in filter_runs([snapshot], severity="BLOCKER")],
+                [snapshot["id"]],
+            )
+            self.assertEqual(
+                [run["id"] for run in filter_runs([snapshot], stage="blocked")],
+                [snapshot["id"]],
+            )
+
+    def test_dashboard_server_does_not_expose_sibling_files(self):
+        render_current = Mock(return_value="<html>dashboard</html>")
+        handler_type = agentic_dashboard._dashboard_handler("dashboard.html", render_current)
+        handler = handler_type.__new__(handler_type)
+        handler.path = "/secret.txt"
+        with patch.object(handler, "send_error") as send_error:
+            handler.do_GET()
+        send_error.assert_called_once_with(404, "Not found")
+        render_current.assert_not_called()
+
+    def test_dashboard_links_state_and_legacy_worktrees_from_branch_names(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            logs = root / "logs"
+            logs.mkdir()
+            (logs / "agent-issue-71-deadbeef").mkdir()
+            (logs / "agent-issue-72-cafebabe").mkdir()
+            state_worktrees = root / "state-worktrees"
+            legacy_worktrees = root / "legacy-worktrees"
+            (state_worktrees / "issue-71-deadbeef").mkdir(parents=True)
+            (legacy_worktrees / "issue-72-cafebabe").mkdir(parents=True)
+            state = StatePaths(root / "state", state_worktrees,
+                               root / "runs", root / "shell", root / "dashboards")
+
+            with (patch.object(agentic_dashboard, "state_paths", return_value=state),
+                  patch.object(agentic_dashboard, "legacy_worktrees_dir",
+                               return_value=legacy_worktrees)):
+                runs, _ = agentic_dashboard._dashboard_snapshot(
+                    root, root / "state", logs, include_legacy=False,
+                )
+
+            linked = {run["issue"]: run["worktree"] for run in runs}
+            self.assertEqual(linked[71], str((state_worktrees / "issue-71-deadbeef").resolve()))
+            self.assertEqual(linked[72], str((legacy_worktrees / "issue-72-cafebabe").resolve()))
 
 
 if __name__ == "__main__":

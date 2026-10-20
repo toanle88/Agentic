@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from agentic_context import INSTRUCTION_CONTEXT_CHARS, _bounded_text
+from agentic_security import redact_secrets
 
 
 USAGE_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens")
@@ -222,6 +223,19 @@ def record_run_instruction(folder: Path, instruction: str) -> None:
     _write_run_record(path, data)
 
 
+def record_issue_metadata(folder: Path, *, number: int | None, title: str,
+                          state: str, source: str = "github") -> None:
+    """Persist bounded issue identity for read-only dashboards and resumes."""
+    path, data = _load_run_record(folder)
+    data["issue_metadata"] = {
+        "number": number,
+        "title": _bounded_text(redact_secrets(title), 280),
+        "state": _bounded_text(state, 40).upper() or "UNKNOWN",
+        "source": _bounded_text(source, 40) or "github",
+    }
+    _write_run_record(path, data)
+
+
 def record_operation(folder: Path, role: str, name: str, *,
                      started_at: str | None = None,
                      finished_at: str | None = None,
@@ -348,6 +362,8 @@ def read_run_usage(folder: Path) -> dict[str, Any]:
         result["security_policy_history"] = data["security_policy_history"]
     if isinstance(data.get("guidance_loads"), list):
         result["guidance_loads"] = data["guidance_loads"]
+    if isinstance(data.get("issue_metadata"), dict):
+        result["issue_metadata"] = data["issue_metadata"]
     instruction = data.get("instruction")
     if isinstance(instruction, str) and instruction.strip():
         result["instruction"] = _bounded_text(instruction, INSTRUCTION_CONTEXT_CHARS)

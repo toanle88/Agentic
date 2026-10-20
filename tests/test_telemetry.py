@@ -9,6 +9,7 @@ from agentic_telemetry import (
     read_run_usage,
     read_run_instruction,
     record_operation,
+    record_issue_metadata,
     record_run_instruction,
     record_security_policy,
     record_usage,
@@ -16,6 +17,35 @@ from agentic_telemetry import (
 
 
 class TelemetryTests(unittest.TestCase):
+    def test_issue_metadata_is_bounded_and_available_to_dashboard_reads(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            record_issue_metadata(
+                folder, number=71, title="Dashboard issue", state="open",
+            )
+            stored = json.loads((folder / "run.json").read_text())
+            self.assertEqual(stored["issue_metadata"]["number"], 71)
+            self.assertEqual(stored["issue_metadata"]["state"], "OPEN")
+            self.assertEqual(read_run_usage(folder)["issue_metadata"]["title"], "Dashboard issue")
+
+    def test_issue_metadata_redacts_secret_bearing_titles_before_persistence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            record_issue_metadata(
+                folder,
+                number=71,
+                title="Investigate api_key=title-secret-value in dashboard metadata",
+                state="open",
+            )
+
+            raw = json.loads((folder / "run.json").read_text())
+            title = raw["issue_metadata"]["title"]
+            self.assertNotIn("title-secret-value", json.dumps(raw))
+            self.assertEqual(
+                title,
+                "Investigate api_key=[REDACTED] in dashboard metadata",
+            )
+
     def test_run_instruction_is_optional_bounded_and_replaceable(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)

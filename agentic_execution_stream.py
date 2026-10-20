@@ -45,6 +45,7 @@ def _remaining_timeout(deadline: float | None, maximum: int | None) -> int | Non
 
 
 def _record_provider_usage(output: Path, readonly: bool, usage: dict[str, Any], *,
+                           model: str | None = None,
                            prompt_chars: int | None = None,
                            completion_chars: int | None = None,
                            turns: int | None = None,
@@ -53,6 +54,8 @@ def _record_provider_usage(output: Path, readonly: bool, usage: dict[str, Any], 
                            exit_code: int | None = None) -> None:
     role = "reviewer" if readonly else "developer"
     invocation = {"name": output.stem}
+    if model:
+        invocation["model"] = model
     if prompt_chars is not None:
         invocation["prompt_chars"] = prompt_chars
     if completion_chars is not None:

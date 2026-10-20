@@ -280,16 +280,43 @@ agentic dashboard \
   --output /path/to/agentic-dashboard.html
 ```
 
+For live updates without regenerating the page, run the built-in read-only
+server instead:
+
+```bash
+agentic dashboard --repo /path/to/target-repository --serve --port 8765
+```
+
+Open the printed `http://127.0.0.1:8765/dashboard.html` URL. Each dashboard
+request rescans the run logs, and the page polls that endpoint every 30 seconds;
+the browser updates its views in place. The server binds to loopback by
+default and exposes no write or publication actions.
+
 In the interactive shell, `/dashboard` generates the snapshot and opens it with
 the host operating system's default browser. Use `/dashboard PATH` to choose a
 specific output file. Regenerate the dashboard after a run to refresh its
-contents. The dashboard shows the recorded token total for each run and a
-visual token-usage chart with one numbered bar per provider invocation when
-available. Runs are ordered oldest to newest, and the highest number is marked
-as latest. This keeps retries and separate developer/reviewer executions
-visible instead of collapsing them into one issue bar. The run detail table
-uses the same numbering and latest marker. Providers that do not report usage
-remain marked as unknown rather than being estimated.
+contents. The dashboard is organized into Dashboard, Runs, Logs, Token usage,
+Issues, and Settings views. Global search covers bounded run metadata, findings,
+errors, and embedded log text. Status, issue number, stage, severity, model, and
+provider filters apply across the views. Severity options are BLOCKER, CRITICAL,
+MAJOR, HIGH, MEDIUM, MINOR, LOW, UNSPECIFIED, and no finding. Token usage
+additionally supports all-time, 24-hour, 7-day, and 30-day periods.
+
+The Issues view groups the locally recorded issue/task runs, shows the persisted
+GitHub issue title and state when available, plus latest derived run status,
+branch, and linked Agentic worktree. New runs persist bounded issue metadata at
+startup; older logs without that metadata show `Title unavailable` and
+`UNKNOWN` rather than contacting GitHub from the read-only dashboard.
+
+Logs remain expandable and have Copy and Download actions. The dashboard is
+read-only: these actions only copy or download already-rendered text and do
+not modify a worktree, run record, or pull request. A `file://` dashboard
+cannot poll local files, and a generic static HTTP server serves the same
+snapshot; use `--serve` for the regenerating endpoint. The dashboard shows the
+recorded token total for each run and a visual token-usage chart with one
+numbered bar per provider invocation when available. Runs are ordered oldest to
+newest, and the highest number is marked as latest. Providers that do not report
+usage remain marked as unknown rather than being estimated.
 
 For scripts and external dashboards, use the read-only status command instead
 of parsing terminal output:

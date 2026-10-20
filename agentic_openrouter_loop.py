@@ -175,7 +175,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
         output.write_text(message, encoding="utf-8")
         usage = combine_usage(usage_records, provider="openrouter")
         _record_provider_usage(
-            output, readonly, usage, prompt_chars=len(prompt),
+            output, readonly, usage, model=model, prompt_chars=len(prompt),
             completion_chars=len(message), turns=len(usage_records),
             duration_seconds=time.monotonic() - started,
             status="failed", exit_code=1,
@@ -196,7 +196,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
     output.write_text(last_message, encoding="utf-8")
     usage = combine_usage(usage_records, provider="openrouter")
     _record_provider_usage(
-        output, readonly, usage, prompt_chars=len(prompt),
+        output, readonly, usage, model=model, prompt_chars=len(prompt),
         completion_chars=len(last_message), turns=len(usage_records),
         duration_seconds=time.monotonic() - started,
         status="completed", exit_code=0,

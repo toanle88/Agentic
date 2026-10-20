@@ -46,7 +46,7 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
         provider="codex",
     )
     _record_provider_usage(
-        output, readonly, usage, prompt_chars=len(prompt),
+        output, readonly, usage, model=model, prompt_chars=len(prompt),
         completion_chars=len(message), turns=1,
         duration_seconds=time.monotonic() - invocation_started,
         status="completed" if result.returncode == 0 else "failed",
@@ -161,7 +161,7 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
     output.write_text(message, encoding="utf-8")
     usage = extract_jsonl_usage(raw, provider=provider)
     _record_provider_usage(
-        output, readonly, usage, prompt_chars=len(prompt),
+        output, readonly, usage, model=model, prompt_chars=len(prompt),
         completion_chars=len(message), turns=1,
         duration_seconds=time.monotonic() - invocation_started,
         status="completed" if result.returncode == 0 else "failed",
