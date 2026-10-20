@@ -86,6 +86,7 @@ class Job:
     exit_code: int | None = None
     notified: bool = False
     completion_callback: Callable[[int], None] | None = None
+    stop_requested: bool = False
 
     @property
     def running(self) -> bool:
@@ -200,17 +201,41 @@ def _pid_running(pid: int) -> bool:
     return True
 
 
+def _signal_process_tree(process: subprocess.Popen[Any], signum: int) -> None:
+    """Signal a foreground process and descendants in its isolated group."""
+    if os.name != "nt":
+        try:
+            pid = int(process.pid)
+            process_group = os.getpgid(pid)
+            # Foreground children are started in a new session. Keep this
+            # guard so a test double or an unexpected caller cannot signal
+            # the shell's own process group.
+            if process_group > 0 and process_group != os.getpgrp():
+                os.killpg(process_group, signum)
+                return
+        except (AttributeError, OSError, ProcessLookupError, TypeError, ValueError):
+            pass
+    try:
+        process.send_signal(signum)
+    except (AttributeError, OSError, ProcessLookupError, TypeError, ValueError):
+        try:
+            process.terminate()
+        except (AttributeError, OSError, ProcessLookupError, TypeError, ValueError):
+            pass
+
+
 class _ForegroundInputForwarder:
     """Own a child line buffer while keeping the terminal echo under control."""
 
     def __init__(self, process: subprocess.Popen[str], foreground) -> None:
         self.process = process
         self.foreground = foreground
-        self.reader = _KeyReader()
+        self.reader = _KeyReader(raw=True)
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
         self.buffer = ""
         self.cursor = 0
+        self.cancel_reason: str | None = None
 
     def start(self) -> None:
         self.thread = threading.Thread(
@@ -248,6 +273,22 @@ class _ForegroundInputForwarder:
         self.cursor = 0
         self.foreground.set_input("", 0)
 
+    def _cancel(self, reason: str, signum: int) -> None:
+        """Cancel the child and stop reading keys after reporting the reason."""
+        self.cancel_reason = reason
+        _signal_process_tree(self.process, signum)
+        self.buffer = ""
+        self.cursor = 0
+        self.foreground.set_input("", 0)
+        self.stop_event.set()
+
+    def _read_key(self) -> tuple[str, str]:
+        if isinstance(self.reader, _KeyReader):
+            return self.reader.read_key(self.stop_event)
+        # Keep small test doubles and platform-specific readers compatible
+        # with the forwarder's historical reader protocol.
+        return self.reader.read_key()
+
     def _insert(self, text: str) -> None:
         self.buffer = self.buffer[:self.cursor] + text + self.buffer[self.cursor:]
         self.cursor += len(text)
@@ -259,7 +300,9 @@ class _ForegroundInputForwarder:
             self._set_noecho()
             self.foreground.set_input("", 0)
             while not self.stop_event.is_set():
-                key, char = self.reader.read_key()
+                key, char = self._read_key()
+                if key == "STOP":
+                    break
                 if key == "RESIZE":
                     self.foreground.refresh()
                 elif key in {"CHAR", "NEWLINE", "PASTE"}:
@@ -290,13 +333,7 @@ class _ForegroundInputForwarder:
                     self.cursor = 0
                     self.foreground.set_input(self.buffer, self.cursor)
                 elif key == "CTRL_C":
-                    try:
-                        self.process.send_signal(signal.SIGINT)
-                    except (OSError, ValueError, AttributeError):
-                        pass
-                    self.buffer = ""
-                    self.cursor = 0
-                    self.foreground.set_input("", 0)
+                    self._cancel("Ctrl-C", signal.SIGINT)
                 elif key == "CTRL_D":
                     if not self.buffer and self.process.stdin is not None:
                         try:
@@ -309,7 +346,10 @@ class _ForegroundInputForwarder:
                 elif key == "PAGE_DOWN":
                     self.foreground.scroll(-1)
                 elif key == "ENTER":
-                    self._send_line()
+                    if self.buffer.strip() == "/stop":
+                        self._cancel("/stop", signal.SIGTERM)
+                    else:
+                        self._send_line()
         finally:
             try:
                 self.reader.__exit__(None, None, None)
@@ -427,6 +467,7 @@ class AgenticShell:
             "log_path": str(job.log_path),
             "cwd": str(self.repo),
             "session_id": job.session_id,
+            "stop_requested": job.stop_requested,
         }
         temporary = job.record_path.with_suffix(".tmp")
         temporary.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
@@ -447,7 +488,8 @@ class AgenticShell:
             if state == "running" and _pid_running(pid):
                 job = Job(number, argv, log_path, None, started, None,
                           record_path, str(record.get("session_id", "unknown")),
-                          persisted_pid=pid, notified=False)
+                          persisted_pid=pid, notified=False,
+                          stop_requested=bool(record.get("stop_requested", False)))
                 self.jobs[number] = job
                 continue
             finished = record.get("finished")
@@ -457,6 +499,7 @@ class AgenticShell:
                 finished=float(finished) if finished is not None else time.time(),
                 exit_code=record.get("exit_code") if state != "running" else -1,
                 notified=True,
+                stop_requested=bool(record.get("stop_requested", False)),
             )
             self.jobs[number] = job
             if state == "running":
@@ -496,6 +539,29 @@ class AgenticShell:
                 name=f"agentic-job-{number}",
                 daemon=True,
             ).start()
+        return job
+
+    def _register_foreground_job(
+        self, argv: list[str], process: subprocess.Popen[str]
+    ) -> Job | None:
+        """Make a foreground child stoppable from another shell session."""
+        try:
+            pid = int(process.pid)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        number = self.next_number
+        self.next_number += 1
+        record_path = self._record_path(number)
+        job = Job(
+            number, argv, self.session_dir / f"job-{number:03d}.log", process,
+            time.time(), None, record_path, self.session_id,
+        )
+        self.jobs[number] = job
+        self._write_record(job)
+        _shell_print(
+            f"[PUBLISH] Foreground job {number} (PID {pid}); "
+            f"use /stop {number} from another shell to cancel"
+        )
         return job
 
     @staticmethod
@@ -572,6 +638,21 @@ class AgenticShell:
         resize_handler_previous = None
         resize_handler_installed = False
         input_forwarder: _ForegroundInputForwarder | None = None
+        foreground_process: subprocess.Popen[str] | None = None
+        foreground_job: Job | None = None
+        foreground_cancel_reason: str | None = None
+        interrupt_handler_previous = None
+        interrupt_handler_installed = False
+
+        def handle_foreground_interrupt(_signum: int, _frame: Any) -> None:
+            """Cancel the isolated child if SIGINT reaches the shell."""
+            nonlocal foreground_cancel_reason
+            foreground_cancel_reason = "Ctrl-C"
+            if input_forwarder is not None:
+                input_forwarder._cancel("Ctrl-C", signal.SIGINT)
+            elif foreground_process is not None:
+                _signal_process_tree(foreground_process, signal.SIGINT)
+
         try:
             if foreground and os.name != "nt" and hasattr(signal, "SIGWINCH"):
                 try:
@@ -580,6 +661,13 @@ class AgenticShell:
                     resize_handler_installed = True
                 except (OSError, ValueError):
                     resize_handler_previous = None
+            if foreground is not None:
+                try:
+                    interrupt_handler_previous = signal.getsignal(signal.SIGINT)
+                    signal.signal(signal.SIGINT, handle_foreground_interrupt)
+                    interrupt_handler_installed = True
+                except (OSError, ValueError):
+                    interrupt_handler_previous = None
 
             popen_kwargs: dict[str, Any] = {
                 "cwd": self.repo,
@@ -589,6 +677,12 @@ class AgenticShell:
                 "encoding": "utf-8",
                 "errors": "replace",
             }
+            if os.name != "nt":
+                popen_kwargs["start_new_session"] = True
+            else:
+                popen_kwargs["creationflags"] = getattr(
+                    subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+                )
             real_tty = bool(
                 getattr(sys.stdin, "isatty", lambda: False)()
                 and getattr(sys.stdout, "isatty", lambda: False)()
@@ -598,6 +692,10 @@ class AgenticShell:
             process = subprocess.Popen(
                 argv, **popen_kwargs
             )
+            foreground_process = process
+            foreground_job = self._register_foreground_job(argv, process)
+            if foreground_cancel_reason is not None:
+                _signal_process_tree(process, signal.SIGINT)
             if foreground is not None and real_tty and process.stdin is not None:
                 input_forwarder = _ForegroundInputForwarder(process, foreground)
                 input_forwarder.start()
@@ -691,11 +789,38 @@ class AgenticShell:
                 stdout_reader.join(timeout=1.0)
                 _shell_clear_transient()
             returncode = process.wait()
+            cancellation_reason = (
+                input_forwarder.cancel_reason if input_forwarder is not None else None
+            )
+            cancellation_reason = cancellation_reason or foreground_cancel_reason
+            if cancellation_reason is None and foreground_job is not None:
+                try:
+                    record = json.loads(
+                        foreground_job.record_path.read_text(encoding="utf-8")
+                    )
+                    if record.get("stop_requested"):
+                        cancellation_reason = "/stop"
+                except (OSError, TypeError, json.JSONDecodeError):
+                    pass
+            if foreground_job is not None:
+                foreground_job.finished = time.time()
+                foreground_job.exit_code = returncode
+                foreground_job.stop_requested = cancellation_reason == "/stop"
+                self._write_record(foreground_job)
+            if cancellation_reason is not None:
+                label = "Publication" if "--publish" in argv else "Foreground command"
+                _shell_print(f"[CANCEL] {label} cancelled by {cancellation_reason}")
+                return
             if returncode:
                 raise RuntimeError(f"command failed with exit {returncode}")
         finally:
             if input_forwarder is not None:
                 input_forwarder.stop()
+            if interrupt_handler_installed:
+                try:
+                    signal.signal(signal.SIGINT, interrupt_handler_previous)
+                except (OSError, ValueError):
+                    pass
             if resize_handler_installed:
                 try:
                     signal.signal(signal.SIGWINCH, resize_handler_previous)
@@ -977,16 +1102,17 @@ class AgenticShell:
         self._refresh(job)
         if not job.running:
             return False
-        if os.name != "nt":
+        if job.process is not None:
+            _signal_process_tree(job.process, signal.SIGTERM)
+        elif os.name != "nt":
             try:
                 os.killpg(os.getpgid(job.pid), signal.SIGTERM)
             except ProcessLookupError:
                 pass
         else:
-            if job.process is not None:
-                job.process.terminate()
-            else:
-                os.kill(job.pid, signal.SIGTERM)
+            os.kill(job.pid, signal.SIGTERM)
+        job.stop_requested = True
+        self._write_record(job)
         _shell_print(f"[JOB {job.number}] stop requested")
         return True
 

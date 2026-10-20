@@ -240,7 +240,10 @@ class _ForegroundOutputState:
     def set_prompt(self, text: str) -> None:
         """Show arbitrary child prompt text in the reserved bottom area."""
         self.live_status = None
-        if self.prompt or self.input_text:
+        # Input can arrive as soon as the forwarder starts, before the child
+        # prompt has made it through the stdout reader. Keep that early input
+        # attached to the first prompt instead of committing it to scrollback.
+        if self.prompt:
             self.commit_prompt()
         self.prompt = self._sanitize_prompt(text)
         self._render()
@@ -832,11 +835,12 @@ def _parse_ansi_sequence(read_next: Callable[[], str | None]) -> tuple[str, str]
 
 
 class _KeyReader:
-    def __init__(self) -> None:
+    def __init__(self, *, raw: bool = False) -> None:
         self._old_settings = None
         self._posix_fd: int | None = None
         self._posix_decoder: Any = None
         self._terminal_size: os.terminal_size | None = None
+        self._raw = raw
 
     def __enter__(self) -> "_KeyReader":
         self._terminal_size = shutil.get_terminal_size(fallback=(80, 24))
@@ -847,7 +851,14 @@ class _KeyReader:
                 fd = sys.stdin.fileno()
                 self._posix_fd = fd
                 self._old_settings = termios.tcgetattr(fd)
-                tty.setcbreak(fd)
+                # The foreground child uses raw mode so Ctrl-C is read as a
+                # key and forwarded to the child's process group. cbreak
+                # leaves ISIG enabled, which would deliver SIGINT to this
+                # shell's main thread instead of reaching read_key().
+                if self._raw:
+                    tty.setraw(fd)
+                else:
+                    tty.setcbreak(fd)
                 encoding = getattr(sys.stdin, "encoding", None) or "utf-8"
                 self._posix_decoder = codecs.getincrementaldecoder(encoding)(
                     errors="replace"
@@ -920,11 +931,13 @@ class _KeyReader:
                 pasted.append(buffered[0])
                 buffered = buffered[1:]
 
-    def read_key(self) -> tuple[str, str]:
+    def read_key(self, stop_event: threading.Event | None = None) -> tuple[str, str]:
         if os.name == "nt":
             import msvcrt
             getwch = cast(Callable[[], str], getattr(msvcrt, "getwch"))
             while not msvcrt.kbhit():
+                if stop_event is not None and stop_event.is_set():
+                    return "STOP", ""
                 if _take_resize_pending() or self._terminal_resized():
                     return "RESIZE", ""
                 time.sleep(0.05)
@@ -990,6 +1003,8 @@ class _KeyReader:
         import select
         fd = self._posix_fd if self._posix_fd is not None else sys.stdin.fileno()
         while True:
+            if stop_event is not None and stop_event.is_set():
+                return "STOP", ""
             try:
                 readable, _, _ = select.select([fd], [], [], 0.1)
             except InterruptedError:
@@ -998,6 +1013,8 @@ class _KeyReader:
                 break
             if _take_resize_pending() or self._terminal_resized():
                 return "RESIZE", ""
+        if stop_event is not None and stop_event.is_set():
+            return "STOP", ""
         char = self._read_posix_char()
         if not char:
             return "CTRL_D", ""
