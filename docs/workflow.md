@@ -138,15 +138,19 @@ Agentic preserves code, commits, test output, reviewer output, and structured ev
 
 If the same rejected review is returned without a changed proposed patch,
 Agentic marks the run `blocked`, preserves the worktree and evidence, and skips
-future developer attempts for that unchanged patch. A later resume is allowed
-only after the proposed patch changes. A blocked run is not approved and cannot
-be published.
+future developer attempts for that unchanged patch and issue. The blocked
+marker stores the issue fingerprint (including its title and body), so a later
+resume after the issue changes clears the terminal marker and invokes the
+developer again even when the patch is unchanged. The terminal summary says
+when this issue change caused the resume. A blocked run is not approved and
+cannot be published.
 
 If configured checks pass but the developer reports a blocker without producing
 any code changes, Agentic also marks the run `blocked` without invoking the
 reviewer. The result includes the bounded developer blocker summary and the
 durable run-log directory; resolve the blocker, add the required patch, and
-resume the run.
+resume the run. This marker also stores the issue fingerprint and resumes when
+the issue changes, even if no code patch was produced previously.
 
 Final development results are explicit: `RETRY_EXHAUSTED` means every
 configured attempt was used and another repair may help; `BLOCKED` means the

@@ -93,7 +93,7 @@ from agentic_telemetry import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.31"
+__version__ = "1.1.32"
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 INSTRUCTION_CONTEXT_CHARS = _INSTRUCTION_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module
@@ -296,18 +296,21 @@ def load_blocked(folder: Path) -> dict[str, Any] | None:
     return value
 
 
-def record_blocked(folder: Path, patch_digest: str, findings: list[str]) -> None:
+def record_blocked(folder: Path, patch_digest: str, findings: list[str], *,
+                   issue_digest: str = "") -> None:
     """Persist a repeated unchanged review blocker for future invocations."""
     blocked_path(folder).write_text(json.dumps({
         "status": "blocked",
         "reason": "Repeated review blocker with no patch change",
         "patch_digest": patch_digest,
+        "issue_digest": issue_digest,
         "findings": findings,
         "blocked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }, indent=2) + "\n", encoding="utf-8")
 
 
-def record_no_code_changes_blocked(folder: Path, developer_report: str) -> None:
+def record_no_code_changes_blocked(folder: Path, developer_report: str, *,
+                                   issue_digest: str = "") -> None:
     """Persist a developer blocker for a passing run with no proposed patch."""
     developer_log = _latest_numbered_log(folder, "developer", "txt")
     summary = _bounded_text(developer_report, 2_000).strip()
@@ -316,6 +319,7 @@ def record_no_code_changes_blocked(folder: Path, developer_report: str) -> None:
         "kind": "no-code-changes",
         "reason": "Developer reported a blocker without producing code changes",
         "patch_digest": "",
+        "issue_digest": issue_digest,
         "developer_summary": summary or "No developer blocker summary was provided.",
         "developer_log": developer_log.name if developer_log else "",
         "logs_path": str(folder),
