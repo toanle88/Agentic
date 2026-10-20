@@ -1147,7 +1147,13 @@ def publish(run: Run, issue: Issue, github_repo: str, base: str,
     _base_sha, digest, _summary = validate_publication_approval(
         run, issue, base, config, approval,
     )
-    confirm = input(
+    # Use the same escape-sequence-aware editor as the interactive shell when
+    # publication is started directly from a real terminal. Foreground shell
+    # publication runs with piped stdin and keeps the ordinary line protocol
+    # used by its input forwarder.
+    from agentic_shell_input import _interactive_line
+
+    confirm = _interactive_line(
         "\n[PUBLISH] Publish this patch? Type 'publish' to approve: "
     ).strip()
     if confirm != "publish":

@@ -271,7 +271,7 @@ def run_chat_session(
     issue: Any, worktree: Path, run_folder: Path, config: dict[str, Any], *,
     run_agent: Callable[..., tuple[bool, str]], run_tests: Callable[..., tuple[bool, str]],
     lock_factory: Callable[[], ContextManager[Any]] | None = None,
-    input_fn: Callable[[str], str] = input, output_fn: Callable[[str], None] = print,
+    input_fn: Callable[[str], str] | None = None, output_fn: Callable[[str], None] = print,
     confirm_fn: Callable[[str], bool] | None = None,
     status_reader: Callable[[], str] | None = None,
     guard_reader: Callable[[], dict[str, Any]] | None = None,
@@ -282,6 +282,24 @@ def run_chat_session(
     chat_folder.mkdir(parents=True, exist_ok=True)
     history_path = chat_folder / "history.jsonl"
     history = _read_history(history_path)
+    if input_fn is None:
+        # Import lazily because agentic_shell_input imports the compatibility
+        # runner's version constant while agentic.py is still initializing.
+        from agentic_shell_input import _interactive_line
+
+        input_history = [
+            item["content"] for item in history
+            if item.get("role") == "user" and item.get("content")
+        ]
+
+        def read_chat_line(prompt: str) -> str:
+            message = _interactive_line(prompt, history=input_history)
+            if message.strip() and (not input_history or input_history[-1] != message):
+                input_history.append(message)
+            return message
+
+        input_fn = read_chat_line
+    assert input_fn is not None
     confirm = confirm_fn or (lambda prompt: input_fn(prompt).strip().casefold() in {"y", "yes"})
     output_fn(f"Chatting with {issue.reference} in {run_folder.parent.name}.")
     output_fn("Explain or inspect freely; requests to fix or change code are authorized per turn. Type /quit to leave.")

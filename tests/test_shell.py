@@ -163,6 +163,49 @@ class ShellTests(unittest.TestCase):
             forwarder._run()
 
         self.assertEqual(stdin.getvalue(), 'publish\n')
+
+    def test_foreground_input_forwarder_consumes_all_arrow_directions(self):
+        class Reader:
+            _posix_fd = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read_key(self):
+                if not hasattr(self, 'keys'):
+                    self.keys = iter(
+                        [('CHAR', char) for char in 'abcd']
+                        + [
+                            ('LEFT', ''), ('UP', ''), ('RIGHT', ''), ('DOWN', ''),
+                            ('HOME', ''), ('RIGHT', ''), ('DELETE', ''), ('END', ''),
+                            ('ENTER', '\n'), ('STOP', ''),
+                        ]
+                    )
+                return next(self.keys)
+
+        class Foreground:
+            def __init__(self):
+                self.inputs = []
+
+            def commit_prompt(self):
+                pass
+
+            def set_input(self, text, cursor):
+                self.inputs.append((text, cursor))
+
+        stdin = StringIO()
+        foreground = Foreground()
+        process = type('Process', (), {'stdin': stdin})()
+        forwarder = agentic_shell._ForegroundInputForwarder(process, foreground)
+        forwarder.reader = Reader()
+        with patch.object(forwarder, '_set_noecho'):
+            forwarder._run()
+
+        self.assertEqual(stdin.getvalue(), 'acd\n')
+        self.assertIn(('acd', 3), foreground.inputs)
         self.assertIsNone(forwarder.cancel_reason)
 
     def test_foreground_input_forwarder_stop_cancels_without_forwarding(self):

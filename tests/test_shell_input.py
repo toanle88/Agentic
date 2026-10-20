@@ -1182,8 +1182,86 @@ class InteractiveInputTests(unittest.TestCase):
         try:
             with patch.object(agentic_shell.sys, 'stdin', stream):
                 with agentic_shell._KeyReader() as reader:
-                    os.write(master, b'\x1b[B')
+                    for sequence, expected in (
+                        (b'\x1b[A', ('UP', '')),
+                        (b'\x1b[B', ('DOWN', '')),
+                        (b'\x1b[C', ('RIGHT', '')),
+                        (b'\x1b[D', ('LEFT', '')),
+                    ):
+                        os.write(master, sequence)
+                        self.assertEqual(reader.read_key(), expected)
+        finally:
+            stream.close()
+            os.close(master)
+
+    @unittest.skipUnless(os.name != 'nt', 'POSIX terminal behavior only')
+    def test_posix_key_reader_keeps_split_escape_sequences_together(self):
+        import io
+        import pty
+        import time
+
+        master, slave = pty.openpty()
+        raw = os.fdopen(slave, 'rb', buffering=0)
+        stream = io.TextIOWrapper(raw, encoding='utf-8')
+        try:
+            with patch.object(agentic_shell.sys, 'stdin', stream):
+                with agentic_shell._KeyReader() as reader:
+                    # Deliberately exceed the per-byte timeout between writes.
+                    # The completed arrow must never be returned as literal
+                    # '[' and 'B' characters.
+                    os.write(master, b'\x1b')
+                    self.assertEqual(reader.read_key(), ('ESCAPE', '\x1b'))
+                    time.sleep(0.08)
+                    os.write(master, b'[')
+                    self.assertEqual(reader.read_key(), ('IDLE', ''))
+                    time.sleep(0.08)
+                    os.write(master, b'B')
                     self.assertEqual(reader.read_key(), ('DOWN', ''))
+        finally:
+            stream.close()
+            os.close(master)
+
+    @unittest.skipUnless(os.name != 'nt', 'POSIX terminal behavior only')
+    def test_posix_key_reader_replays_literal_text_after_isolated_escape(self):
+        import io
+        import pty
+        import time
+
+        master, slave = pty.openpty()
+        raw = os.fdopen(slave, 'rb', buffering=0)
+        stream = io.TextIOWrapper(raw, encoding='utf-8')
+        try:
+            with patch.object(agentic_shell.sys, 'stdin', stream):
+                with agentic_shell._KeyReader() as reader:
+                    for prefix in (b'[', b'O'):
+                        os.write(master, b'\x1b')
+                        self.assertEqual(reader.read_key(), ('ESCAPE', '\x1b'))
+                        time.sleep(0.08)
+                        os.write(master, prefix + b'x')
+                        self.assertEqual(reader.read_key(), ('CHAR', prefix.decode()))
+                        self.assertEqual(reader.read_key(), ('CHAR', 'x'))
+        finally:
+            stream.close()
+            os.close(master)
+
+    @unittest.skipUnless(os.name != 'nt', 'POSIX terminal behavior only')
+    def test_posix_key_reader_preserves_escape_before_rapid_literal_byte(self):
+        import io
+        import pty
+        import time
+
+        master, slave = pty.openpty()
+        raw = os.fdopen(slave, 'rb', buffering=0)
+        stream = io.TextIOWrapper(raw, encoding='utf-8')
+        try:
+            with patch.object(agentic_shell.sys, 'stdin', stream):
+                with agentic_shell._KeyReader() as reader:
+                    for delay in (0, 0.01):
+                        os.write(master, b'\x1bx')
+                        if delay:
+                            time.sleep(delay)
+                        self.assertEqual(reader.read_key(), ('ESCAPE', '\x1b'))
+                        self.assertEqual(reader.read_key(), ('CHAR', 'x'))
         finally:
             stream.close()
             os.close(master)
