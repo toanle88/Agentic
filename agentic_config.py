@@ -10,11 +10,12 @@ import json
 import os
 import re
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
 from agentic_models import AgentSettings
-from agentic_sandbox import validate_sandbox
+from agentic_sandbox import sandbox_build_command, validate_sandbox
 
 
 SUPPORTED_PROVIDERS = ("codex", "gemini", "claude", "copilot", "openrouter")
@@ -276,7 +277,9 @@ def preflight_agent_settings(*settings: dict[str, Any],
             raise RuntimeError(f"Configured provider {provider!r} is unavailable; {install_hint}")
 
 
-def preflight_security(security_mode: str, sandbox: dict[str, Any]) -> None:
+def preflight_security(
+    security_mode: str, sandbox: dict[str, Any], *, repo: Path | None = None,
+) -> None:
     """Fail closed when an explicitly isolated run cannot be isolated."""
     if security_mode not in SECURITY_MODES:
         raise RuntimeError(f"Unknown security mode: {security_mode}")
@@ -288,6 +291,44 @@ def preflight_security(security_mode: str, sandbox: dict[str, Any]) -> None:
             raise RuntimeError(
                 f"Sandbox engine {engine!r} is unavailable; isolated execution cannot continue"
             )
+        if sandbox.get("dockerfile"):
+            if repo is None:
+                raise RuntimeError(
+                    "A repository path is required to build sandbox.dockerfile"
+                )
+            build_command = sandbox_build_command(sandbox, repo)
+        else:
+            build_command = None
+        if build_command is not None:
+            try:
+                result = subprocess.run(
+                    build_command, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, encoding="utf-8", errors="replace", timeout=1800, check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise RuntimeError(f"Sandbox image build could not start or timed out: {exc}") from exc
+            if result.returncode:
+                detail = result.stdout.strip()[-2000:]
+                raise RuntimeError(
+                    f"Sandbox image build failed with exit code {result.returncode}: {detail}"
+                )
+
+
+def detect_project_language(repo: Path) -> tuple[str | None, str]:
+    """Return a conservative language hint for init and sandbox template selection."""
+    markers = (
+        ("python", ("pyproject.toml", "setup.py", "requirements.txt"), "Detected Python project"),
+        ("node", ("package.json",), "Detected Node.js project"),
+        ("go", ("go.mod",), "Detected Go module"),
+        ("rust", ("Cargo.toml",), "Detected Rust crate"),
+        ("java", ("pom.xml", "build.gradle", "build.gradle.kts"), "Detected Java project"),
+    )
+    for language, files, message in markers:
+        if any((repo / name).is_file() for name in files):
+            return language, message
+    if any(repo.glob(pattern) for pattern in ("*.csproj", "*.sln", "global.json")):
+        return "dotnet", "Detected .NET project"
+    return None, "No supported project language detected"
 
 
 def test_commands_for_profile(config: dict[str, Any], profile: str) -> list[list[str]]:
