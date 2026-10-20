@@ -85,9 +85,9 @@ class InteractiveInputTests(unittest.TestCase):
             )
 
         self.assertEqual(result, 'xxxxx')
-        last_frame = output.getvalue().rsplit('\033[1;3r', 1)[-1]
+        last_frame = output.getvalue().rsplit('\033[1;1r', 1)[-1]
         visible = strip_ansi(last_frame)
-        self.assertIn('output-1', visible)
+        self.assertIn('output-4', visible)
         self.assertNotIn('output-5', visible)
 
     def test_command_output_between_prompts_stays_in_the_next_viewport(self):
@@ -122,9 +122,9 @@ class InteractiveInputTests(unittest.TestCase):
             agentic_shell_input._restore_interactive_output(previous)
 
         self.assertEqual(len(state.history), 5)
-        last_frame = output.getvalue().rsplit('\033[1;3r', 1)[-1]
+        last_frame = output.getvalue().rsplit('\033[1;1r', 1)[-1]
         visible = strip_ansi(last_frame)
-        self.assertIn('command-output-1', visible)
+        self.assertIn('command-output-4', visible)
         self.assertNotIn('command-output-5', visible)
 
     def test_live_log_chunks_preserve_boundaries_but_status_adds_newline(self):
@@ -173,8 +173,8 @@ class InteractiveInputTests(unittest.TestCase):
 
         self.assertEqual(result, '/run ')
         rendered = output.getvalue()
-        self.assertIn('\033[8;1H', rendered)
-        completion_frame = rendered.split('\033[1;1H', 1)[1].split('\033[8;1H', 1)[0]
+        self.assertIn('\033[6;1H', rendered)
+        completion_frame = rendered.split('\033[1;1H', 1)[1].split('\033[6;1H', 1)[0]
         plain_frame = strip_ansi(completion_frame)
         self.assertLess(plain_frame.find('/run'), plain_frame.rfind('› /'))
 
@@ -209,7 +209,7 @@ class InteractiveInputTests(unittest.TestCase):
 
         self.assertEqual(result, '/run ')
         rendered = output.getvalue()
-        self.assertIn('\033[6;1H[JOB 1] finished', rendered)
+        self.assertIn('\033[4;1H[JOB 1] finished', rendered)
         plain_output = strip_ansi(rendered)
         self.assertLess(
             plain_output.rfind('[JOB 1] finished'),
@@ -235,6 +235,63 @@ class InteractiveInputTests(unittest.TestCase):
             rendered,
         )
         self.assertIn('\033[97m', rendered)
+
+    def test_interactive_input_adds_padded_rows_around_the_prompt(self):
+        reader = _create_mock_reader([('CHAR', 'x'), ('ENTER', '\n')])
+        output = TTYBuffer()
+        with patch.dict(os.environ, {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+             patch('agentic_shell.shutil.get_terminal_size',
+                   return_value=os.terminal_size((20, 8))), \
+             patch('sys.stdout', output):
+            agentic_shell._interactive_input(
+                '› ', agentic_shell._completion_items,
+                key_reader_factory=reader,
+            )
+
+        rendered = output.getvalue()
+        self.assertIn('\033[6;1H', rendered)
+        self.assertGreaterEqual(rendered.count('\033[48;5;236m'), 3)
+
+    def test_interactive_input_keeps_prompt_and_completion_on_a_tiny_terminal(self):
+        keys = [('CHAR', '/'), ('ENTER', '\n'), ('ENTER', '\n')]
+        reader = _create_mock_reader(keys)
+        output = StringIO()
+        with patch('agentic_shell.shutil.get_terminal_size',
+                   return_value=os.terminal_size((80, 2))), \
+             patch('sys.stdout', output):
+            result = agentic_shell._interactive_input(
+                '› ', agentic_shell._completion_items,
+                key_reader_factory=reader,
+            )
+
+        self.assertEqual(result, '/run ')
+        rendered = output.getvalue()
+        self.assertIn('\033[1;1H', rendered)
+        self.assertIn('\n› /run', strip_ansi(rendered))
+
+    def test_interactive_input_preserves_output_row_on_a_three_row_terminal(self):
+        state = agentic_shell_input._InteractiveOutputState()
+        state.history.append('retained output\n')
+        reader = _create_mock_reader([
+            ('PASTE', 'first\nsecond'), ('ENTER', '\n'),
+        ])
+        output = StringIO()
+        with patch('agentic_shell.shutil.get_terminal_size',
+                   return_value=os.terminal_size((80, 3))), \
+             patch('sys.stdout', output):
+            result = agentic_shell._interactive_input(
+                '› ', agentic_shell._completion_items,
+                key_reader_factory=reader,
+                output_state=state,
+            )
+
+        self.assertEqual(result, 'first\nsecond')
+        plain_output = strip_ansi(output.getvalue())
+        self.assertIn('retained output', plain_output)
+        self.assertLess(
+            plain_output.find('retained output'),
+            plain_output.rfind('› '),
+        )
 
     def test_input_row_uses_display_width_for_wide_characters(self):
         with patch.dict(os.environ, {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
@@ -380,8 +437,8 @@ class InteractiveInputTests(unittest.TestCase):
 
         self.assertEqual(result, 'ab')
         rendered = output.getvalue()
-        self.assertIn('\033[6;1Hpartial', rendered)
-        self.assertIn('\033[6;8H log', rendered)
+        self.assertIn('\033[4;1Hpartial', rendered)
+        self.assertIn('\033[4;8H log', rendered)
 
     def test_interactive_split_output_wraps_after_the_right_margin(self):
         class OutputReader:
@@ -415,8 +472,8 @@ class InteractiveInputTests(unittest.TestCase):
 
         self.assertEqual(result, 'ab')
         rendered = output.getvalue()
-        self.assertIn('\033[7;1H12345678', rendered)
-        self.assertIn('\033[7;1HX', rendered)
+        self.assertIn('\033[5;1H12345678', rendered)
+        self.assertIn('\033[5;1HX', rendered)
 
     def test_interactive_split_output_tracks_tab_stops(self):
         class OutputReader:
@@ -449,7 +506,7 @@ class InteractiveInputTests(unittest.TestCase):
             )
 
         self.assertEqual(result, 'ab')
-        self.assertIn('\033[7;9HX', output.getvalue())
+        self.assertIn('\033[5;9HX', output.getvalue())
 
     def test_interactive_split_output_tracks_wide_characters(self):
         class OutputReader:
@@ -482,7 +539,7 @@ class InteractiveInputTests(unittest.TestCase):
             )
 
         self.assertEqual(result, 'ab')
-        self.assertIn('\033[7;3HX', output.getvalue())
+        self.assertIn('\033[5;3HX', output.getvalue())
 
     def test_interactive_split_output_wraps_wide_character_at_right_margin(self):
         class OutputReader:
@@ -515,8 +572,8 @@ class InteractiveInputTests(unittest.TestCase):
             )
 
         self.assertEqual(result, 'ab')
-        self.assertIn('\033[7;1H1234567界', output.getvalue())
-        self.assertIn('\033[7;3HX', output.getvalue())
+        self.assertIn('\033[5;1H1234567界', output.getvalue())
+        self.assertIn('\033[5;3HX', output.getvalue())
 
     def test_interactive_split_output_preserves_wrap_after_combining_mark(self):
         class OutputReader:
@@ -549,8 +606,8 @@ class InteractiveInputTests(unittest.TestCase):
             )
 
         self.assertEqual(result, 'ab')
-        self.assertIn('\033[7;1H1234567a', output.getvalue())
-        self.assertIn('\033[7;1HX', output.getvalue())
+        self.assertIn('\033[5;1H1234567a', output.getvalue())
+        self.assertIn('\033[5;1HX', output.getvalue())
 
     def test_interactive_input_reduces_completion_rows_for_short_terminal(self):
         keys = [('CHAR', '/'), ('ENTER', '\n'), ('ENTER', '\n')]
@@ -567,7 +624,12 @@ class InteractiveInputTests(unittest.TestCase):
 
         self.assertEqual(result, '/run ')
         rendered = output.getvalue()
-        completion_frame = rendered.split('\033[1;1H', 1)[1].split('\033[4;1H', 1)[0]
+        completion_frame = next(
+            frame for frame in rendered.split('\033[1;1H')
+            if '/run' in strip_ansi(frame)
+            and '/ps' in strip_ansi(frame)
+            and '/chat' not in strip_ansi(frame)
+        )
         plain_frame = strip_ansi(completion_frame)
         self.assertIn('/run', plain_frame)
         self.assertIn('/ps', plain_frame)
@@ -956,8 +1018,8 @@ class InteractiveInputTests(unittest.TestCase):
 
         self.assertEqual(result, '')
         rendered = output.getvalue()
-        self.assertIn('\033[24;1H', rendered)
-        self.assertIn('\033[8;1H', rendered)
+        self.assertIn('\033[22;1H', rendered)
+        self.assertIn('\033[6;1H', rendered)
 
     @unittest.skipUnless(os.name != 'nt', 'POSIX terminal behavior only')
 
