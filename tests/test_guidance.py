@@ -33,6 +33,7 @@ class GuidanceTests(unittest.TestCase):
         manifest = match.group(1)
         for module in (
             "agentic_dashboard_data",
+            "agentic_execution_guard",
             "agentic_execution_providers",
             "agentic_execution_stream",
             "agentic_openrouter_loop",
