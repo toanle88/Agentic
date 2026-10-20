@@ -33,7 +33,7 @@ from agentic_config import (  # noqa: F401
     OPENROUTER_MAX_TURNS,
     SECURITY_MODES,
     SUPPORTED_PROVIDERS,
-    _append_gitignore_entry,
+    _append_git_exclude_entry,
     default_provider_settings,
     detect_test_commands,
     detect_project_language,
@@ -101,7 +101,7 @@ from agentic_telemetry import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.52"
+__version__ = "1.1.53"
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 INSTRUCTION_CONTEXT_CHARS = _INSTRUCTION_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module
@@ -683,8 +683,9 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
     else:
         config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
         _status_print(f"[INIT] Wrote {config_path}")
-    if _append_gitignore_entry(repo, AGENT_CONFIG_FILENAME):
-        _status_print(f"[INIT] Added {AGENT_CONFIG_FILENAME} to {repo / '.gitignore'}")
+    exclude_path, added = _append_git_exclude_entry(repo, AGENT_CONFIG_FILENAME)
+    if added:
+        _status_print(f"[INIT] Added {AGENT_CONFIG_FILENAME} to {exclude_path}")
     agents_path = repo / AGENTS_FILENAME
     if create_agents:
         if agents_path.exists() and not force:

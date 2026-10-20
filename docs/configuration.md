@@ -4,7 +4,7 @@ Agentic reads the personal, target-specific `agent_config.json` from the target 
 
 For editor validation, use the checked-in [`agent_config.schema.json`](../agent_config.schema.json) as the JSON Schema. The schema is a convenience for editors; Agentic remains the source of truth and validates configuration before a run.
 
-The easiest setup is `agentic init`. It creates an ignored config with a detected starter check. Choose a provider during initialization when needed:
+The easiest setup is `agentic init`. It creates an ignored config with a detected starter check by adding `agent_config.json` to Git's local `.git/info/exclude`; the tracked `.gitignore` is not changed. Local excludes are specific to one clone, so run `agentic init` separately in each clone. Choose a provider during initialization when needed:
 
 ```bash
 agentic init --provider codex
