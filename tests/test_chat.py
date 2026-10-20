@@ -25,6 +25,36 @@ from agentic_execution_guard import restricted_process_environment
 
 
 class ChatTests(unittest.TestCase):
+    def test_tty_chat_input_passes_explicit_style_metadata_for_all_prompts(self):
+        prompts = []
+
+        def fake_input(prompt, **kwargs):
+            prompts.append((prompt, {**kwargs, 'history': list(kwargs['history'])}))
+            return '/quit'
+
+        issue = agentic.Issue(45, 'Fix', 'Body')
+        with tempfile.TemporaryDirectory() as temp, \
+             patch('agentic_shell_input._interactive_line', side_effect=fake_input):
+            result = run_chat_session(
+                issue,
+                Path(temp) / 'worktree',
+                Path(temp) / 'run',
+                {'developer_agent': {'provider': 'codex'}, 'sandbox': {}, 'test_commands': []},
+                run_agent=lambda *args, **kwargs: (True, ''),
+                run_tests=lambda *args, **kwargs: (True, ''),
+                output_fn=lambda _message: None,
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(prompts, [(
+            'chat> ',
+            {
+                'history': [],
+                'system_prefix': 'CHAT',
+                'system_prefix_text': 'chat> ',
+            },
+        )])
+
     def test_chat_requires_an_existing_worktree_and_never_creates_one(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = Path(temp)

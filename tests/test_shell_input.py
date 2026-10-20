@@ -49,6 +49,22 @@ class InteractiveInputTests(unittest.TestCase):
         self.assertNotIn('\033[', rendered)
         self.assertIn(raw_prompt + 'publish', rendered)
 
+    def test_chat_prompt_styles_exact_unbracketed_text(self):
+        output = TTYBuffer()
+        with patch('agentic_shell_input.sys.stdout', new=output), \
+             patch('agentic_shell_input.shutil.get_terminal_size',
+                   return_value=os.terminal_size((80, 8))), \
+             patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}):
+            state = agentic_shell_input._InteractiveOutputState()
+            foreground = agentic_shell_input._ForegroundOutputState(state)
+            foreground.set_prompt(
+                'chat> ', system_prefix='CHAT', system_prefix_text='chat> ',
+            )
+
+        rendered = output.getvalue()
+        self.assertIn('\033[96mchat> \033[0m', rendered)
+        self.assertEqual(foreground.prompt, 'chat> ')
+
     def test_shell_print_can_style_explicit_future_system_prefix(self):
         output = TTYBuffer()
         with patch('agentic_shell_input.sys.stdout', new=output), \
