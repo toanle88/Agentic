@@ -46,7 +46,7 @@ from agentic_execution import (
 )
 from agentic_models import AgentSettings, Issue, Run
 from agentic_openrouter import run_openrouter
-from agentic_output import strip_ansi, style_text
+from agentic_output import strip_ansi, style_system_text, style_text
 from agentic_policy import forbidden
 from agentic_prompts import build_agent_prompt, _run_instruction_context, _system_prompt_context
 from agentic_review import parse_review_result, record_review_findings
@@ -63,12 +63,17 @@ class NoCodeChangesError(RuntimeError):
 
 
 def _status_print(message: Any, *, file: Any = None, flush: bool = False,
-                  style_status_tokens: bool = True) -> None:
+                  style_status_tokens: bool = True,
+                  system_prefix: str | None = None) -> None:
     """Print human-facing status with TTY-only styling."""
     from agentic_execution import _console_print
 
+    renderer = style_system_text if system_prefix is not None else style_text
     _console_print(
-        style_text(message, file, style_status_tokens=style_status_tokens),
+        renderer(
+            message, file, style_status_tokens=style_status_tokens,
+            **({"system_prefix": system_prefix} if system_prefix is not None else {}),
+        ),
         file=file,
         flush=flush,
     )
@@ -1154,7 +1159,8 @@ def publish(run: Run, issue: Issue, github_repo: str, base: str,
     from agentic_shell_input import _interactive_line
 
     confirm = _interactive_line(
-        "\n[PUBLISH] Publish this patch? Type 'publish' to approve: "
+        "\n[PUBLISH] Publish this patch? Type 'publish' to approve: ",
+        system_prefix="PUBLISH",
     ).strip()
     if confirm != "publish":
         _status_print("Publication cancelled; branch/worktree kept intact")
@@ -1230,7 +1236,8 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
                 log_hint = blocked.get("logs_path") or str(folder)
                 _status_print(
                     "[NO_CHANGES] Developer reported a blocker without producing code changes; "
-                    f"resolve it and see the run logs at {log_hint}"
+                    f"resolve it and see the run logs at {log_hint}",
+                    system_prefix="NO_CHANGES",
                 )
             attempts = blocked.get("attempts")
             if not isinstance(attempts, int):
@@ -1340,13 +1347,17 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
                 developer_report or "No developer blocker summary was provided.", 1_200,
             )
             _status_print(
-                "[NO_CHANGES] Checks passed, but the developer produced no code changes."
+                "[NO_CHANGES] Checks passed, but the developer produced no code changes.",
+                system_prefix="NO_CHANGES",
             )
             _status_print(
                 f"[NO_CHANGES] Developer blocker: {_result_text(developer_summary)}",
-                style_status_tokens=False,
+                style_status_tokens=False, system_prefix="NO_CHANGES",
             )
-            _status_print(f"[NO_CHANGES] Run logs: {folder}", style_status_tokens=False)
+            _status_print(
+                f"[NO_CHANGES] Run logs: {folder}",
+                style_status_tokens=False, system_prefix="NO_CHANGES",
+            )
             next_action = _resume_action(issue, folder)
             record_result(
                 folder, "NO_CHANGES", attempts=attempt + 1,

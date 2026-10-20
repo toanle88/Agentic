@@ -49,10 +49,15 @@ _TIMESTAMP_RE = re.compile(r"^\s*(\[\d{2}:\d{2}:\d{2}\])")
 _PREFIX_RE = re.compile(
     r"^\s*(?:\[\d{2}:\d{2}:\d{2}\]\s*)?"
     r"(\[(?:DEVELOPER|REVIEW|TESTS|RETRY|GIT|PATCH|ERROR|RESULT|CHAT|INVESTIGATION|BASELINE|"
-    r"PUBLISH|SKIP|INIT|CLEAN|SYSTEM|COST|JOB [^\]]+|DASHBOARD|MANUAL|"
+    r"PUBLISH|SKIP|INIT|CLEAN|SYSTEM|COST|NO_CHANGES|CANCEL|DOCTOR|"
+    r"JOB [^\]]+|DASHBOARD|MANUAL|"
     r"TIMEOUT|BLOCKED|STOP|RESUME|DRY RUN)\])"
     r"(?=\s|$)",
     re.IGNORECASE,
+)
+_SYSTEM_PREFIX_RE = re.compile(
+    r"^\s*(?:\[\d{2}:\d{2}:\d{2}\]\s*)?"
+    r"(\[[A-Za-z][A-Za-z0-9 _-]{0,39}\])(?=\s|$)"
 )
 _STRUCTURED_SUFFIX_RE = re.compile(
     r"(?<![\w./\\-])(\[(?:RETRY|TIMEOUT|BLOCKED|PUBLISH|SKIP)\])(?=\s*$)",
@@ -81,6 +86,25 @@ _PREFIX_COLORS = {
     "ERROR": "31",
     "RESULT": "32",
     "CHAT": "96",
+    "COST": "90",
+    "OK": "32",
+    "PASSED": "32",
+    "WARN": "33",
+    "FAIL": "31",
+    "FAILED": "31",
+    "NOT-STARTED": "31",
+    "NO_CHANGES": "33",
+    "CANCEL": "33",
+    "DOCTOR": "36",
+    "INVESTIGATION": "95",
+    "BASELINE": "90",
+    "DASHBOARD": "36",
+    "MANUAL": "36",
+    "INIT": "36",
+    "CLEAN": "32",
+    "SYSTEM": "90",
+    "RESUME": "33",
+    "DRY RUN": "90",
     "TIMEOUT": "33",
     "BLOCKED": "33",
     "STOP": "33",
@@ -159,16 +183,35 @@ def _is_path_bracketed_status(line: str, start: int, end: int) -> bool:
     return "/" in line[:bracket_start] or "\\" in line[:bracket_start]
 
 
-def _styled_spans(line: str, *, style_status_tokens: bool = True) -> list[tuple[int, int, str]]:
+def _styled_spans(
+    line: str,
+    *,
+    style_status_tokens: bool = True,
+    system_prefix: str | None = None,
+) -> list[tuple[int, int, str]]:
     """Find terminal-only spans without styling message bodies or paths."""
     spans: list[tuple[int, int, str]] = []
     timestamp = _TIMESTAMP_RE.match(line)
     if timestamp:
         spans.append((timestamp.start(1), timestamp.end(1), "90"))
 
-    prefix = _PREFIX_RE.match(line)
+    prefix = _PREFIX_RE.match(line) if system_prefix is None else None
+    if system_prefix == "":
+        prefix = _SYSTEM_PREFIX_RE.match(line)
+    elif system_prefix is not None:
+        expected = system_prefix.strip()
+        if expected.startswith("[") and expected.endswith("]"):
+            expected = expected[1:-1]
+        if expected:
+            explicit = re.compile(
+                r"^\s*(?:\[\d{2}:\d{2}:\d{2}\]\s*)?"
+                rf"(\[{re.escape(expected)}\s*\])(?=\s|$)",
+                re.IGNORECASE,
+            ).match(line)
+            if explicit:
+                prefix = explicit
     if prefix:
-        label = prefix.group(1)[1:-1].upper()
+        label = prefix.group(1)[1:-1].strip().upper()
         code = _prefix_color(label, line)
         spans.append((prefix.start(1), prefix.end(1), code))
 
@@ -232,6 +275,53 @@ def style_text(value: Any, stream: Any = None, *, style_status_tokens: bool = Tr
         body = line.rstrip("\r\n")
         ending = line[len(body):]
         output.append(_style_line(body, stream, style_status_tokens=style_status_tokens) + ending)
+    return "".join(output)
+
+
+def style_system_text(
+    value: Any,
+    stream: Any = None,
+    *,
+    system_prefix: str | None = None,
+    style_status_tokens: bool = True,
+) -> str:
+    """Style a known system message without classifying its message body.
+
+    ``style_text`` deliberately recognizes only its compatibility allowlist.
+    Callers that own a generated prefix can use this helper for a new category
+    by supplying ``system_prefix``; the prefix is matched only at the start of
+    each rendered line and receives the neutral fallback when no palette entry
+    exists.  Without an explicit prefix, only the first line accepts a new
+    system label.  This keeps provider responses and user text after a prefix
+    out of the classification boundary.
+    """
+    text = strip_ansi(value)
+    if not color_enabled(stream):
+        return text
+    output: list[str] = []
+    for index, line in enumerate(text.splitlines(keepends=True)):
+        body = line.rstrip("\r\n")
+        ending = line[len(body):]
+        if index > 0 and system_prefix is None:
+            output.append(body + ending)
+            continue
+        generated_prefix = system_prefix if system_prefix is not None else ""
+        spans = _styled_spans(
+            body,
+            style_status_tokens=style_status_tokens,
+            system_prefix=generated_prefix,
+        )
+        if not spans:
+            output.append(body + ending)
+            continue
+        rendered: list[str] = []
+        cursor = 0
+        for start, end, code in sorted(spans):
+            rendered.append(body[cursor:start])
+            rendered.append(paint(body[start:end], code, stream))
+            cursor = end
+        rendered.append(body[cursor:])
+        output.append("".join(rendered) + ending)
     return "".join(output)
 
 

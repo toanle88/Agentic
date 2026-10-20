@@ -27,6 +27,7 @@ from agentic_output import (
     paint,
     sanitize_terminal_text,
     strip_ansi,
+    style_system_text,
     style_text,
 )
 if TYPE_CHECKING:
@@ -158,6 +159,7 @@ class _ForegroundOutputState:
         self.output_state = output_state
         self.mode = TerminalMode(mode)
         self.prompt = ""
+        self.prompt_prefix: str | None = None
         self.input_text = ""
         self.input_cursor = 0
         self.finished = False
@@ -170,9 +172,18 @@ class _ForegroundOutputState:
         return "\n".join(sanitize_terminal_text(line) for line in safe.split("\n"))
 
     @classmethod
-    def _prompt_lines(cls, prompt: str, columns: int) -> list[str]:
+    def _prompt_lines(
+        cls, prompt: str, columns: int, *, system_prefix: str | None = None,
+    ) -> list[str]:
         safe_prompt = cls._sanitize_prompt(prompt)
-        return _output_history_lines(safe_prompt, columns) or [""]
+        lines = _output_history_lines(safe_prompt, columns) or [""]
+        if system_prefix is not None and lines:
+            lines[0] = style_system_text(
+                lines[0],
+                system_prefix=system_prefix,
+                style_status_tokens=False,
+            )
+        return lines
 
     @staticmethod
     def _cursor_position(text: str, cursor: int, columns: int) -> tuple[int, int]:
@@ -203,7 +214,9 @@ class _ForegroundOutputState:
             columns = max(1, size.columns)
             rows = max(1, size.lines)
             prompt_text = self._prompt_text()
-            prompt_lines = self._prompt_lines(prompt_text, columns)
+            prompt_lines = self._prompt_lines(
+                prompt_text, columns, system_prefix=self.prompt_prefix,
+            )
             prompt_rows = min(rows, max(1, len(prompt_lines)))
             output_rows = max(0, rows - prompt_rows)
 
@@ -262,11 +275,12 @@ class _ForegroundOutputState:
                 self._prompt_text(), ensure_newline=True, columns=columns
             )
             self.prompt = ""
+            self.prompt_prefix = None
             self.input_text = ""
             self.input_cursor = 0
             self._render()
 
-    def set_prompt(self, text: str) -> None:
+    def set_prompt(self, text: str, *, system_prefix: str | None = None) -> None:
         """Show recognized child prompt text in the reserved bottom area."""
         if self.finished:
             return
@@ -277,6 +291,7 @@ class _ForegroundOutputState:
         if self.prompt:
             self.commit_prompt()
         self.prompt = self._sanitize_prompt(text)
+        self.prompt_prefix = system_prefix
         self._render()
 
     def set_input(self, text: str, cursor: int | None = None) -> None:
@@ -319,7 +334,9 @@ class _ForegroundOutputState:
             rows = max(1, size.lines)
             prompt_rows = min(
                 rows,
-                max(1, len(self._prompt_lines(self._prompt_text(), columns))),
+                max(1, len(self._prompt_lines(
+                    self._prompt_text(), columns, system_prefix=self.prompt_prefix,
+                ))),
             )
             output_rows = max(0, rows - prompt_rows)
             output_lines = _output_history_lines(
@@ -344,6 +361,7 @@ class _ForegroundOutputState:
                     self._prompt_text(), ensure_newline=True, columns=columns
                 )
             self.prompt = ""
+            self.prompt_prefix = None
             self.input_text = ""
             self.input_cursor = 0
             self.live_status = None
@@ -1266,6 +1284,7 @@ def _interactive_input(
     status_line: str | None = None,
     output_state: _InteractiveOutputState | None = None,
     terminal_mode: TerminalMode = TerminalMode.COMMAND_READY,
+    system_prefix: str | None = None,
 ) -> str:
     """Read one or more shell lines with autocomplete, paste, and navigation."""
     line = ""
@@ -1437,7 +1456,12 @@ def _interactive_input(
                 )
                 if original_row == cursor_row:
                     cursor_display = visible_cursor
-                display_lines.append(_input_row(row_prompt, visible, columns))
+                display_lines.append(_input_row(
+                    row_prompt,
+                    visible,
+                    columns,
+                    system_prefix=system_prefix if original_row == 0 else None,
+                ))
 
             input_padding = [
                 _input_row("", "", columns)
@@ -1820,6 +1844,7 @@ def _interactive_line(
     *,
     history: list[str] | None = None,
     completer: Callable[[str, int | None], list[tuple[str, str]]] | None = None,
+    system_prefix: str | None = None,
 ) -> str:
     """Read one edited line on a TTY and retain plain-input behavior elsewhere."""
     if _is_interactive_terminal():
@@ -1827,6 +1852,7 @@ def _interactive_line(
             prompt,
             completer or (lambda _line, _cursor: []),
             history=history,
+            system_prefix=system_prefix,
         )
     return input(prompt)
 
@@ -1900,17 +1926,31 @@ def _shell_paint(text: str, code: str) -> str:
     return paint(sanitize_terminal_text(text), code)
 
 
-def _input_row(prompt: str, text: str, columns: int) -> str:
+def _input_row(
+    prompt: str,
+    text: str,
+    columns: int,
+    *,
+    system_prefix: str | None = None,
+) -> str:
     """Render one full-width editable row with a resettable TTY background."""
     safe_prompt = sanitize_terminal_text(prompt)
     safe_text = sanitize_terminal_text(text)
+    prompt_display = (
+        style_system_text(
+            safe_prompt,
+            system_prefix=system_prefix,
+            style_status_tokens=False,
+        )
+        if system_prefix is not None else safe_prompt
+    )
     content = safe_prompt + safe_text
     padding = " " * max(0, columns - _terminal_text_width(content))
     if not color_enabled():
         return content + padding
     return (
         "\033[48;5;236m"
-        f"\033[1;36m{safe_prompt}"
+        f"\033[1;36m{prompt_display}"
         f"\033[97m{safe_text}{padding}"
         "\033[0m"
     )
@@ -1926,9 +1966,12 @@ def _write_shell_output(text: str, *, ensure_newline: bool = True) -> None:
 
 
 def _shell_print(message: Any = "", *, end: str = "\n", flush: bool = False,
-                 style_status_tokens: bool = True) -> None:
+                 style_status_tokens: bool = True,
+                 system_prefix: str | None = None) -> None:
     """Print shell status or replayed log text with terminal-only styling."""
-    text = style_text(message, style_status_tokens=style_status_tokens)
+    renderer = style_system_text if system_prefix is not None else style_text
+    kwargs = {"system_prefix": system_prefix} if system_prefix is not None else {}
+    text = renderer(message, style_status_tokens=style_status_tokens, **kwargs)
     _write_shell_output(text + end)
     if flush:
         sys.stdout.flush()

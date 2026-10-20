@@ -17,6 +17,7 @@ from typing import Callable, ContextManager
 
 from agentic_config import load_config, sandbox_env_for_provider
 from agentic_execution import _doctor_public_detail
+from agentic_output import style_system_text
 from agentic_sandbox import sandbox_command
 
 
@@ -233,7 +234,13 @@ def run_doctor(
                     with (command_lock(command_worktree) if command_lock else nullcontext()):
                         for argv in commands:
                             if not json_output:
-                                print(f"[DOCTOR] Running: {shlex.join(argv)}", flush=True)
+                                print(
+                                    style_system_text(
+                                        f"[DOCTOR] Running: {shlex.join(argv)}",
+                                        system_prefix="DOCTOR",
+                                    ),
+                                    flush=True,
+                                )
                             command_results.append(_run_configured_command(
                                 argv,
                                 command_worktree,
@@ -284,12 +291,24 @@ def run_doctor(
             print(f"Command worktree: {command_worktree}")
         for label, ok, _detail, required in checks:
             state = "OK" if ok else ("FAIL" if required else "WARN")
-            print(f"[{state:<4}] {label}: {_doctor_public_detail(label, ok, required)}")
+            print(
+                style_system_text(
+                    f"[{state:<4}] {label}: {_doctor_public_detail(label, ok, required)}",
+                    system_prefix=state,
+                    style_status_tokens=False,
+                )
+            )
         if command_results:
             print("Configured commands:")
             for result in command_results:
                 status = str(result["status"]).upper()
                 command = shlex.join(str(part) for part in result["argv"])
                 duration = result["duration_seconds"]
-                print(f"[{status:<11}] {command} ({duration}s)")
+                print(
+                    style_system_text(
+                        f"[{status:<11}] {command} ({duration}s)",
+                        system_prefix=status,
+                        style_status_tokens=False,
+                    )
+                )
     return 0 if success else 1

@@ -227,10 +227,18 @@ def _signal_process_tree(process: subprocess.Popen[Any], signum: int) -> None:
 
 def _is_foreground_prompt(text: str) -> bool:
     """Recognize the child prompts that are safe to make editable."""
-    return text in {
-        "chat> ",
-        "[PUBLISH] Publish this patch? Type 'publish' to approve: ",
-    }
+    return text in _FOREGROUND_PROMPT_PREFIXES
+
+
+_FOREGROUND_PROMPT_PREFIXES = {
+    "chat> ": None,
+    "[PUBLISH] Publish this patch? Type 'publish' to approve: ": "PUBLISH",
+}
+
+
+def _foreground_prompt_prefix(text: str) -> str | None:
+    """Return styling metadata for a recognized child prompt."""
+    return _FOREGROUND_PROMPT_PREFIXES.get(text)
 
 
 def _display_escape(character: str) -> str:
@@ -799,7 +807,9 @@ class AgenticShell:
                         )
                     elif line and _is_foreground_prompt(line):
                         if foreground is not None:
-                            foreground.set_prompt(line)
+                            foreground.set_prompt(
+                                line, system_prefix=_foreground_prompt_prefix(line),
+                            )
                         else:
                             _shell_print(line, end="", style_status_tokens=False, flush=True)
                     elif line:
@@ -849,7 +859,9 @@ class AgenticShell:
                             and not prompt_was_displayed
                             and _is_foreground_prompt(pending)
                         ):
-                            foreground.set_prompt(pending)
+                            foreground.set_prompt(
+                                pending, system_prefix=_foreground_prompt_prefix(pending),
+                            )
                             pending = ""
                             prompt_was_displayed = True
                         continue

@@ -19,6 +19,48 @@ from test_agentic import sh
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_doctor_status_labels_use_shared_tty_styling_and_plain_fallback(self):
+        class TTYBuffer(io.StringIO):
+            def isatty(self):
+                return True
+
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            config = repo / 'agent_config.json'
+            config.write_text(json.dumps({
+                'test_commands': [[sys.executable, '-c', 'import sys; sys.exit(3)']],
+            }))
+
+            def fake_probe(argv, cwd, **kwargs):
+                if argv[:2] == ['git', 'rev-parse']:
+                    return True, str(repo)
+                return False, 'unavailable'
+
+            with (patch('agentic.installed_git_version', return_value=(2, 48, 0)),
+                  patch('agentic.probe', side_effect=fake_probe),
+                  patch('agentic.shutil.which', return_value='/usr/bin/tool'),
+                  patch('agentic.worktree_path_lock', return_value=nullcontext()),
+                  patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}),
+                  patch('sys.stdout', new=TTYBuffer()) as output):
+                result = agentic.doctor(repo, config, run_commands=True)
+
+            colored = output.getvalue()
+            self.assertEqual(result, 1)
+            self.assertIn('\033[31m[FAIL]\033[0m', colored)
+            self.assertIn('\033[33m[WARN]\033[0m', colored)
+            self.assertIn('\033[31m[FAILED     ]\033[0m', colored)
+            self.assertNotIn('\033[31m[DOCTOR]', colored)
+
+            with (patch('agentic.installed_git_version', return_value=(2, 48, 0)),
+                  patch('agentic.probe', side_effect=fake_probe),
+                  patch('agentic.shutil.which', return_value='/usr/bin/tool'),
+                  patch('agentic.worktree_path_lock', return_value=nullcontext()),
+                  patch.dict('os.environ', {'NO_COLOR': '1'}),
+                  patch('sys.stdout', new=io.StringIO()) as plain_output):
+                agentic.doctor(repo, config, run_commands=True)
+            self.assertNotIn('\033[', plain_output.getvalue())
+            self.assertIn('[FAILED     ]', plain_output.getvalue())
+
     def test_init_detects_go_and_ignores_personal_config(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = Path(temp)
