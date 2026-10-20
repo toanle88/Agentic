@@ -6,9 +6,22 @@ from unittest.mock import patch
 import agentic
 import agentic_openrouter
 from agentic_sandbox import sandbox_command, validate_sandbox
+from agentic_security import redact_secrets
 
 
 class ReadOnlyBoundaryTests(unittest.TestCase):
+    def test_secret_canary_formats_are_redacted(self):
+        value = "canary-secret-value-123456"
+        payload = (
+            f'OPENAI_API_KEY={value}\n'
+            f'{{"api_key": "{value}"}}\n'
+            f'Authorization: Bearer {value}\n'
+        )
+        with patch.dict("os.environ", {}, clear=True):
+            redacted = redact_secrets(payload, extra_values=[value])
+        self.assertNotIn(value, redacted)
+        self.assertGreaterEqual(redacted.count("[REDACTED]"), 3)
+
     def test_readonly_rejects_mutating_or_escaping_commands(self):
         blocked = (
             ["sed", "-i", "s/x/y/", "file.txt"],

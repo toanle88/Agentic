@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import urllib.error
 import urllib.request
@@ -14,7 +15,9 @@ from agentic_security import redact_secrets
 from agentic_policy import forbidden, sensitive_read
 
 OPENROUTER_READ_FILE_CHARS = 12_000
+OPENROUTER_READ_CHUNK_CHARS = 8_192
 OPENROUTER_COMMAND_OUTPUT_CHARS = 6_000
+OPENROUTER_LIST_FILES_PAGE_SIZE = 300
 NETWORK_COMMANDS = {"curl", "wget", "ssh", "scp", "sftp", "ftp", "nc", "netcat", "telnet", "gh"}
 ALWAYS_BLOCKED_COMMANDS = {"gh", "ssh", "scp", "sftp"}
 READONLY_GIT_COMMANDS = {"status", "diff", "log", "show", "branch", "rev-parse"}
@@ -106,6 +109,10 @@ def _openrouter_tools(readonly: bool) -> list[dict[str, Any]]:
                 "description": "List files below a relative directory in the current worktree.",
                 "parameters": {"type": "object", "properties": {
                     "path": {"type": "string", "description": "Relative directory, default '.'."},
+                    "page": {
+                        "type": "integer", "minimum": 1,
+                        "description": "1-based page number; request the next page when the result says more files exist.",
+                    },
                 }},
             },
         },
@@ -179,6 +186,90 @@ def _openrouter_command_allowed(argv: Any, readonly: bool,
     return True, ""
 
 
+def _bounded_file_text(path: Path, *, start_line: int | None = None,
+                       end_line: int | None = None) -> str:
+    """Read only the requested lines and output budget from a text file."""
+    marker = "\n...[truncated; use start_line/end_line to read a smaller range]"
+    chunks: list[str] = []
+    used = 0
+    truncated = False
+    with path.open("r", encoding="utf-8", errors="replace") as stream:
+        if start_line is None and end_line is None:
+            value = stream.read(OPENROUTER_READ_FILE_CHARS + 1)
+            truncated = len(value) > OPENROUTER_READ_FILE_CHARS
+            text = value[:OPENROUTER_READ_FILE_CHARS]
+            return (
+                text[:OPENROUTER_READ_FILE_CHARS - len(marker)] + marker
+                if truncated else text
+            )
+        line_number = 1
+        while True:
+            block = stream.read(OPENROUTER_READ_CHUNK_CHARS)
+            if not block:
+                break
+            block_start = 0
+            while block_start < len(block):
+                newline = block.find("\n", block_start)
+                block_end = len(block) if newline < 0 else newline + 1
+                if start_line <= line_number <= end_line:
+                    segment = block[block_start:block_end]
+                    remaining = OPENROUTER_READ_FILE_CHARS - used
+                    if len(segment) > remaining:
+                        if remaining > 0:
+                            chunks.append(segment[:remaining])
+                        truncated = True
+                        break
+                    chunks.append(segment)
+                    used += len(segment)
+                if newline < 0:
+                    break
+                line_number += 1
+                if line_number > end_line:
+                    break
+                block_start = block_end
+            if truncated or line_number > end_line:
+                break
+    text = "".join(chunks)
+    if truncated:
+        text = text[:OPENROUTER_READ_FILE_CHARS - len(marker)] + marker
+    return text
+
+
+def _list_files_page(target: Path, root: Path, page: int) -> tuple[list[str], bool]:
+    """Return one deterministic file-list page and whether another exists."""
+    offset = (page - 1) * OPENROUTER_LIST_FILES_PAGE_SIZE
+    paths: list[str] = []
+    seen = 0
+    has_more = False
+    for current, directories, filenames in os.walk(target, topdown=True, followlinks=False):
+        directories[:] = [directory for directory in directories if not sensitive_read(
+            (Path(current) / directory).relative_to(root).as_posix()
+        )]
+        directories.sort()
+        filenames.sort()
+        current_path = Path(current)
+        for filename in filenames:
+            item = current_path / filename
+            try:
+                resolved_item = item.resolve()
+                relative_item = resolved_item.relative_to(root).as_posix()
+            except (OSError, ValueError):
+                continue
+            if sensitive_read(relative_item) or not resolved_item.is_file():
+                continue
+            if seen < offset:
+                seen += 1
+                continue
+            if len(paths) == OPENROUTER_LIST_FILES_PAGE_SIZE:
+                has_more = True
+                break
+            paths.append(relative_item)
+            seen += 1
+        if has_more:
+            break
+    return paths, has_more
+
+
 def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                           *, readonly: bool, command_timeout: int | None = None,
                           allow_network: bool = False,
@@ -191,27 +282,21 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
             target = worktree.resolve() if relative == "." else _safe_worktree_path(worktree, relative)
             if not target.is_dir():
                 return f"ERROR: {relative!r} is not a directory"
-            paths = []
-            for item in sorted(target.rglob("*")):
-                try:
-                    resolved_item = item.resolve()
-                    relative_item = resolved_item.relative_to(worktree.resolve()).as_posix()
-                except ValueError:
-                    continue
-                if sensitive_read(relative_item):
-                    continue
-                if resolved_item.is_file():
-                    paths.append(relative_item)
-                if len(paths) >= 300:
-                    break
-            return "\n".join(paths) or "(no files)"
+            page = arguments.get("page", 1)
+            if not isinstance(page, int) or isinstance(page, bool) or page < 1:
+                return "ERROR: page must be a positive integer"
+            root = worktree.resolve()
+            paths, has_more = _list_files_page(target, root, page)
+            result = "\n".join(paths) or "(no files)"
+            if has_more:
+                result += f"\n...[more files; call list_files with page={page + 1}]"
+            return result
         if name == "read_file":
             relative = arguments.get("path", "")
             target = _safe_worktree_path(worktree, relative)
             normalized = target.relative_to(worktree.resolve()).as_posix()
             if sensitive_read(normalized):
                 return f"ERROR: protected file {relative!r} cannot be read"
-            text = target.read_text(encoding="utf-8", errors="replace")
             start_line = arguments.get("start_line")
             end_line = arguments.get("end_line")
             if start_line is not None or end_line is not None:
@@ -222,14 +307,7 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                     or end_line < start_line
                 ):
                     return "ERROR: start_line and end_line must be integers with 1 <= start_line <= end_line"
-                lines = text.splitlines(keepends=True)
-                text = "".join(lines[start_line - 1:end_line])
-            if len(text) > OPENROUTER_READ_FILE_CHARS:
-                marker = "\n...[truncated; use start_line/end_line to read a smaller range]"
-                text = (
-                    text[:OPENROUTER_READ_FILE_CHARS - len(marker)] + marker
-                )
-            return text
+            return _bounded_file_text(target, start_line=start_line, end_line=end_line)
         if name == "write_file":
             if readonly:
                 return "ERROR: write_file is unavailable during review"

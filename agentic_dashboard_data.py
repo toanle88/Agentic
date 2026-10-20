@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -33,6 +34,8 @@ SEVERITY_RANK = {
     "MINOR": 2,
     "LOW": 1,
 }
+_RUN_CACHE_LIMIT = 512
+_RUN_SNAPSHOT_CACHE: dict[tuple[str, str], tuple[tuple[tuple[str, int, int], ...], dict[str, Any] | None]] = {}
 
 
 def filter_runs(runs: Iterable[dict[str, Any]], *, query: str = "",
@@ -99,6 +102,34 @@ def _numbered_files(folder: Path, prefixes: Iterable[str]) -> list[Path]:
     ]
 
 
+def _numbered_file_index(paths: Iterable[Path]) -> dict[str, list[Path]]:
+    """Index numbered artifacts once per run snapshot."""
+    indexed: dict[str, list[tuple[int, float, Path]]] = defaultdict(list)
+    for path in paths:
+        match = NUMBERED_FILE.fullmatch(path.name)
+        if not match:
+            continue
+        try:
+            modified = path.stat().st_mtime
+        except OSError:
+            modified = 0
+        indexed[match.group("prefix")].append((int(match.group("number")), modified, path))
+    return {
+        prefix: [path for _, _, path in sorted(values, key=lambda item: (item[0], item[1], item[2].name))]
+        for prefix, values in indexed.items()
+    }
+
+
+def _indexed_files(index: dict[str, list[Path]] | None, folder: Path,
+                   prefixes: Iterable[str]) -> list[Path]:
+    if index is None:
+        return _numbered_files(folder, prefixes)
+    paths: list[Path] = []
+    for prefix in prefixes:
+        paths.extend(index.get(prefix, []))
+    return sorted(paths, key=lambda path: (path.stat().st_mtime, path.name))
+
+
 def _latest(paths: Iterable[Path]) -> Path | None:
     candidates = list(paths)
     if not candidates:
@@ -107,11 +138,23 @@ def _latest(paths: Iterable[Path]) -> Path | None:
 
 
 def _read(path: Path, limit: int = MAX_TEXT) -> str:
+    """Read only a bounded tail from a potentially large durable artifact."""
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        size = path.stat().st_size
+        with path.open("rb") as stream:
+            # UTF-8 characters are at most four bytes. The small multiplier
+            # lets us retain ``limit`` characters without reading the whole
+            # file, while still keeping memory bounded for hostile logs.
+            start = max(0, size - max(limit * 4, 4096))
+            stream.seek(start)
+            text = stream.read().decode("utf-8", errors="replace")
     except OSError as exc:
         return f"Could not read {path.name}: {exc}"
+    truncated = start > 0
     if len(text) > limit:
+        truncated = True
+        text = text[-limit:]
+    if truncated:
         text = f"[… earlier output omitted; showing the last {limit:,} characters …]\n" + text[-limit:]
     return redact_secrets(text)
 
@@ -182,9 +225,9 @@ def _finding_records(values: Any) -> tuple[list[str], list[dict[str, str]]]:
     return text, records
 
 
-def _review(folder: Path) -> tuple[dict[str, Any], Path | None]:
+def _review(folder: Path, index: dict[str, list[Path]] | None = None) -> tuple[dict[str, Any], Path | None]:
     path = _latest(
-        path for path in _numbered_files(folder, ["review"])
+        path for path in _indexed_files(index, folder, ["review"])
         if path.suffix == ".json"
     )
     history_path = folder / "review-history.json"
@@ -265,9 +308,9 @@ def _result(folder: Path) -> dict[str, Any] | None:
     return value
 
 
-def _investigation(folder: Path) -> tuple[dict[str, Any], Path | None]:
+def _investigation(folder: Path, index: dict[str, list[Path]] | None = None) -> tuple[dict[str, Any], Path | None]:
     path = _latest(
-        path for path in _numbered_files(folder, ["investigation"])
+        path for path in _indexed_files(index, folder, ["investigation"])
         if path.suffix == ".json"
     )
     if path is None:
@@ -295,8 +338,8 @@ def _investigation(folder: Path) -> tuple[dict[str, Any], Path | None]:
     }, path
 
 
-def _tests(folder: Path) -> tuple[dict[str, Any], Path | None]:
-    path = _latest(_numbered_files(folder, ["test-command", "tests"]))
+def _tests(folder: Path, index: dict[str, list[Path]] | None = None) -> tuple[dict[str, Any], Path | None]:
+    path = _latest(_indexed_files(index, folder, ["test-command", "tests"]))
     if path is None:
         return {"status": "not-run", "summary": "No test result recorded."}, None
     content = _read(path)
@@ -308,8 +351,8 @@ def _tests(folder: Path) -> tuple[dict[str, Any], Path | None]:
     }, path
 
 
-def _latest_developer(folder: Path) -> tuple[dict[str, Any], list[Path]]:
-    outputs = _numbered_files(folder, ["developer"])
+def _latest_developer(folder: Path, index: dict[str, list[Path]] | None = None) -> tuple[dict[str, Any], list[Path]]:
+    outputs = _indexed_files(index, folder, ["developer"])
     output = _latest(path for path in outputs if path.suffix == ".txt")
     progress = _latest(path for path in outputs if path.suffix == ".log")
     return {
@@ -329,8 +372,8 @@ def _all_log_files(folder: Path) -> list[Path]:
     return sorted(files, key=lambda path: (path.stat().st_mtime, path.name), reverse=True)
 
 
-def _process_running(folder: Path) -> bool:
-    progress = _latest(_numbered_files(folder, ["developer", "review", "investigation", "test-command"]))
+def _process_running(folder: Path, index: dict[str, list[Path]] | None = None) -> bool:
+    progress = _latest(_indexed_files(index, folder, ["developer", "review", "investigation", "test-command"]))
     if progress is None:
         return False
     content = _read(progress, 20_000)
@@ -341,8 +384,10 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
     match = RUN_NAME.fullmatch(folder.name)
     if not match:
         return None
-    investigation, investigation_path = _investigation(folder)
-    review, review_path = _review(folder)
+    all_files = _all_log_files(folder)
+    index = _numbered_file_index(all_files)
+    investigation, investigation_path = _investigation(folder, index)
+    review, review_path = _review(folder, index)
     blocked = _blocked(folder)
     result = _result(folder)
     legacy_result_status = blocked.get("result_status") if blocked else None
@@ -361,11 +406,10 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
         result["status"] = legacy_result_status
         if result["status"] == "NO_CHANGES":
             result["reason"] = blocked.get("developer_summary") or result.get("reason", "")
-    tests, tests_path = _tests(folder)
-    developer, developer_paths = _latest_developer(folder)
-    all_files = _all_log_files(folder)
+    tests, tests_path = _tests(folder, index)
+    developer, developer_paths = _latest_developer(folder, index)
     last_activity = _latest(all_files)
-    if _process_running(folder):
+    if _process_running(folder, index):
         status = "in-progress"
     elif investigation["state"] == "invalid" and not developer_paths and review["status"] == "not-run":
         status = "investigation-invalid"
@@ -477,8 +521,27 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
 def collect_runs(logs_root: Path) -> list[dict[str, Any]]:
     if not logs_root.is_dir():
         return []
-    runs = [
-        snapshot for folder in logs_root.iterdir() if folder.is_dir()
-        for snapshot in [_run_snapshot(folder)] if snapshot is not None
-    ]
+    root_key = str(logs_root.resolve())
+    runs: list[dict[str, Any]] = []
+    for folder in logs_root.iterdir():
+        if not folder.is_dir():
+            continue
+        signature: list[tuple[str, int, int]] = []
+        try:
+            for path in folder.iterdir():
+                if not path.is_file() or path.is_symlink():
+                    continue
+                stat = path.stat()
+                signature.append((path.name, stat.st_size, stat.st_mtime_ns))
+        except OSError:
+            signature = []
+        cache_key = (root_key, folder.name)
+        cached = _RUN_SNAPSHOT_CACHE.get(cache_key)
+        snapshot = cached[1] if cached and cached[0] == tuple(sorted(signature)) else _run_snapshot(folder)
+        if snapshot is not None:
+            runs.append(snapshot)
+            _RUN_SNAPSHOT_CACHE[cache_key] = (tuple(sorted(signature)), snapshot)
+    if len(_RUN_SNAPSHOT_CACHE) > _RUN_CACHE_LIMIT:
+        for key in list(_RUN_SNAPSHOT_CACHE)[:len(_RUN_SNAPSHOT_CACHE) - _RUN_CACHE_LIMIT]:
+            _RUN_SNAPSHOT_CACHE.pop(key, None)
     return sorted(runs, key=lambda run: (run["last_activity"], run["id"]), reverse=True)

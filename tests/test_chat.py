@@ -147,6 +147,19 @@ class ChatTests(unittest.TestCase):
             error = validate_worktree_guard(worktree, before)
             self.assertIn('protected file', error or '')
 
+    def test_guard_hashes_protected_files_with_bounded_memory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            worktree = Path(temp)
+            subprocess.run(['git', 'init', '-q'], cwd=worktree, check=True)
+            (worktree / 'ordinary').mkdir()
+            for index in range(300):
+                (worktree / 'ordinary' / f'file-{index}.txt').write_text('ordinary\n')
+            protected = worktree / 'AGENTS.md'
+            protected.write_text('x' * (2 * 1024 * 1024))
+            before = capture_worktree_guard(worktree)
+            protected.write_text('y' * (2 * 1024 * 1024))
+            self.assertIn('protected file', validate_worktree_guard(worktree, before) or '')
+
     def test_guard_allows_agentic_runner_source_in_agentic_checkout(self):
         with tempfile.TemporaryDirectory() as temp:
             worktree = Path(temp)

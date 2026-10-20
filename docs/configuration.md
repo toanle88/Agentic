@@ -183,6 +183,7 @@ isolated checks and provider processes start:
     "build_context": ".",
     "language": "python",
     "allow_network": false,
+    "build_network": true,
     "pass_env": ["OPENAI_API_KEY"]
   }
 }
@@ -195,6 +196,12 @@ container. See the [language-specific starter templates](../examples/sandbox/REA
 for pinned Python, Node.js, Go, Rust, Java, and .NET examples. Templates
 include comments for adding project dependencies, native packages, test tools,
 and the selected provider CLI.
+
+`build_network` controls network access while the configured Dockerfile is
+built. It defaults to `true` so Dockerfiles that install dependencies remain
+functional; set it to `false` for a network-disabled build when the Dockerfile
+uses only locally available inputs. This build setting is separate from
+`allow_network`, which controls runtime containers.
 
 `agentic init` records a best-effort language hint from common project markers.
 Use `--sandbox-language` or set `sandbox.language` to override it. Detection is

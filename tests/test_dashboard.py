@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import agentic_dashboard
+import agentic_dashboard_data
 from agentic_models import StatePaths
 from agentic_dashboard_data import filter_runs
 
@@ -50,6 +51,36 @@ class DashboardTests(unittest.TestCase):
             self.assertIn("persistence", snapshot["review"]["summary"])
             self.assertEqual(snapshot["review"]["skipped"], ["Browser check unavailable"])
             self.assertEqual(snapshot["review"]["recurring"][0]["count"], 2)
+
+    def test_dashboard_bounds_large_log_reads_to_a_tail(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            run = root / "agent-issue-120-ab12cd34"
+            run.mkdir(parents=True)
+            (run / "developer-001.txt").write_text(
+                "prefix\n" + ("x" * (3 * 1024 * 1024)) + "TAIL-MARKER\n"
+            )
+            snapshot = agentic_dashboard.collect_runs(root)[0]
+            self.assertIn("TAIL-MARKER", snapshot["developer"]["summary"])
+            self.assertIn("earlier output omitted", snapshot["developer"]["summary"])
+            self.assertLess(len(snapshot["developer"]["summary"]), 6_000)
+
+    def test_dashboard_reuses_unchanged_run_snapshots(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            run = root / "agent-issue-121-ab12cd34"
+            run.mkdir(parents=True)
+            (run / "developer-001.txt").write_text("first\n")
+            with patch.object(
+                agentic_dashboard_data, "_run_snapshot",
+                wraps=agentic_dashboard_data._run_snapshot,
+            ) as snapshot:
+                agentic_dashboard_data.collect_runs(root)
+                agentic_dashboard_data.collect_runs(root)
+                self.assertEqual(snapshot.call_count, 1)
+                (run / "developer-001.txt").write_text("second\n")
+                agentic_dashboard_data.collect_runs(root)
+                self.assertEqual(snapshot.call_count, 2)
 
     def test_dashboard_exposes_run_metrics(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -411,6 +442,7 @@ class DashboardTests(unittest.TestCase):
         self.assertIn('data-copy=', html)
         self.assertIn('data-download=', html)
         self.assertIn("async function refreshDashboard", html)
+        self.assertIn("const searchableCache=new Map()", html)
         self.assertIn("window.setInterval(refreshDashboard,30000)", html)
         self.assertIn(
             'dataset.theme=document.documentElement.dataset.theme==="light"?"dark":"light"',
