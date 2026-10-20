@@ -225,6 +225,23 @@ class InteractiveInputTests(unittest.TestCase):
         self.assertIn('status update', ''.join(state.history))
         self.assertIn('Continue? publ', output.getvalue())
 
+    def test_foreground_finish_discards_input_and_ignores_late_updates(self):
+        state = agentic_shell_input._InteractiveOutputState()
+        output = TTYBuffer()
+        foreground = agentic_shell_input._ForegroundOutputState(state)
+        with patch('sys.stdout', output), \
+             patch('agentic_shell_input.shutil.get_terminal_size',
+                   return_value=os.terminal_size((30, 6))):
+            foreground.set_prompt('Continue? ')
+            foreground.set_input('publish', 7)
+            foreground.clear_input()
+            foreground.finish()
+            foreground.set_input('leaked command', 14)
+
+        self.assertEqual(foreground.input_text, '')
+        self.assertEqual(foreground.input_cursor, 0)
+        self.assertNotIn('leaked command', ''.join(state.history))
+
     def test_foreground_page_scroll_keeps_prompt_at_bottom(self):
         state = agentic_shell_input._InteractiveOutputState()
         output = TTYBuffer()

@@ -947,6 +947,76 @@ class ShellTests(unittest.TestCase):
 
         self.assertIn('publication output', ''.join(state.history))
 
+    def test_foreground_publish_command_output_never_becomes_editable_prompt(self):
+        command_output = "chat> gh issue edit 119 --body $'first\\nsecond'\n" \
+            "gh issue create --title 'quoted title' --body $'third\\nfourth' chat> "
+        for returncode in (0, 1):
+            with self.subTest(returncode=returncode), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                shell = agentic_shell.AgenticShell(
+                    root, Path(sys.executable), session_dir=root / 'logs'
+                )
+                state = agentic_shell_input._InteractiveOutputState()
+                previous = agentic_shell_input._activate_interactive_output(state)
+                output = StringIO()
+
+                class Process:
+                    stdout = StringIO(command_output)
+                    pid = 123
+
+                    def poll(self):
+                        return None
+
+                    def wait(self):
+                        owner = getattr(
+                            agentic_shell_input._ACTIVE_INTERACTIVE_OUTPUT,
+                            '__self__',
+                            None,
+                        )
+                        self.input_at_wait = getattr(owner, 'input_text', None)
+                        self.prompt_at_wait = getattr(owner, 'prompt', None)
+                        return returncode
+
+                process = Process()
+                try:
+                    with (patch('agentic_shell._is_interactive_terminal', return_value=True),
+                          patch('agentic_shell.subprocess.Popen', return_value=process),
+                          patch('agentic_shell.shutil.get_terminal_size',
+                                return_value=os.terminal_size((80, 8))),
+                          patch('agentic_shell_input.shutil.get_terminal_size',
+                                return_value=os.terminal_size((80, 8))),
+                          patch('sys.stdout', output)):
+                        if returncode:
+                            with self.assertRaisesRegex(RuntimeError, 'exit 1'):
+                                shell._run_foreground(['--publish'])
+                        else:
+                            shell._run_foreground(['--publish'])
+                finally:
+                    active_after_run = agentic_shell_input._ACTIVE_INTERACTIVE_OUTPUT
+                    agentic_shell_input._restore_interactive_output(previous)
+
+                self.assertIs(
+                    getattr(active_after_run, '__self__', None),
+                    state,
+                )
+                self.assertEqual(process.input_at_wait, '')
+                self.assertEqual(process.prompt_at_wait, '')
+                rendered_history = ''.join(state.history)
+                self.assertNotIn(command_output, rendered_history)
+                self.assertIn("chat> gh issue edit 119", rendered_history)
+                self.assertIn('first\nsecond', rendered_history)
+                self.assertIn('third\nfourth chat> ', rendered_history)
+                self.assertNotIn('first\\nsecond', rendered_history)
+                self.assertNotIn("$'", rendered_history)
+
+    def test_foreground_output_normalization_preserves_windows_paths(self):
+        windows_command = r"gh issue edit 119 --body C:\new\file --title C:\temp\folder"
+
+        self.assertEqual(
+            agentic_shell._normalize_foreground_output(windows_command),
+            windows_command,
+        )
+
     def test_foreground_child_confirmation_prompt_stays_in_reserved_bottom_row(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1019,6 +1089,12 @@ class ShellTests(unittest.TestCase):
 
                 def wait(self):
                     self.prompt_was_visible = 'Continue?' in output.getvalue()
+                    owner = getattr(
+                        agentic_shell_input._ACTIVE_INTERACTIVE_OUTPUT,
+                        '__self__',
+                        None,
+                    )
+                    self.editable_prompt = getattr(owner, 'prompt', None)
                     return 0
 
             process = Process()
@@ -1037,6 +1113,7 @@ class ShellTests(unittest.TestCase):
                 agentic_shell_input._restore_interactive_output(previous)
 
         self.assertTrue(process.prompt_was_visible)
+        self.assertEqual(process.editable_prompt, '')
 
     def test_foreground_child_output_styles_prefix_without_recoloring_body(self):
         class TTYBuffer(StringIO):

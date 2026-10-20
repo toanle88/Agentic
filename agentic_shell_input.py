@@ -132,6 +132,7 @@ class _ForegroundOutputState:
         self.prompt = ""
         self.input_text = ""
         self.input_cursor = 0
+        self.finished = False
         self.live_status: str | None = None
         self.output_scroll_lines = 0
 
@@ -238,7 +239,9 @@ class _ForegroundOutputState:
             self._render()
 
     def set_prompt(self, text: str) -> None:
-        """Show arbitrary child prompt text in the reserved bottom area."""
+        """Show recognized child prompt text in the reserved bottom area."""
+        if self.finished:
+            return
         self.live_status = None
         # Input can arrive as soon as the forwarder starts, before the child
         # prompt has made it through the stdout reader. Keep that early input
@@ -250,10 +253,20 @@ class _ForegroundOutputState:
 
     def set_input(self, text: str, cursor: int | None = None) -> None:
         """Redraw the child prompt with the shell-owned input buffer."""
+        if self.finished:
+            return
         self.input_text = self._sanitize_prompt(text)
         self.input_cursor = len(self.input_text) if cursor is None else max(
             0, min(cursor, len(self.input_text))
         )
+        self._render()
+
+    def clear_input(self) -> None:
+        """Discard unsubmitted child input before restoring the shell prompt."""
+        if self.finished or not self.input_text:
+            return
+        self.input_text = ""
+        self.input_cursor = 0
         self._render()
 
     def write_transient(self, text: str) -> None:
@@ -295,6 +308,7 @@ class _ForegroundOutputState:
     def finish(self) -> None:
         """Restore the normal terminal scroll region after the child exits."""
         with _OUTPUT_LOCK:
+            self.finished = True
             size = shutil.get_terminal_size(fallback=(80, 24))
             columns = max(1, size.columns)
             if self.prompt or self.input_text:
