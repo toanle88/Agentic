@@ -20,6 +20,7 @@ Agentic is intentionally small and uses the Python standard library at runtime.
 | `agentic_openrouter_loop.py` | OpenRouter request/response loop and tool-turn orchestration. |
 | `agentic_policy.py` | Protected-path and sensitive-file policy shared by the runner and API tools. |
 | `agentic_config.py` | Target-repository configuration loading, provider validation/preflight, test-command detection, and setup defaults. |
+| `agentic_test_discovery.py` | Deterministic metadata inspection, optional read-only candidate assistance, bounded argv validation, and fast/slow classification. |
 | `agentic_diagnostics.py` | Repository prerequisite checks and secure-sandbox/provider diagnostics. |
 | `agentic_shell.py` | Interactive supervisor for background jobs and terminal log tails. |
 | `agentic_shell_input.py` | TTY input editing, completion, key decoding, styling, and banner presentation. |

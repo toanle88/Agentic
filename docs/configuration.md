@@ -19,6 +19,40 @@ The same complete templates are available under
 detected `test_commands` as a starting point and replace them with the target
 project's real checks before running an issue.
 
+## Assisted test discovery
+
+For a new repository, `agentic init --discover-tests` inspects common project
+metadata such as `pyproject.toml`, `package.json`, `Makefile`, `go.mod`, and
+`Cargo.toml`. It proposes direct argv-array checks, runs each candidate from
+the repository with a bounded per-candidate timeout, and labels missing tools
+or external dependencies as skipped rather than code failures. Passing checks
+are classified as fast or slow using explicit metadata evidence and measured
+duration: a check taking at least 30 seconds is slow, as is a check whose
+metadata identifies integration, end-to-end, build, release, or benchmark
+work.
+
+Discovery never creates an installer command, runs a shell, or parses package
+scripts into shell commands. When multiple checks make interpretation useful,
+the selected provider may suggest additional argv candidates from the bounded,
+safe metadata inventory (including project-specific package scripts and Make
+targets) through its read-only interface; unsafe, malformed, or unsupported
+suggestions are discarded. Provider failure does not make deterministic
+discovery fail.
+
+Only candidates that start successfully and exit zero are eligible to be
+saved. Missing executables, unavailable modules, dependency-related exit
+statuses, failed checks, and timeouts are never saved. The proposed
+configuration is printed and requires an explicit `y` confirmation before
+`agent_config.json` is written; any other response leaves the repository
+unchanged. An existing config is preserved without running discovery unless
+`--force` is supplied. Fast candidates become `test_commands`; slow candidates
+become `slow_test_commands` and run only with the slow test profile. Use
+`--discovery-timeout SECONDS` to change the per-candidate limit (1 through
+86,400 seconds).
+With `--security-mode isolated` (or `--secure`), the sandbox is preflighted
+before discovery and both provider assistance and candidate checks run inside
+that sandbox; discovery fails closed if it cannot be applied.
+
 Runtime state is controlled separately from project configuration. Use `--state-dir PATH` or `AGENTIC_STATE_DIR` for worktrees, logs, shell records, and dashboards. This is especially useful in WSL when Windows Git must open the worktree from a shared mounted drive.
 
 ## Example
