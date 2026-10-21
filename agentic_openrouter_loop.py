@@ -46,6 +46,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                    check_commands: list[list[str]] | None = None,
                    allow_runner_source: bool = False,
                    json_mode: bool = False,
+                   verbose: bool = False,
                    sandbox: dict[str, Any] | None = None) -> tuple[bool, str]:
     """Run an OpenAI-compatible OpenRouter agent with scoped local tools."""
     if not model:
@@ -94,6 +95,10 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
     live_status = False
     live_status_enabled = bool(getattr(sys.stdout, "isatty", lambda: False)())
 
+    def record_raw(event: dict[str, Any]) -> None:
+        with raw_file.open("a", encoding="utf-8") as handle:
+            handle.write(redact_secrets(json.dumps(event, ensure_ascii=False)) + "\n")
+
     def clear_live_status() -> None:
         nonlocal live_status
         if live_status and live_status_enabled:
@@ -136,8 +141,9 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
         else:
             clear_live_status()
             _console_print(rendered, flush=True)
-        with log_file.open("a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
+        if verbose or not transient:
+            with log_file.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
 
     emit(f"Started (OpenRouter/{model})", style_status_tokens=True)
     try:
@@ -164,10 +170,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                 base_url.rstrip("/") + "/chat/completions", api_key, body, remaining
             )
             usage_records.append(normalize_usage(response, provider="openrouter"))
-            with raw_file.open("a", encoding="utf-8") as handle:
-                handle.write(redact_secrets(json.dumps(
-                    {"turn": turn + 1, "response": response}, ensure_ascii=False
-                )) + "\n")
+            record_raw({"event": "response", "turn": turn + 1, "response": response})
             choices = response.get("choices")
             if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
                 raise RuntimeError("OpenRouter response did not contain a choice")
@@ -194,6 +197,10 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                     arguments = {}
                 if not isinstance(arguments, dict):
                     arguments = {}
+                record_raw({
+                    "event": "tool_call", "turn": turn + 1,
+                    "name": name, "arguments": arguments,
+                })
                 emit(f"Using tool: {name}", transient=True)
                 tool_timeout = command_timeout
                 if deadline is not None:
@@ -209,6 +216,10 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                     check_commands=check_commands,
                     sandbox=sandbox, allow_runner_source=allow_runner_source,
                 )
+                record_raw({
+                    "event": "tool_result", "turn": turn + 1,
+                    "name": name, "result": result,
+                })
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.get("id", f"call-{turn}"),

@@ -30,6 +30,7 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
               reasoning_effort: str | None = None,
               api_key_env: str | None = None,
               permission_policy: dict[str, bool] | None = None,
+              verbose: bool = False,
               sandbox: dict[str, Any] | None = None) -> tuple[bool, str]:
     # Each invocation creates a fresh session. The repository is the memory.
     prompt = guidance_prompt(
@@ -47,7 +48,7 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
     invocation_started = time.monotonic()
     result = streamed_command(
         args, worktree, label=label, log_file=output.with_suffix(".log"),
-        timeout=timeout, codex_json=True, sandbox=sandbox,
+        timeout=timeout, codex_json=True, verbose=verbose, sandbox=sandbox,
         sandbox_read_only=readonly,
         sandbox_pass_env=(sandbox or {}).get("pass_env", []),
         metrics_folder=output.parent,
@@ -158,6 +159,7 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
                      executable_path: str | None = None,
                      host: str | None = None,
                      api_key_env: str | None = None,
+                     verbose: bool = False,
                      sandbox: dict[str, Any] | None = None) -> tuple[bool, str]:
     """Run a locally installed coding CLI in its non-interactive mode."""
     prompt = guidance_prompt(
@@ -202,7 +204,7 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
         process_env["COPILOT_GH_HOST"] = host
     result = streamed_command(
         args, worktree, label=label, log_file=output.with_suffix(".log"),
-        timeout=timeout, codex_json=structured,
+        timeout=timeout, codex_json=structured, verbose=verbose,
         progress_parser=(lambda line: _provider_progress(line, provider)) if structured else None,
         sandbox=effective_sandbox, sandbox_read_only=readonly,
         sandbox_pass_env=sandbox_pass_env,

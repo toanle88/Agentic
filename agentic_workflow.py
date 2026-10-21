@@ -380,7 +380,8 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
               model: str | None = None, reasoning_effort: str | None = None,
               timeout: int | None = None,
               sandbox: dict[str, Any] | None = None,
-              check_commands: list[list[str]] | None = None) -> tuple[bool, str]:
+              check_commands: list[list[str]] | None = None,
+              verbose: bool = False) -> tuple[bool, str]:
     """Dispatch one developer/reviewer turn to the configured provider."""
     if isinstance(settings, AgentSettings):
         selected = settings.as_dict()
@@ -415,11 +416,13 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
         reasoning_effort = selected["reasoning_effort"]
     if selected.get("timeout_seconds") is not None:
         timeout = selected["timeout_seconds"]
+    progress_kwargs = {"verbose": True} if verbose else {}
     if provider == "codex":
         return run_codex(
             worktree, prompt, output=output, readonly=readonly, schema=schema,
             timeout=timeout, model=model, reasoning_effort=reasoning_effort,
             **({"api_key_env": selected_env} if selected_env else {}),
+            **progress_kwargs,
             **policy_kwargs,
             **({"sandbox": provider_sandbox} if provider_sandbox is not None else {}),
         )
@@ -443,6 +446,7 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
         return run_openrouter(
             worktree, prompt, output=output, readonly=readonly, schema=schema,
             timeout=timeout, model=model, reasoning_effort=reasoning_effort,
+            **progress_kwargs,
             **router_kwargs,
             **policy_kwargs,
         )
@@ -461,6 +465,7 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
     return run_cli_provider(
         worktree, prompt, output=output, provider=provider,
         readonly=readonly, timeout=timeout, model=model,
+        **progress_kwargs,
         **({"api_key_env": selected_env} if selected_env else {}),
         **policy_kwargs,
         **cli_kwargs,
@@ -541,7 +546,8 @@ def _repair_eof_blank_lines(worktree: Path, diagnostics: str) -> list[str]:
 def run_tests(worktree: Path, test_commands: list[list[str]],
               folder: Path | None = None, timeout: int | None = None,
               sandbox: dict[str, Any] | None = None,
-              deadline: float | None = None) -> tuple[bool, str]:
+              deadline: float | None = None,
+              verbose: bool = False) -> tuple[bool, str]:
     results: list[str] = []
     for argv in test_commands:
         if deadline is not None and time.monotonic() >= deadline:
@@ -554,7 +560,7 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
         result = streamed_command(argv, worktree, label="TESTS", log_file=log,
                                   timeout=_remaining_timeout(deadline, timeout),
                                   heartbeat=15, sandbox=sandbox, sandbox_pass_env=[],
-                                  metrics_folder=folder)
+                                  metrics_folder=folder, verbose=verbose)
         results.append(f"$ {display_command}\n{result.stdout[-6000:]}")
         if result.returncode:
             _status_print(f"[TESTS] FAILED (exit {result.returncode})", flush=True)
@@ -719,6 +725,7 @@ def investigate_issue(worktree: Path, issue: Issue, folder: Path, *,
                       reasoning_effort: str | None = None,
                       timeout: int | None = None,
                       agent: dict[str, Any] | AgentSettings | None = None,
+                      verbose: bool = False,
                       sandbox: dict[str, Any] | None = None) -> dict[str, Any]:
     """Investigate an issue and record feedback for the development turn."""
     schema = folder / "investigation-schema.json"
@@ -762,6 +769,7 @@ paths and test names when they support the observation.
     _status_print(f"[INVESTIGATION] Launching independent read-only {provider} process")
     run_kwargs: dict[str, Any] = {
         "model": model, "reasoning_effort": reasoning_effort, "timeout": timeout,
+        "verbose": verbose,
     }
     if sandbox is not None and sandbox.get("enabled"):
         run_kwargs["sandbox"] = sandbox
@@ -839,7 +847,8 @@ def print_investigation_summary(feedback: dict[str, Any]) -> None:
 
 
 def _run_investigation(run: Run, issue: Issue, config: dict[str, Any],
-                       folder: Path, *, deadline: float | None = None) -> dict[str, Any]:
+                       folder: Path, *, deadline: float | None = None,
+                       verbose: bool = False) -> dict[str, Any]:
     """Load a cached investigation or perform it, retrying tooling errors once."""
     cached = _latest_investigation(folder, issue)
     if cached is not None:
@@ -856,6 +865,7 @@ def _run_investigation(run: Run, issue: Issue, config: dict[str, Any],
                 deadline, config.get("effective_reviewer_timeout_seconds"),
             ),
             "sandbox": config.get("sandbox"),
+            "verbose": verbose,
         }
         return investigate_issue(run.worktree, issue, folder, **kwargs)
 
@@ -908,7 +918,8 @@ def review(worktree: Path, issue: Issue, folder: Path, base_sha: str,
            sandbox: dict[str, Any] | None = None,
            developer_report: str = "",
            instruction: str | None = None,
-           system_prompt: str | None = None) -> dict[str, Any]:
+           system_prompt: str | None = None,
+           verbose: bool = False) -> dict[str, Any]:
     if not developer_report:
         developer_report = load_latest_developer_report(folder)
     if instruction is None:
@@ -975,6 +986,7 @@ verdict.
     _status_print(f"[REVIEW] Launching independent read-only {provider} process")
     run_kwargs: dict[str, Any] = {
         "model": model, "reasoning_effort": reasoning_effort, "timeout": timeout,
+        "verbose": verbose,
     }
     if sandbox is not None and sandbox.get("enabled"):
         run_kwargs["sandbox"] = sandbox
@@ -1062,6 +1074,7 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
                       developer_report: str = "",
                       instruction: str | None = None,
                       system_prompt: str | None = None,
+                      verbose: bool = False,
                       ) -> tuple[bool, str, dict[str, Any], str, str]:
     # A new validation attempt supersedes prior terminal state and automated
     # approval. A successful review below records a fresh approval for its
@@ -1081,6 +1094,7 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
         ),
         sandbox=config.get("sandbox"),
         deadline=deadline,
+        verbose=verbose,
     )
     atomic_write_text(next_log(folder, "tests"), report)
     if not passed:
@@ -1104,6 +1118,7 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
             config.get("effective_reviewer_timeout_seconds"),
         ),
         sandbox=config.get("sandbox"),
+        verbose=verbose,
     )
     if verdict.get("_tooling_error"):
         _status_print("[REVIEW] Reviewer result was invalid; retrying read-only review")
@@ -1118,6 +1133,7 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
                 config.get("effective_reviewer_timeout_seconds"),
             ),
             sandbox=config.get("sandbox"),
+            verbose=verbose,
         )
     if verdict.get("_tooling_error"):
         raise RuntimeError(
@@ -1402,7 +1418,8 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
             test_commands: list[list[str]] | None = None,
             deadline: float | None = None,
             instruction: str | None = None,
-            system_prompt: str | None = None) -> bool:
+            system_prompt: str | None = None,
+            verbose: bool = False) -> bool:
     if instruction is None:
         instruction = read_run_instruction(folder)
     if system_prompt is None:
@@ -1486,6 +1503,7 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
         agent_kwargs: dict[str, Any] = {
             "settings": config.get("developer_agent"),
             "timeout": _remaining_timeout(deadline, config.get("effective_developer_timeout_seconds")),
+            "verbose": verbose,
         }
         if test_commands is not None:
             agent_kwargs["check_commands"] = test_commands
@@ -1534,6 +1552,7 @@ def develop(run: Run, issue: Issue, base: str, config: dict[str, Any], folder: P
                 deadline=deadline, developer_report=developer_report,
                 instruction=instruction,
                 system_prompt=system_prompt,
+                verbose=verbose,
             )
         except NoCodeChangesError:
             record_no_code_changes_blocked(

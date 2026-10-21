@@ -341,6 +341,7 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                      timeout: int | None, codex_json: bool = False,
                      heartbeat: int = 15,
                      progress_parser: Any | None = None,
+                     verbose: bool = False,
                      sandbox: dict[str, Any] | None = None,
                      sandbox_read_only: bool = False,
                      sandbox_pass_env: list[str] | None = None,
@@ -388,6 +389,8 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
         with log_file.open("w", encoding="utf-8", buffering=1) as human_log:
             live_status = False
             live_status_enabled = bool(getattr(sys.stdout, "isatty", lambda: False)())
+            last_heartbeat_log: float | None = None
+            modified_paths: set[str] = set()
 
             def clear_live_status() -> None:
                 nonlocal live_status
@@ -397,7 +400,7 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
 
             def display(message: str, *, style_status_tokens: bool = False,
                         generated_status_spans: list[tuple[int, int]] | None = None,
-                        transient: bool = False) -> None:
+                        transient: bool = False, persist: bool = True) -> None:
                 nonlocal last_notice, live_status
                 now = datetime.datetime.now().strftime("%H:%M:%S")
                 prefix = f"[{now}] [{label}]"
@@ -419,7 +422,8 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                 else:
                     clear_live_status()
                     _console_print(rendered, flush=True)
-                human_log.write(formatted + "\n")
+                if persist:
+                    human_log.write(formatted + "\n")
                 last_notice = time.monotonic()
 
             display(f"Started (PID {proc.pid}); progress log: {log_file}", style_status_tokens=True)
@@ -457,16 +461,41 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                     shown = safe_line.strip("\r\n")
                 if shown:
                     displayed = redact_secrets(shown) if codex_json else _short(shown, 500)
+                    transient = is_transient_progress(f"[{label}] {displayed}")
+                    persist = verbose or not transient
+                    if not verbose and displayed.startswith("Still running ("):
+                        now = time.monotonic()
+                        persist = (
+                            last_heartbeat_log is None
+                            or now - last_heartbeat_log >= 60
+                        )
+                        if persist:
+                            last_heartbeat_log = now
+                    if not verbose and displayed.startswith("Modified files:"):
+                        details = displayed.partition(":")[2].strip()
+                        if details == "patch applied":
+                            modified_paths.add("<patch>")
+                        else:
+                            modified_paths.update(
+                                item.strip() for item in details.split(",") if item.strip()
+                            )
+                        persist = False
                     display(
                         displayed,
                         generated_status_spans=(
                             _generated_progress_spans(displayed) if codex_json else None
                         ),
-                        transient=is_transient_progress(f"[{label}] {displayed}"),
+                        transient=transient,
+                        persist=persist,
                     )
             proc.wait()
             seconds = int(time.monotonic() - started)
             code = proc.returncode
+            if modified_paths and not verbose:
+                count = len(modified_paths)
+                display(
+                    f"Modified files: {count} file{'s' if count != 1 else ''} changed",
+                )
             display(
                 f"Finished in {seconds}s (exit {code})" + (" [TIMEOUT]" if timed_out else ""),
                 style_status_tokens=True,
@@ -483,6 +512,14 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                     exit_code=124 if timed_out else code,
                 )
     except KeyboardInterrupt:
+        try:
+            with log_file.open("a", encoding="utf-8") as human_log:
+                human_log.write(
+                    f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
+                    f"[{label}] Cancelled by user.\n"
+                )
+        except OSError:
+            pass
         if os.name != "nt":
             os.killpg(proc.pid, signal.SIGKILL)
         else:

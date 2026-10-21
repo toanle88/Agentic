@@ -662,6 +662,10 @@ class ShellTests(unittest.TestCase):
             ('119', ['--review']),
         )
         self.assertEqual(
+            agentic_shell._parse_job_command(['/run', '119', '--verbose']),
+            ('119', ['--verbose']),
+        )
+        self.assertEqual(
             agentic_shell._parse_job_command(['/run', '119', '--profile', 'slow']),
             ('119', ['--profile', 'slow']),
         )
@@ -992,6 +996,17 @@ class ShellTests(unittest.TestCase):
             self.assertIn(str(task), argv)
             self.assertIn('--profile', argv)
             self.assertIn('slow', argv)
+
+
+    def test_shell_forwards_verbose_to_runner_argv(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), session_dir=root / 'logs'
+            )
+            with patch.object(shell, '_launch') as launch:
+                shell.run_issue(['/run', '119', '--verbose'])
+            self.assertIn('--verbose', launch.call_args.args[0])
 
 
     def test_shell_runs_publish_in_foreground_for_confirmation(self):
