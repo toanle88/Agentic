@@ -9,6 +9,7 @@ Agentic is intentionally small and uses the Python standard library at runtime.
 | `agentic.py` | Compatibility-facing CLI entry point and workflow orchestration. |
 | `agentic_worktrees.py` | Repository identity, locks, Git worktree creation, discovery, and issue intake. |
 | `agentic_workflow.py` | Developer execution, validation, investigation, review, and publication workflow. |
+| `agentic_workflow_state.py` | Bounded workflow run markers, approvals, resume task materialization, and durable evidence helpers. |
 | `agentic_context.py` | Bounded issue, feedback, and provider-history context formatting. |
 | `agentic_prompts.py` | Bounded, delimited developer/reviewer prompt construction. |
 | `agentic_execution.py` | Compatibility facade for provider execution helpers. |
@@ -25,6 +26,7 @@ Agentic is intentionally small and uses the Python standard library at runtime.
 | `agentic_shell.py` | Interactive supervisor for background jobs and terminal log tails. |
 | `agentic_shell_input.py` | TTY input editing, completion, key decoding, styling, and banner presentation. |
 | `agentic_shell_commands.py` | Pure interactive-shell command and option validation; returns argv fragments without executing them. |
+| `agentic_shell_jobs.py` | Shell job records, process-group cancellation, bounded log tails, and foreground input forwarding. |
 | `agentic_dashboard.py` | Read-only parser and renderer for durable run logs. |
 | `agentic_dashboard_data.py` | Read-only durable-log parsing and legacy/centralized snapshot merging for the dashboard. |
 | `agentic_persistence.py` | Crash-safe atomic writes for run metadata and durable artifacts. |
@@ -69,6 +71,13 @@ and prompting are split into `tests/test_agentic_configuration.py` and
 `tests/test_agentic_prompting.py`; shell input is in `tests/test_shell_input.py`;
 and worktree publication/workflow coverage is in
 `tests/test_worktrees_publication.py` and `tests/test_worktrees_workflow.py`.
+The interactive-shell facade delegates job/process primitives to
+`agentic_shell_jobs.py` while retaining command dispatch and terminal-mode
+ownership. The workflow facade delegates durable run-state helpers to
+`agentic_workflow_state.py` while retaining provider, validation, review, and
+publication transitions. Both extracted modules are directly importable and
+covered by import-boundary characterization tests; the historical
+`agentic.py` wrappers remain the compatibility surface.
 Benchmark corpus validation, scenario execution, and reporting are split across
 `scripts/agent_benchmark_config.py`, `scripts/agent_benchmark_scenarios.py`,
 and `scripts/agent_benchmark_reporting.py`; `scripts/agent_benchmark.py`
