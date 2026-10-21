@@ -461,10 +461,11 @@ for the developer and reviewer independently, even when they use the same
 provider. Codex and Claude include a read-only authentication-status probe;
 Gemini and Copilot report authentication as skipped because doctor does not
 invoke their documented login flows or infer provider state from unrelated
-commands. Provider output and credential values are never printed. For each
-role, JSON diagnostics include `auth_mode`, `api_key_env`, `credential_set`,
-and `sandbox_passed` (`null` when no isolated sandbox applies). Human-readable
-output names the selected mode and environment variable but never its value.
+commands. Provider output, credential values, configured command arguments, and
+credential environment-variable names are never printed. For each role, JSON
+diagnostics include `auth_mode`, `credential_set`, and `sandbox_passed` (`null`
+when no isolated sandbox applies). Human-readable output names the selected
+mode and credential status without exposing the environment variable name.
 Native authentication checks are skipped when API-key mode is selected, so an
 unavailable unused login does not fail the check.
 

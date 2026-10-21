@@ -131,6 +131,44 @@ def _configured_command_detail(
     )
 
 
+def _public_command_results(
+    command_results: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Return command outcomes without configured argv or other input text."""
+    return [
+        {
+            "status": str(result.get("status", "unknown")),
+            "exit_code": result.get("exit_code"),
+            "duration_seconds": result.get("duration_seconds"),
+        }
+        for result in command_results
+    ]
+
+
+def _public_check(check: dict[str, object]) -> dict[str, object]:
+    """Keep credential and configuration values out of public diagnostics."""
+    label = str(check["name"])
+    ok = bool(check["ok"])
+    required = bool(check["required"])
+    public = {
+        "category": str(check["category"]),
+        "name": label,
+        "ok": ok,
+        "required": required,
+        "status": str(check["status"]),
+        "detail": _doctor_public_detail(
+            label, ok, required, str(check["detail"]),
+        ),
+    }
+    if "authentication" in label:
+        public.update({
+            "auth_mode": check.get("auth_mode"),
+            "credential_set": check.get("credential_set"),
+            "sandbox_passed": check.get("sandbox_passed"),
+        })
+    return public
+
+
 def run_doctor(
     repo: Path,
     config_path: Path | None = None,
@@ -383,7 +421,7 @@ def run_doctor(
                         detail = (
                             "configured environment credentials are set"
                             if not missing_env else
-                            "missing: " + ", ".join(f"${name}" for name in missing_env)
+                            "one or more configured environment credentials are missing"
                         )
                         add_check("agent", f"{role_name} sandbox credentials", not missing_env, detail)
                     else:
@@ -502,7 +540,7 @@ def run_doctor(
                         "; sandbox: not included" if sandbox_passed is False else ""
                     )
                     auth_detail = (
-                        f"mode: API key ({credential_label}); variable: ${api_key_env}; "
+                        f"mode: API key ({credential_label}); "
                         f"status: {'set' if credential_set else 'missing'}{sandbox_detail}"
                     )
                 else:
@@ -512,7 +550,7 @@ def run_doctor(
                     auth_status = None
                     credential_label = "GitHub token" if provider == "copilot" else "API key"
                     auth_detail = (
-                        f"mode: both; variable: ${api_key_env}; "
+                        "mode: both; "
                         f"{credential_label}: {'set' if credential_set else 'missing'}; "
                         f"native CLI: {native_detail}"
                     )
@@ -522,7 +560,6 @@ def run_doctor(
                     required=auth_required,
                     status=auth_status,
                     auth_mode=auth_mode,
-                    api_key_env=api_key_env,
                     credential_set=credential_set,
                     sandbox_passed=sandbox_passed,
                 )
@@ -570,23 +607,15 @@ def run_doctor(
     display_checks = sorted(
         checks, key=lambda check: category_order.get(str(check["category"]), 99),
     )
+    public_checks = [_public_check(check) for check in display_checks]
     if json_output:
         print(json.dumps({
             "repository": str(repo),
             "ok": success,
             "command_profile": profile if run_commands else None,
             "command_worktree": str(command_worktree) if run_commands else None,
-            "checks": [
-                {
-                    **check,
-                    "detail": _doctor_public_detail(
-                        str(check["name"]), bool(check["ok"]),
-                        bool(check["required"]), str(check["detail"]),
-                    ),
-                }
-                for check in display_checks
-            ],
-            "command_results": command_results,
+            "checks": public_checks,
+            "command_results": _public_command_results(command_results),
         }, indent=2))
     else:
         print("Agentic doctor")
@@ -599,32 +628,30 @@ def run_doctor(
             "agent": "Agent access",
         }
         current_category = None
-        for check in display_checks:
+        for check in public_checks:
             category = str(check["category"])
             if category != current_category:
                 print(category_titles.get(category, category.title()))
                 current_category = category
             label = str(check["name"])
             ok = bool(check["ok"])
-            required = bool(check["required"])
             detail = str(check["detail"])
             state = str(check["status"]).upper()
             print(
                 style_system_text(
-                    f"[{state:<4}] {label}: {_doctor_public_detail(label, ok, required, detail)}",
+                    f"[{state:<4}] {label}: {detail}",
                     system_prefix=state,
                     style_status_tokens=False,
                 )
             )
         if command_results:
             print("Configured commands:")
-            for result in command_results:
+            for index, result in enumerate(command_results, start=1):
                 status = str(result["status"]).upper()
-                command = shlex.join(str(part) for part in result["argv"])
                 duration = result["duration_seconds"]
                 print(
                     style_system_text(
-                        f"[{status:<11}] {command} ({duration}s)",
+                        f"[{status:<11}] configured command #{index} ({duration}s)",
                         system_prefix=status,
                         style_status_tokens=False,
                     )
