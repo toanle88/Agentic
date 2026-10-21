@@ -99,12 +99,10 @@ _DIFF_STAT_LINE_RE = re.compile(
     r"^.+?\s+\|\s+\d+(?P<graph>\s+[+-]+)?\s*$"
 )
 _DIFF_STAT_TOTAL_LINE_RE = re.compile(
-    r"^\s*\d+\s+files?\s+changed"
-    r"(?:,\s+\d+\s+insertions?\(\+\))?"
-    r"(?:,\s+\d+\s+deletions?\(-\))?\s*$"
+    r"^\s*\d+\s+.*(?:\(\+\)|\(-\))\s*$"
 )
 _DIFF_STAT_TOTAL_TOKEN_RE = re.compile(
-    r"\d+\s+insertions?\(\+\)|\d+\s+deletions?\(-\)"
+    r"\b\d+\s+[^\d,()]+?\((?P<sign>[+-])\)"
 )
 
 _PREFIX_COLORS = {
@@ -330,7 +328,10 @@ def _diff_stat_spans(line: str) -> list[tuple[int, int, str]]:
 
     if _DIFF_STAT_TOTAL_LINE_RE.match(line):
         for total in _DIFF_STAT_TOTAL_TOKEN_RE.finditer(line):
-            spans.append((total.start(), total.end(), "32" if "insertion" in total.group() else "31"))
+            spans.append((
+                total.start(), total.end(),
+                "32" if total.group("sign") == "+" else "31",
+            ))
     return spans
 
 

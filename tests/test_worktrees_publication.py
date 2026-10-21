@@ -1,5 +1,6 @@
 """Focused publication tests."""
 import sys
+from io import StringIO
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import call, patch
@@ -49,6 +50,33 @@ class PublicationTests(_GitRepositoryTestCase):
             agentic.validate_publication_approval(
                 run, issue, 'main', config, approval,
             )
+
+
+    def test_validate_publication_approval_keeps_patch_summary_plain(self):
+        run = agentic.create_worktree(self.repo, 'main', 21)
+        issue = agentic.Issue(21, 'Plain publication summary', '')
+        config = {'max_files': 10}
+        approval = {
+            'branch': run.branch,
+            'issue_digest': agentic.issue_fingerprint(issue),
+            'base_sha': 'base-sha',
+            'patch_digest': 'digest',
+        }
+        summary = (
+            ' fix.py | 2 ++\n'
+            ' 1 file changed, 2 insertions(+)\n'
+        )
+        console = StringIO()
+        with (patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}),
+              patch('sys.stdout', console),
+              patch('agentic.prepare_patch', return_value=('base-sha', 'digest', summary))):
+            result = agentic.validate_publication_approval(
+                run, issue, 'main', config, approval,
+            )
+
+        self.assertEqual(result, ('base-sha', 'digest', summary))
+        self.assertEqual(console.getvalue(), '[PATCH] Proposed changes:\n' + summary + '\n')
+        self.assertNotIn('\033[', console.getvalue())
 
 
     def test_blocked_change_from_previous_commit_cannot_publish(self):
