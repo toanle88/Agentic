@@ -135,7 +135,9 @@ class PureTests(unittest.TestCase):
             folder = worktree / 'logs'
             folder.mkdir()
             issue = agentic.Issue(19, 'Review', '')
-            with patch('agentic.run_codex', return_value=(True, 'not json')):
+            with (patch.dict('agentic_workflow._WORKFLOW_IMPLEMENTATIONS',
+                             {'_review_diff_context': lambda worktree, base: '<staged_patch>'}),
+                  patch('agentic.run_codex', return_value=(True, 'not json'))):
                 verdict = agentic.review(worktree, issue, folder, 'base')
         self.assertTrue(verdict['_tooling_error'])
         self.assertFalse(verdict['approved'])
@@ -147,9 +149,11 @@ class PureTests(unittest.TestCase):
             folder = worktree / 'logs'
             folder.mkdir()
             issue = agentic.Issue(20, 'Review shape', '')
-            with patch('agentic.run_agent', return_value=(True, json.dumps({
-                'approved': 'yes', 'summary': 'bad', 'findings': [],
-            }))):
+            with (patch.dict('agentic_workflow._WORKFLOW_IMPLEMENTATIONS',
+                             {'_review_diff_context': lambda worktree, base: '<staged_patch>'}),
+                  patch('agentic.run_agent', return_value=(True, json.dumps({
+                      'approved': 'yes', 'summary': 'bad', 'findings': [],
+                  })))):
                 verdict = agentic.review(worktree, issue, folder, 'base')
         self.assertTrue(verdict['_tooling_error'])
         self.assertIn('wrong shape', verdict['summary'])
@@ -168,9 +172,11 @@ class PureTests(unittest.TestCase):
             folder = worktree / 'logs'
             folder.mkdir()
             issue = agentic.Issue(20, 'Review skipped shape', '')
-            with patch('agentic.run_agent', return_value=(True, json.dumps({
-                'approved': True, 'summary': 'bad', 'findings': [], 'skipped': 'not a list',
-            }))):
+            with (patch.dict('agentic_workflow._WORKFLOW_IMPLEMENTATIONS',
+                             {'_review_diff_context': lambda worktree, base: '<staged_patch>'}),
+                  patch('agentic.run_agent', return_value=(True, json.dumps({
+                      'approved': True, 'summary': 'bad', 'findings': [], 'skipped': 'not a list',
+                  })))):
                 verdict = agentic.review(worktree, issue, folder, 'base')
         self.assertTrue(verdict['_tooling_error'])
         self.assertIn('wrong shape', verdict['summary'])
@@ -433,7 +439,13 @@ class PureTests(unittest.TestCase):
             self.assertIn('--dangerously-skip-permissions', claude_developer)
             self.assertNotIn('--permission-mode', claude_developer)
             self.assertIn('--available-tools', copilot_review)
-            self.assertIn('--deny-tool', copilot_review)
+            self.assertEqual(
+                copilot_review[copilot_review.index('--available-tools') + 1],
+                'view,grep,glob',
+            )
+            self.assertNotIn('bash', copilot_review)
+            self.assertNotIn('--allow-tool', copilot_review)
+            self.assertNotIn('--deny-tool', copilot_review)
             self.assertNotIn('--allow-all-tools', copilot_review)
             self.assertIn('--allow-all-tools', copilot_developer)
             self.assertIn('--allow-all-paths', copilot_developer)

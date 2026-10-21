@@ -135,7 +135,10 @@ class WorkflowTests(_GitRepositoryTestCase):
         self.assertEqual(verdict['approved'], True)
         self.assertEqual(verdict['skipped'], ['Browser check unavailable in this environment'])
         self.assertEqual(len(list(folder.glob('review-*.json'))), 2)  # review-schema + review-001
-        self.assertIn('git diff --cached', calls[1][-1])
+        self.assertIn('git diff --no-ext-diff --no-textconv --cached', calls[1][-1])
+        self.assertIn('<staged_patch>', calls[1][-1])
+        self.assertIn('answer=42', calls[1][-1])
+        self.assertNotIn('git diff --cached', calls[1][-1])
         self.assertIn('description', calls[1][-1])
         self.assertIn('pytest passed', calls[1][-1])
         self.assertIn('Made implementation changes.', calls[1][-1])

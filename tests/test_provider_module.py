@@ -30,6 +30,8 @@ class ProviderCommandTests(unittest.TestCase):
         self.assertTrue(structured)
         self.assertIn("--approval-mode", gemini)
         self.assertEqual(gemini[gemini.index("--approval-mode") + 1], "plan")
+        self.assertNotIn("--allowed-tools", gemini)
+        self.assertNotIn("ShellTool", gemini)
 
         claude, structured = cli_provider_command("claude", "develop", readonly=False)
         self.assertTrue(structured)
@@ -37,7 +39,12 @@ class ProviderCommandTests(unittest.TestCase):
 
         copilot, structured = cli_provider_command("copilot", "review", readonly=True)
         self.assertFalse(structured)
-        self.assertIn("--deny-tool", copilot)
+        self.assertEqual(
+            copilot[copilot.index("--available-tools") + 1], "view,grep,glob",
+        )
+        self.assertNotIn("bash", copilot)
+        self.assertNotIn("--allow-tool", copilot)
+        self.assertNotIn("--deny-tool", copilot)
         self.assertNotIn("--allow-all-tools", copilot)
 
     def test_copilot_download_path_is_resolved_and_used_as_argv_executable(self):

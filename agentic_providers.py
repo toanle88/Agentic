@@ -150,9 +150,11 @@ def cli_provider_command(
         if model:
             args += ["--model", model]
         if readonly:
-            # Copilot has no universal read-only mode; expose only inspection
-            # tools and deny shell execution for review turns.
-            args += ["--available-tools", "view,grep,glob", "--deny-tool", "shell(*)"]
+            # Keep native review turns closed: the runner supplies the staged
+            # diff, so Copilot only needs file inspection tools. In particular,
+            # do not expose bash/shell, whose unmatched commands could prompt
+            # or inherit an existing approval.
+            args += ["--available-tools", "view,grep,glob"]
         else:
             args += ["--allow-all-tools", "--allow-all-paths"]
         return args, False
