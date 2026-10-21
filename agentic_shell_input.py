@@ -26,9 +26,11 @@ from agentic import __version__
 from agentic_output import (
     color_enabled,
     paint,
+    PatchSummaryStream,
     sanitize_terminal_text,
     strip_ansi,
     style_system_text,
+    style_shell_text,
     style_text,
 )
 if TYPE_CHECKING:
@@ -47,7 +49,6 @@ class TerminalMode(str, Enum):
     """Identify which interactive view currently owns the terminal."""
 
     COMMAND_READY = "command-ready"
-    CHAT = "chat"
     CONFIRMATION = "confirmation"
     LIVE_OUTPUT = "live-output"
     OUTPUT = "output"
@@ -622,19 +623,6 @@ _HELP_SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     (
         "Session",
         (
-            (
-                "/chat ISSUE",
-                "open a conversational session in an existing run",
-            ),
-            (
-                "/chat pr PR",
-                "repair an existing pull request after CI failure",
-            ),
-            ("/chat ISSUE MESSAGE", "run an issue with a one-shot instruction"),
-            (
-                "/chat MESSAGE",
-                "start a local one-shot task from chat style (local mode)",
-            ),
             ("/stop JOB|--all", "stop one or all running jobs"),
             ("/help", "show this help"),
             ("/quit", "leave the shell; running jobs continue"),
@@ -653,7 +641,6 @@ _HELP_NOTES = (
 SHELL_COMMANDS = (
     "/run",
     "/ps",
-    "/chat",
     "/logs",
     "/list",
     "/runs",
@@ -671,7 +658,6 @@ SHELL_COMMANDS = (
 )
 SHELL_OPTIONS = {
     "/run": ("--profile", "--instruction", "--review", "--publish", "--mark-done", "--reason", "--new", "--task-file"),
-    "/chat": (),
     "/ps": ("--all",),
     "/runs": ("--json",),
     "/status": ("--json",),
@@ -682,7 +668,6 @@ SHELL_OPTIONS = {
 }
 COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/run": "start a background job or local task",
-    "/chat": "open a conversational session in an existing issue run",
     "/ps": "show running or persisted background jobs",
     "/logs": "follow or show captured terminal output",
     "/list": "list open GitHub issues",
@@ -2025,12 +2010,20 @@ def _write_shell_output(text: str, *, ensure_newline: bool = True) -> None:
 
 def _shell_print(message: Any = "", *, end: str = "\n", flush: bool = False,
                  style_status_tokens: bool = True,
-                 system_prefix: str | None = None) -> None:
+                 system_prefix: str | None = None,
+                 patch_stream: PatchSummaryStream | None = None) -> None:
     """Print shell status or replayed log text with terminal-only styling."""
-    renderer = style_system_text if system_prefix is not None else style_text
-    kwargs = {"system_prefix": system_prefix} if system_prefix is not None else {}
-    text = renderer(message, style_status_tokens=style_status_tokens, **kwargs)
-    _write_shell_output(text + end)
+    if patch_stream is not None and system_prefix is None:
+        text = patch_stream.feed(str(message) + end)
+    elif system_prefix is None:
+        text = style_shell_text(message, style_status_tokens=style_status_tokens) + end
+    else:
+        text = style_system_text(
+            message,
+            system_prefix=system_prefix,
+            style_status_tokens=style_status_tokens,
+        ) + end
+    _write_shell_output(text)
     if flush:
         sys.stdout.flush()
 
@@ -2042,12 +2035,20 @@ def _shell_print_raw(message: Any = "", *, end: str = "\n", flush: bool = False)
         sys.stdout.flush()
 
 
-def _shell_write_log(text: str) -> None:
+def _shell_write_log(
+    text: str,
+    *,
+    patch_stream: PatchSummaryStream | None = None,
+    final: bool = False,
+) -> None:
     """Write appended log text without bypassing the TTY styling boundary."""
-    _write_shell_output(
-        style_text(text, style_status_tokens=False),
-        ensure_newline=False,
-    )
+    if patch_stream is None:
+        rendered = style_shell_text(text, style_status_tokens=False)
+    else:
+        rendered = patch_stream.feed(text)
+        if final:
+            rendered += patch_stream.flush()
+    _write_shell_output(rendered, ensure_newline=False)
     sys.stdout.flush()
 
 

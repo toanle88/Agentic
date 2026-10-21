@@ -24,7 +24,12 @@ from pathlib import Path
 from typing import Any, Callable, TextIO
 
 from agentic import __version__  # noqa: F401
-from agentic_output import is_transient_progress, sanitize_terminal_text, untag_system_prefix
+from agentic_output import (
+    PatchSummaryStream,
+    is_transient_progress,
+    sanitize_terminal_text,
+    untag_system_prefix,
+)
 from agentic_shell_input import (  # noqa: F401
     COMMAND_DESCRIPTIONS,
     HELP,
@@ -231,7 +236,6 @@ def _is_foreground_prompt(text: str) -> bool:
 
 
 _FOREGROUND_PROMPT_PREFIXES = {
-    "chat> ": "CHAT",
     "[RESUME] Waiting for worktree selection. Enter a number or 'q' to cancel: ": "RESUME",
     "[PUBLISH] Waiting for worktree selection. Enter a number or 'q' to cancel: ": "PUBLISH",
     "[PUBLISH] Publish this patch? [y/N]: ": "PUBLISH",
@@ -244,11 +248,6 @@ _FOREGROUND_PROMPT_PREFIXES = {
 def _foreground_prompt_prefix(text: str) -> str | None:
     """Return styling metadata for a recognized child prompt."""
     return _FOREGROUND_PROMPT_PREFIXES.get(text)
-
-
-def _foreground_prompt_prefix_text(text: str) -> str | None:
-    """Return the exact generated text for an unbracketed child prompt."""
-    return text if text == "chat> " else None
 
 
 def _display_escape(character: str) -> str:
@@ -339,6 +338,13 @@ class _ForegroundInputForwarder:
 
     def _send_line(self) -> None:
         if self.process.stdin is None:
+            return
+        # Some terminal bridges deliver the command's CRLF as two separate
+        # key events.  The second event can reach this forwarder after the
+        # shell has started the foreground child but before its prompt has
+        # been rendered.  Do not turn that stale, empty Enter into an answer
+        # to a later confirmation prompt.
+        if not self.buffer and not getattr(self.foreground, "prompt", ""):
             return
         self.foreground.commit_prompt()
         try:
@@ -721,10 +727,7 @@ class AgenticShell:
                 raise RuntimeError(f"command failed with exit {result.returncode}")
             return
 
-        mode = (
-            TerminalMode.CHAT if "--chat" in argv
-            else TerminalMode.CONFIRMATION
-        )
+        mode = TerminalMode.CONFIRMATION
         self._set_terminal_mode(mode)
         foreground, previous_output = _begin_foreground_output(
             self._interactive_output_state, mode
@@ -777,10 +780,6 @@ class AgenticShell:
                 popen_kwargs["creationflags"] = getattr(
                     subprocess, "CREATE_NEW_PROCESS_GROUP", 0
                 )
-            if "--chat" in argv:
-                child_environment = os.environ.copy()
-                child_environment["AGENTIC_SHELL_SYSTEM_PREFIXES"] = "1"
-                popen_kwargs["env"] = child_environment
             real_tty = bool(
                 getattr(sys.stdin, "isatty", lambda: False)()
                 and getattr(sys.stdout, "isatty", lambda: False)()
@@ -802,6 +801,7 @@ class AgenticShell:
                 pending = ""
                 previous_was_carriage_return = False
                 prompt_was_displayed = False
+                patch_stream = PatchSummaryStream()
 
                 def emit_line(line: str, *, terminated: bool) -> None:
                     nonlocal prompt_was_displayed
@@ -818,6 +818,7 @@ class AgenticShell:
                         _shell_print(
                             _normalize_foreground_output(line),
                             style_status_tokens=False,
+                            patch_stream=patch_stream if generated_prefix is None else None,
                             system_prefix=generated_prefix,
                             flush=True,
                         )
@@ -826,7 +827,6 @@ class AgenticShell:
                             foreground.set_prompt(
                                 line,
                                 system_prefix=_foreground_prompt_prefix(line),
-                                system_prefix_text=_foreground_prompt_prefix_text(line),
                             )
                         else:
                             _shell_print(line, end="", style_status_tokens=False, flush=True)
@@ -838,6 +838,7 @@ class AgenticShell:
                         _shell_print(
                             _normalize_foreground_output(line),
                             style_status_tokens=False,
+                            patch_stream=patch_stream,
                             flush=True,
                         )
 
@@ -880,7 +881,6 @@ class AgenticShell:
                             foreground.set_prompt(
                                 pending,
                                 system_prefix=_foreground_prompt_prefix(pending),
-                                system_prefix_text=_foreground_prompt_prefix_text(pending),
                             )
                             pending = ""
                             prompt_was_displayed = True
@@ -908,10 +908,7 @@ class AgenticShell:
                     pending += chunk
                     previous_was_carriage_return = False
                     # Wait until the stream is briefly idle before treating
-                    # an exact prompt as complete. This prevents a command
-                    # that starts with "chat> " from being split into an
-                    # editable prompt followed by scrollback when its next
-                    # character arrives in a later read.
+                    # an exact prompt as complete.
                 if pending:
                     emit_line(pending, terminated=False)
                 stdout_reader.join(timeout=1.0)
@@ -1077,57 +1074,6 @@ class AgenticShell:
         else:
             self._launch(argv)
 
-    def run_chat(self, parts: list[str], raw_line: str | None = None) -> None:
-        """Open chat or preserve the historical one-shot chat task forms."""
-        if len(parts) < 2:
-            raise ValueError("usage: /chat ISSUE [MESSAGE], /chat pr PR, or /chat MESSAGE (local mode)")
-        if parts[1].casefold() == "pr":
-            if len(parts) != 3 or not parts[2].isascii() or not parts[2].isdigit():
-                raise ValueError("usage: /chat pr PR")
-            pull_request = parts[2]
-            self.active_task = f"PR #{pull_request} repair"
-            self._run_foreground(self._runner_args(None, ["--chat", "--pr", pull_request]))
-            return
-        message_parts = parts[2:] if parts[1].isdigit() else parts[1:]
-        multiline_message: str | None = None
-        if raw_line is not None and "\n" in raw_line:
-            first_line, remainder = raw_line.split("\n", 1)
-            try:
-                first_parts = shlex.split(first_line)
-            except ValueError:
-                first_parts = []
-            if first_parts and first_parts[0].lower() == "/chat":
-                offset = 2 if len(first_parts) > 1 and first_parts[1].isdigit() else 1
-                first_message = " ".join(first_parts[offset:])
-                multiline_message = first_message + (("\n" + remainder) if remainder else "")
-
-        # The new two-token issue form is the interactive session. A message
-        # after the issue retains the original one-shot /run behavior.
-        if parts[1].isdigit() and len(parts) == 2:
-            issue = parts[1]
-            self.active_task = f"issue #{issue}"
-            self._run_foreground(self._runner_args(issue, ["--chat"]))
-            return
-
-        if parts[1].isdigit():
-            issue = parts[1]
-            message = (multiline_message if multiline_message is not None else " ".join(message_parts)).strip()
-            if not message:
-                raise ValueError("usage: /chat ISSUE MESSAGE")
-            self.active_task = f"issue #{issue}"
-            self.run_issue(["/run", issue, "--instruction", message])
-            return
-
-        if self._task_source() != "local":
-            raise ValueError("GitHub mode requires /chat ISSUE MESSAGE; set task_source to local for /chat MESSAGE")
-        message = (multiline_message if multiline_message is not None else " ".join(message_parts)).strip()
-        if not message:
-            raise ValueError("chat message must not be empty")
-        path = self.session_dir / f"chat-{uuid.uuid4().hex[:12]}.md"
-        path.write_text(message + "\n", encoding="utf-8")
-        self.run_issue(["/run", "--task-file", str(path)])
-        self.active_task = "local chat"
-
     def run_dashboard(self, parts: list[str]) -> None:
         dashboard = self.runner.with_name("agentic_dashboard.py")
         if not dashboard.is_file():
@@ -1213,7 +1159,12 @@ class AgenticShell:
                 initial_start = max(0, initial_end - 200_000)
                 stream.seek(initial_start)
                 initial = stream.read(initial_end - initial_start)
-                _shell_print(_tail_from_text(initial, lines), style_status_tokens=False)
+                patch_stream = PatchSummaryStream()
+                _shell_print(
+                    _tail_from_text(initial, lines),
+                    style_status_tokens=False,
+                    patch_stream=patch_stream,
+                )
                 # Keep the position at the end of the initial snapshot rather
                 # than seeking to the current EOF, so a concurrent write is
                 # still included in the first live read.
@@ -1223,7 +1174,7 @@ class AgenticShell:
                     self._refresh(job)
                     chunk = stream.read()
                     if chunk:
-                        _shell_write_log(chunk)
+                        _shell_write_log(chunk, patch_stream=patch_stream)
                     if not job.running:
                         break
                     time.sleep(0.1)
@@ -1233,7 +1184,9 @@ class AgenticShell:
                 self._refresh(job)
                 chunk = stream.read()
                 if chunk:
-                    _shell_write_log(chunk)
+                    _shell_write_log(chunk, patch_stream=patch_stream, final=True)
+                else:
+                    _shell_write_log("", patch_stream=patch_stream, final=True)
         except KeyboardInterrupt:
             _shell_print("\n--- live output follow stopped; job continues running ---")
         except OSError as exc:
@@ -1369,8 +1322,6 @@ class AgenticShell:
                 _print_help()
             elif command == "/run":
                 self.run_issue(parts)
-            elif command == "/chat":
-                self.run_chat(parts, line)
             elif command == "/ps":
                 self.show_processes(parts)
             elif command == "/logs":

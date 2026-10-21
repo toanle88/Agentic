@@ -13,7 +13,6 @@ import agentic
 import agentic_shell
 import agentic_shell_input
 from agentic import state_paths
-from agentic_output import tag_system_prefix
 
 
 class ShellTests(unittest.TestCase):
@@ -28,10 +27,15 @@ class ShellTests(unittest.TestCase):
         raw_slave = os.fdopen(slave, 'rb', buffering=0)
         terminal_input = io.TextIOWrapper(raw_slave, encoding='utf-8')
         process = subprocess.Popen(
-            [sys.executable, '-c', 'import time; time.sleep(30)'],
+            [
+                sys.executable,
+                '-c',
+                'import time; print("ready", flush=True); time.sleep(30)',
+            ],
             stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            text=True,
             start_new_session=True,
         )
 
@@ -41,6 +45,8 @@ class ShellTests(unittest.TestCase):
 
         forwarder = agentic_shell._ForegroundInputForwarder(process, Foreground())
         try:
+            self.assertIsNotNone(process.stdout)
+            self.assertEqual(process.stdout.readline().strip(), 'ready')
             with patch.object(agentic_shell_input.sys, 'stdin', terminal_input):
                 forwarder.start()
                 deadline = time.monotonic() + 3
@@ -57,11 +63,11 @@ class ShellTests(unittest.TestCase):
                 self.assertFalse(termios.tcgetattr(fd)[3] & termios.ISIG)
                 os.write(master, b'\003')
                 deadline = time.monotonic() + 3
-                while process.poll() is None and time.monotonic() < deadline:
+                while forwarder.cancel_reason is None and time.monotonic() < deadline:
                     time.sleep(0.01)
                 forwarder.stop()
             self.assertEqual(forwarder.cancel_reason, 'Ctrl-C')
-            self.assertIsNotNone(process.poll())
+            process.wait(timeout=3)
         finally:
             forwarder.stop()
             if process.poll() is None:
@@ -69,6 +75,8 @@ class ShellTests(unittest.TestCase):
                 process.wait(timeout=3)
             if process.stdin is not None:
                 process.stdin.close()
+            if process.stdout is not None:
+                process.stdout.close()
             terminal_input.close()
             os.close(master)
 
@@ -164,6 +172,39 @@ class ShellTests(unittest.TestCase):
             forwarder._run()
 
         self.assertEqual(stdin.getvalue(), 'publish\n')
+
+    def test_foreground_input_forwarder_ignores_stale_empty_enter_before_prompt(self):
+        class Reader:
+            _posix_fd = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read_key(self):
+                if not hasattr(self, 'keys'):
+                    self.keys = iter([('ENTER', '\n'), ('STOP', '')])
+                return next(self.keys)
+
+        class Foreground:
+            prompt = ''
+
+            def commit_prompt(self):
+                pass
+
+            def set_input(self, text, cursor):
+                pass
+
+        stdin = StringIO()
+        process = type('Process', (), {'stdin': stdin})()
+        forwarder = agentic_shell._ForegroundInputForwarder(process, Foreground())
+        forwarder.reader = Reader()
+        with patch.object(forwarder, '_set_noecho'):
+            forwarder._run()
+
+        self.assertEqual(stdin.getvalue(), '')
 
     def test_foreground_input_forwarder_consumes_all_arrow_directions(self):
         class Reader:
@@ -440,6 +481,45 @@ class ShellTests(unittest.TestCase):
             self.assertIn('[TESTS] PASSED', plain.getvalue())
 
 
+    def test_log_replay_colors_patch_diff_stat_only_on_a_terminal(self):
+        from contextlib import redirect_stdout
+
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        summary = (
+            '[PATCH] Proposed changes:\n'
+            ' src/App.py | 4 ++--\n'
+            ' 1 file changed, 2 insertions(+), 2 deletions(-)\n'
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            job = shell._launch([
+                sys.executable,
+                '-c',
+                f'import sys; sys.stdout.write({summary!r})',
+            ])
+            job.process.wait(timeout=5)
+            shell.refresh()
+
+            colored = TTYBuffer()
+            with patch.dict(os.environ, {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), redirect_stdout(colored):
+                shell.show_logs(['/logs', str(job.number), '5'])
+            rendered = colored.getvalue()
+            self.assertIn('\033[95m[PATCH]\033[0m Proposed changes:', rendered)
+            self.assertIn('\033[32m++\033[0m\033[31m--\033[0m', rendered)
+            self.assertIn('\033[32m2 insertions(+)\033[0m', rendered)
+            self.assertIn('\033[31m2 deletions(-)\033[0m', rendered)
+
+            plain = StringIO()
+            with redirect_stdout(plain):
+                shell.show_logs(['/logs', str(job.number), '5'])
+            self.assertNotIn('\033[', plain.getvalue())
+            self.assertIn(summary, plain.getvalue())
+
+
     def test_runner_command_forwarding_uses_terminal_styling(self):
         from contextlib import redirect_stdout
         from subprocess import CompletedProcess
@@ -561,67 +641,14 @@ class ShellTests(unittest.TestCase):
                 shell.execute('/status')
             self.assertEqual(shell.history, ['/status'])
 
-    def test_chat_issue_opens_foreground_chat_session(self):
+    def test_removed_chat_command_is_not_dispatched(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
-            with patch.object(shell, '_run_foreground') as run_foreground:
-                shell.run_chat(['/chat', '69'])
-            run_foreground.assert_called_once_with([
-                sys.executable, '-u', str(shell.runner), '--repo', str(root.resolve()),
-                '--state-dir', str(shell.state_dir), '--issue', '69', '--chat',
-            ])
-            self.assertEqual(shell.active_task, 'issue #69')
-
-    def test_chat_pr_opens_foreground_repair_session(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
-            with patch.object(shell, '_run_foreground') as run_foreground:
-                shell.run_chat(['/chat', 'pr', '123'])
-            run_foreground.assert_called_once_with([
-                sys.executable, '-u', str(shell.runner), '--repo', str(root.resolve()),
-                '--state-dir', str(shell.state_dir), '--chat', '--pr', '123',
-            ])
-            self.assertEqual(shell.active_task, 'PR #123 repair')
-
-    def test_chat_requires_an_issue_number(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
             shell = agentic_shell.AgenticShell(
-                root, Path(sys.executable), session_dir=root / 'logs'
+                Path(temp), Path(sys.executable), session_dir=Path(temp) / 'logs'
             )
-            with self.assertRaisesRegex(ValueError, 'usage: /chat ISSUE'):
-                shell.run_chat(['/chat'])
-
-    def test_chat_issue_one_shot_preserves_instruction_argv(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
-            with patch.object(shell, 'run_issue') as run_issue:
-                shell.run_chat(['/chat', '69', 'first', 'line'])
-            run_issue.assert_called_once_with(['/run', '69', '--instruction', 'first line'])
-
-    def test_chat_local_one_shot_preserves_task_file_form(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            (root / 'agent_config.json').write_text('{"task_source":"local"}')
-            shell = agentic_shell.AgenticShell(root, Path(sys.executable), config=root / 'agent_config.json', session_dir=root / 'logs')
-            with patch.object(shell, 'run_issue') as run_issue:
-                shell.run_chat(['/chat', 'add', 'exports'])
-            args = run_issue.call_args.args[0]
-            self.assertEqual(args[:2], ['/run', '--task-file'])
-            self.assertEqual(Path(args[2]).read_text(), 'add exports\n')
-            self.assertEqual(shell.active_task, 'local chat')
-
-    def test_chat_preserves_multiline_issue_instruction(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
-            with patch.object(shell, 'run_issue') as run_issue:
-                shell.run_chat(['/chat', '69', 'first', 'line', 'second', 'line'], '/chat 69 first line\nsecond line')
-            run_issue.assert_called_once_with(['/run', '69', '--instruction', 'first line\nsecond line'])
-
+            with patch('agentic_shell._shell_print') as shell_print:
+                self.assertTrue(shell.execute('/chat 69'))
+            shell_print.assert_called_once_with("Unknown command: /chat. Use /help.")
 
     def test_parse_run_command(self):
         self.assertEqual(agentic_shell._parse_job_command(['/run', '119']), ('119', []))
@@ -1014,8 +1041,8 @@ class ShellTests(unittest.TestCase):
         self.assertIn('publication output', ''.join(state.history))
 
     def test_foreground_publish_command_output_never_becomes_editable_prompt(self):
-        command_output = "chat> gh issue edit 119 --body $'first\\nsecond'\n" \
-            "gh issue create --title 'quoted title' --body $'third\\nfourth' chat> "
+        command_output = "agent> gh issue edit 119 --body $'first\\nsecond'\n" \
+            "gh issue create --title 'quoted title' --body $'third\\nfourth' agent> "
         for returncode in (0, 1):
             with self.subTest(returncode=returncode), tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
@@ -1069,9 +1096,9 @@ class ShellTests(unittest.TestCase):
                 self.assertEqual(process.prompt_at_wait, '')
                 rendered_history = ''.join(state.history)
                 self.assertNotIn(command_output, rendered_history)
-                self.assertIn("chat> gh issue edit 119", rendered_history)
+                self.assertIn("agent> gh issue edit 119", rendered_history)
                 self.assertIn('first\nsecond', rendered_history)
-                self.assertIn('third\nfourth chat> ', rendered_history)
+                self.assertIn('third\nfourth agent> ', rendered_history)
                 self.assertNotIn('first\\nsecond', rendered_history)
                 self.assertNotIn("$'", rendered_history)
 
@@ -1197,36 +1224,6 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(process.mode_at_wait, agentic_shell.TerminalMode.CONFIRMATION)
         self.assertEqual(process.editable_prompt, '')
 
-    def test_foreground_chat_owns_prompt_until_child_exits(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
-            state = agentic_shell_input._InteractiveOutputState()
-            previous = agentic_shell_input._activate_interactive_output(state)
-
-            class Process:
-                stdout = StringIO('chat> ')
-
-                def wait(self):
-                    self.mode_at_wait = shell.terminal_mode
-                    self.state_mode_at_wait = state.mode
-                    return 0
-
-            process = Process()
-            try:
-                with (patch('agentic_shell._is_interactive_terminal', return_value=True),
-                      patch('agentic_shell.subprocess.Popen', return_value=process),
-                      patch('sys.stdout', new_callable=StringIO)):
-                    shell._run_foreground(['--chat'])
-            finally:
-                agentic_shell_input._restore_interactive_output(previous)
-
-        self.assertEqual(process.mode_at_wait, agentic_shell.TerminalMode.CHAT)
-        self.assertEqual(process.state_mode_at_wait, agentic_shell.TerminalMode.CHAT)
-        self.assertEqual(shell.terminal_mode, agentic_shell.TerminalMode.OUTPUT)
-        self.assertEqual(agentic_shell._foreground_prompt_prefix('chat> '), 'CHAT')
-        self.assertEqual(agentic_shell._foreground_prompt_prefix_text('chat> '), 'chat> ')
-
     def test_foreground_child_output_styles_prefix_without_recoloring_body(self):
         class TTYBuffer(StringIO):
             def isatty(self):
@@ -1253,35 +1250,6 @@ class ShellTests(unittest.TestCase):
             rendered,
         )
         self.assertNotIn('\033[32mPASSED\033[0m', rendered)
-
-    def test_foreground_chat_metadata_styles_future_prefix_without_body_recoloring(self):
-        class TTYBuffer(StringIO):
-            def isatty(self):
-                return True
-
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            shell = agentic_shell.AgenticShell(
-                root, Path(sys.executable), session_dir=root / 'logs'
-            )
-            process = type('Process', (), {
-                'stdout': StringIO(tag_system_prefix(
-                    '[FUTURE_STAGE] generated [REVIEW] body\n', 'FUTURE_STAGE',
-                )),
-                'wait': lambda self: 0,
-            })()
-            with (patch('agentic_shell._is_interactive_terminal', return_value=True),
-                  patch('agentic_shell.subprocess.Popen', return_value=process),
-                  patch.dict(os.environ, {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}),
-                  patch('sys.stdout', new=TTYBuffer()) as output):
-                shell._run_foreground(['--chat'])
-
-        rendered = output.getvalue()
-        self.assertIn(
-            '\033[90m[FUTURE_STAGE]\033[0m generated [REVIEW] body',
-            rendered,
-        )
-        self.assertNotIn('\033[35m[REVIEW]', rendered)
 
 
     def test_shell_preserves_instruction_as_one_runner_argv_value(self):

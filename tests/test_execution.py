@@ -11,7 +11,14 @@ from unittest.mock import patch
 
 import agentic
 import agentic_execution
-from agentic_output import is_transient_progress, style_patch_summary, style_system_text, style_text
+from agentic_output import (
+    PatchSummaryStream,
+    is_transient_progress,
+    strip_ansi,
+    style_patch_summary,
+    style_system_text,
+    style_text,
+)
 
 
 def sh(*args, cwd):
@@ -66,6 +73,19 @@ class StreamingTests(unittest.TestCase):
         stat_line = styled.split(' weird+file-.txt', 1)[1].splitlines()[0]
         self.assertNotIn('\033[', stat_line.split('|', 1)[0])
 
+    def test_style_patch_summary_aligns_unindented_first_stat_row(self):
+        summary = (
+            '[PATCH] Proposed changes:\n'
+            'SECURITY.md                                        | 35 ++++\n'
+            ' agent_config.example.json                          | 11 +\n'
+            ' 2 files changed, 46 insertions(+)\n'
+        )
+
+        aligned = style_patch_summary(summary)
+        rows = aligned.splitlines()[1:3]
+        self.assertTrue(rows[0].startswith(' '))
+        self.assertEqual(rows[0].index('|'), rows[1].index('|'))
+
     def test_style_patch_summary_colors_diff_totals_without_english_labels(self):
         class TTYBuffer(StringIO):
             def isatty(self):
@@ -94,6 +114,48 @@ class StreamingTests(unittest.TestCase):
         with patch.dict('os.environ', {'NO_COLOR': '1', 'AGENTIC_PLAIN': ''}), \
              patch('sys.stdout', new=TTYBuffer()):
             self.assertEqual(style_patch_summary(summary), summary)
+
+    def test_patch_summary_stream_styles_split_live_log_chunks(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        output = TTYBuffer()
+        with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+             patch('sys.stdout', new=output):
+            renderer = PatchSummaryStream()
+            rendered = renderer.feed('[PATCH] Proposed changes:\n src/App.py | 4 ')
+            rendered += renderer.feed('++--\n 1 file changed, 2 insertions(+), ')
+            rendered += renderer.feed('2 deletions(-)\n[REVIEW] next\n')
+            rendered += renderer.flush()
+
+            timestamped = PatchSummaryStream(output)
+            rendered_timestamped = timestamped.feed('[13:42:27')
+            rendered_timestamped += timestamped.feed(
+                '] [PATCH] Proposed changes:\n src/App.py | 4 ++--\n'
+            )
+            rendered_timestamped += timestamped.flush()
+
+        self.assertIn('\033[95m[PATCH]\033[0m Proposed changes:', rendered)
+        self.assertIn(' src/App.py | 4 \033[32m++\033[0m\033[31m--\033[0m', rendered)
+        self.assertIn('\033[32m2 insertions(+)\033[0m', rendered)
+        self.assertIn('\033[31m2 deletions(-)\033[0m', rendered)
+        self.assertIn('\033[35m[REVIEW]\033[0m next', rendered)
+
+        self.assertIn('\033[95m[PATCH]\033[0m Proposed changes:', rendered_timestamped)
+        self.assertIn(
+            ' src/App.py | 4 \033[32m++\033[0m\033[31m--\033[0m',
+            rendered_timestamped,
+        )
+
+        unindented = PatchSummaryStream()
+        rendered_unindented = unindented.feed(
+            '[PATCH] Proposed changes:\nSECURITY.md                                        | 35 ++++\n'
+            ' agent_config.example.json                          | 11 +\n'
+        )
+        rows = rendered_unindented.splitlines()[1:3]
+        plain_rows = [strip_ansi(row) for row in rows]
+        self.assertEqual(plain_rows[0].index('|'), plain_rows[1].index('|'))
 
     def test_status_styling_is_tty_only_and_honors_no_color(self):
         class TTYBuffer(StringIO):
@@ -188,7 +250,7 @@ class StreamingTests(unittest.TestCase):
         expected = {
             'DEVELOPER': '36', 'REVIEW': '35', 'TESTS': '34', 'RETRY': '33',
             'GIT': '33', 'PATCH': '95', 'ERROR': '31', 'RESULT': '31',
-            'CHAT': '96', 'COST': '90', 'NO_CHANGES': '33', 'CANCEL': '33',
+            'COST': '90', 'NO_CHANGES': '33', 'CANCEL': '33',
             'DOCTOR': '36', 'TIMEOUT': '33', 'BLOCKED': '33', 'STOP': '33',
         }
         with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
@@ -240,61 +302,25 @@ class StreamingTests(unittest.TestCase):
         self.assertEqual(inferred, '\033[90m[FUTURE_STAGE]\033[0m provider text')
         self.assertEqual(plain, '\033[90m[FUTURE_STAGE]\033[0m provider text')
 
-    def test_style_system_text_styles_exact_unbracketed_prompts_only(self):
-        class TTYBuffer(StringIO):
-            def isatty(self):
-                return True
-
-        with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
-             patch('sys.stdout', new=TTYBuffer()):
-            styled = style_system_text(
-                'chat> ',
-                system_prefix='CHAT',
-                system_prefix_text='chat>',
-                style_status_tokens=False,
-            )
-            user_text = style_system_text(
-                'user text containing chat> ',
-                system_prefix='CHAT',
-                system_prefix_text='chat>',
-                style_status_tokens=False,
-            )
-        self.assertEqual(styled, '\033[96mchat>\033[0m ')
-        self.assertEqual(user_text, 'user text containing chat> ')
-
     def test_style_system_text_preserves_wrapping_and_plain_output(self):
         class TTYBuffer(StringIO):
             def isatty(self):
                 return True
 
-        message = '[CHAT] Agent response:\n[REVIEW] body\nnext line\n'
+        message = '[DEVELOPER] Agent response:\n[REVIEW] body\nnext line\n'
         with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
              patch('sys.stdout', new=TTYBuffer()):
-            styled = style_system_text(message, system_prefix='CHAT', style_status_tokens=False)
+            styled = style_system_text(message, system_prefix='DEVELOPER', style_status_tokens=False)
         self.assertEqual(
             styled,
-            '\033[96m[CHAT]\033[0m Agent response:\n[REVIEW] body\nnext line\n',
+            '\033[36m[DEVELOPER]\033[0m Agent response:\n[REVIEW] body\nnext line\n',
         )
 
         with patch.dict('os.environ', {'NO_COLOR': '1'}):
             self.assertEqual(
-                style_system_text(message, system_prefix='CHAT'),
+                style_system_text(message, system_prefix='DEVELOPER'),
                 message,
             )
-
-    def test_chat_output_styles_category_without_recoloring_response(self):
-        class TTYBuffer(StringIO):
-            def isatty(self):
-                return True
-
-        output = TTYBuffer()
-        with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
-             patch('sys.stdout', new=output):
-            agentic._chat_output('[CHAT] Agent response: FAILED\n[REVIEW] provider text')
-        self.assertEqual(
-            output.getvalue(),
-            '\033[96m[CHAT]\033[0m Agent response: FAILED\n[REVIEW] provider text\n',
-        )
 
     def test_stage_prefix_colors_follow_outcomes_without_painting_body(self):
         class TTYBuffer(StringIO):

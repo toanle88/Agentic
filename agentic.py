@@ -53,13 +53,6 @@ from agentic_context import (  # noqa: F401
     _compact_feedback,
     _issue_context,
 )
-from agentic_chat import (
-    _GeneratedChatOutput,
-    capture_worktree_guard,
-    capture_worktree_snapshot,
-    run_chat_session,
-    validate_worktree_guard,
-)
 from agentic_prompts import (  # noqa: F401
     _developer_prompt_context,
     _developer_run_instruction_context,
@@ -89,7 +82,7 @@ from agentic_execution import (  # noqa: F401
     run_codex,
     streamed_command,
 )
-from agentic_output import style_system_text, style_text, tag_system_prefix
+from agentic_output import style_system_text, style_text
 from agentic_openrouter import (  # noqa: F401
     run_openrouter,
 )
@@ -141,23 +134,6 @@ def _warn_dangerous_permissions(config: dict[str, Any]) -> None:
             file=sys.stderr,
             flush=True,
         )
-
-
-def _chat_output(message: Any) -> None:
-    """Render chat's generated category while leaving the response body plain."""
-    prefix = getattr(message, "system_prefix", None)
-    rendered_message = str(message)
-    if prefix and os.environ.get("AGENTIC_SHELL_SYSTEM_PREFIXES"):
-        rendered_message = tag_system_prefix(rendered_message, prefix)
-    if prefix:
-        rendered = style_system_text(
-            rendered_message,
-            system_prefix=prefix,
-            style_status_tokens=False,
-        )
-    else:
-        rendered = style_system_text(rendered_message, style_status_tokens=False)
-    _console_print(rendered, flush=True)
 
 
 PROVIDER_SANDBOX_ENV = _agentic_config.PROVIDER_SANDBOX_ENV
@@ -970,10 +946,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--interactive", action="store_true", help="Open the interactive background-job shell")
     parser.add_argument(
-        "--chat", action="store_true",
-        help="Open a human-directed chat session in an existing issue worktree",
-    )
-    parser.add_argument(
         "--config", default=None,
         help="Configuration file (default: agent_config.json in the target repository)",
     )
@@ -982,10 +954,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Test profile: fast checks by default, or fast plus slow_test_commands",
     )
     parser.add_argument("--issue", type=int, help="GitHub issue number")
-    parser.add_argument(
-        "--pr", "--pull-request", dest="pr", type=int,
-        help="Repair an existing pull request in chat (never creates a new PR)",
-    )
     parser.add_argument(
         "--instruction", default=None,
         help="Optional untrusted instruction preserved for this run and its resumes",
@@ -1068,158 +1036,11 @@ def execute(args: argparse.Namespace) -> int:
     root = _absolute_path(Path(git(repo, "rev-parse", "--show-toplevel")))
     if not _paths_equal(repo, root):
         raise RuntimeError("Run agentic.py from the project root or pass --repo pointing to that root")
-    if args.chat:
-        return execute_chat(args, repo)
-    if args.pr is not None:
-        raise RuntimeError("--pr requires --chat")
-
     if args.runs:
         show_runs(repo)
         return 0
 
     return execute_locked(args, repo)
-
-
-def _chat_pr_repair_callback(
-    repo: Path, github_repo: str, github_host: str, pull_request: PullRequest,
-    run: Run, issue: Issue, base: str, config: dict[str, Any], folder: Path,
-    state_dir: Path,
-):
-    """Build the validation and explicit-push boundary for PR chat."""
-    def repair(
-        developer_response: str, input_fn: Any, output_fn: Any,
-    ) -> tuple[bool, str]:
-        with worktree_lock(repo, run, state_dir):
-            passed, _report, _verdict, _digest, _base_sha = verify_and_review(
-                run, issue, base, config, folder,
-                developer_report=developer_response,
-            )
-        if not passed:
-            return False, "Configured checks or the independent read-only review did not approve the repair."
-        output_fn(_GeneratedChatOutput(
-            "[PR] Configured checks passed and the independent read-only review approved the repair.",
-            "REVIEW",
-        ))
-        answer = input_fn(f"Push this fix to PR #{pull_request.number}? [y/N]: ").strip().casefold()
-        if answer not in {"y", "yes"}:
-            output_fn(_GeneratedChatOutput(
-                f"[PR] Push cancelled; reviewed changes remain in {run.worktree}.", "PUBLISH",
-            ))
-            return True, "Review approved; push cancelled by the user."
-        with worktree_lock(repo, run, state_dir):
-            push_existing_pr(
-                run, issue, github_repo, base, config, folder, pull_request,
-                fetch_pr=lambda: get_pull_request(
-                    repo, github_repo, pull_request.number, github_host,
-                ),
-            )
-        output_fn(_GeneratedChatOutput(
-            f"[PR] Pushed the reviewed repair to PR #{pull_request.number}.", "PUBLISH",
-        ))
-        return True, "Repair reviewed and pushed to the existing pull request."
-
-    return repair
-
-
-def execute_chat(args: argparse.Namespace, repo: Path) -> int:
-    """Run ordinary issue chat or the guarded repair flow for an existing PR."""
-    issue_number: int | None = args.issue
-    pull_request_number: int | None = args.pr
-    if issue_number is None and pull_request_number is None:
-        raise RuntimeError("--chat requires --issue N or --pr N")
-    if issue_number is not None and pull_request_number is not None:
-        raise RuntimeError("--chat accepts either --issue N or --pr N, not both")
-    if any((args.interactive, args.task is not None, args.task_file is not None, args.list, args.runs,
-            args.new, args.review, args.publish, args.mark_done, args.instruction)):
-        raise RuntimeError(
-            "--chat can only be combined with --issue or --pr, --repo, --state-dir, and --config"
-        )
-    config_path = Path(args.config).resolve() if args.config else repo / "agent_config.json"
-    if not config_path.is_file():
-        raise RuntimeError(
-            f"No configuration found at {config_path}. Create a target-repository "
-            "agent_config.json or pass --config explicitly"
-        )
-    config = load_config(config_path)
-    github_host = config.get("github_host", DEFAULT_GITHUB_HOST)
-    preflight_security(config["security_mode"], config["sandbox"], repo=repo)
-    agent_settings = [config["developer_agent"]]
-    if pull_request_number is not None and config.get("reviewer_agent"):
-        agent_settings.append(config["reviewer_agent"])
-    preflight_agent_settings(*agent_settings, sandbox=config["sandbox"])
-    if pull_request_number is not None:
-        preflight_test_commands(repo, config["test_commands"], sandbox=config["sandbox"])
-    state_dir = Path(args.state_dir).expanduser().resolve() if args.state_dir else default_state_dir()
-    github_repo, _ = github_metadata(repo, github_host)
-    repair_pr: PullRequest | None = None
-    if pull_request_number is not None:
-        repair_pr = get_pull_request(repo, github_repo, pull_request_number, github_host)
-        if repair_pr.state.casefold() != "open":
-            raise RuntimeError(f"Pull request #{args.pr} is not open; repair is blocked")
-        if not repair_pr.head_repo:
-            raise RuntimeError(f"Pull request #{args.pr} has no head repository identity")
-        if repair_pr.head_repo != github_repo:
-            raise RuntimeError(
-                f"Pull request #{args.pr} is from {repair_pr.head_repo}; "
-                "repair requires the configured repository head"
-            )
-        if not repair_pr.head:
-            raise RuntimeError(f"Pull request #{args.pr} has no usable head branch")
-        if not repair_pr.base:
-            raise RuntimeError(f"Pull request #{args.pr} has no usable base branch")
-        if not repair_pr.head_sha or not repair_pr.base_sha:
-            raise RuntimeError(f"Pull request #{args.pr} is missing immutable ref identities")
-        run = run_for_branch(repo, repair_pr.head)
-        if run is None:
-            raise RuntimeError(
-                f"No existing Agentic worktree for PR #{args.pr} branch {repair_pr.head!r}; "
-                "repair will not create a worktree"
-            )
-        issue = Issue(repair_pr.number, repair_pr.title, repair_pr.body, state=repair_pr.state)
-    else:
-        assert issue_number is not None
-        issue = get_issue(repo, github_repo, issue_number, github_host)
-        previous = runs_for_issue(repo, issue_number)
-        if not previous:
-            raise RuntimeError(
-                f"No existing worktree for issue #{args.issue}; run the issue first before starting chat"
-            )
-        run = choose_existing(previous)
-    folder = logs_path(repo, run, state_dir)
-    record_security_policy(folder, config)
-    _warn_dangerous_permissions(config)
-
-    def status_reader() -> str:
-        return capture_worktree_snapshot(run.worktree)
-
-    def guard_reader() -> dict[str, Any]:
-        return capture_worktree_guard(run.worktree)
-
-    def guard_validator(before: dict[str, Any]) -> str | None:
-        return validate_worktree_guard(run.worktree, before)
-
-    repair_callback = None
-    if repair_pr is not None:
-        repair_callback = _chat_pr_repair_callback(
-            repo, github_repo, github_host, repair_pr, run, issue, base=repair_pr.base,
-            config=config, folder=folder, state_dir=state_dir,
-        )
-
-    return run_chat_session(
-        issue,
-        run.worktree,
-        folder,
-        config,
-        run_agent=run_agent,
-        run_tests=run_tests,
-        lock_factory=lambda: worktree_lock(repo, run, state_dir),
-        status_reader=status_reader,
-        guard_reader=guard_reader,
-        guard_validator=guard_validator,
-        output_fn=_chat_output,
-        repair_mode=repair_pr is not None,
-        repair_callback=repair_callback,
-    )
 
 
 def execute_locked(args: argparse.Namespace, repo: Path) -> int:
@@ -1502,14 +1323,6 @@ def main(argv: list[str] | None = None) -> int:
                     confirm=args.yes, remove_logs=args.remove_logs,
                     state_dir=cleanup_state_dir,
                 )
-        if args.chat:
-            if args.issue is None and args.pr is None:
-                parser.error("--chat requires --issue N or --pr N")
-            if args.issue is not None and args.pr is not None:
-                parser.error("--chat accepts either --issue N or --pr N, not both")
-            if args.interactive:
-                parser.error("--chat cannot be combined with --interactive")
-            return execute(args)
         if args.profile != "fast" and args.issue is None and args.task is None and args.task_file is None:
             parser.error("--profile requires --issue or --task; use /run ISSUE --profile slow in the interactive shell")
         # The interactive supervisor is the natural entry point when no

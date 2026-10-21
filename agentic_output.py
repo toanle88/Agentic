@@ -68,7 +68,7 @@ def paint(text: Any, code: str, stream: Any = None) -> str:
 _TIMESTAMP_RE = re.compile(r"^\s*(\[\d{2}:\d{2}:\d{2}\])")
 _PREFIX_RE = re.compile(
     r"^\s*(?:\[\d{2}:\d{2}:\d{2}\]\s*)?"
-    r"(\[(?:DEVELOPER|REVIEW|TESTS|RETRY|GIT|PATCH|ERROR|RESULT|CHAT|INVESTIGATION|BASELINE|"
+    r"(\[(?:DEVELOPER|REVIEW|TESTS|RETRY|GIT|PATCH|ERROR|RESULT|INVESTIGATION|BASELINE|"
     r"PUBLISH|SKIP|INIT|CLEAN|SYSTEM|COST|NO_CHANGES|CANCEL|DOCTOR|"
     r"JOB [^\]]+|DASHBOARD|MANUAL|"
     r"TIMEOUT|BLOCKED|STOP|RESUME|DRY RUN)\])"
@@ -104,6 +104,11 @@ _DIFF_STAT_TOTAL_LINE_RE = re.compile(
 _DIFF_STAT_TOTAL_TOKEN_RE = re.compile(
     r"\b\d+\s+[^\d,()]+?\((?P<sign>[+-])\)"
 )
+_PATCH_SUMMARY_PREFIX = "[PATCH] Proposed changes:"
+_PATCH_SUMMARY_HEADER_RE = re.compile(
+    r"^\s*(?:\[\d{2}:\d{2}:\d{2}\]\s*)?"
+    r"\[PATCH\]\s+Proposed changes:\s*$"
+)
 
 _PREFIX_COLORS = {
     "DEVELOPER": "36",
@@ -114,7 +119,6 @@ _PREFIX_COLORS = {
     "PATCH": "95",
     "ERROR": "31",
     "RESULT": "32",
-    "CHAT": "96",
     "COST": "90",
     "OK": "32",
     "PASSED": "32",
@@ -335,13 +339,25 @@ def _diff_stat_spans(line: str) -> list[tuple[int, int, str]]:
     return spans
 
 
+def _align_diff_stat_line(line: str) -> str:
+    """Keep diff-stat rows aligned when an upstream producer drops padding."""
+    body = line.rstrip("\r\n")
+    if body and not body[0].isspace() and (
+        _DIFF_STAT_LINE_RE.match(body) or _DIFF_STAT_TOTAL_LINE_RE.match(body)
+    ):
+        return " " + line
+    return line
+
+
 def style_patch_summary(value: Any, stream: Any = None) -> str:
     """Style a ``[PATCH]`` message and its Git diff-stat additions/removals."""
     text = strip_ansi(value)
-    if not color_enabled(stream):
-        return text
     output: list[str] = []
     for index, line in enumerate(text.splitlines(keepends=True)):
+        line = _align_diff_stat_line(line)
+        if not color_enabled(stream):
+            output.append(line)
+            continue
         body = line.rstrip("\r\n")
         ending = line[len(body):]
         spans = _diff_stat_spans(body)
@@ -350,6 +366,100 @@ def style_patch_summary(value: Any, stream: Any = None) -> str:
         spans.sort()
         output.append(_render_spans(body, spans, stream) + ending)
     return "".join(output)
+
+
+def _is_diff_stat_line(line: str) -> bool:
+    """Return whether a line belongs to a Git diff-stat summary."""
+    body = line.rstrip("\r\n")
+    return bool(_DIFF_STAT_LINE_RE.match(body) or _DIFF_STAT_TOTAL_LINE_RE.match(body))
+
+
+def _is_patch_header_prefix(value: str) -> bool:
+    """Return whether an incomplete line can still become a patch header."""
+    candidate = value.lstrip()
+    if _PATCH_SUMMARY_PREFIX.startswith(candidate):
+        return True
+    if len(candidate) <= 10:
+        timestamp_pattern = "[dd:dd:dd]"
+        return all(
+            character == expected or expected == "d" and character.isdigit()
+            for character, expected in zip(candidate, timestamp_pattern)
+        )
+    timestamp = candidate[:10]
+    if not re.fullmatch(r"\[\d{2}:\d{2}:\d{2}\]", timestamp):
+        return False
+    return _PATCH_SUMMARY_PREFIX.startswith(candidate[10:].lstrip())
+
+
+class PatchSummaryStream:
+    """Style patch summaries while preserving arbitrary output chunking."""
+
+    def __init__(self, stream: Any = None, *, style_status_tokens: bool = False) -> None:
+        self.stream = stream
+        self.style_status_tokens = style_status_tokens
+        self._active = False
+        self._pending = ""
+
+    def _render_line(self, line: str) -> str:
+        line = _align_diff_stat_line(line)
+        body = line.rstrip("\r\n")
+        if _PATCH_SUMMARY_HEADER_RE.match(body):
+            self._active = True
+            return style_patch_summary(line, self.stream)
+        if self._active and _is_diff_stat_line(body):
+            return style_patch_summary(line, self.stream)
+        self._active = False
+        return style_text(
+            line,
+            self.stream,
+            style_status_tokens=self.style_status_tokens,
+        )
+
+    def feed(self, value: Any) -> str:
+        """Render one output chunk, retaining only incomplete patch lines."""
+        text = self._pending + strip_ansi(value)
+        self._pending = ""
+        lines = text.splitlines(keepends=True)
+        if lines and not lines[-1].endswith(("\n", "\r")):
+            self._pending = lines.pop()
+
+        rendered = "".join(self._render_line(line) for line in lines)
+        if self._pending and (
+            self._active
+            or _is_patch_header_prefix(self._pending)
+        ):
+            return rendered
+        if self._pending:
+            rendered += style_text(
+                self._pending,
+                self.stream,
+                style_status_tokens=self.style_status_tokens,
+            )
+            self._pending = ""
+        return rendered
+
+    def flush(self) -> str:
+        """Render an incomplete final line, if any."""
+        if not self._pending:
+            return ""
+        pending = self._pending
+        self._pending = ""
+        return (
+            style_patch_summary(pending, self.stream)
+            if self._active or _PATCH_SUMMARY_HEADER_RE.match(pending)
+            else style_text(
+                pending,
+                self.stream,
+                style_status_tokens=self.style_status_tokens,
+            )
+        )
+
+
+def style_shell_text(value: Any, stream: Any = None, *, style_status_tokens: bool = False) -> str:
+    """Style shell-replayed output, including complete patch-stat blocks."""
+    renderer = PatchSummaryStream(stream, style_status_tokens=style_status_tokens)
+    rendered = renderer.feed(value)
+    return rendered + renderer.flush()
 
 
 def style_text(value: Any, stream: Any = None, *, style_status_tokens: bool = True) -> str:
