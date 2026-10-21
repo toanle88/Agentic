@@ -1,7 +1,7 @@
 """Read-only parsing of durable Agentic run logs.
 
 The dashboard renderer should not know the on-disk schema. This module turns
-centralized or legacy run folders into bounded, redacted snapshots while
+centralized or legacy run folders into bounded snapshots while
 preserving the optional fields used by older run records.
 """
 from __future__ import annotations
@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .review import finding_severity
-from .security import redact_secrets
 from .telemetry import read_run_usage
 
 
@@ -156,7 +155,7 @@ def _read(path: Path, limit: int = MAX_TEXT) -> str:
         text = text[-limit:]
     if truncated:
         text = f"[… earlier output omitted; showing the last {limit:,} characters …]\n" + text[-limit:]
-    return redact_secrets(text)
+    return text
 
 
 def _timestamp(path: Path) -> str:

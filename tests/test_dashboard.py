@@ -1,4 +1,6 @@
+import base64
 import json
+import math
 import os
 import shutil
 import ssl
@@ -15,6 +17,7 @@ from agentic_runner import dashboard as agentic_dashboard
 from agentic_runner import dashboard_data as agentic_dashboard_data
 from agentic_runner.models import StatePaths
 from agentic_runner.dashboard_data import filter_runs
+from agentic_runner.persistence import atomic_write_text
 
 
 class DashboardTests(unittest.TestCase):
@@ -126,19 +129,19 @@ class DashboardTests(unittest.TestCase):
             self.assertIn('<pre class="json-block">', html)
             self.assertIn("JSON.stringify(value,null,2)", html)
             self.assertIn("Latest recorded policy", html)
-            self.assertIn("Token usage by run", html)
-            self.assertIn("Known totals for each provider invocation", html)
-            self.assertIn("ordered from newest to oldest by timestamp", html)
-            self.assertIn('id="token-sort"', html)
-            self.assertIn('<div class="token-controls"><label>Order', html)
-            self.assertIn(".token-controls{display:flex;align-items:center;gap:16px", html)
+            self.assertIn("<h2>Token usage</h2>", html)
+            self.assertIn("Recorded provider usage by run.", html)
+            self.assertIn('class="panel token-panel"', html)
+            self.assertIn('<div class="table-wrap" id="token-table"></div>', html)
+            self.assertNotIn('class="panel chart-panel"', html)
+            self.assertNotIn('id="token-chart"', html)
+            self.assertNotIn('<span class="token-legend">', html)
+            self.assertNotIn('id="token-sort"', html)
             self.assertIn(".recent-heading{padding:22px}", html)
             self.assertNotIn('<div class="detail"><h2>Recent activity', html)
             self.assertIn("<h3>Tests</h3>", html)
             self.assertNotIn("Tests · ${esc(run.tests.status)}", html)
             self.assertNotIn("Tests: ${esc(run.tests.status)}", html)
-            self.assertIn('value="newest"', html)
-            self.assertIn('value="oldest"', html)
             self.assertIn("function compareTokenEntries", html)
             self.assertIn('return state.tokenSort===\"newest\"?rightTime-leftTime:leftTime-rightTime;', html)
             self.assertIn("String(left.run.id).localeCompare", html)
@@ -146,8 +149,12 @@ class DashboardTests(unittest.TestCase):
             self.assertIn("<th>Timestamp</th><th>Run</th><th>Invocation</th>", html)
             self.assertIn("tokenTimestampText", html)
             self.assertIn("Tokens: ${esc(formatTokens(tokenValue(run)))}</span>", html)
-            self.assertIn("developer-001", html)
-            self.assertIn("reviewer-001", html)
+            payload = html.split('<script type="application/json" id="dashboard-data">', 1)[1].split(
+                "</script>", 1,
+            )[0]
+            embedded = json.loads(base64.b64decode(payload).decode("utf-8"))
+            self.assertEqual(embedded["runs"][0]["usage"]["by_invocation"][0]["name"], "developer-001")
+            self.assertEqual(embedded["runs"][0]["usage"]["by_invocation"][1]["name"], "reviewer-001")
 
     def test_dashboard_exposes_and_escapes_per_run_instruction(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -161,7 +168,13 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(snapshot['instruction'], "Keep <script>alert('x')</script> as data")
             html = agentic_dashboard.render_dashboard([snapshot], 'demo', root.name)
             self.assertIn('Per-run instruction', html)
-            self.assertIn('\\u003cscript\\u003e', html)
+            payload = html.split('<script type="application/json" id="dashboard-data">', 1)[1].split(
+                "</script>", 1,
+            )[0]
+            self.assertEqual(
+                json.loads(base64.b64decode(payload).decode("utf-8"))["runs"][0]["instruction"],
+                "Keep <script>alert('x')</script> as data",
+            )
             self.assertNotIn("<script>alert('x')</script>", html)
 
     def test_review_parser_accepts_json_code_fence(self):
@@ -216,8 +229,12 @@ class DashboardTests(unittest.TestCase):
             }))
             snapshot = agentic_dashboard.collect_runs(root)[0]
             html = agentic_dashboard.render_dashboard([snapshot], "demo", root.name)
-            self.assertIn("The upstream service is unavailable.", html)
-            self.assertIn(str(run), html)
+            payload = html.split('<script type="application/json" id="dashboard-data">', 1)[1].split(
+                "</script>", 1,
+            )[0]
+            embedded = json.dumps(json.loads(base64.b64decode(payload).decode("utf-8")))
+            self.assertIn("The upstream service is unavailable.", embedded)
+            self.assertIn(str(run), embedded)
 
     def test_terminal_result_statuses_are_visible_and_legacy_blockers_still_parse(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -247,7 +264,13 @@ class DashboardTests(unittest.TestCase):
             rendered = agentic_dashboard.render_dashboard(list(snapshots.values()), "demo", root.name)
             self.assertIn("Retry exhausted", rendered)
             self.assertIn("No changes", rendered)
-            self.assertIn("Missing upstream contract.", rendered)
+            payload = rendered.split('<script type="application/json" id="dashboard-data">', 1)[1].split(
+                "</script>", 1,
+            )[0]
+            self.assertIn(
+                "Missing upstream contract.",
+                json.dumps(json.loads(base64.b64decode(payload).decode("utf-8"))),
+            )
             self.assertIn(
                 'run.blocked && run.status !== "no_changes" && '
                 'run.result?.status !== "NO_CHANGES"',
@@ -343,6 +366,8 @@ class DashboardTests(unittest.TestCase):
         html = agentic_dashboard.render_dashboard([], "demo", ".demo-agent-runs")
         self.assertIn("Agentic run dashboard", html)
         self.assertIn("No runs match this filter", html)
+        self.assertIn('<p id="repo-name">demo</p>', html)
+        self.assertIn("No runs recorded yet.", html)
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / ".demo-agent-runs"
@@ -352,14 +377,48 @@ class DashboardTests(unittest.TestCase):
             snapshot = agentic_dashboard.collect_runs(root)
             html = agentic_dashboard.render_dashboard(snapshot, "demo", root.name)
             self.assertNotIn("</script><script>", html)
-            self.assertIn("\\u003c/script\\u003e", html)
+            payload = html.split('<script type="application/json" id="dashboard-data">', 1)[1].split(
+                "</script>", 1,
+            )[0]
+            self.assertIn("</script><script>alert('x')</script>", json.loads(
+                base64.b64decode(payload).decode("utf-8"),
+            )["runs"][0]["files"][0]["content"])
 
-    def test_dashboard_redacts_credentials_from_log_content(self):
+    def test_render_dashboard_server_fallback_contains_recorded_runs(self):
+        html = agentic_dashboard.render_dashboard([{
+            "issue": 7,
+            "issue_metadata": {"title": "Dashboard issue", "state": "OPEN"},
+            "label": "Issue #7", "status": "approved", "stage": "completed",
+            "last_activity": "2026-10-21T12:00:00+00:00",
+        }], "demo", "runs")
+        self.assertIn("Issue #7", html)
+        self.assertIn("2026-10-21T12:00:00+00:00", html)
+        self.assertIn("Dashboard issue", html)
+        self.assertIn("window.__dashboardBootError", html)
+        self.assertIn("Total runs", html)
+
+    def test_render_dashboard_embeds_browser_valid_json_for_non_finite_values(self):
+        html = agentic_dashboard.render_dashboard(
+            [{"id": "run", "metrics": {"duration": math.nan, "limit": math.inf}}],
+            "demo", ".demo-agent-runs",
+        )
+        payload = html.split('<script type="application/json" id="dashboard-data">', 1)[1].split(
+            "</script>", 1,
+        )[0]
+        data = json.loads(base64.b64decode(payload).decode("utf-8"))
+        self.assertIsNone(data["runs"][0]["metrics"]["duration"])
+        self.assertIsNone(data["runs"][0]["metrics"]["limit"])
+        self.assertNotIn("NaN", payload)
+        self.assertNotIn("Infinity", payload)
+
+    def test_dashboard_reads_credentials_redacted_by_log_writer(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / ".demo-agent-runs"
             run = root / "agent-issue-7-deadbeef"
             run.mkdir(parents=True)
-            (run / "developer-001.txt").write_text("api_key=dashboard-secret-value")
+            log_path = run / "developer-001.txt"
+            atomic_write_text(log_path, "api_key=dashboard-secret-value")
+            self.assertNotIn("dashboard-secret-value", log_path.read_text())
             snapshot = agentic_dashboard.collect_runs(root)
             self.assertNotIn("dashboard-secret-value", snapshot[0]["developer"]["summary"])
 
@@ -377,7 +436,13 @@ class DashboardTests(unittest.TestCase):
             ]))
             html = agentic_dashboard.render_dashboard(agentic_dashboard.collect_runs(root), "demo", root.name)
             self.assertIn("Recurring findings", html)
-            self.assertIn("Fix wiring", html)
+            payload = html.split('<script type="application/json" id="dashboard-data">', 1)[1].split(
+                "</script>", 1,
+            )[0]
+            self.assertIn(
+                "Fix wiring",
+                json.dumps(json.loads(base64.b64decode(payload).decode("utf-8"))),
+            )
 
     def test_dashboard_renders_skipped_review_validation(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -392,7 +457,13 @@ class DashboardTests(unittest.TestCase):
                 agentic_dashboard.collect_runs(root), "demo", root.name,
             )
             self.assertIn("Skipped validation", html)
-            self.assertIn("Integration service is not available", html)
+            payload = html.split('<script type="application/json" id="dashboard-data">', 1)[1].split(
+                "</script>", 1,
+            )[0]
+            self.assertIn(
+                "Integration service is not available",
+                json.dumps(json.loads(base64.b64decode(payload).decode("utf-8"))),
+            )
 
     def test_collect_runs_from_roots_prefers_centralized_snapshot(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -419,7 +490,9 @@ class DashboardTests(unittest.TestCase):
                 '--repo', str(root), '--logs', str(logs), '--output', str(output),
             ]), 0)
             self.assertTrue(output.is_file())
-            self.assertIn('Agentic run dashboard', output.read_text())
+            rendered = output.read_text()
+            self.assertIn('Agentic run dashboard', rendered)
+            self.assertNotIn('[REDACTED]', rendered)
 
     def test_dashboard_serve_mode_rebuilds_data_for_each_request(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -517,11 +590,18 @@ class DashboardTests(unittest.TestCase):
             self.assertIn(f'data-view="{view}"', html)
         for control in ("search", "status", "issue", "stage", "severity", "model", "provider"):
             self.assertIn(f'id="{control}"', html)
-        self.assertIn('id="token-sort"', html)
+        self.assertNotIn('id="token-sort"', html)
+        self.assertNotIn('id="token-chart"', html)
+        self.assertIn('id="token-table"', html)
         self.assertIn('data-copy=', html)
         self.assertIn('data-download=', html)
         self.assertIn("async function refreshDashboard", html)
         self.assertIn("const searchableCache=new Map()", html)
+        self.assertIn("function searchable(run){return searchableCache[run.id]||\"\"}", html)
+        self.assertIn("function scheduleSearchRender()", html)
+        self.assertIn("searchTimer=window.setTimeout", html)
+        self.assertIn("function renderCurrentView()", html)
+        self.assertNotIn("var searchable=JSON.stringify(run).toLowerCase()", html)
         self.assertIn("window.setInterval(refreshDashboard,30000)", html)
         self.assertIn(
             'dataset.theme=document.documentElement.dataset.theme==="light"?"dark":"light"',
@@ -534,6 +614,7 @@ class DashboardTests(unittest.TestCase):
             self.assertIn(f'value="{severity}"', html)
         self.assertIn("Latest recorded run activity, newest first.", html)
         self.assertIn("Issue status", html)
+        self.assertIn("data-issue-row", html)
         self.assertIn("Next action", html)
         self.assertIn("suggestedCommand", html)
 
@@ -636,7 +717,7 @@ console.log(JSON.stringify({{newest, oldest}}));
             self.assertEqual(snapshot["issue_metadata"]["state"], "OPEN")
             html = agentic_dashboard.render_dashboard([snapshot], "demo", root.name)
             self.assertIn("Redesign dashboard navigation", html)
-            self.assertIn('"state":"OPEN"', html)
+            self.assertIn("<td>OPEN</td>", html)
 
     def test_dashboard_snapshot_normalizes_finding_severity_and_model_metadata(self):
         with tempfile.TemporaryDirectory() as temp:

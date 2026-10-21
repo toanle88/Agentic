@@ -15,16 +15,21 @@ from typing import Any
 from .security import redact_secrets
 
 
-def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
-    """Redact, then replace *path* only after the complete write succeeds.
+def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8",
+                      redact: bool = True) -> None:
+    """Optionally redact, then replace *path* after the complete write succeeds.
 
     A failed write or replacement leaves an existing destination untouched and
     removes the same-directory temporary file. This is the persistence
     boundary for durable text as well as JSON serialized through
-    :func:`atomic_write_json`.
+    :func:`atomic_write_json`. Generated HTML may disable the final text pass
+    when its dynamic data has already been safely encoded and redacted; running
+    the credential regex over JavaScript source can turn expressions such as
+    ``key=value`` into invalid code.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = redact_secrets(text)
+    if redact:
+        text = redact_secrets(text)
     temporary: str | None = None
     try:
         with tempfile.NamedTemporaryFile(
