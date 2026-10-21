@@ -283,6 +283,31 @@ class TestDiscovery(unittest.TestCase):
         self.assertEqual(results[0]["status"], "failed")
         self.assertEqual(results[1]["status"], "missing-dependency")
 
+    def test_dependency_text_handles_prefixed_shell_errors_without_pathological_backtracking(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            outputs = [
+                "tool: command not found",
+                "shell: nested: no such file or directory",
+                (" 9:" * 10_000) + " not a dependency error",
+            ]
+            candidates = [
+                {
+                    "argv": [
+                        sys.executable,
+                        "-c",
+                        f"import sys; print({output!r}); raise SystemExit(1)",
+                    ],
+                    "reason": "dependency diagnostic",
+                }
+                for output in outputs
+            ]
+            results = validate_test_candidates(repo, candidates, timeout=2)
+
+        self.assertEqual(results[0]["status"], "missing-dependency")
+        self.assertEqual(results[1]["status"], "missing-dependency")
+        self.assertEqual(results[2]["status"], "failed")
+
     def test_verbose_dependency_failure_keeps_diagnostic_tail(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = Path(temp)

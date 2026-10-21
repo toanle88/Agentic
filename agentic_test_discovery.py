@@ -28,13 +28,17 @@ MAX_OUTPUT_TAIL_BYTES = 2_000
 OUTPUT_READ_CHUNK_BYTES = 8_192
 DEPENDENCY_FAILURE_RE = re.compile(
     r"(?im)(?:"
-    r"^\s*(?:[^:\n]+:\s*)*(?:command not found|not found|no such file or directory)\s*$"
-    r"|^\s*(?:ModuleNotFoundError|ImportError):\s*No module named\b"
+    r"^\s*(?:ModuleNotFoundError|ImportError):\s*No module named\b"
     r"|^\s*(?:Error:\s*)?Cannot find module\b"
     r"|^\s*(?:module|package)\s+[^\n]+\s+is not installed\s*$"
     r"|^\s*missing (?:the )?(?:required )?dependencies?\s*$"
     r")"
 )
+_SHELL_DEPENDENCY_MESSAGES = frozenset({
+    "command not found",
+    "not found",
+    "no such file or directory",
+})
 SHELL_EXECUTABLES = {"bash", "cmd", "csh", "fish", "powershell", "pwsh", "sh", "zsh"}
 EVAL_OPTIONS = {"-c", "--command", "-e", "--eval", "-exec"}
 ALLOWED_EXECUTABLES = {
@@ -96,6 +100,20 @@ class DiscoveryResult:
 
 def _command_key(argv: list[str]) -> tuple[str, ...]:
     return tuple(argv)
+
+
+def _has_shell_dependency_failure(output: str) -> bool:
+    """Recognize shell diagnostics without nested regular-expression repetition."""
+    for line in output.splitlines():
+        message = line.strip()
+        while ":" in message:
+            prefix, message = message.split(":", 1)
+            if not prefix.strip():
+                break
+            message = message.strip()
+        if message.casefold() in _SHELL_DEPENDENCY_MESSAGES:
+            return True
+    return False
 
 
 def _candidate(argv: list[str], reason: str, *, profile: str = "fast") -> dict[str, Any]:
@@ -628,7 +646,12 @@ def validate_test_candidates(
             continue
         output = output.strip()
         detail = f"exit code {returncode}"
-        if returncode in {127, 9009} or (output and DEPENDENCY_FAILURE_RE.search(output)):
+        if returncode in {127, 9009} or (
+            output and (
+                _has_shell_dependency_failure(output)
+                or DEPENDENCY_FAILURE_RE.search(output)
+            )
+        ):
             status = "missing-dependency"
             detail += "; external dependency appears unavailable"
         else:
