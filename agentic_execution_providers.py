@@ -13,7 +13,11 @@ from agentic_execution_stream import (
 )
 from agentic_execution_guard import restricted_process_environment
 from agentic_guidance import guidance_phase, guidance_prompt
-from agentic_providers import cli_provider_command, codex_command
+from agentic_providers import (
+    cli_provider_command,
+    codex_command,
+    resolve_provider_executable,
+)
 from agentic_security import redact_secrets
 from agentic_telemetry import extract_jsonl_usage
 
@@ -145,6 +149,7 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
                      provider: str, readonly: bool = False,
                      timeout: int | None = None,
                      model: str | None = None,
+                     executable_path: str | None = None,
                      sandbox: dict[str, Any] | None = None,
                      chat_restricted: bool = False) -> tuple[bool, str]:
     """Run a locally installed coding CLI in its non-interactive mode."""
@@ -152,7 +157,19 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
         worktree, prompt, readonly=readonly, audit_folder=output.parent,
         phase=guidance_phase(output, readonly=readonly),
     )
-    args, structured = cli_provider_command(provider, prompt, readonly=readonly, model=model)
+    command_kwargs: dict[str, Any] = {}
+    if provider == "copilot":
+        resolved = resolve_provider_executable(
+            provider,
+            executable_path,
+            discover_copilot=not bool((sandbox or {}).get("enabled")),
+        )
+        effective_path = resolved.path or executable_path
+        if effective_path:
+            command_kwargs["executable_path"] = effective_path
+    args, structured = cli_provider_command(
+        provider, prompt, readonly=readonly, model=model, **command_kwargs,
+    )
 
     label = "REVIEW" if readonly else "DEVELOPER"
     invocation_started = time.monotonic()

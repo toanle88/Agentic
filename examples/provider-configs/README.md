@@ -35,5 +35,11 @@ should remain ignored by Git. Its `max_tool_turns`,
 tool loop; leave network access disabled unless the repository explicitly
 needs it.
 
+For Copilot installed through `gh copilot`, trusted mode automatically checks
+the GitHub CLI download location. You can instead set
+`"executable_path": "/path/to/copilot"` in the developer or reviewer provider
+block, or export `COPILOT_PATH`. In isolated mode, the path must exist inside
+the configured sandbox image.
+
 For editor completion and validation, associate the configuration with the
 repository's [`agent_config.schema.json`](../../agent_config.schema.json).

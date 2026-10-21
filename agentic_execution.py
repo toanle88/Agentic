@@ -47,7 +47,18 @@ def run_cli_provider(*args, **kwargs):
     old_streamed = _providers.streamed_command
     old_command = _providers.cli_provider_command
     _providers.streamed_command = streamed_command
-    _providers.cli_provider_command = cli_provider_command
+    def compatible_command(*command_args, **command_kwargs):
+        try:
+            return cli_provider_command(*command_args, **command_kwargs)
+        except TypeError as exc:
+            if (
+                "executable_path" not in command_kwargs
+                or "executable_path" not in str(exc)
+            ):
+                raise
+            command_kwargs.pop("executable_path")
+            return cli_provider_command(*command_args, **command_kwargs)
+    _providers.cli_provider_command = compatible_command
     try:
         return _providers.run_cli_provider(*args, **kwargs)
     finally:

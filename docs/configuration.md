@@ -86,6 +86,7 @@ Each provider object supports these fields:
 | `model` | string or `null` | Provider model; `null` uses the native CLI default. OpenRouter requires a model. |
 | `reasoning_effort` | string or `null` | Optional reasoning setting used by Codex/OpenRouter, such as `max`; native CLIs use their own options. |
 | `timeout_seconds` | integer or `null` | Per developer/reviewer invocation limit; `null` uses 600 seconds for developers or 300 seconds for reviewers. |
+| `executable_path` | string or `null` | Copilot only: optional explicit executable path. In trusted mode, `COPILOT_PATH` and the GitHub CLI download at `~/.local/share/gh/copilot/copilot` are also detected automatically. In isolated mode, set an image-visible path because host paths are not mounted. |
 | `api_key_env` | string | OpenRouter only: environment variable containing the API key. |
 | `base_url` | URL | OpenRouter only: API base URL, defaulting to the public OpenRouter endpoint. |
 | `max_tool_turns` | integer or `null` | OpenRouter only: maximum number of model/tool rounds; default `40`. |
@@ -99,6 +100,16 @@ Each provider object supports these fields:
 `claude`, `copilot`, or `openrouter`. The developer and reviewer can use
 different providers. Native providers use their own CLI installation and
 authentication; Agentic never stores their credentials.
+
+When Copilot is installed through `gh copilot`, `agentic doctor` checks the
+normal `PATH` first and then the GitHub CLI download location
+`~/.local/share/gh/copilot/copilot` (or `$XDG_DATA_HOME/gh/copilot/copilot`).
+The check is read-only. If it finds the downloaded executable, Agentic uses it
+for trusted provider runs and reports the path with instructions to add its
+directory to `PATH` or set `COPILOT_PATH`. An explicit
+`developer.executable_path` or `reviewer.executable_path` takes precedence.
+For isolated runs, the configured sandbox image must contain Copilot; an
+`executable_path` there is interpreted inside the image.
 
 For OpenRouter, provide a model and an environment-variable name, never the
 secret itself:

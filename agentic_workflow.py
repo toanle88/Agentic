@@ -406,9 +406,13 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
             **({"chat_restricted": True} if chat_restricted else {}),
             **router_kwargs,
         )
+    cli_kwargs: dict[str, Any] = {}
+    if selected.get("executable_path") is not None:
+        cli_kwargs["executable_path"] = selected["executable_path"]
     return run_cli_provider(
         worktree, prompt, output=output, provider=provider,
         readonly=readonly, timeout=timeout, model=model,
+        **cli_kwargs,
         **({"chat_restricted": True} if chat_restricted else {}),
         **({"sandbox": provider_sandbox} if provider_sandbox is not None else {}),
     )

@@ -52,9 +52,11 @@ def _doctor_public_detail(
             "enabled for developer and read-only reviewer; disable unless outbound access is required"
             if not ok else "disabled for developer and read-only reviewer"
         )
+    safe_detail = redact_secrets(sanitize_terminal_text(detail or "")).strip()
+    if ok and "copilot" in label.lower() and safe_detail.startswith("Copilot CLI"):
+        return _short(safe_detail, 240)
     if ok:
         return "passed"
-    safe_detail = redact_secrets(sanitize_terminal_text(detail or "")).strip()
     if safe_detail:
         return _short(safe_detail, 240)
     return "required check failed" if required else "warning"
