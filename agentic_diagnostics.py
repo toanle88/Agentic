@@ -634,7 +634,6 @@ def run_doctor(
                 print(category_titles.get(category, category.title()))
                 current_category = category
             label = str(check["name"])
-            ok = bool(check["ok"])
             detail = str(check["detail"])
             state = str(check["status"]).upper()
             print(
