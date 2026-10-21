@@ -339,6 +339,13 @@ class _ForegroundInputForwarder:
     def _send_line(self) -> None:
         if self.process.stdin is None:
             return
+        # Some terminal bridges deliver the command's CRLF as two separate
+        # key events.  The second event can reach this forwarder after the
+        # shell has started the foreground child but before its prompt has
+        # been rendered.  Do not turn that stale, empty Enter into an answer
+        # to a later confirmation prompt.
+        if not self.buffer and not getattr(self.foreground, "prompt", ""):
+            return
         self.foreground.commit_prompt()
         try:
             self.process.stdin.write(self.buffer + "\n")

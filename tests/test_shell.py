@@ -165,6 +165,39 @@ class ShellTests(unittest.TestCase):
 
         self.assertEqual(stdin.getvalue(), 'publish\n')
 
+    def test_foreground_input_forwarder_ignores_stale_empty_enter_before_prompt(self):
+        class Reader:
+            _posix_fd = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read_key(self):
+                if not hasattr(self, 'keys'):
+                    self.keys = iter([('ENTER', '\n'), ('STOP', '')])
+                return next(self.keys)
+
+        class Foreground:
+            prompt = ''
+
+            def commit_prompt(self):
+                pass
+
+            def set_input(self, text, cursor):
+                pass
+
+        stdin = StringIO()
+        process = type('Process', (), {'stdin': stdin})()
+        forwarder = agentic_shell._ForegroundInputForwarder(process, Foreground())
+        forwarder.reader = Reader()
+        with patch.object(forwarder, '_set_noecho'):
+            forwarder._run()
+
+        self.assertEqual(stdin.getvalue(), '')
+
     def test_foreground_input_forwarder_consumes_all_arrow_directions(self):
         class Reader:
             _posix_fd = None
