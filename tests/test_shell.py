@@ -27,10 +27,15 @@ class ShellTests(unittest.TestCase):
         raw_slave = os.fdopen(slave, 'rb', buffering=0)
         terminal_input = io.TextIOWrapper(raw_slave, encoding='utf-8')
         process = subprocess.Popen(
-            [sys.executable, '-c', 'import time; time.sleep(30)'],
+            [
+                sys.executable,
+                '-c',
+                'import time; print("ready", flush=True); time.sleep(30)',
+            ],
             stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            text=True,
             start_new_session=True,
         )
 
@@ -40,6 +45,8 @@ class ShellTests(unittest.TestCase):
 
         forwarder = agentic_shell._ForegroundInputForwarder(process, Foreground())
         try:
+            self.assertIsNotNone(process.stdout)
+            self.assertEqual(process.stdout.readline().strip(), 'ready')
             with patch.object(agentic_shell_input.sys, 'stdin', terminal_input):
                 forwarder.start()
                 deadline = time.monotonic() + 3
@@ -56,11 +63,11 @@ class ShellTests(unittest.TestCase):
                 self.assertFalse(termios.tcgetattr(fd)[3] & termios.ISIG)
                 os.write(master, b'\003')
                 deadline = time.monotonic() + 3
-                while process.poll() is None and time.monotonic() < deadline:
+                while forwarder.cancel_reason is None and time.monotonic() < deadline:
                     time.sleep(0.01)
                 forwarder.stop()
             self.assertEqual(forwarder.cancel_reason, 'Ctrl-C')
-            self.assertIsNotNone(process.poll())
+            process.wait(timeout=3)
         finally:
             forwarder.stop()
             if process.poll() is None:
@@ -68,6 +75,8 @@ class ShellTests(unittest.TestCase):
                 process.wait(timeout=3)
             if process.stdin is not None:
                 process.stdin.close()
+            if process.stdout is not None:
+                process.stdout.close()
             terminal_input.close()
             os.close(master)
 
