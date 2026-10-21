@@ -1,5 +1,6 @@
 """Focused workflow tests."""
 import json
+import contextlib
 import shlex
 import subprocess
 import sys
@@ -16,6 +17,41 @@ from test_worktrees import _GitRepositoryTestCase
 
 
 class WorkflowTests(_GitRepositoryTestCase):
+    def test_offline_resume_uses_cached_issue_without_github_metadata(self):
+        config_path = self.repo / "agent-config.json"
+        config_path.write_text(json.dumps({
+            "test_commands": [[sys.executable, "-c", "print('ok')"]],
+            "developer_agent": {"provider": "codex"},
+            "reviewer_agent": {"provider": "codex"},
+        }))
+        state_dir = Path(self.tmp.name) / "agentic-state"
+        fake_run = agentic.Run(88, "agent/issue-88-aabbccdd", self.repo / "worktree")
+        folder = agentic.logs_path(self.repo, fake_run, state_dir)
+        from agentic_telemetry import record_issue_metadata
+        record_issue_metadata(
+            folder, number=88, title="Cached issue", state="OPEN",
+            body="Implement the offline resume path.",
+        )
+        args = agentic.build_parser().parse_args([
+            "--repo", str(self.repo), "--config", str(config_path),
+            "--state-dir", str(state_dir), "--issue", "88", "--offline",
+        ])
+        with (
+            patch("agentic.preflight_test_commands"),
+            patch("agentic.preflight_agent_settings"),
+            patch("agentic.default_base_branch", return_value="main"),
+            patch("agentic.runs_for_issue", return_value=[fake_run]),
+            patch("agentic.github_metadata", side_effect=AssertionError("GitHub metadata was requested")),
+            patch("agentic.choose_existing", return_value=fake_run),
+            patch("agentic.worktree_lock", return_value=contextlib.nullcontext()),
+            patch("agentic._run_investigation", return_value={"summary": "cached", "findings": []}),
+            patch("agentic.run_tests", return_value=(True, "ok")),
+            patch("agentic.develop", return_value=True) as develop,
+        ):
+            self.assertEqual(agentic.execute_locked(args, self.repo), 0)
+        self.assertEqual(develop.call_args.args[1].title, "Cached issue")
+        self.assertEqual(develop.call_args.args[1].body, "Implement the offline resume path.")
+
     def test_local_resume_action_materializes_task_file_invocation(self):
         task_file = self.repo / "task.md"
         task_file.write_text("Implement the local task.\n")

@@ -367,7 +367,9 @@ def _latest_developer(folder: Path, index: dict[str, list[Path]] | None = None) 
 def _all_log_files(folder: Path) -> list[Path]:
     files = [
         path for path in folder.iterdir()
-        if path.is_file() and path.name not in {"review-schema.json", "investigation-schema.json"}
+        if path.is_file() and path.name not in {
+            "review-schema.json", "investigation-schema.json", "issue-snapshot.json",
+        }
     ] if folder.is_dir() else []
     return sorted(files, key=lambda path: (path.stat().st_mtime, path.name), reverse=True)
 

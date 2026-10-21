@@ -17,7 +17,6 @@ import shlex
 import shutil
 import tempfile
 import time
-import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -50,6 +49,7 @@ from agentic_execution import (
 from agentic_models import DEFAULT_GITHUB_HOST, AgentSettings, Issue, PullRequest, Run
 from agentic_openrouter import run_openrouter
 from agentic_output import strip_ansi, style_patch_summary, style_system_text, style_text
+from agentic_persistence import atomic_write_json, atomic_write_text
 from agentic_policy import default_permission_policy, forbidden
 from agentic_prompts import build_agent_prompt, _run_instruction_context, _system_prompt_context
 from agentic_review import parse_review_result, record_review_findings
@@ -217,7 +217,7 @@ def _local_resume_task_file(issue: Issue, folder: Path) -> Path:
         raise RuntimeError(f"Cannot preserve local task for resume: {path}")
     if not path.exists():
         try:
-            path.write_text(issue.body, encoding="utf-8")
+            atomic_write_text(path, issue.body)
         except OSError as exc:
             raise RuntimeError(f"Cannot preserve local task for resume: {path}") from exc
     return path
@@ -238,7 +238,7 @@ def record_result(folder: Path, status: str, *, attempts: int,
                   max_retries: int, reason: str, worktree: Path,
                   next_action: str) -> None:
     """Persist the latest user-facing terminal result for the dashboard."""
-    _result_path(folder).write_text(json.dumps({
+    atomic_write_json(_result_path(folder), {
         "status": status,
         "attempts": attempts,
         "max_retries": max_retries,
@@ -247,7 +247,7 @@ def record_result(folder: Path, status: str, *, attempts: int,
         "logs_path": str(folder),
         "next_action": next_action,
         "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    }, indent=2) + "\n", encoding="utf-8")
+    })
 
 
 def clear_result(folder: Path) -> None:
@@ -267,7 +267,7 @@ def load_blocked(folder: Path) -> dict[str, Any] | None:
 def record_blocked(folder: Path, patch_digest: str, findings: list[str], *,
                    attempts: int | None = None, max_retries: int | None = None,
                    summary: str = "", issue_digest: str = "") -> None:
-    _blocked_path(folder).write_text(json.dumps({
+    atomic_write_json(_blocked_path(folder), {
         "status": "blocked",
         "result_status": "BLOCKED",
         "reason": "Repeated review blocker with no patch change",
@@ -279,7 +279,7 @@ def record_blocked(folder: Path, patch_digest: str, findings: list[str], *,
         "max_retries": max_retries,
         "logs_path": str(folder),
         "blocked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    }, indent=2) + "\n", encoding="utf-8")
+    })
 
 
 def record_no_code_changes_blocked(folder: Path, developer_report: str, *,
@@ -287,7 +287,7 @@ def record_no_code_changes_blocked(folder: Path, developer_report: str, *,
                                    max_retries: int | None = None,
                                    issue_digest: str = "") -> None:
     developer_log = _latest_numbered_log(folder, "developer", "txt")
-    _blocked_path(folder).write_text(json.dumps({
+    atomic_write_json(_blocked_path(folder), {
         "status": "blocked",
         "result_status": "NO_CHANGES",
         "kind": "no-code-changes",
@@ -301,7 +301,7 @@ def record_no_code_changes_blocked(folder: Path, developer_report: str, *,
         "max_retries": max_retries,
         "logs_path": str(folder),
         "blocked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    }, indent=2) + "\n", encoding="utf-8")
+    })
 
 
 def clear_blocked(folder: Path) -> None:
@@ -354,12 +354,7 @@ def record_review_approval(run: Run, issue: Issue, base: str, base_sha: str,
         "approved_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
     path = review_approval_path(folder)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        temporary.write_text(json.dumps(approval, indent=2) + "\n", encoding="utf-8")
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    atomic_write_json(path, approval)
     return approval
 
 
@@ -727,7 +722,7 @@ def investigate_issue(worktree: Path, issue: Issue, folder: Path, *,
                       sandbox: dict[str, Any] | None = None) -> dict[str, Any]:
     """Investigate an issue and record feedback for the development turn."""
     schema = folder / "investigation-schema.json"
-    schema.write_text(json.dumps(INVESTIGATION_SCHEMA, indent=2), encoding="utf-8")
+    atomic_write_json(schema, INVESTIGATION_SCHEMA)
     output = next_log(folder, "investigation", "json")
     provider = agent.provider if isinstance(agent, AgentSettings) else (agent or {}).get("provider", "codex")
     prompt = f"""You are an INDEPENDENT, READ-ONLY issue investigator.
@@ -800,7 +795,7 @@ paths and test names when they support the observation.
     result = {"summary": data["summary"], "findings": data["findings"]}
     # Keep the provider-facing schema strict while recording which issue body
     # the cached feedback actually evaluated.
-    output.write_text(json.dumps({**result, "_issue_digest": issue_fingerprint(issue)}, indent=2), encoding="utf-8")
+    atomic_write_json(output, {**result, "_issue_digest": issue_fingerprint(issue)})
     return result
 
 
@@ -919,7 +914,7 @@ def review(worktree: Path, issue: Issue, folder: Path, base_sha: str,
     if instruction is None:
         instruction = read_run_instruction(folder)
     schema = folder / "review-schema.json"
-    schema.write_text(json.dumps(REVIEW_SCHEMA, indent=2), encoding="utf-8")
+    atomic_write_json(schema, REVIEW_SCHEMA)
     output = next_log(folder, "review", "json")
     provider = agent.provider if isinstance(agent, AgentSettings) else (agent or {}).get("provider", "codex")
     diff_context = _review_diff_context(worktree, base_sha)
@@ -1087,7 +1082,7 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
         sandbox=config.get("sandbox"),
         deadline=deadline,
     )
-    next_log(folder, "tests").write_text(report, encoding="utf-8")
+    atomic_write_text(next_log(folder, "tests"), report)
     if not passed:
         _status_print("[TESTS] Failed")
         _console_print(strip_ansi(report[-2500:]))

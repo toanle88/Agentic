@@ -18,7 +18,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +86,7 @@ from agentic_execution import (  # noqa: F401
     streamed_command,
 )
 from agentic_output import style_system_text, style_text
+from agentic_persistence import atomic_write_json
 from agentic_openrouter import (  # noqa: F401
     run_openrouter,
 )
@@ -102,6 +102,7 @@ from agentic_telemetry import (
     read_run_instruction,
     record_run_instruction,
     record_issue_metadata,
+    read_issue_snapshot,
     record_security_policy,
 )
 
@@ -353,14 +354,14 @@ def load_blocked(folder: Path) -> dict[str, Any] | None:
 def record_blocked(folder: Path, patch_digest: str, findings: list[str], *,
                    issue_digest: str = "") -> None:
     """Persist a repeated unchanged review blocker for future invocations."""
-    blocked_path(folder).write_text(json.dumps({
+    atomic_write_json(blocked_path(folder), {
         "status": "blocked",
         "reason": "Repeated review blocker with no patch change",
         "patch_digest": patch_digest,
         "issue_digest": issue_digest,
         "findings": findings,
         "blocked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    }, indent=2) + "\n", encoding="utf-8")
+    })
 
 
 def record_no_code_changes_blocked(folder: Path, developer_report: str, *,
@@ -368,7 +369,7 @@ def record_no_code_changes_blocked(folder: Path, developer_report: str, *,
     """Persist a developer blocker for a passing run with no proposed patch."""
     developer_log = _latest_numbered_log(folder, "developer", "txt")
     summary = _bounded_text(developer_report, 2_000).strip()
-    blocked_path(folder).write_text(json.dumps({
+    atomic_write_json(blocked_path(folder), {
         "status": "blocked",
         "kind": "no-code-changes",
         "reason": "Developer reported a blocker without producing code changes",
@@ -378,7 +379,7 @@ def record_no_code_changes_blocked(folder: Path, developer_report: str, *,
         "developer_log": developer_log.name if developer_log else "",
         "logs_path": str(folder),
         "blocked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    }, indent=2) + "\n", encoding="utf-8")
+    })
 
 
 def clear_blocked(folder: Path) -> None:
@@ -423,12 +424,7 @@ def record_manual_approval(run: Run, issue: Issue, base: str, config: dict[str, 
         "marked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
     path = manual_approval_path(folder)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        temporary.write_text(json.dumps(approval, indent=2) + "\n", encoding="utf-8")
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    atomic_write_json(path, approval)
     _status_print(f"[MANUAL] Marked complete: {summary.strip() or '(patch recorded)'}")
     _status_print(f"[MANUAL] Approval record: {path}")
     return approval
@@ -453,12 +449,7 @@ def record_review_approval(run: Run, issue: Issue, base: str, base_sha: str,
         "approved_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
     path = review_approval_path(folder)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        temporary.write_text(json.dumps(approval, indent=2) + "\n", encoding="utf-8")
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    atomic_write_json(path, approval)
     return approval
 
 
@@ -962,6 +953,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--instruction", default=None,
         help="Optional untrusted instruction preserved for this run and its resumes",
     )
+    parser.add_argument(
+        "--offline", action="store_true",
+        help="Resume an existing GitHub run from its bounded issue snapshot without GitHub API calls",
+    )
     parser.add_argument("--task", help="Local task text (used when task_source is local)")
     parser.add_argument("--task-file", type=Path, help="File containing a local task (used when task_source is local)")
     parser.add_argument("--list", action="store_true", help="List open issues")
@@ -1052,6 +1047,8 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
         raise RuntimeError("--new cannot be combined with --review, --publish, or --mark-done")
     if args.reason and not args.mark_done:
         raise RuntimeError("--reason can only be used with --mark-done")
+    if args.offline and (args.new or args.publish or args.list or args.runs):
+        raise RuntimeError("--offline only supports resuming an existing issue run")
     if args.runs:
         if args.json:
             show_runs(repo, json_output=True)
@@ -1091,7 +1088,10 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
     task_deadline = time.monotonic() + config["task_timeout_seconds"]
 
     task_source = config["task_source"]
+    offline_run: Run | None = None
     if task_source == "local":
+        if args.offline:
+            raise RuntimeError("--offline is only available for GitHub issue runs")
         if args.issue is not None:
             raise RuntimeError("This repository uses local task mode; use --task or --task-file instead of --issue")
         if args.task is not None and args.task_file is not None:
@@ -1108,15 +1108,39 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
     else:
         if args.task is not None or args.task_file is not None:
             raise RuntimeError("This repository uses GitHub issue mode; remove --task/--task-file or set task_source to local")
-        github_repo, base = github_metadata(repo, github_host)
-        if args.issue is None:
-            issues = fetch_issues(repo, github_repo, github_host)
-            show_issues(repo, issues)
-            number = select_issue(issues)
+        if args.offline:
+            if args.issue is None:
+                raise RuntimeError("--offline requires --issue N so an existing run can be selected")
+            github_repo = None
+            base = default_base_branch(repo)
+            previous = runs_for_issue(repo, args.issue)
+            if not previous:
+                raise RuntimeError(f"No existing worktree found for issue #{args.issue}; offline resume cannot start a run")
+            offline_run = choose_existing(previous, prompt_prefix="RESUME")
+            cached = read_issue_snapshot(logs_path(repo, offline_run, state_dir))
+            if cached is None:
+                raise RuntimeError(
+                    "This run has no bounded issue snapshot; resume once online before using --offline"
+                )
+            issue = Issue(
+                int(cached.get("number", args.issue)),
+                str(cached.get("title", f"Issue #{args.issue}")),
+                str(cached.get("body", "")),
+                str(cached.get("state", "OPEN")),
+                str(cached.get("source", "github")),
+            )
+            if issue.number != args.issue or issue.is_local:
+                raise RuntimeError("Cached issue snapshot does not match the requested GitHub issue")
         else:
-            number = args.issue
-        previous = runs_for_issue(repo, number)
-        issue = get_issue(repo, github_repo, number, github_host)
+            github_repo, base = github_metadata(repo, github_host)
+            if args.issue is None:
+                issues = fetch_issues(repo, github_repo, github_host)
+                show_issues(repo, issues)
+                number = select_issue(issues)
+            else:
+                number = args.issue
+            previous = runs_for_issue(repo, number)
+            issue = get_issue(repo, github_repo, number, github_host)
 
     if args.publish and not github_repo:
         try:
@@ -1128,7 +1152,10 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
     issue_number = issue.number
     if not issue.is_local and issue_number is None:
         raise RuntimeError("GitHub issue data did not include an issue number")
-    if args.new:
+    if offline_run is not None:
+        run = offline_run
+        fresh = False
+    elif args.new:
         if not eligible(issue):
             raise RuntimeError("Only open issues can start a new worktree")
         if issue.is_local:
@@ -1168,7 +1195,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
     system_prompt = config.get("system_prompt")
     record_issue_metadata(
         folder, number=issue.number, title=issue.title,
-        state=issue.state, source=issue.source,
+        state=issue.state, source=issue.source, body=issue.body,
     )
     record_security_policy(folder, config)
     manual_approval = load_publication_approval(folder)
