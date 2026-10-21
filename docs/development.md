@@ -80,7 +80,17 @@ and opens a normal GitHub pull request using the `gh` CLI. Authenticate first
 with `gh auth login`. Use `--dry-run` to validate the starting branch and run
 checks without making changes.
 
-After the version PR is merged, update local `main` and run the tag helper:
+After the version PR is merged, the preferred release path is GitHub Actions:
+
+1. Open **Actions → Release → Run workflow** and select `main`.
+2. Start the run and approve the protected `release` environment if required.
+3. Confirm the workflow succeeds and inspect the GitHub Release and
+   `release-artifacts` in the run summary.
+
+The workflow reads `agentic.__version__`, validates the supported
+`MAJOR.MINOR.PATCH` form, runs the compile, offline test, and build checks, and
+refuses an existing tag or release. If the UI path is unavailable, update local
+`main` and use the local tag helper as a fallback:
 
 ```bash
 python scripts/release.py --dry-run

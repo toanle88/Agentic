@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Create and push a version tag for an Agentic release.
 
-The GitHub Actions release workflow builds the package and creates the GitHub
-Release. This script performs the local safety checks and pushes the tag that
-starts that workflow.
+The GitHub Actions Release workflow builds the package and creates the GitHub
+Release, including manual runs from ``main``. This script performs the local
+safety checks and pushes the tag as a local fallback.
 """
 
 from __future__ import annotations

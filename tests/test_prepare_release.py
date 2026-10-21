@@ -13,6 +13,13 @@ from scripts import prepare_release
 
 
 class PrepareReleaseTests(unittest.TestCase):
+    def test_pull_request_guidance_describes_actions_release_and_local_fallback(self):
+        body = prepare_release._pull_request_body("v1.0.1")
+
+        self.assertIn("Actions → Release → Run workflow", body)
+        self.assertIn("select `main`", body)
+        self.assertIn("python scripts/release.py", body)
+
     def test_update_package_version_preserves_assignment_style(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

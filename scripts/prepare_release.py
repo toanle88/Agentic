@@ -3,8 +3,9 @@
 
 This command updates ``agentic.__version__`` on a release branch, runs the
 local release checks, pushes the branch, and opens a normal GitHub pull
-request. The existing ``scripts/release.py`` remains responsible for creating
-the tag after that pull request has been merged.
+request. After that pull request is merged, the GitHub Actions Release workflow
+can create the tag and GitHub Release from ``main``; ``scripts/release.py``
+remains the local fallback.
 """
 
 from __future__ import annotations
@@ -171,8 +172,11 @@ def _pull_request_body(tag: str) -> str:
     return (
         f"## Release {tag}\n\n"
         "This pull request updates the Agentic package version.\n\n"
-        "After merging, run `python scripts/release.py` from the synchronized `main` "
-        "branch to create and push the release tag."
+        "After merging, open Actions → Release → Run workflow, select `main`, "
+        "and approve the `release` environment if required. The workflow reads "
+        "`agentic.__version__`, runs the release checks, and creates the tag and "
+        "GitHub Release. If the UI path is unavailable, run `python "
+        "scripts/release.py` from synchronized `main` as the local fallback."
     )
 
 
@@ -246,7 +250,8 @@ def main(argv: Sequence[str] | None = None, *, root: Path = ROOT) -> int:
 
     pr_url = (pr.stdout or pr.stderr or "").strip().splitlines()[-1:] or ["(URL not returned)"]
     print(f"[release-pr] Release PR created: {pr_url[0]}")
-    print("[release-pr] Merge the PR, then run: python scripts/release.py")
+    print("[release-pr] Merge the PR, then run Actions → Release from main")
+    print("[release-pr] Local fallback: python scripts/release.py")
     return 0
 
 
