@@ -340,13 +340,25 @@ def _diff_stat_spans(line: str) -> list[tuple[int, int, str]]:
     return spans
 
 
+def _align_diff_stat_line(line: str) -> str:
+    """Keep diff-stat rows aligned when an upstream producer drops padding."""
+    body = line.rstrip("\r\n")
+    if body and not body[0].isspace() and (
+        _DIFF_STAT_LINE_RE.match(body) or _DIFF_STAT_TOTAL_LINE_RE.match(body)
+    ):
+        return " " + line
+    return line
+
+
 def style_patch_summary(value: Any, stream: Any = None) -> str:
     """Style a ``[PATCH]`` message and its Git diff-stat additions/removals."""
     text = strip_ansi(value)
-    if not color_enabled(stream):
-        return text
     output: list[str] = []
     for index, line in enumerate(text.splitlines(keepends=True)):
+        line = _align_diff_stat_line(line)
+        if not color_enabled(stream):
+            output.append(line)
+            continue
         body = line.rstrip("\r\n")
         ending = line[len(body):]
         spans = _diff_stat_spans(body)
@@ -390,6 +402,7 @@ class PatchSummaryStream:
         self._pending = ""
 
     def _render_line(self, line: str) -> str:
+        line = _align_diff_stat_line(line)
         body = line.rstrip("\r\n")
         if _PATCH_SUMMARY_HEADER_RE.match(body):
             self._active = True
