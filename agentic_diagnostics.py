@@ -15,7 +15,12 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Callable, ContextManager
 
-from agentic_config import load_config, sandbox_env_for_provider
+from agentic_config import (
+    api_key_env_for_provider,
+    auth_mode_for_settings,
+    load_config,
+    sandbox_env_for_provider,
+)
 from agentic_execution import _doctor_public_detail
 from agentic_models import DEFAULT_GITHUB_HOST
 from agentic_output import style_system_text
@@ -154,15 +159,18 @@ def run_doctor(
         detail: str,
         required: bool = True,
         status: str | None = None,
+        **metadata: object,
     ) -> None:
-        checks.append({
+        check: dict[str, object] = {
             "category": category,
             "name": label,
             "ok": ok,
             "required": required,
             "status": status or ("ok" if ok else ("fail" if required else "warn")),
             "detail": detail,
-        })
+        }
+        check.update(metadata)
+        checks.append(check)
 
     def add_skip(category: str, label: str, detail: str) -> None:
         add_check(category, label, False, detail, required=False, status="skip")
@@ -340,20 +348,36 @@ def run_doctor(
             for role, settings in (("developer", loaded["developer_agent"]), ("reviewer", loaded["reviewer_agent"])):
                 provider = settings["provider"]
                 role_name = role.title()
+                auth_mode = auth_mode_for_settings(settings)
+                api_key_env = (
+                    api_key_env_for_provider(provider, settings.get("api_key_env"))
+                    if auth_mode in {"api_key", "both"} else None
+                )
+                credential_set = (
+                    bool(os.environ.get(api_key_env)) if api_key_env else None
+                )
+                sandbox_passed = (
+                    api_key_env in sandbox_env_for_provider(
+                        provider, loaded.get("sandbox"), api_key_env,
+                    )
+                    if api_key_env and provider != "openrouter"
+                    and loaded.get("sandbox", {}).get("enabled") else None
+                )
+                executable = None
+                provider_ok = False
+                native_ok: bool | None = None
+                native_detail = "native CLI authentication was not selected"
+                native_required = False
                 if provider == "openrouter":
-                    env_name = settings["api_key_env"]
                     add_skip(
                         "agent", f"{role_name} provider ({provider})",
                         "API provider has no local executable",
                     )
-                    credentials_ok = bool(os.environ.get(env_name))
-                    add_check(
-                        "agent", f"{role_name} agent authentication ({provider})",
-                        credentials_ok,
-                        f"${env_name} is set" if credentials_ok else f"${env_name} is missing",
-                    )
+                    provider_ok = True
                 elif loaded.get("sandbox", {}).get("enabled"):
-                    pass_env = sandbox_env_for_provider(provider, loaded["sandbox"])
+                    pass_env = sandbox_env_for_provider(
+                        provider, loaded["sandbox"], api_key_env,
+                    )
                     missing_env = [name for name in pass_env if not os.environ.get(name)]
                     if pass_env:
                         detail = (
@@ -363,13 +387,14 @@ def run_doctor(
                         )
                         add_check("agent", f"{role_name} sandbox credentials", not missing_env, detail)
                     else:
-                        add_check(
-                            "agent", f"{role_name} agent authentication ({provider})", False,
-                            "provider credentials must be provisioned in the image or sandbox.pass_env",
-                            required=False,
-                        )
+                        if api_key_env:
+                            add_check(
+                                "agent", f"{role_name} sandbox credentials", False,
+                                f"${api_key_env} is not listed in sandbox.pass_env",
+                            )
                     if engine_path and image_ok:
                         image_executable = settings.get("executable_path") or provider
+                        executable = str(image_executable)
                         provider_ok, _provider_output = probe(
                             [engine_path, "run", "--rm", "--network", "none",
                              "--entrypoint", str(image_executable),
@@ -387,13 +412,18 @@ def run_doctor(
                             "agent", f"{role_name} provider ({provider})", False,
                             "provider executable was not probed because the sandbox engine or image is unavailable",
                         )
+                    if auth_mode in {"native_cli", "both"}:
+                        native_detail = (
+                            "native CLI authentication is selected; the sandbox image is responsible "
+                            "for its login state"
+                        )
                 else:
                     resolved = resolve_provider_executable(
                         provider, settings.get("executable_path"),
                     )
                     executable = resolved.path
-                    ok, _provider_output = probe([executable, "--version"], repo) if executable else (False, "")
-                    if ok:
+                    provider_ok, _provider_output = probe([executable, "--version"], repo) if executable else (False, "")
+                    if provider_ok:
                         if provider == "copilot" and resolved.source == "GitHub CLI download":
                             detail = (
                                 f"Copilot CLI was found at {display_provider_path(executable)} "
@@ -425,34 +455,77 @@ def run_doctor(
                                 )
                         else:
                             detail = "executable not found on PATH"
-                    add_check("agent", f"{role_name} provider ({provider})", ok, detail)
+                    add_check("agent", f"{role_name} provider ({provider})", provider_ok, detail)
                     auth_args = PROVIDER_AUTH_STATUS_ARGS.get(provider)
-                    if executable and ok and auth_args:
-                        auth_ok, _auth_output = probe(
+                    native_required = bool(auth_args)
+                    if auth_mode not in {"native_cli", "both"}:
+                        native_ok = None
+                        native_detail = "native CLI authentication was not checked because API-key mode is selected"
+                    elif executable and provider_ok and auth_args:
+                        native_ok, _auth_output = probe(
                             [executable, *auth_args], repo, timeout=30,
                         )
-                        auth_detail = (
-                            "provider authentication is available" if auth_ok else
+                        native_detail = (
+                            "provider authentication is available" if native_ok else
                             "provider is not authenticated or its auth status could not be checked"
                         )
                     elif not executable:
-                        auth_ok = False
-                        auth_detail = "authentication was not checked because the executable is unavailable"
-                    elif not ok:
-                        auth_ok = False
-                        auth_detail = "authentication was not checked because the executable failed its version check"
+                        native_ok = False
+                        native_detail = "authentication was not checked because the executable is unavailable"
+                    elif not provider_ok:
+                        native_ok = False
+                        native_detail = "authentication was not checked because the executable failed its version check"
                     else:
-                        auth_ok = False
-                        auth_detail = (
+                        native_ok = False
+                        native_detail = (
                             "provider CLI has no documented noninteractive authentication "
                             "status check"
                         )
-                    add_check(
-                        "agent", f"{role_name} agent authentication ({provider})",
-                        auth_ok, auth_detail,
-                        required=bool(auth_args),
-                        status=None if auth_args else "skip",
+                api_required = auth_mode in {"api_key", "both"}
+                api_ok = (
+                    bool(credential_set)
+                    and (sandbox_passed is not False)
+                    if api_required else True
+                )
+                if auth_mode == "native_cli":
+                    auth_ok = bool(native_ok)
+                    auth_required = native_required
+                    auth_status = None if native_required else "skip"
+                    auth_detail = f"mode: native CLI; status: {native_detail}"
+                elif auth_mode == "api_key":
+                    auth_ok = api_ok
+                    auth_required = True
+                    auth_status = None
+                    credential_label = "GitHub token" if provider == "copilot" else "API key"
+                    sandbox_detail = (
+                        "; sandbox: passed" if sandbox_passed is True else
+                        "; sandbox: not included" if sandbox_passed is False else ""
                     )
+                    auth_detail = (
+                        f"mode: API key ({credential_label}); variable: ${api_key_env}; "
+                        f"status: {'set' if credential_set else 'missing'}{sandbox_detail}"
+                    )
+                else:
+                    native_component_ok = bool(native_ok) if native_required else True
+                    auth_ok = api_ok and native_component_ok
+                    auth_required = True
+                    auth_status = None
+                    credential_label = "GitHub token" if provider == "copilot" else "API key"
+                    auth_detail = (
+                        f"mode: both; variable: ${api_key_env}; "
+                        f"{credential_label}: {'set' if credential_set else 'missing'}; "
+                        f"native CLI: {native_detail}"
+                    )
+                add_check(
+                    "agent", f"{role_name} agent authentication ({provider})",
+                    auth_ok, auth_detail,
+                    required=auth_required,
+                    status=auth_status,
+                    auth_mode=auth_mode,
+                    api_key_env=api_key_env,
+                    credential_set=credential_set,
+                    sandbox_passed=sandbox_passed,
+                )
             if run_commands and worktree_ok:
                 commands = list(loaded["test_commands"])
                 if profile == "slow":

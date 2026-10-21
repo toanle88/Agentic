@@ -152,9 +152,25 @@ Provider selection is configured independently for the developer and reviewer:
 ```
 
 Supported providers are `codex`, `gemini`, `claude`, `copilot`, and
-`openrouter`. For OpenRouter, set `model`, keep `api_key_env` pointing to an
-environment variable such as `OPENROUTER_API_KEY`, and export the key before
-running Agentic. Do not put API keys in `agent_config.json`.
+`openrouter`. Native CLI login remains the default. Any provider can instead
+use an environment-backed credential with `auth: "api_key"` and
+`api_key_env` (or by setting `api_key_env` alone):
+
+```json
+{
+  "developer": {
+    "provider": "claude",
+    "api_key_env": "ANTHROPIC_API_KEY"
+  }
+}
+```
+
+Provider defaults are `OPENAI_API_KEY`, `GEMINI_API_KEY`,
+`ANTHROPIC_API_KEY`, and `GH_TOKEN` (GitHub token) for Codex, Gemini, Claude,
+and Copilot. OpenRouter uses `OPENROUTER_API_KEY` by default. Export the
+selected variable before running Agentic; never put a credential value in
+`agent_config.json`. For isolated mode, also list the selected variable in
+`sandbox.pass_env`.
 
 Run the environment diagnostic before the first issue:
 

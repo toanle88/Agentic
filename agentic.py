@@ -31,6 +31,8 @@ from agentic_config import (  # noqa: F401
     DEFAULT_REVIEWER_TIMEOUT,
     DEFAULT_TASK_TIMEOUT,
     DEFAULT_TEST_TIMEOUT,
+    AUTH_MODES,
+    PROVIDER_API_KEY_ENV,
     OPENROUTER_MAX_TURNS,
     SECURITY_MODES,
     SUPPORTED_PROVIDERS,
@@ -41,6 +43,8 @@ from agentic_config import (  # noqa: F401
     load_config,
     preflight_agent_settings,
     preflight_security,
+    api_key_env_for_provider,
+    auth_mode_for_settings,
     sandbox_env_for_provider,
     sandbox_env_for_providers,
     test_commands_for_profile,
@@ -102,7 +106,7 @@ from agentic_telemetry import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.61"
+__version__ = "1.1.62"
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 INSTRUCTION_CONTEXT_CHARS = _INSTRUCTION_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module

@@ -124,6 +124,7 @@ class AgentSettings:
     executable_path: str | None = None
     host: str | None = None
     permission_policy: dict[str, bool] | None = None
+    auth: str = "native_cli"
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -131,6 +132,7 @@ class AgentSettings:
             "model": self.model,
             "reasoning_effort": self.reasoning_effort,
             "timeout_seconds": self.timeout_seconds,
+            "auth": self.auth,
             "api_key_env": self.api_key_env,
             "base_url": self.base_url,
             "executable_path": self.executable_path,

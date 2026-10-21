@@ -124,7 +124,8 @@ Each provider object supports these fields:
 | `timeout_seconds` | integer or `null` | Per developer/reviewer invocation limit; `null` uses 600 seconds for developers or 300 seconds for reviewers. |
 | `executable_path` | string or `null` | Copilot only: optional explicit executable path. In trusted mode, `COPILOT_PATH` and the GitHub CLI download at `~/.local/share/gh/copilot/copilot` are also detected automatically. In isolated mode, set an image-visible path because host paths are not mounted. |
 | `host` | hostname or `null` | Copilot only: host used for Copilot authentication and model access. Agentic sets the per-process `COPILOT_GH_HOST` environment variable and never changes global `GH_HOST`. |
-| `api_key_env` | string | OpenRouter only: environment variable containing the API key. |
+| `auth` | `native_cli`, `api_key`, or `both` | Authentication mode. Omitted values preserve native CLI authentication unless `api_key_env` is present; OpenRouter always uses `api_key`. |
+| `api_key_env` | string | Environment-variable name for the selected provider credential. Defaults to `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `GH_TOKEN`, or `OPENROUTER_API_KEY` when API-key mode is selected. The value is never stored in configuration. |
 | `base_url` | URL | OpenRouter only: API base URL, defaulting to the public OpenRouter endpoint. |
 | `max_tool_turns` | integer or `null` | OpenRouter only: maximum number of model/tool rounds; default `40`. |
 | `command_timeout_seconds` | integer or `null` | OpenRouter only: maximum duration of one tool command; `null` uses 300 seconds. |
@@ -189,7 +190,30 @@ capability is necessary.
 `developer.provider` and `reviewer.provider` may be `codex`, `gemini`,
 `claude`, `copilot`, or `openrouter`. The developer and reviewer can use
 different providers. Native providers use their own CLI installation and
-authentication; Agentic never stores their credentials.
+authentication by default; Agentic never stores their credentials. To use an
+environment-backed credential, set `auth` to `api_key` (or set `api_key_env`,
+which selects that mode) and optionally override the provider default:
+
+```json
+{
+  "developer": {
+    "provider": "claude",
+    "auth": "api_key",
+    "api_key_env": "ANTHROPIC_API_KEY"
+  },
+  "reviewer": {
+    "provider": "copilot",
+    "api_key_env": "REVIEW_GITHUB_TOKEN"
+  }
+}
+```
+
+The supported defaults are `OPENAI_API_KEY` for Codex, `GEMINI_API_KEY` for
+Gemini, `ANTHROPIC_API_KEY` for Claude, and `GH_TOKEN` (a GitHub token) for
+Copilot. `auth: "both"` requires both the environment credential and native
+CLI authentication. Export the selected variables in the shell that runs
+Agentic. In isolated mode, add each selected variable to `sandbox.pass_env`;
+only the role's selected credential is passed to its provider process.
 
 GitHub repository operations use `github_host` through a per-process `GH_HOST`
 environment override. A Copilot provider can use a different Enterprise Cloud
@@ -437,7 +461,12 @@ for the developer and reviewer independently, even when they use the same
 provider. Codex and Claude include a read-only authentication-status probe;
 Gemini and Copilot report authentication as skipped because doctor does not
 invoke their documented login flows or infer provider state from unrelated
-commands. Provider output and credentials are never printed.
+commands. Provider output and credential values are never printed. For each
+role, JSON diagnostics include `auth_mode`, `api_key_env`, `credential_set`,
+and `sandbox_passed` (`null` when no isolated sandbox applies). Human-readable
+output names the selected mode and environment variable but never its value.
+Native authentication checks are skipped when API-key mode is selected, so an
+unavailable unused login does not fail the check.
 
 ## Choosing checks
 

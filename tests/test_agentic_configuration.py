@@ -270,7 +270,8 @@ class ConfigurationTests(unittest.TestCase):
             ({'developer': {'timeout_seconds': 0}}, 'timeout_seconds'),
             ({'developer': {'model': ' '}}, 'model'),
             ({'developer': {'provider': 'openrouter', 'model': 'x', 'base_url': 'ftp://router'}}, 'base_url'),
-            ({'developer': {'provider': 'gemini', 'api_key_env': 'KEY'}}, 'only valid for openrouter'),
+            ({'developer': {'provider': 'gemini', 'api_key_env': 'BAD-NAME'}}, 'valid environment variable'),
+            ({'developer': {'provider': 'gemini', 'auth': 'unsupported'}}, 'auth'),
             ({'security_mode': 'unsafe'}, 'security_mode'),
         ]
         with tempfile.TemporaryDirectory() as temp:
@@ -280,6 +281,51 @@ class ConfigurationTests(unittest.TestCase):
                     path.write_text(json.dumps({**base, **extra}))
                     with self.assertRaisesRegex(ValueError, expected):
                         agentic.load_config(path)
+
+
+    def test_native_provider_api_key_auth_uses_provider_defaults_and_role_overrides(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'agent_config.json'
+            path.write_text(json.dumps({
+                'test_commands': [['true']],
+                'developer': {'provider': 'claude', 'auth': 'api_key'},
+                'reviewer': {
+                    'provider': 'copilot', 'api_key_env': 'REVIEW_GITHUB_TOKEN',
+                },
+            }))
+            config = agentic.load_config(path)
+        self.assertEqual(config['developer_agent']['auth'], 'api_key')
+        self.assertEqual(config['developer_agent']['api_key_env'], 'ANTHROPIC_API_KEY')
+        self.assertEqual(config['reviewer_agent']['auth'], 'api_key')
+        self.assertEqual(config['reviewer_agent']['api_key_env'], 'REVIEW_GITHUB_TOKEN')
+
+
+    def test_api_key_preflight_checks_trusted_and_isolated_credentials(self):
+        settings = {'provider': 'claude', 'api_key_env': 'CLAUDE_TEST_KEY'}
+        with patch.dict(agentic.os.environ, {}, clear=True), \
+             patch('agentic.shutil.which', return_value='/usr/bin/claude'):
+            with self.assertRaisesRegex(RuntimeError, r'Claude API key is missing; set \$CLAUDE_TEST_KEY'):
+                agentic.preflight_agent_settings(settings)
+        with patch.dict(agentic.os.environ, {'CLAUDE_TEST_KEY': 'secret'}, clear=True), \
+             patch('agentic.shutil.which', return_value='/usr/bin/claude'):
+            agentic.preflight_agent_settings(settings)
+            with self.assertRaisesRegex(RuntimeError, 'sandbox.pass_env'):
+                agentic.preflight_agent_settings(
+                    settings,
+                    sandbox={'enabled': True, 'pass_env': []},
+                )
+            agentic.preflight_agent_settings(
+                settings,
+                sandbox={'enabled': True, 'pass_env': ['CLAUDE_TEST_KEY']},
+            )
+
+
+    def test_sandbox_credential_filter_accepts_role_specific_environment_names(self):
+        sandbox = {'enabled': True, 'pass_env': ['OPENAI_API_KEY', 'REVIEW_KEY']}
+        self.assertEqual(
+            agentic.sandbox_env_for_provider('claude', sandbox, 'REVIEW_KEY'),
+            ['REVIEW_KEY'],
+        )
 
 
     def test_openrouter_limits_are_loaded_and_validated(self):
@@ -600,6 +646,17 @@ class ConfigurationTests(unittest.TestCase):
             agentic.preflight_agent_settings({'provider': 'gemini'}, sandbox=sandbox)
 
 
+    def test_openrouter_sandbox_preflight_keeps_api_credential_on_host(self):
+        sandbox = {
+            'enabled': True, 'engine': 'docker', 'image': 'test-image',
+            'pass_env': ['OPENROUTER_API_KEY'],
+        }
+        with patch.dict(agentic.os.environ, {'OPENROUTER_API_KEY': 'present'}, clear=True):
+            agentic.preflight_agent_settings(
+                {'provider': 'openrouter', 'api_key_env': 'OPENROUTER_API_KEY'},
+                sandbox=sandbox,
+            )
+
     def test_sandbox_credentials_are_selected_per_provider(self):
         sandbox = {
             'enabled': True, 'engine': 'docker', 'image': 'test-image',
@@ -762,6 +819,107 @@ class ConfigurationTests(unittest.TestCase):
         self.assertTrue(payload['ok'])
         self.assertTrue(any(item['name'] == 'Agentic config' for item in payload['checks']))
         self.assertTrue(all('category' in item for item in payload['checks']))
+
+
+    def test_doctor_reports_api_key_mode_without_secret_values_or_native_probe(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            config = repo / 'agent_config.json'
+            config.write_text(json.dumps({
+                'task_source': 'local',
+                'test_commands': [[sys.executable, '-c', 'pass']],
+                'developer': {
+                    'provider': 'claude', 'api_key_env': 'CLAUDE_ROLE_KEY',
+                },
+                'reviewer': {
+                    'provider': 'codex', 'auth': 'api_key',
+                    'api_key_env': 'CODEX_ROLE_KEY',
+                },
+            }))
+            probed = []
+
+            def fake_probe(argv, cwd, **kwargs):
+                probed.append(argv)
+                if argv[:2] == ['git', 'rev-parse']:
+                    return True, str(repo)
+                return True, 'provider-auth-secret-value'
+
+            with (patch.dict(agentic.os.environ, {
+                      'CLAUDE_ROLE_KEY': 'claude-secret',
+                      'CODEX_ROLE_KEY': 'codex-secret',
+                  }, clear=True),
+                  patch('agentic.installed_git_version', return_value=(2, 48, 0)),
+                  patch('agentic.probe', side_effect=fake_probe),
+                  patch('agentic.shutil.which', return_value='/usr/bin/provider'),
+                  patch('sys.stdout', new_callable=io.StringIO) as output):
+                result = agentic.doctor(repo, config, json_output=True)
+        self.assertEqual(result, 0)
+        rendered = output.getvalue()
+        self.assertNotIn('claude-secret', rendered)
+        self.assertNotIn('codex-secret', rendered)
+        payload = json.loads(rendered)
+        auth_checks = {
+            item['name']: item for item in payload['checks']
+            if item['category'] == 'agent' and 'authentication' in item['name']
+        }
+        claude = auth_checks['Developer agent authentication (claude)']
+        self.assertEqual(claude['auth_mode'], 'api_key')
+        self.assertEqual(claude['api_key_env'], 'CLAUDE_ROLE_KEY')
+        self.assertTrue(claude['credential_set'])
+        self.assertIsNone(claude['sandbox_passed'])
+        self.assertNotIn(['/usr/bin/provider', 'auth', 'status'], probed)
+        codex = auth_checks['Reviewer agent authentication (codex)']
+        self.assertEqual(codex['api_key_env'], 'CODEX_ROLE_KEY')
+        self.assertTrue(codex['credential_set'])
+
+    def test_doctor_reports_openrouter_host_credential_with_sandbox(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            config = repo / 'agent_config.json'
+            config.write_text(json.dumps({
+                'task_source': 'local',
+                'security_mode': 'isolated',
+                'test_commands': [[sys.executable, '-c', 'pass']],
+                'sandbox': {
+                    'enabled': True,
+                    'engine': 'docker',
+                    'image': 'test-image',
+                    'pass_env': ['OPENROUTER_API_KEY'],
+                },
+                'developer': {
+                    'provider': 'openrouter', 'model': 'test-model',
+                },
+                'reviewer': {
+                    'provider': 'openrouter', 'model': 'test-model',
+                },
+            }))
+
+            def fake_probe(argv, cwd, **kwargs):
+                return True, 'ok'
+
+            with (patch.dict(agentic.os.environ, {
+                      'OPENROUTER_API_KEY': 'router-secret',
+                  }, clear=True),
+                  patch('agentic.installed_git_version', return_value=(2, 48, 0)),
+                  patch('agentic.probe', side_effect=fake_probe),
+                  patch('agentic.shutil.which', return_value='/usr/bin/docker'),
+                  patch('sys.stdout', new_callable=io.StringIO) as output):
+                result = agentic.doctor(repo, config, json_output=True)
+
+        self.assertEqual(result, 0)
+        rendered = output.getvalue()
+        self.assertNotIn('router-secret', rendered)
+        payload = json.loads(rendered)
+        auth_checks = {
+            item['name']: item for item in payload['checks']
+            if item['category'] == 'agent' and 'authentication' in item['name']
+        }
+        for role in ('Developer', 'Reviewer'):
+            check = auth_checks[f'{role} agent authentication (openrouter)']
+            self.assertEqual(check['auth_mode'], 'api_key')
+            self.assertEqual(check['api_key_env'], 'OPENROUTER_API_KEY')
+            self.assertTrue(check['credential_set'])
+            self.assertIsNone(check['sandbox_passed'])
 
 
     def test_doctor_separates_github_access_checks_and_local_mode_skips_them(self):
