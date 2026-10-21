@@ -356,7 +356,7 @@ agentic dashboard --serve --host 0.0.0.0 --allow-remote \
   --tls-certfile server.crt --tls-keyfile server.key
 ```
 
-Remote serving uses HTTPS and refuses to start without both TLS files,
+Remote serving uses HTTPS with TLS 1.2 or newer and refuses to start without both TLS files,
 `--allow-remote`, and the token environment variable. API clients may send
 `Authorization: Bearer <token>`. Browsers can use HTTP Basic authentication
 with username `agentic` and the token as the password; this also allows live

@@ -323,8 +323,7 @@ def _serve_dashboard(output: Path, render_current: Any, host: str, port: int,
     output_name = output.name
     tls_context = None
     if tls_certfile is not None and tls_keyfile is not None:
-        tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        tls_context.load_cert_chain(tls_certfile, tls_keyfile)
+        tls_context = _dashboard_tls_context(tls_certfile, tls_keyfile)
     server = ThreadingHTTPServer(
         (host, port), _dashboard_handler(output_name, render_current, auth_token),
     )
@@ -340,6 +339,14 @@ def _serve_dashboard(output: Path, render_current: Any, host: str, port: int,
         return
     finally:
         server.server_close()
+
+
+def _dashboard_tls_context(certfile: Path, keyfile: Path) -> ssl.SSLContext:
+    """Create the dashboard's server context with a modern TLS floor."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(certfile, keyfile)
+    return context
 
 
 def main(argv: list[str] | None = None) -> int:

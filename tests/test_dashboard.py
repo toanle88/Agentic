@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -494,6 +495,20 @@ class DashboardTests(unittest.TestCase):
                     "--repo", str(root), "--logs", str(logs), "--output", str(root / "dashboard.html"),
                     "--serve", "--allow-remote", "--host", "0.0.0.0", "--port", "0",
                 ])
+
+    def test_dashboard_tls_context_rejects_legacy_protocol_versions(self):
+        with patch.object(agentic_dashboard.ssl, "SSLContext") as ssl_context:
+            context = ssl_context.return_value
+            result = agentic_dashboard._dashboard_tls_context(
+                Path("server.crt"), Path("server.key"),
+            )
+
+        self.assertIs(result, context)
+        ssl_context.assert_called_once_with(ssl.PROTOCOL_TLS_SERVER)
+        self.assertEqual(context.minimum_version, ssl.TLSVersion.TLSv1_2)
+        context.load_cert_chain.assert_called_once_with(
+            Path("server.crt"), Path("server.key"),
+        )
 
     def test_dashboard_renders_navigable_views_filters_and_log_actions(self):
         html = agentic_dashboard.render_dashboard([], "demo", ".demo-agent-runs")
