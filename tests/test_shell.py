@@ -13,7 +13,6 @@ import agentic
 import agentic_shell
 import agentic_shell_input
 from agentic import state_paths
-from agentic_output import tag_system_prefix
 
 
 class ShellTests(unittest.TestCase):
