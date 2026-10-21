@@ -45,6 +45,11 @@ class OpenRouterTests(unittest.TestCase):
             self.assertTrue(ok)
             self.assertEqual(message, 'done')
             self.assertTrue(tool_call.call_args.kwargs['allow_network'])
+            log = (root / 'developer.log').read_text(encoding='utf-8')
+            self.assertNotIn('Using tool: run_command', log)
+            raw = (root / 'developer.jsonl').read_text(encoding='utf-8')
+            self.assertIn('"event": "tool_call"', raw)
+            self.assertIn('"event": "tool_result"', raw)
 
     def test_openrouter_requires_model_and_never_reads_key_from_config(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -150,6 +155,32 @@ class OpenRouterTests(unittest.TestCase):
             log = (root / 'developer.log').read_text(encoding='utf-8')
             self.assertNotIn('\033[', log)
             self.assertIn('[DEVELOPER] Finished in', log)
+
+    def test_openrouter_verbose_keeps_transient_tool_progress(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            responses = iter([
+                {'choices': [{'message': {
+                    'role': 'assistant', 'content': None,
+                    'tool_calls': [{'id': 'call-1', 'function': {
+                        'name': 'list_files', 'arguments': '{}',
+                    }}],
+                }}]},
+                {'choices': [{'message': {'role': 'assistant', 'content': 'done'}}]},
+            ])
+            with (patch.dict(agentic.os.environ, {'ROUTER_KEY': 'secret'}, clear=False),
+                  patch('agentic_openrouter._openrouter_request',
+                        side_effect=lambda *args: next(responses)),
+                  patch('agentic_openrouter._openrouter_tool_call', return_value='ok')):
+                ok, _ = agentic.run_openrouter(
+                    root, 'prompt', output=root / 'verbose.txt', model='openai/test',
+                    api_key_env='ROUTER_KEY', verbose=True,
+                )
+            self.assertTrue(ok)
+            self.assertIn(
+                'Using tool: list_files',
+                (root / 'verbose.log').read_text(encoding='utf-8'),
+            )
 
     def test_openrouter_colors_generated_error_without_coloring_provider_message(self):
         class TTYBuffer(StringIO):

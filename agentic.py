@@ -107,7 +107,7 @@ from agentic_telemetry import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.62"
+__version__ = "1.1.63"
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 INSTRUCTION_CONTEXT_CHARS = _INSTRUCTION_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module
@@ -957,6 +957,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--offline", action="store_true",
         help="Resume an existing GitHub run from its bounded issue snapshot without GitHub API calls",
     )
+    parser.add_argument(
+        "--verbose", action="store_true",
+        help="Keep detailed provider and command progress in human-readable logs",
+    )
     parser.add_argument("--task", help="Local task text (used when task_source is local)")
     parser.add_argument("--task-file", type=Path, help="File containing a local task (used when task_source is local)")
     parser.add_argument("--list", action="store_true", help="List open issues")
@@ -1213,6 +1217,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
                 deadline=task_deadline,
                 instruction=instruction,
                 system_prompt=system_prompt,
+                verbose=args.verbose,
             )
         if not passed:
             raise RuntimeError("Review or tests did not approve current changes")
@@ -1248,6 +1253,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
     with worktree_lock(repo, run, state_dir):
         investigation = _run_investigation(
             run, issue, config, folder, deadline=task_deadline,
+            verbose=args.verbose,
         )
     if not fresh and github_repo:
         existing = check_existing_pr(run.worktree, github_repo, run.branch, github_host)
@@ -1261,6 +1267,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
                 timeout=_remaining_timeout(task_deadline, config["effective_test_timeout_seconds"]),
                 sandbox=config.get("sandbox"),
                 deadline=task_deadline,
+                verbose=args.verbose,
             )
         if not passed:
             raise RuntimeError(f"Base tests are failing; retained worktree.\n{report[-2500:]}")
@@ -1275,6 +1282,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
             initial_feedback="\n\n".join(feedback_parts), test_commands=test_commands,
             deadline=task_deadline, instruction=instruction,
             system_prompt=system_prompt,
+            verbose=args.verbose,
         )
     if not completed:
         terminal_result = None

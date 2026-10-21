@@ -21,6 +21,12 @@ class ShellCommandTests(unittest.TestCase):
             ("47", ["--offline"]),
         )
 
+    def test_verbose_is_a_valid_run_flag(self):
+        self.assertEqual(
+            parse_job_command(["/run", "47", "--verbose"]),
+            ("47", ["--verbose"]),
+        )
+
     def test_conflicting_run_modes_are_rejected(self):
         with self.assertRaises(ValueError):
             parse_job_command(["/run", "47", "--review", "--publish"])

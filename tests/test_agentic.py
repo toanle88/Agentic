@@ -584,6 +584,15 @@ class PureTests(unittest.TestCase):
         passed_sandbox = cli.call_args.kwargs['sandbox']
         self.assertEqual(passed_sandbox['pass_env'], ['ROLE_KEY', 'ANTHROPIC_API_KEY'])
 
+    def test_run_agent_forwards_verbose_only_when_requested(self):
+        root = Path('/tmp/agentic-provider-verbose-test')
+        with patch('agentic.run_cli_provider', return_value=(True, 'cli')) as cli:
+            agentic.run_agent(
+                root, 'prompt', output=root / 'message.txt',
+                settings={'provider': 'gemini'}, verbose=True,
+            )
+        self.assertTrue(cli.call_args.kwargs['verbose'])
+
 
     def test_native_provider_maps_custom_credential_name_to_cli_environment(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -738,6 +747,9 @@ class PureTests(unittest.TestCase):
         self.assertIsNone(args.command)
         self.assertEqual(args.issue, 42)
         self.assertTrue(args.publish)
+        self.assertTrue(agentic.build_parser().parse_args([
+            '--issue', '42', '--verbose',
+        ]).verbose)
         with self.assertRaises(SystemExit):
             agentic.build_parser().parse_args(['--chat', '--issue', '42'])
         with self.assertRaises(SystemExit):

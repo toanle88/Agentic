@@ -487,8 +487,14 @@ class StreamingTests(unittest.TestCase):
             root = Path(dirname)
             log = root / 'developer-001.log'
             script = ('import json,sys; '
+                      'print(json.dumps({"type":"thread.started"}),flush=True); '
+                      'print(json.dumps({"type":"turn.completed"}),flush=True); '
                       'print(json.dumps({"type":"item.started","item":'
                       '{"type":"command_execution","command":"ls tests"}}),flush=True); '
+                      'print(json.dumps({"type":"item.completed","item":'
+                      '{"type":"file_change","changes":[{"path":"a.py"}]}}),flush=True); '
+                      'print(json.dumps({"type":"item.completed","item":'
+                      '{"type":"file_change","changes":[{"path":"b.py"}]}}),flush=True); '
                       'print(json.dumps({"type":"item.completed","item":'
                       '{"type":"command_execution","exit_code":0}}),flush=True)')
             with patch('sys.stdout', new_callable=StringIO) as out:
@@ -498,12 +504,55 @@ class StreamingTests(unittest.TestCase):
                                                   metrics_folder=root)
             self.assertEqual(result.returncode, 0)
             self.assertIn('Running command: ls tests', out.getvalue())
-            self.assertIn('Command finished (exit 0)', log.read_text())
-            self.assertIn('item.started', log.with_suffix('.jsonl').read_text())
+            human = log.read_text(encoding='utf-8')
+            self.assertNotIn('Codex session started', human)
+            self.assertNotIn('Agent finished its turn', human)
+            self.assertNotIn('Command finished (exit 0)', human)
+            self.assertEqual(human.count('Modified files:'), 1)
+            raw = log.with_suffix('.jsonl').read_text(encoding='utf-8')
+            self.assertIn('item.started', raw)
+            self.assertIn('thread.started', raw)
             metrics = json.loads((root / 'run.json').read_text())['metrics']
             self.assertEqual(metrics['operations'][0]['role'], 'developer')
             self.assertEqual(metrics['operations'][0]['status'], 'completed')
             self.assertGreaterEqual(metrics['operations'][0]['duration_seconds'], 0)
+
+    def test_verbose_streamed_codex_log_keeps_routine_progress(self):
+        from io import StringIO
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            log = root / 'developer.log'
+            script = ('import json; '
+                      'print(json.dumps({"type":"thread.started"}),flush=True); '
+                      'print(json.dumps({"type":"item.completed","item":'
+                      '{"type":"command_execution","exit_code":0}}),flush=True)')
+            with patch('sys.stdout', new_callable=StringIO):
+                result = agentic.streamed_command(
+                    [sys.executable, '-c', script], root,
+                    label='DEVELOPER', log_file=log, timeout=10,
+                    codex_json=True, verbose=True,
+                )
+            self.assertEqual(result.returncode, 0)
+            human = log.read_text(encoding='utf-8')
+            self.assertIn('Codex session started', human)
+            self.assertIn('Command finished (exit 0)', human)
+
+    def test_streamed_progress_keeps_failure_and_timeout_diagnostics(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            script = ('import json; '
+                      'print(json.dumps({"type":"item.completed","item":'
+                      '{"type":"command_execution","exit_code":3}}),flush=True); '
+                      'print(json.dumps({"type":"error","message":"provider failed"}),flush=True)')
+            result = agentic.streamed_command(
+                [sys.executable, '-c', script], root,
+                label='DEVELOPER', log_file=root / 'developer.log',
+                timeout=10, codex_json=True,
+            )
+            self.assertEqual(result.returncode, 0)
+            human = (root / 'developer.log').read_text(encoding='utf-8')
+            self.assertIn('Command finished (exit 3)', human)
+            self.assertIn('ERROR: provider failed', human)
 
     def test_tty_codex_progress_colors_generated_status_tokens(self):
         class TTYBuffer(StringIO):
@@ -612,7 +661,10 @@ class StreamingTests(unittest.TestCase):
                 )
             self.assertEqual(result.returncode, 0)
             self.assertIn('\r\033[2K', out.getvalue())
-            self.assertIn('Still running', (root / 'tests.log').read_text(encoding='utf-8'))
+            self.assertEqual(
+                (root / 'tests.log').read_text(encoding='utf-8').count('Still running'),
+                1,
+            )
 
     def test_streamed_command_allows_no_timeout(self):
         with tempfile.TemporaryDirectory() as dirname:

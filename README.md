@@ -240,6 +240,12 @@ visible. Set `AGENTIC_ASCII=1` for terminals that do not render box-drawing
 characters, or `NO_COLOR=1` / `AGENTIC_PLAIN=1` for plain, uncolored output.
 Redirected output and persisted logs are plain text.
 
+Persisted provider logs are concise by default: routine session, tool, heartbeat,
+and successful command progress stays as live terminal status, while failures,
+timeouts, final results, and diagnostics remain in the human-readable log. Use
+`agentic --issue 119 --verbose` or `/run 119 --verbose` to retain detailed
+progress. Structured provider events remain in the adjacent `.jsonl` trace.
+
 Interactive input keeps a two-line status prompt with the developer provider
 and model, working directory, and active task. Up/Down recalls command history;
 Ctrl+C cancels the current input, Esc dismisses completion, and bracketed

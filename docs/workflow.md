@@ -40,10 +40,10 @@ Available commands:
 
 ```text
 /run ISSUE [--profile fast|slow]       Start a background job
-     [--review|--publish|--mark-done|--new]
+     [--review|--publish|--mark-done|--new|--verbose]
      [--reason "why"] with --mark-done
 /run [--profile fast|slow]             Local mode: paste task, finish with /done
-     [--review|--publish|--mark-done|--new]
+     [--review|--publish|--mark-done|--new|--verbose]
 /ps [--all]                            Show current or persisted job status
 /logs JOB|PID [LINES]                  Follow a running job or show recent output
 /stop JOB|--all                        Stop one or all running jobs
@@ -319,6 +319,16 @@ Durable artifacts are stored in the centralized Agentic state directory:
 ```
 
 Run logs include developer and reviewer progress, provider event traces, test output, structured review results, and resume evidence. They are outside the worktree so they cannot accidentally become part of the patch.
+
+Human-readable provider logs are concise by default. Routine session, tool,
+heartbeat, and successful command-completion messages are kept as transient
+terminal status or summarized, while errors, non-zero exits, timeouts,
+cancellations, test failures, review findings, final responses, and duration
+remain durable. Pass `--verbose` to the regular CLI, for example
+`agentic --issue 119 --verbose`, or use `/run 119 --verbose` in the interactive
+shell to retain the detailed progress output. Structured providers keep the
+complete redacted event stream in the adjacent `.jsonl` file; the human log is
+not a replacement for that trace.
 
 Generate a read-only HTML snapshot:
 

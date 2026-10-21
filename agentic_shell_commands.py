@@ -10,7 +10,9 @@ from collections.abc import Sequence
 
 
 _RUN_VALUE_OPTIONS = {"--profile", "--instruction", "--reason", "--task-file"}
-_RUN_BOOLEAN_OPTIONS = {"--review", "--publish", "--mark-done", "--new", "--offline"}
+_RUN_BOOLEAN_OPTIONS = {
+    "--review", "--publish", "--mark-done", "--new", "--offline", "--verbose",
+}
 
 
 def has_job_flag(flags: Sequence[str], option: str) -> bool:
@@ -52,7 +54,7 @@ def parse_job_command(parts: list[str]) -> tuple[str | None, list[str]]:
     else:
         raise ValueError(
             'usage: /run ISSUE [--profile fast|slow] [--instruction "text"] '
-            '[--review|--publish|--mark-done|--new|--offline]'
+            '[--review|--publish|--mark-done|--new|--offline|--verbose]'
         )
     seen_values: set[str] = set()
     index = 0

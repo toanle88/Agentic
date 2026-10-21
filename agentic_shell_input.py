@@ -582,13 +582,13 @@ _HELP_SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         (
             (
                 '/run ISSUE [--profile fast|slow] [--instruction "text"] '
-                '[--review|--publish|--mark-done|--new] [--reason "why"] '
+                '[--review|--publish|--mark-done|--new|--verbose] [--reason "why"] '
                 "with --mark-done",
                 "start a background job",
             ),
             (
                 '/run [--profile fast|slow] [--instruction "text"] '
-                '[--review|--publish|--mark-done|--new]',
+                '[--review|--publish|--mark-done|--new|--verbose]',
                 "local mode: paste a task, finish with /done",
             ),
             (
@@ -657,7 +657,7 @@ SHELL_COMMANDS = (
     "/?",
 )
 SHELL_OPTIONS = {
-    "/run": ("--profile", "--instruction", "--review", "--publish", "--mark-done", "--reason", "--new", "--task-file"),
+    "/run": ("--profile", "--instruction", "--review", "--publish", "--mark-done", "--reason", "--new", "--verbose", "--task-file"),
     "/ps": ("--all",),
     "/runs": ("--json",),
     "/status": ("--json",),
@@ -692,6 +692,7 @@ OPTION_DESCRIPTIONS: dict[str, str] = {
     "--mark-done": "record human completion for the current patch",
     "--reason": "reason recorded with manual completion",
     "--new": "start fresh worktree, ignoring cached state",
+    "--verbose": "keep detailed provider progress in human-readable logs",
     "--all": "show jobs across all shell sessions",
     "--json": "output status in JSON format",
     "--commands": "run configured doctor checks (may mutate the worktree)",
