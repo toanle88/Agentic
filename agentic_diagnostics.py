@@ -390,7 +390,7 @@ def run_doctor(
                         if api_key_env:
                             add_check(
                                 "agent", f"{role_name} sandbox credentials", False,
-                                f"${api_key_env} is not listed in sandbox.pass_env",
+                                "configured API credential is not listed in sandbox.pass_env",
                             )
                     if engine_path and image_ok:
                         image_executable = settings.get("executable_path") or provider
