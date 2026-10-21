@@ -17,7 +17,7 @@ import uuid
 from typing import Any
 
 from agentic_execution import _console_print
-from agentic_models import DEFAULT_GITHUB_HOST, Issue, Run, StatePaths
+from agentic_models import DEFAULT_GITHUB_HOST, Issue, PullRequest, Run, StatePaths
 from agentic_security import redact_secrets
 from agentic_output import style_system_text, style_text
 
@@ -318,6 +318,21 @@ def get_issue(
     return Issue.parse(raw)
 
 
+def get_pull_request(
+    repo: Path, github_repo: str, number: int,
+    github_host: str = DEFAULT_GITHUB_HOST,
+) -> PullRequest:
+    """Read only the PR identity required for a repair or guarded push."""
+    raw = json.loads(command(_github_command(
+        github_host, "pr", "view", str(number), "--repo", github_repo,
+        "--json", (
+            "number,title,body,state,url,baseRefName,baseRefOid,"
+            "headRefName,headRefOid,headRepository,headRepositoryOwner"
+        ),
+    ), repo, env=_github_environment(github_host)).stdout)
+    return PullRequest.parse(raw)
+
+
 def load_local_task(path: Path) -> Issue:
     try:
         text = path.read_text(encoding="utf-8")
@@ -377,6 +392,11 @@ def runs_for_issue(repo: Path, number: int) -> list[Run]:
 
 def runs_for_task(repo: Path, task_key: str) -> list[Run]:
     return [run for run in discover_runs(repo) if run.task_key == task_key]
+
+
+def run_for_branch(repo: Path, branch: str) -> Run | None:
+    """Find an existing Agentic worktree without creating or checking out one."""
+    return next((run for run in discover_runs(repo) if run.branch == branch), None)
 
 
 def choose_existing(runs: list[Run], *, prompt_prefix: str = "RESUME") -> Run:

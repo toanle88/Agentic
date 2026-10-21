@@ -45,6 +45,7 @@ Available commands:
 /run [--profile fast|slow]             Local mode: paste task, finish with /done
      [--review|--publish|--mark-done|--new]
 /chat ISSUE                            Open a chat session in an existing issue run
+/chat pr PR                            Repair an existing published PR after CI failure
 /chat ISSUE MESSAGE                    Run an issue with a one-off instruction
 /chat MESSAGE                          Start a local task from a chat-style message
 /ps [--all]                            Show current or persisted job status
@@ -120,6 +121,9 @@ blocked, exhausted its retries, or has failed checks or review findings:
 agentic --chat --issue 119
 ```
 
+To repair an existing published pull request, use `agentic --chat --pr 123`
+or `/chat pr 123` in the interactive shell.
+
 The session reuses the selected existing issue worktree; it never creates a
 new worktree. `/chat 119` from the interactive shell opens the same foreground
 session. Each turn receives the issue, bounded run metadata, recent developer,
@@ -143,6 +147,17 @@ developer attempts, retry accounting, review approval, and blocked/result
 markers. Chat does not automatically review, commit, push, or publish. Any
 later automated run or `--review` sees the resulting worktree and must validate
 it again before publication.
+
+PR repair sessions reuse the PR head branch's existing Agentic worktree and
+fail closed if it is unavailable; they never create a replacement worktree or
+PR. Paste CI output with `/ci` (or `/ci` followed by a paste). It is bounded,
+redacted, and passed to the provider inside an explicit untrusted-data section.
+After a repair edit, Agentic runs every configured check and the independent
+read-only reviewer. If both approve, it shows the evidence and asks exactly for
+explicit confirmation before pushing: `Push this fix to PR #123? [y/N]:`.
+The push revalidates the PR number, repository, branch, base, remote head, and
+reviewed patch digest immediately before pushing; it updates the existing PR
+and never invokes `gh pr create`.
 
 On an interactive terminal, chat responses are marked as `[CHAT] Agent response`
 and workflow prefixes such as `[DEVELOPER]`, `[TESTS]`, `[REVIEW]`, `[PATCH]`,

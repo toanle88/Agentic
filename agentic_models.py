@@ -61,6 +61,44 @@ class Run:
 
 
 @dataclass(frozen=True)
+class PullRequest:
+    """The bounded GitHub identity needed to repair an existing PR."""
+
+    number: int
+    title: str
+    body: str
+    state: str
+    base: str
+    base_sha: str
+    head: str
+    head_sha: str
+    head_repo: str
+    url: str
+
+    @classmethod
+    def parse(cls, raw: dict[str, Any]) -> "PullRequest":
+        base_ref = raw.get("baseRefName") or raw.get("base") or ""
+        head_ref = raw.get("headRefName") or raw.get("head") or ""
+        head_repo = raw.get("headRepository", {}) or {}
+        if isinstance(head_repo, dict):
+            head_repo_name = head_repo.get("nameWithOwner") or head_repo.get("fullName") or ""
+        else:
+            head_repo_name = str(head_repo)
+        return cls(
+            number=int(raw["number"]),
+            title=str(raw.get("title") or ""),
+            body=str(raw.get("body") or ""),
+            state=str(raw.get("state") or ""),
+            base=str(base_ref),
+            base_sha=str(raw.get("baseRefOid") or raw.get("baseSha") or ""),
+            head=str(head_ref),
+            head_sha=str(raw.get("headRefOid") or raw.get("headSha") or ""),
+            head_repo=head_repo_name,
+            url=str(raw.get("url") or ""),
+        )
+
+
+@dataclass(frozen=True)
 class StatePaths:
     root: Path
     worktrees: Path

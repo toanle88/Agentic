@@ -44,7 +44,7 @@ from agentic_execution import (
     run_codex,
     streamed_command,
 )
-from agentic_models import DEFAULT_GITHUB_HOST, AgentSettings, Issue, Run
+from agentic_models import DEFAULT_GITHUB_HOST, AgentSettings, Issue, PullRequest, Run
 from agentic_openrouter import run_openrouter
 from agentic_output import strip_ansi, style_patch_summary, style_system_text, style_text
 from agentic_policy import forbidden
@@ -52,7 +52,7 @@ from agentic_prompts import build_agent_prompt, _run_instruction_context, _syste
 from agentic_review import parse_review_result, record_review_findings
 from agentic_security import redact_secrets
 from agentic_telemetry import read_run_instruction
-from agentic_worktrees import command, eligible, git, issue_fingerprint, probe
+from agentic_worktrees import command, eligible, get_pull_request, git, issue_fingerprint, probe
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -1111,6 +1111,64 @@ def check_existing_pr(
         "gh", "pr", "list", "--repo", github_repo, "--head", branch,
         "--state", "all", "--json", "number,url,state", "--limit", "20",
     ], repo, env=_github_environment(github_host)).stdout)
+
+
+def _validate_pull_request_identity(expected: PullRequest, current: PullRequest) -> None:
+    """Reject a push if the PR changed while the repair was being reviewed."""
+    if current.number != expected.number:
+        raise RuntimeError("Pull request identity changed; refusing to push")
+    if current.state.casefold() != "open":
+        raise RuntimeError("Pull request is no longer open; refusing to push")
+    if (current.base, current.head, current.head_repo) != (
+        expected.base, expected.head, expected.head_repo,
+    ):
+        raise RuntimeError("Pull request branch or repository changed; refusing to push")
+    if expected.url and current.url and current.url != expected.url:
+        raise RuntimeError("Pull request URL changed; refusing to push")
+    if not expected.head_sha or not current.head_sha or current.head_sha != expected.head_sha:
+        raise RuntimeError("Pull request head changed since repair started; refusing to push")
+    if not expected.base_sha or not current.base_sha or current.base_sha != expected.base_sha:
+        raise RuntimeError("Pull request base changed since repair started; refusing to push")
+
+
+def push_existing_pr(run: Run, issue: Issue, github_repo: str, base: str,
+                     config: dict[str, Any], folder: Path,
+                     pull_request: PullRequest,
+                     fetch_pr: Any | None = None) -> None:
+    """Push a freshly reviewed patch to the same open PR, never create one."""
+    if not eligible(issue):
+        raise RuntimeError("Pull request is closed; publication blocked")
+    if pull_request.head != run.branch or pull_request.base != base:
+        raise RuntimeError("Pull request does not match the selected worktree")
+    if not pull_request.head_repo:
+        raise RuntimeError("Pull request head repository identity is unavailable")
+    if pull_request.head_repo != github_repo:
+        raise RuntimeError("Pull request head repository is not the configured repository")
+    approval = load_publication_approval(folder)
+    if approval is None or approval.get("kind") == "manual":
+        raise RuntimeError("No fresh automated review approval recorded for the PR repair")
+    _base_sha, digest, _summary = validate_publication_approval(
+        run, issue, base, config, approval,
+    )
+    lookup = fetch_pr or (lambda: get_pull_request(
+        run.worktree, github_repo, pull_request.number, config.get("github_host", DEFAULT_GITHUB_HOST),
+    ))
+    current = lookup()
+    _validate_pull_request_identity(pull_request, current)
+
+    # The caller already obtained the exact PR-repair confirmation. Recheck all
+    # mutable state after that human decision and immediately before pushing.
+    _new_base_sha, new_digest, _ = prepare_patch(run.worktree, base, config["max_files"])
+    if new_digest != digest or _new_base_sha != approval.get("base_sha"):
+        raise RuntimeError("Patch changed since repair review; not publishing")
+    current = lookup()
+    _validate_pull_request_identity(pull_request, current)
+    if command(["git", "diff", "--cached", "--quiet"], run.worktree, check=False).returncode:
+        git(run.worktree, "commit", "-m", f"fix: repair PR #{pull_request.number}")
+    current = lookup()
+    _validate_pull_request_identity(pull_request, current)
+    git(run.worktree, "push", "-u", "origin", run.branch)
+    _status_print(f"[PUBLISH] Completed: updated PR #{pull_request.number}: {pull_request.url}")
 
 
 _ANSI_SEQUENCE_RE = re.compile(

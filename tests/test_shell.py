@@ -573,6 +573,18 @@ class ShellTests(unittest.TestCase):
             ])
             self.assertEqual(shell.active_task, 'issue #69')
 
+    def test_chat_pr_opens_foreground_repair_session(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            with patch.object(shell, '_run_foreground') as run_foreground:
+                shell.run_chat(['/chat', 'pr', '123'])
+            run_foreground.assert_called_once_with([
+                sys.executable, '-u', str(shell.runner), '--repo', str(root.resolve()),
+                '--state-dir', str(shell.state_dir), '--chat', '--pr', '123',
+            ])
+            self.assertEqual(shell.active_task, 'PR #123 repair')
+
     def test_chat_requires_an_issue_number(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

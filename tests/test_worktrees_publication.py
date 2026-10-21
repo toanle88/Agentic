@@ -351,3 +351,37 @@ class PublicationTests(_GitRepositoryTestCase):
                 run, agentic.Issue(35, 'Closed', '', state='CLOSED'),
                 'owner/repo', 'main', config, folder,
             )
+
+    def test_pr_repair_pushes_existing_branch_without_creating_a_pr(self):
+        run = agentic.create_worktree(self.repo, 'main', 36)
+        (run.worktree / 'fix.py').write_text('fixed=True\n')
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(36, 'Repair', 'Fix CI')
+        config = {'test_commands': [['python', '-c', 'pass']], 'max_files': 10}
+        agentic.record_review_approval(
+            run, issue, 'main', 'base-sha', 'patch-digest',
+            {'approved': True, 'summary': 'Fresh review', 'findings': [], 'skipped': []},
+            config, folder,
+        )
+        pull_request = agentic.PullRequest(
+            123, 'Repair', 'Fix CI', 'OPEN', 'main', 'base-sha', run.branch,
+            'head-sha', 'owner/repo', 'https://github.test/pull/123',
+        )
+        commands = []
+
+        def fake_command(argv, cwd, **kwargs):
+            commands.append(argv)
+            if argv[:4] == ['git', 'diff', '--cached', '--quiet']:
+                return CompletedProcess(argv, 1, stdout='')
+            return CompletedProcess(argv, 0, stdout='')
+
+        with (patch('agentic.prepare_patch', return_value=('base-sha', 'patch-digest', 'summary')),
+              patch('agentic.git') as git_mock,
+              patch('agentic.command', side_effect=fake_command),
+              patch('agentic._status_print')):
+            agentic.push_existing_pr(
+                run, issue, 'owner/repo', 'main', config, folder, pull_request,
+                fetch_pr=lambda: pull_request,
+            )
+        self.assertIn(call(run.worktree, 'push', '-u', 'origin', run.branch), git_mock.call_args_list)
+        self.assertFalse(any(argv[:3] == ['gh', 'pr', 'create'] for argv in commands))
