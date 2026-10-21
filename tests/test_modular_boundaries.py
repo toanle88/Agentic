@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import tests
+import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner import shell as agentic_shell
 from agentic_runner import shell_jobs as agentic_shell_jobs
 from agentic_runner import workflow as agentic_workflow

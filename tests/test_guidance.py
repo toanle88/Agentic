@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import tests
+import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner import execution as agentic_execution
 from agentic_runner.guidance import (
     MAX_GUIDANCE_FILE_BYTES,

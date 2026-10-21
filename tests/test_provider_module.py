@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import tests
+import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner.providers import (
     cli_provider_command,
     codex_command,

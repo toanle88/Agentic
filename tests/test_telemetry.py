@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import tests
+import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner.telemetry import (
     combine_usage,
     extract_jsonl_usage,

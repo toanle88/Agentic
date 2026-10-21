@@ -1,6 +1,6 @@
 import unittest
 
-import tests
+import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner import cli as agentic
 from agentic_runner import config as agentic_config
 

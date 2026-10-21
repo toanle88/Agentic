@@ -24,6 +24,7 @@ from typing import Any
 from . import config as _agentic_config
 from . import context as _agentic_context
 from . import worktrees as _agentic_worktrees
+from . import __version__
 from .config import (  # noqa: F401
     DEFAULT_INIT_SECURITY_MODE,
     DEFAULT_OPENROUTER_BASE_URL,
@@ -108,7 +109,6 @@ from .telemetry import (
 
 _SOURCE_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_DIR = _SOURCE_ROOT if (_SOURCE_ROOT / "agentic.py").is_file() else Path(__file__).resolve().parent
-from . import __version__
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 INSTRUCTION_CONTEXT_CHARS = _INSTRUCTION_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module
