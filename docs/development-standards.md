@@ -44,6 +44,26 @@ design choices in [`decisions/`](decisions/).
   behavior and add coverage for old records and absent optional files.
 - Keep architecture decisions in a numbered or dated ADR under `decisions/`.
 
+## Durable artifact redaction and recovery
+
+All durable run, review, telemetry, and resume text written through
+`agentic_persistence` is redacted at the final write boundary. Provider
+adapters also redact streamed raw traces and command output before appending
+them, including the selected credential value when its configured environment
+name is non-semantic. Codex final-message output is staged in a same-directory
+temporary file until it has been redacted and atomically replaced. This is
+bounded protection for common bearer, key/value, JSON, multiline, and
+configured-environment credential forms; it is not arbitrary secret discovery.
+
+JSON and complete text state uses same-directory temporary files, `fsync`, and
+replacement. If a process stops before replacement, the previous complete
+artifact remains authoritative; if there is no previous artifact, readers
+treat an empty, truncated, or invalid file as absent. Approval records fail
+closed with an explicit unreadable/invalid error. Append-only provider and
+test streaming logs may end mid-record after interruption; readers show only
+bounded, redacted evidence and treat malformed structured output as invalid,
+without using it as approval or publication state.
+
 ## Review and handoff
 
 - Review the complete proposed diff, not only files changed in the current

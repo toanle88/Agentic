@@ -9,6 +9,7 @@ import re
 from typing import Any
 
 from agentic_persistence import atomic_write_json
+from agentic_security import redact_secrets
 
 
 FINDING_SEVERITIES = (
@@ -65,7 +66,7 @@ def analyze_findings(findings: list[str]) -> list[dict[str, str]]:
         {
             "severity": finding_severity(finding),
             "fingerprint": finding_fingerprint(finding),
-            "text": finding,
+            "text": redact_secrets(finding),
         }
         for finding in findings
     ]
@@ -75,7 +76,7 @@ def record_review_findings(folder: Path, verdict: dict[str, Any]) -> dict[str, A
     """Persist finding history and annotate recurring findings for the next attempt."""
     history_path = folder / "review-history.json"
     try:
-        history = json.loads(history_path.read_text(encoding="utf-8"))
+        history = json.loads(redact_secrets(history_path.read_text(encoding="utf-8")))
     except (FileNotFoundError, json.JSONDecodeError):
         history = []
     if not isinstance(history, list):
@@ -105,7 +106,7 @@ def record_review_findings(folder: Path, verdict: dict[str, Any]) -> dict[str, A
 def review_history_feedback(folder: Path) -> str:
     path = folder / "review-history.json"
     try:
-        history = json.loads(path.read_text(encoding="utf-8"))
+        history = json.loads(redact_secrets(path.read_text(encoding="utf-8")))
     except (FileNotFoundError, json.JSONDecodeError):
         return ""
     if not isinstance(history, list) or len(history) < 2:
@@ -121,11 +122,11 @@ def review_history_feedback(folder: Path) -> str:
             if not isinstance(key, str):
                 continue
             count, severity, text = counts.get(
-                key, (0, str(item.get("severity", "UNSPECIFIED")), str(item.get("text", "")))
+                key, (0, str(item.get("severity", "UNSPECIFIED")), redact_secrets(str(item.get("text", ""))))
             )
             counts[key] = (count + 1, severity, text)
     repeated = [
-        f"[{severity}] ({count} reviews) {text}"
+        f"[{severity}] ({count} reviews) {redact_secrets(text)}"
         for count, severity, text in counts.values()
         if count > 1
     ]

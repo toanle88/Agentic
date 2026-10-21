@@ -23,6 +23,7 @@ from agentic_execution import (
     _short,
 )
 from agentic_guidance import guidance_phase, guidance_prompt
+from agentic_persistence import atomic_write_text
 from agentic_openrouter_tools import (
     _openrouter_request,
     _openrouter_tool_call,
@@ -66,6 +67,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
     api_key = os.environ.get(api_key_env)
     if not api_key:
         raise RuntimeError(f"OpenRouter API key is missing; set ${api_key_env}")
+    redaction_values = [api_key]
     prompt = guidance_prompt(
         worktree, prompt, readonly=readonly, audit_folder=output.parent,
         phase=guidance_phase(output, readonly=readonly),
@@ -90,14 +92,19 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
     started_at = datetime.datetime.now(datetime.timezone.utc)
     last_message = ""
     usage_records: list[dict[str, Any]] = []
-    log_file.write_text("", encoding="utf-8")
-    raw_file.write_text("", encoding="utf-8")
+    atomic_write_text(log_file, "")
+    atomic_write_text(raw_file, "")
     live_status = False
     live_status_enabled = bool(getattr(sys.stdout, "isatty", lambda: False)())
 
     def record_raw(event: dict[str, Any]) -> None:
         with raw_file.open("a", encoding="utf-8") as handle:
-            handle.write(redact_secrets(json.dumps(event, ensure_ascii=False)) + "\n")
+            handle.write(
+                redact_secrets(
+                    json.dumps(event, ensure_ascii=False),
+                    extra_values=redaction_values,
+                ) + "\n"
+            )
 
     def clear_live_status() -> None:
         nonlocal live_status
@@ -167,7 +174,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                 body["reasoning_effort"] = reasoning_effort
             remaining = None if deadline is None else max(1, int(deadline - time.monotonic()))
             response = _openrouter_request(
-                base_url.rstrip("/") + "/chat/completions", api_key, body, remaining
+                base_url.rstrip("/") + "/chat/completions", api_key, body, remaining,
             )
             usage_records.append(normalize_usage(response, provider="openrouter"))
             record_raw({"event": "response", "turn": turn + 1, "response": response})
@@ -182,7 +189,9 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
             content = _message_text(message.get("content"))
             if content:
                 last_message = content
-                emit("Agent: " + _short(redact_secrets(content), 350))
+                emit("Agent: " + _short(
+                    redact_secrets(content, extra_values=redaction_values), 350,
+                ))
             if not tool_calls:
                 break
             for tool_call in tool_calls:
@@ -215,6 +224,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                     permission_policy=permission_policy,
                     check_commands=check_commands,
                     sandbox=sandbox, allow_runner_source=allow_runner_source,
+                    redaction_values=redaction_values,
                 )
                 record_raw({
                     "event": "tool_result", "turn": turn + 1,
@@ -228,9 +238,9 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
         else:
             raise RuntimeError(f"OpenRouter agent exceeded {max_tool_turns} tool turns")
     except RuntimeError as exc:
-        message = redact_secrets(last_message or str(exc))
+        message = redact_secrets(last_message or str(exc), extra_values=redaction_values)
         emit("ERROR: " + message, generated_status="ERROR")
-        output.write_text(message, encoding="utf-8")
+        atomic_write_text(output, message)
         usage = combine_usage(usage_records, provider="openrouter")
         _record_provider_usage(
             output, readonly, usage, model=model, prompt_chars=len(prompt),
@@ -250,8 +260,8 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
         return False, message
     seconds = int(time.monotonic() - started)
     emit(f"Finished in {seconds}s (exit 0)", style_status_tokens=True)
-    last_message = redact_secrets(last_message)
-    output.write_text(last_message, encoding="utf-8")
+    last_message = redact_secrets(last_message, extra_values=redaction_values)
+    atomic_write_text(output, last_message)
     usage = combine_usage(usage_records, provider="openrouter")
     _record_provider_usage(
         output, readonly, usage, model=model, prompt_chars=len(prompt),

@@ -382,6 +382,27 @@ class PureTests(unittest.TestCase):
             self.assertEqual(streamed.call_args.kwargs['timeout'], 7)
 
 
+    def test_codex_provider_output_is_staged_until_redaction_completes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / 'message.txt'
+            output.write_text('previous complete message', encoding='utf-8')
+
+            def interrupted_stream(argv, cwd, **kwargs):
+                provider_output = Path(argv[argv.index('--output-last-message') + 1])
+                self.assertNotEqual(provider_output, output)
+                self.assertEqual(provider_output.parent, output.parent)
+                provider_output.write_text('partial unredacted provider output', encoding='utf-8')
+                raise KeyboardInterrupt
+
+            with patch('agentic_execution.streamed_command', side_effect=interrupted_stream):
+                with self.assertRaises(KeyboardInterrupt):
+                    agentic.run_codex(root, 'prompt', output=output)
+
+            self.assertEqual(output.read_text(encoding='utf-8'), 'previous complete message')
+            self.assertEqual(list(root.glob('.*.provider.tmp')), [])
+
+
     def test_cli_provider_uses_headless_structured_mode(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

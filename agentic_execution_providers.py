@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,8 @@ from agentic_execution_stream import (
     streamed_command,
 )
 from agentic_guidance import guidance_phase, guidance_prompt
-from agentic_config import provider_process_environment
+from agentic_config import PROVIDER_API_KEY_ENV, provider_process_environment
+from agentic_persistence import atomic_write_text
 from agentic_policy import default_permission_policy
 from agentic_providers import (
     cli_provider_command,
@@ -37,39 +39,61 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
         worktree, prompt, readonly=readonly, audit_folder=output.parent,
         phase=guidance_phase(output, readonly=readonly),
     )
-    command_kwargs: dict[str, Any] = {}
-    if permission_policy is not None:
-        command_kwargs["permission_policy"] = permission_policy
-    args = codex_command(
-        prompt, readonly=readonly, schema=schema, output=output,
-        model=model, reasoning_effort=reasoning_effort, **command_kwargs,
-    )
-    label = "REVIEW" if readonly else "DEVELOPER"
-    invocation_started = time.monotonic()
-    result = streamed_command(
-        args, worktree, label=label, log_file=output.with_suffix(".log"),
-        timeout=timeout, codex_json=True, verbose=verbose, sandbox=sandbox,
-        sandbox_read_only=readonly,
-        sandbox_pass_env=(sandbox or {}).get("pass_env", []),
-        metrics_folder=output.parent,
-        env=provider_process_environment("codex", api_key_env),
-    )
-    message = output.read_text(encoding="utf-8") if output.exists() else result.stdout[-4000:]
-    message = redact_secrets(message)
-    output.write_text(message, encoding="utf-8")
-    usage_path = output.with_suffix(".jsonl")
-    usage = extract_jsonl_usage(
-        usage_path.read_text(encoding="utf-8", errors="replace") if usage_path.exists() else "",
-        provider="codex",
-    )
-    _record_provider_usage(
-        output, readonly, usage, model=model, prompt_chars=len(prompt),
-        completion_chars=len(message), turns=1,
-        duration_seconds=time.monotonic() - invocation_started,
-        status="completed" if result.returncode == 0 else "failed",
-        exit_code=result.returncode,
-    )
-    return result.returncode == 0, message
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary_output: str | None = None
+    credential_name = api_key_env or PROVIDER_API_KEY_ENV.get("codex")
+    credential_value = os.environ.get(credential_name) if credential_name else None
+    redaction_values = [credential_value] if credential_value else []
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=output.parent,
+            prefix=f".{output.name}.", suffix=".provider.tmp", delete=False,
+        ) as stream:
+            temporary_output = stream.name
+        command_kwargs: dict[str, Any] = {}
+        if permission_policy is not None:
+            command_kwargs["permission_policy"] = permission_policy
+        args = codex_command(
+            prompt, readonly=readonly, schema=schema, output=Path(temporary_output),
+            model=model, reasoning_effort=reasoning_effort, **command_kwargs,
+        )
+        label = "REVIEW" if readonly else "DEVELOPER"
+        invocation_started = time.monotonic()
+        result = streamed_command(
+            args, worktree, label=label, log_file=output.with_suffix(".log"),
+            timeout=timeout, codex_json=True, verbose=verbose, sandbox=sandbox,
+            sandbox_read_only=readonly,
+            sandbox_pass_env=(sandbox or {}).get("pass_env", []),
+            metrics_folder=output.parent,
+            env=provider_process_environment("codex", api_key_env),
+            redaction_values=redaction_values,
+        )
+        provider_output = Path(temporary_output)
+        message = (
+            provider_output.read_text(encoding="utf-8")
+            if provider_output.exists() else result.stdout[-4000:]
+        )
+        message = redact_secrets(message, extra_values=redaction_values)
+        atomic_write_text(output, message)
+        usage_path = output.with_suffix(".jsonl")
+        usage = extract_jsonl_usage(
+            usage_path.read_text(encoding="utf-8", errors="replace") if usage_path.exists() else "",
+            provider="codex",
+        )
+        _record_provider_usage(
+            output, readonly, usage, model=model, prompt_chars=len(prompt),
+            completion_chars=len(message), turns=1,
+            duration_seconds=time.monotonic() - invocation_started,
+            status="completed" if result.returncode == 0 else "failed",
+            exit_code=result.returncode,
+        )
+        return result.returncode == 0, message
+    finally:
+        if temporary_output is not None:
+            try:
+                Path(temporary_output).unlink()
+            except FileNotFoundError:
+                pass
 def _provider_progress(line: str, provider: str) -> str | None:
     """Turn Gemini/Claude JSON events into compact terminal progress."""
     try:
@@ -198,6 +222,9 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
     sandbox_pass_env = list((sandbox or {}).get("pass_env", []))
     if provider == "copilot" and host and "COPILOT_GH_HOST" not in sandbox_pass_env:
         sandbox_pass_env.append("COPILOT_GH_HOST")
+    credential_name = api_key_env or PROVIDER_API_KEY_ENV.get(provider)
+    credential_value = os.environ.get(credential_name) if credential_name else None
+    redaction_values = [credential_value] if credential_value else []
     process_env = provider_process_environment(provider, api_key_env)
     if provider == "copilot" and host:
         process_env = dict(process_env or os.environ)
@@ -209,10 +236,14 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
         sandbox=effective_sandbox, sandbox_read_only=readonly,
         sandbox_pass_env=sandbox_pass_env,
         metrics_folder=output.parent, env=process_env,
+        redaction_values=redaction_values,
     )
     raw_path = output.with_suffix(".jsonl") if structured else None
     raw = raw_path.read_text(encoding="utf-8", errors="replace") if raw_path and raw_path.exists() else result.stdout
-    message = redact_secrets(_extract_provider_message(raw, provider) or result.stdout[-10000:].strip())
+    message = redact_secrets(
+        _extract_provider_message(raw, provider) or result.stdout[-10000:].strip(),
+        extra_values=redaction_values,
+    )
     if (
         provider == "copilot" and host and model and result.returncode != 0
         and re.search(r"model .*?(?:not available|unavailable)", message, re.IGNORECASE)
@@ -222,7 +253,7 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
             "Verify the model is provisioned for that Copilot host and account.\n"
             + message
         )
-    output.write_text(message, encoding="utf-8")
+    atomic_write_text(output, message)
     usage = extract_jsonl_usage(raw, provider=provider)
     _record_provider_usage(
         output, readonly, usage, model=model, prompt_chars=len(prompt),

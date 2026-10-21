@@ -328,7 +328,8 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                           permission_policy: dict[str, bool] | None = None,
                           check_commands: list[list[str]] | None = None,
                           sandbox: dict[str, Any] | None = None,
-                          allow_runner_source: bool = False) -> str:
+                          allow_runner_source: bool = False,
+                          redaction_values: list[str] | None = None) -> str:
     try:
         policy = default_permission_policy("reviewer" if readonly else "developer")
         if permission_policy is None:
@@ -412,7 +413,7 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                 )
             except subprocess.TimeoutExpired:
                 return f"ERROR: command timed out after {command_timeout}s"
-            output = redact_secrets(result.stdout)
+            output = redact_secrets(result.stdout, extra_values=redaction_values or ())
             if len(output) > OPENROUTER_COMMAND_OUTPUT_CHARS:
                 marker = "...[command output truncated; showing the tail]\n"
                 output = (
@@ -421,11 +422,13 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
             return f"exit {result.returncode}\n{output}"
         return f"ERROR: unknown tool {name!r}"
     except (OSError, UnicodeError, ValueError) as exc:
-        return f"ERROR: {redact_secrets(str(exc))}"
+        return f"ERROR: {redact_secrets(str(exc), extra_values=redaction_values or ())}"
 
 
 def _openrouter_request(url: str, api_key: str, body: dict[str, Any],
-                        timeout: int | None) -> dict[str, Any]:
+                        timeout: int | None,
+                        redaction_values: list[str] | None = None) -> dict[str, Any]:
+    redaction_values = [api_key, *(redaction_values or [])]
     request = urllib.request.Request(
         url,
         data=json.dumps(body).encode("utf-8"),
@@ -441,10 +444,16 @@ def _openrouter_request(url: str, api_key: str, body: dict[str, Any],
         with response_context as response:
             value = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        detail = redact_secrets(exc.read().decode("utf-8", errors="replace")[-1000:])
+        detail = redact_secrets(
+            exc.read().decode("utf-8", errors="replace")[-1000:],
+            extra_values=redaction_values or (),
+        )
         raise RuntimeError(f"OpenRouter request failed ({exc.code}): {detail}") from exc
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"OpenRouter request failed: {redact_secrets(str(exc))}") from exc
+        raise RuntimeError(
+            "OpenRouter request failed: "
+            + redact_secrets(str(exc), extra_values=redaction_values or ())
+        ) from exc
     if not isinstance(value, dict):
         raise RuntimeError("OpenRouter returned a non-object response")
     if value.get("error"):
