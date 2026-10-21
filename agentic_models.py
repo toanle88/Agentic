@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Any
 
 
+DEFAULT_GITHUB_HOST = "github.com"
+
+
 @dataclass(frozen=True)
 class Issue:
     number: int | None
@@ -81,6 +84,7 @@ class AgentSettings:
     allow_network: bool = False
     json_mode: bool = False
     executable_path: str | None = None
+    host: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -95,5 +99,6 @@ class AgentSettings:
             "command_timeout_seconds": self.command_timeout_seconds,
             "allow_network": self.allow_network,
             "json_mode": self.json_mode,
+            "host": self.host,
         }
 

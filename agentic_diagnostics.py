@@ -17,6 +17,7 @@ from typing import Callable, ContextManager
 
 from agentic_config import load_config, sandbox_env_for_provider
 from agentic_execution import _doctor_public_detail
+from agentic_models import DEFAULT_GITHUB_HOST
 from agentic_output import style_system_text
 from agentic_providers import (
     display_provider_path,
@@ -26,6 +27,12 @@ from agentic_sandbox import sandbox_command
 
 
 AGENT_CONFIG_FILENAME = "agent_config.json"
+
+
+def _github_environment(host: str) -> dict[str, str]:
+    environment = os.environ.copy()
+    environment["GH_HOST"] = host
+    return environment
 
 # These are documented, read-only provider status commands.  Their output is
 # deliberately discarded; only the exit status is used to distinguish an
@@ -202,6 +209,7 @@ def run_doctor(
     if target_config.is_file():
         try:
             loaded = load_config(target_config)
+            github_host = loaded.get("github_host", DEFAULT_GITHUB_HOST)
             gh_path = None if loaded["task_source"] == "local" else shutil.which("gh")
             if loaded["task_source"] == "local":
                 add_skip(
@@ -227,8 +235,8 @@ def run_doctor(
                 )
             else:
                 gh_auth_ok, _ = probe(
-                    [gh_path, "auth", "status", "--active", "--hostname", "github.com"],
-                    repo, timeout=30,
+                    [gh_path, "auth", "status", "--active"],
+                    repo, timeout=30, env=_github_environment(github_host),
                 )
                 add_check(
                     "github", "GitHub CLI authentication", gh_auth_ok,
@@ -236,7 +244,7 @@ def run_doctor(
                 )
                 repo_access_ok, _ = probe(
                     [gh_path, "repo", "view", "--json", "nameWithOwner"],
-                    repo, timeout=30,
+                    repo, timeout=30, env=_github_environment(github_host),
                 )
                 add_check(
                     "github", "GitHub repository access", repo_access_ok,
@@ -245,7 +253,7 @@ def run_doctor(
                 )
                 issue_access_ok, _ = probe(
                     [gh_path, "issue", "list", "--limit", "1", "--json", "number"],
-                    repo, timeout=30,
+                    repo, timeout=30, env=_github_environment(github_host),
                 )
                 add_check(
                     "github", "GitHub issue access", issue_access_ok,

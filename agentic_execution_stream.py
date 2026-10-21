@@ -356,7 +356,7 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
     log_file.parent.mkdir(parents=True, exist_ok=True)
     process_argv = sandbox_command(
         argv, cwd, sandbox, output_root=log_file.parent, read_only=sandbox_read_only,
-        pass_env=sandbox_pass_env, restricted=sandbox_restricted,
+        pass_env=sandbox_pass_env, restricted=sandbox_restricted, env=env,
     )
     try:
         proc = subprocess.Popen(

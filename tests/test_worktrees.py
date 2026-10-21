@@ -32,6 +32,14 @@ class _GitRepositoryTestCase(unittest.TestCase):
 
 
 class GitTest(_GitRepositoryTestCase):
+    def test_github_remote_matching_uses_configured_enterprise_host(self):
+        with patch('agentic_worktrees.git', return_value='ssh://git@github.example.com/owner/repo.git'):
+            self.assertEqual(
+                agentic_worktrees.github_repo_from_remote(Path('/repo'), 'github.example.com'),
+                'owner/repo',
+            )
+            self.assertIsNone(agentic_worktrees.github_repo_from_remote(Path('/repo'), 'github.com'))
+
     def test_create_discover_reuse_worktree_without_state_file(self):
         run = agentic.create_worktree(self.repo, 'main', 42)
         found = agentic.runs_for_issue(self.repo, 42)

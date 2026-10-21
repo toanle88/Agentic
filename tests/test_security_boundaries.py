@@ -170,6 +170,19 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
         self.assertEqual(command[env_index + 1], "OPENAI_API_KEY")
         self.assertNotIn("secret-value", command)
 
+    def test_sandbox_can_forward_a_provider_host_from_child_environment(self):
+        settings = validate_sandbox({
+            "enabled": True, "engine": "docker", "image": "test-image",
+        })
+        child_env = {"COPILOT_GH_HOST": "copilot.example.com"}
+        command = sandbox_command(
+            ["copilot", "--version"], Path("/tmp/worktree"), settings,
+            pass_env=["COPILOT_GH_HOST"], env=child_env,
+        )
+        env_index = command.index("--env")
+        self.assertEqual(command[env_index + 1], "COPILOT_GH_HOST")
+        self.assertNotIn("copilot.example.com", command)
+
     def test_worktree_lock_rejects_duplicate_worker(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

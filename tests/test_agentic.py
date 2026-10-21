@@ -1,6 +1,7 @@
 """Offline tests: no GitHub or Codex credentials needed."""
 import json
 import io
+import os
 import subprocess
 import sys
 import tempfile
@@ -437,6 +438,31 @@ class PureTests(unittest.TestCase):
             self.assertIn('--allow-all-tools', copilot_developer)
             self.assertIn('--allow-all-paths', copilot_developer)
 
+    def test_copilot_host_is_scoped_to_provider_environment_and_model_errors_are_clear(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / 'copilot-dev.txt'
+            captured = {}
+
+            def fake_stream(argv, cwd, **kwargs):
+                captured.update(kwargs)
+                return CompletedProcess(argv, 1, stdout='Model "gpt-5.6-luna" is not available')
+
+            with patch.dict(os.environ, {'GH_HOST': 'repository.example.com'}, clear=False), \
+                 patch('agentic_execution.streamed_command', side_effect=fake_stream):
+                ok, message = agentic.run_cli_provider(
+                    root, 'implement', output=output, provider='copilot',
+                    model='gpt-5.6-luna', host='copilot.example.com',
+                    executable_path='/tmp/copilot',
+                )
+
+                self.assertFalse(ok)
+                self.assertEqual(os.environ['GH_HOST'], 'repository.example.com')
+            self.assertEqual(captured['env']['GH_HOST'], 'repository.example.com')
+            self.assertEqual(captured['env']['COPILOT_GH_HOST'], 'copilot.example.com')
+            self.assertIn("Copilot model 'gpt-5.6-luna' is unavailable", message)
+            self.assertIn("'copilot.example.com'", message)
+
 
     def test_provider_output_parsing_handles_mixed_events_and_copilot_text(self):
         raw = '\n'.join([
@@ -557,6 +583,15 @@ class PureTests(unittest.TestCase):
             issues = agentic.fetch_issues(Path('.'), 'owner/repo')
         self.assertEqual([issue.number for issue in issues], [10, 30, 40])
         self.assertTrue(all(issue.state == 'OPEN' for issue in issues))
+
+    def test_github_issue_commands_use_explicit_host(self):
+        with patch('agentic.command', return_value=CompletedProcess(
+            ['gh'], 0, stdout=json.dumps({'number': 2, 'title': 'Fix', 'body': '', 'state': 'OPEN'})
+        )) as command_mock:
+            agentic.get_issue(Path('.'), 'owner/repo', 2, 'github.example.com')
+        argv = command_mock.call_args.args[0]
+        self.assertEqual(argv[:2], ['gh', 'issue'])
+        self.assertEqual(command_mock.call_args.kwargs['env']['GH_HOST'], 'github.example.com')
 
 
     def test_issue_view_omits_label_fetch(self):

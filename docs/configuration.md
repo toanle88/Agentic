@@ -106,6 +106,7 @@ Use commands that are actually supported by the target repository. Agentic does 
 | `codex_timeout_seconds` | integer or `null` | `null` | Legacy developer/reviewer timeout. `null` uses the safe provider default. |
 | `test_timeout_seconds` | integer or `null` | `300` when omitted | Per-test-command timeout. Explicit `null` disables the per-test-command limit. |
 | `task_timeout_seconds` | integer | `1800` | Maximum wall-clock time for one task invocation, including checks and review. |
+| `github_host` | hostname | `github.com` | Host used explicitly for GitHub CLI repository, issue, and publication operations. This is independent of provider hosts. |
 | `system_prompt` | nonempty string or `null` | `null` | Optional persistent project guidance included as bounded, untrusted context in developer and reviewer prompts. |
 | `security_mode` | `trusted` or `isolated` | `trusted` | `isolated` requires the configured Docker/Podman engine and image and fails closed when either is unavailable. |
 | `sandbox` | object | disabled | Optional Docker/Podman isolation for provider, OpenRouter tool, and test processes. `pass_env` names explicit credential variables to pass into the container. |
@@ -121,6 +122,7 @@ Each provider object supports these fields:
 | `reasoning_effort` | string or `null` | Optional reasoning setting used by Codex/OpenRouter, such as `max`; native CLIs use their own options. |
 | `timeout_seconds` | integer or `null` | Per developer/reviewer invocation limit; `null` uses 600 seconds for developers or 300 seconds for reviewers. |
 | `executable_path` | string or `null` | Copilot only: optional explicit executable path. In trusted mode, `COPILOT_PATH` and the GitHub CLI download at `~/.local/share/gh/copilot/copilot` are also detected automatically. In isolated mode, set an image-visible path because host paths are not mounted. |
+| `host` | hostname or `null` | Copilot only: host used for Copilot authentication and model access. Agentic sets the per-process `COPILOT_GH_HOST` environment variable and never changes global `GH_HOST`. |
 | `api_key_env` | string | OpenRouter only: environment variable containing the API key. |
 | `base_url` | URL | OpenRouter only: API base URL, defaulting to the public OpenRouter endpoint. |
 | `max_tool_turns` | integer or `null` | OpenRouter only: maximum number of model/tool rounds; default `40`. |
@@ -134,6 +136,32 @@ Each provider object supports these fields:
 `claude`, `copilot`, or `openrouter`. The developer and reviewer can use
 different providers. Native providers use their own CLI installation and
 authentication; Agentic never stores their credentials.
+
+GitHub repository operations use `github_host` through a per-process `GH_HOST`
+environment override. A Copilot provider can use a different Enterprise Cloud
+or data-residency host with its role-specific `host` setting:
+
+```json
+{
+  "github_host": "github.com",
+  "developer": {
+    "provider": "copilot",
+    "host": "codehq.ghe.com",
+    "model": "gpt-5.6-luna"
+  },
+  "reviewer": {
+    "provider": "copilot",
+    "host": "codehq.ghe.com",
+    "model": "gpt-5.6-luna"
+  }
+}
+```
+
+The Copilot CLI documents `COPILOT_GH_HOST` as the Copilot-only override for
+`GH_HOST`; it is passed only to the provider process (and to its isolated
+container when configured). If the selected model is rejected by that host,
+Agentic reports the model and provider host so account/host provisioning can be
+corrected without exposing credentials.
 
 When Copilot is installed through `gh copilot`, `agentic doctor` checks the
 normal `PATH` first and then the GitHub CLI download location
