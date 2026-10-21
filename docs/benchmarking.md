@@ -3,7 +3,7 @@
 ## Performance baselines
 
 Issue execution performance is compared using the reproducible corpus and
-budgets in [`audits/issue-73.md`](audits/issue-73.md). Record p50, p95, p99,
+budgets in [`audits/2026-10-21-issue-73.md`](audits/2026-10-21-issue-73.md). Record p50, p95, p99,
 peak resident memory, Python version, operating system, CPU, filesystem type,
 and repetition count for dashboard collection/rendering, log processing,
 OpenRouter file tools and Git operations. Use three cold

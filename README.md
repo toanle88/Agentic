@@ -324,7 +324,7 @@ jobs. Use `/stop --all` to request termination for every running Agentic job.
 | [Architecture decisions](docs/decisions/) | Durable architecture decision records. |
 | [Security policy](SECURITY.md) | Threat model, credentials, logs, and sandbox limitations. |
 | [Development](docs/development.md) | Local development, tests, CI, releases, and contribution workflow. |
-| [Issue #73 audit](docs/audits/issue-73.md) | Quality, security, performance findings, baselines, and follow-ups. |
+| [Issue #73 audit (2026-10-21)](docs/audits/2026-10-21-issue-73.md) | Current quality, security, performance findings, measurements, and follow-ups. |
 | [`agent_config.schema.json`](agent_config.schema.json) | JSON Schema for editor-assisted configuration validation. |
 
 ## Development and releases
