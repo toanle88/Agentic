@@ -107,7 +107,7 @@ from agentic_telemetry import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.64"
+__version__ = "1.1.65"
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 INSTRUCTION_CONTEXT_CHARS = _INSTRUCTION_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module
@@ -341,7 +341,7 @@ def load_blocked(folder: Path) -> dict[str, Any] | None:
     """Load a blocked marker, ignoring incomplete or corrupt markers."""
     path = blocked_path(folder)
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(redact_secrets(path.read_text(encoding="utf-8")))
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         return None
     if not isinstance(value, dict) or value.get("status") != "blocked":
@@ -396,7 +396,7 @@ def load_manual_approval(folder: Path) -> dict[str, Any] | None:
     if not path.is_file():
         return None
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(redact_secrets(path.read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"Manual completion record is unreadable: {path}") from exc
     if not isinstance(value, dict) or value.get("status") != "approved":
@@ -459,7 +459,7 @@ def load_review_approval(folder: Path) -> dict[str, Any] | None:
     if not path.is_file():
         return None
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(redact_secrets(path.read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"Automated review approval is unreadable: {path}") from exc
     if not isinstance(value, dict) or value.get("status") != "approved":
@@ -497,7 +497,7 @@ def load_resume_feedback(folder: Path) -> str:
     chunks: list[str] = []
     review_log = _latest_numbered_log(folder, "review", "json")
     if review_log:
-        raw = review_log.read_text(encoding="utf-8", errors="replace")
+        raw = redact_secrets(review_log.read_text(encoding="utf-8", errors="replace"))
         try:
             verdict = json.loads(raw)
         except json.JSONDecodeError:
@@ -513,13 +513,13 @@ def load_resume_feedback(folder: Path) -> str:
     if test_log is None:
         test_log = _latest_numbered_log(folder, "test-command", "txt")
     if test_log:
-        raw = test_log.read_text(encoding="utf-8", errors="replace")
+        raw = redact_secrets(test_log.read_text(encoding="utf-8", errors="replace"))
         if raw.strip():
             chunks.append("Previous test evidence (untrusted output):\n" + raw)
     recurring = review_history_feedback(folder)
     if recurring:
         chunks.append(recurring)
-    return "\n\n".join(chunks)[-9000:]
+    return redact_secrets("\n\n".join(chunks)[-9000:])
 
 
 def load_latest_developer_report(folder: Path, limit: int = 6000) -> str:

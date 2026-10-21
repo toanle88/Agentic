@@ -1,12 +1,23 @@
+import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import agentic
+import agentic_execution
+import agentic_dashboard_data
 import agentic_openrouter
+from agentic_openrouter_tools import _openrouter_tool_call
+from agentic_config import PROVIDER_API_KEY_ENV, provider_process_environment
 from agentic_sandbox import sandbox_command, validate_sandbox
 from agentic_security import redact_secrets
+from agentic_execution_stream import streamed_command
+from agentic_persistence import atomic_write_text
+from agentic_telemetry import record_issue_metadata, record_run_instruction, record_usage
+from agentic_review import record_review_findings
+from agentic_models import Issue, Run
 
 
 class ReadOnlyBoundaryTests(unittest.TestCase):
@@ -21,6 +32,143 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
             redacted = redact_secrets(payload, extra_values=[value])
         self.assertNotIn(value, redacted)
         self.assertGreaterEqual(redacted.count("[REDACTED]"), 3)
+
+    def test_provider_specific_credentials_are_redacted_in_adversarial_forms(self):
+        credentials = {
+            "OPENAI_API_KEY": "sk-proj-synthetic-openai-123456",
+            "GEMINI_API_KEY": "AIza-synthetic-gemini-123456",
+            "ANTHROPIC_API_KEY": "sk-ant-synthetic-claude-123456",
+            "GH_TOKEN": "ghp-synthetic-copilot-123456",
+            "OPENROUTER_API_KEY": "or-synthetic-router-123456",
+            "CUSTOM_PROVIDER_TOKEN": "custom-synthetic-token-123456",
+        }
+        payloads = (
+            'OPENAI_API_KEY="{}"\nAuthorization:\n Bearer {}\n'.format(
+                credentials["OPENAI_API_KEY"], credentials["OPENAI_API_KEY"]
+            ),
+            '{{"GEMINI_API_KEY": "{}"}}\ncommand output: token={}\n'.format(
+                credentials["GEMINI_API_KEY"], credentials["GEMINI_API_KEY"]
+            ),
+            "ANTHROPIC_API_KEY: '{}'\nerror: api-key={}\n".format(
+                credentials["ANTHROPIC_API_KEY"], credentials["ANTHROPIC_API_KEY"]
+            ),
+            "GH_TOKEN={}\nGITHUB_TOKEN: {}\n".format(
+                credentials["GH_TOKEN"], credentials["GH_TOKEN"]
+            ),
+            "OPENROUTER_API_KEY={}\nBearer {}\n".format(
+                credentials["OPENROUTER_API_KEY"], credentials["OPENROUTER_API_KEY"]
+            ),
+            "CUSTOM_PROVIDER_TOKEN={}\ncustom output: {}\n".format(
+                credentials["CUSTOM_PROVIDER_TOKEN"], credentials["CUSTOM_PROVIDER_TOKEN"]
+            ),
+        )
+        with patch.dict("os.environ", credentials, clear=True):
+            self.assertEqual(
+                {provider: PROVIDER_API_KEY_ENV[provider] for provider in (
+                    "codex", "gemini", "claude", "copilot", "openrouter",
+                )},
+                {
+                    "codex": "OPENAI_API_KEY",
+                    "gemini": "GEMINI_API_KEY",
+                    "claude": "ANTHROPIC_API_KEY",
+                    "copilot": "GH_TOKEN",
+                    "openrouter": "OPENROUTER_API_KEY",
+                },
+            )
+            custom_environment = provider_process_environment(
+                "claude", "CUSTOM_PROVIDER_TOKEN",
+            )
+            self.assertEqual(custom_environment["ANTHROPIC_API_KEY"], credentials["CUSTOM_PROVIDER_TOKEN"])
+            for payload in payloads:
+                redacted = redact_secrets(payload)
+                for value in credentials.values():
+                    self.assertNotIn(value, redacted)
+
+    def test_configured_credential_with_nonsemantic_name_is_redacted_from_provider_streams(self):
+        value = "custom-configured-credential-123456"
+        with tempfile.TemporaryDirectory() as temp, patch.dict(
+            "os.environ", {"SERVICE_VALUE": value}, clear=True
+        ):
+            root = Path(temp)
+            script = root / "provider.py"
+            script.write_text(
+                "import json\n"
+                f"print(json.dumps({{'type': 'message', 'content': 'token={value}'}}), flush=True)\n",
+                encoding="utf-8",
+            )
+            with patch(
+                "agentic_execution.cli_provider_command",
+                return_value=([sys.executable, str(script)], True),
+            ):
+                ok, message = agentic_execution.run_cli_provider(
+                    root, "review", output=root / "review.txt", provider="claude",
+                    readonly=True, api_key_env="SERVICE_VALUE", timeout=10,
+                    permission_policy={"read_files": True},
+                )
+
+            self.assertTrue(ok)
+            self.assertNotIn(value, message)
+            for path in (root / "review.txt", root / "review.log", root / "review.jsonl"):
+                self.assertNotIn(value, path.read_text(encoding="utf-8"))
+
+    def test_synthetic_credentials_stay_out_of_streams_and_durable_channels(self):
+        value = "sk-proj-synthetic-channel-123456"
+        with tempfile.TemporaryDirectory() as temp, patch.dict(
+            "os.environ", {"OPENAI_API_KEY": value}, clear=True
+        ):
+            root = Path(temp)
+            result = streamed_command(
+                [sys.executable, "-c", f"print('api_key={value}')"],
+                root, label="DEVELOPER", log_file=root / "developer-001.log",
+                timeout=10, codex_json=True,
+            )
+            self.assertNotIn(value, result.stdout)
+            for path in (root / "developer-001.log", root / "developer-001.jsonl"):
+                self.assertNotIn(value, path.read_text(encoding="utf-8"))
+
+            command_result = _openrouter_tool_call(
+                root, "run_command",
+                {"argv": [sys.executable, "-c", f"print('token={value}')"]},
+                readonly=False,
+            )
+            self.assertNotIn(value, command_result)
+
+            record_issue_metadata(
+                root, number=146, title=f'api_key={value}',
+                state="open", body=f"Bearer {value}",
+            )
+            record_run_instruction(root, f'{{"OPENAI_API_KEY": "{value}"}}')
+            record_usage(
+                root, "developer", {"provider": "codex"},
+                invocation={"diagnostic": f"token={value}"},
+            )
+            record_review_findings(
+                root, {"approved": False, "findings": [f"secret={value}"]},
+            )
+            run = Run(146, "agent/issue-146-synthetic123", root)
+            issue = Issue(146, "Synthetic fixture", "description")
+            agentic.record_review_approval(
+                run, issue, "main", "base-sha", "patch-digest",
+                {"summary": f"api_key={value}", "skipped": [f"token={value}"]},
+                {"reviewer_agent": {"provider": "codex"}}, root,
+            )
+            with patch(
+                "agentic.prepare_patch",
+                return_value=("base-sha", "patch-digest", "summary"),
+            ):
+                agentic.record_manual_approval(
+                    run, issue, "main", {"max_files": 10}, root, f"secret={value}",
+                )
+            atomic_write_text(root / "resume-task.md", f"command output: {value}\n")
+
+            dashboard_run = root / "agent-issue-146-dashboard123"
+            dashboard_run.mkdir()
+            atomic_write_text(dashboard_run / "developer-001.txt", f"api_key={value}\n")
+            self.assertNotIn(value, json.dumps(agentic_dashboard_data.collect_runs(root)))
+
+            for path in root.rglob("*"):
+                if path.is_file():
+                    self.assertNotIn(value, path.read_text(encoding="utf-8"), path)
 
     def test_readonly_rejects_mutating_or_escaping_commands(self):
         blocked = (

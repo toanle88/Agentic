@@ -26,7 +26,7 @@ def _load_run_record(folder: Path) -> tuple[Path, dict[str, Any]]:
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / "run.json"
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(redact_secrets(path.read_text(encoding="utf-8")))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         data = {}
     if not isinstance(data, dict):
@@ -258,7 +258,7 @@ def record_issue_metadata(folder: Path, *, number: int | None, title: str,
 def read_issue_snapshot(folder: Path) -> dict[str, Any] | None:
     """Read the bounded issue snapshot used by offline run resumes."""
     try:
-        value = json.loads((folder / "issue-snapshot.json").read_text(encoding="utf-8"))
+        value = json.loads(redact_secrets((folder / "issue-snapshot.json").read_text(encoding="utf-8")))
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         return None
     if not isinstance(value, dict):
@@ -373,7 +373,7 @@ def record_guidance_loads(folder: Path, loads: list[dict[str, Any]]) -> None:
 
 def read_run_usage(folder: Path) -> dict[str, Any]:
     try:
-        data = json.loads((folder / "run.json").read_text(encoding="utf-8"))
+        data = json.loads(redact_secrets((folder / "run.json").read_text(encoding="utf-8")))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return combine_usage([])
     if not isinstance(data, dict):

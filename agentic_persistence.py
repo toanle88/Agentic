@@ -12,10 +12,19 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from agentic_security import redact_secrets
+
 
 def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
-    """Write *text* and replace ``path`` only after the complete write succeeds."""
+    """Redact, then replace *path* only after the complete write succeeds.
+
+    A failed write or replacement leaves an existing destination untouched and
+    removes the same-directory temporary file. This is the persistence
+    boundary for durable text as well as JSON serialized through
+    :func:`atomic_write_json`.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+    text = redact_secrets(text)
     temporary: str | None = None
     try:
         with tempfile.NamedTemporaryFile(

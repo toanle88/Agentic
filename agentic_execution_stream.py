@@ -346,7 +346,8 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                      sandbox_read_only: bool = False,
                      sandbox_pass_env: list[str] | None = None,
                      metrics_folder: Path | None = None,
-                     env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+                     env: dict[str, str] | None = None,
+                     redaction_values: list[str] | None = None) -> subprocess.CompletedProcess[str]:
     """Stream a subprocess to terminal + durable log; print heartbeats when quiet.
 
     Raw JSONL events are stored next to the human-readable log when a provider
@@ -450,7 +451,7 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                     continue
                 if line is None:
                     break
-                safe_line = strip_ansi(redact_secrets(line))
+                safe_line = strip_ansi(redact_secrets(line, extra_values=redaction_values or ()))
                 if raw_file:
                     raw_file.write(safe_line)
                     raw_file.flush()
@@ -460,7 +461,10 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                 else:
                     shown = safe_line.strip("\r\n")
                 if shown:
-                    displayed = redact_secrets(shown) if codex_json else _short(shown, 500)
+                    displayed = (
+                        redact_secrets(shown, extra_values=redaction_values or ())
+                        if codex_json else _short(shown, 500)
+                    )
                     transient = is_transient_progress(f"[{label}] {displayed}")
                     persist = verbose or not transient
                     if not verbose and displayed.startswith("Still running ("):

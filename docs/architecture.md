@@ -56,8 +56,10 @@ Prompt construction is implemented by `agentic_prompts.py` and exposed through
 `agentic.agent_prompt`; shell option parsing and TTY input are separate from
 the job supervisor. Provider streaming, provider adapters, OpenRouter policy,
 and the OpenRouter loop follow the same facade pattern. Durable artifact writes
-use a shared persistence boundary so the dashboard cannot observe partially
-written JSON after an interrupted process. The dashboard renderer
+use a shared, redacting persistence boundary so the dashboard cannot observe
+partially written JSON after an interrupted process. Append-only streaming
+logs may be incomplete after interruption and are treated as bounded,
+untrusted evidence. The dashboard renderer
 and run-log parser are separate so HTML presentation does not own durable-schema
 compatibility.
 

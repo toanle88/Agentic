@@ -159,7 +159,7 @@ def load_latest_developer_report(folder: Path, limit: int = 6_000) -> str:
     if path is None:
         return ""
     try:
-        return path.read_text(encoding="utf-8", errors="replace")[-limit:]
+        return redact_secrets(path.read_text(encoding="utf-8", errors="replace"))[-limit:]
     except OSError:
         return ""
 
