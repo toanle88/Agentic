@@ -80,6 +80,7 @@ class AgentSettings:
     command_timeout_seconds: int | None = None
     allow_network: bool = False
     json_mode: bool = False
+    executable_path: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -89,6 +90,7 @@ class AgentSettings:
             "timeout_seconds": self.timeout_seconds,
             "api_key_env": self.api_key_env,
             "base_url": self.base_url,
+            "executable_path": self.executable_path,
             "max_tool_turns": self.max_tool_turns,
             "command_timeout_seconds": self.command_timeout_seconds,
             "allow_network": self.allow_network,

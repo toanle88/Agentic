@@ -18,6 +18,10 @@ from typing import Callable, ContextManager
 from agentic_config import load_config, sandbox_env_for_provider
 from agentic_execution import _doctor_public_detail
 from agentic_output import style_system_text
+from agentic_providers import (
+    display_provider_path,
+    resolve_provider_executable,
+)
 from agentic_sandbox import sandbox_command
 
 
@@ -357,17 +361,18 @@ def run_doctor(
                             required=False,
                         )
                     if engine_path and image_ok:
+                        image_executable = settings.get("executable_path") or provider
                         provider_ok, _provider_output = probe(
                             [engine_path, "run", "--rm", "--network", "none",
-                             "--entrypoint", provider,
+                             "--entrypoint", str(image_executable),
                              loaded["sandbox"]["image"], "--version"],
                             repo, timeout=30,
                         )
                         add_check(
                             "agent", f"{role_name} provider ({provider})", provider_ok,
-                            "provider executable is available in the sandbox image"
+                            f"provider executable {image_executable!r} is available in the sandbox image"
                             if provider_ok else
-                            "provider executable failed its --version check in the sandbox image",
+                            f"provider executable {image_executable!r} failed its --version check in the sandbox image",
                         )
                     else:
                         add_check(
@@ -375,14 +380,43 @@ def run_doctor(
                             "provider executable was not probed because the sandbox engine or image is unavailable",
                         )
                 else:
-                    executable = shutil.which(provider)
+                    resolved = resolve_provider_executable(
+                        provider, settings.get("executable_path"),
+                    )
+                    executable = resolved.path
                     ok, _provider_output = probe([executable, "--version"], repo) if executable else (False, "")
                     if ok:
-                        detail = "provider is available"
+                        if provider == "copilot" and resolved.source == "GitHub CLI download":
+                            detail = (
+                                f"Copilot CLI was found at {display_provider_path(executable)} "
+                                "but is not on PATH; add its directory to PATH or configure "
+                                "executable_path/COPILOT_PATH"
+                            )
+                        elif provider == "copilot" and resolved.source in {"configuration", "COPILOT_PATH"}:
+                            detail = f"Copilot CLI is available at {display_provider_path(executable)}"
+                        else:
+                            detail = "provider is available"
                     elif executable:
                         detail = "executable failed its --version check"
                     else:
-                        detail = "executable not found on PATH"
+                        if provider == "copilot":
+                            gh_path = shutil.which("gh")
+                            gh_available = bool(
+                                gh_path and probe([gh_path, "copilot", "--help"], repo)[0]
+                            )
+                            if gh_available:
+                                detail = (
+                                    "executable not found on PATH; 'gh copilot' is "
+                                    "available, locate the downloaded binary and set "
+                                    "COPILOT_PATH or copilot executable_path"
+                                )
+                            else:
+                                detail = (
+                                    "executable not found on PATH; install Copilot CLI or "
+                                    "set COPILOT_PATH/copilot executable_path"
+                                )
+                        else:
+                            detail = "executable not found on PATH"
                     add_check("agent", f"{role_name} provider ({provider})", ok, detail)
                     auth_args = PROVIDER_AUTH_STATUS_ARGS.get(provider)
                     if executable and ok and auth_args:

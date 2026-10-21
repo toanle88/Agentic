@@ -361,6 +361,77 @@ class ConfigurationTests(unittest.TestCase):
                 {'provider': 'codex'}, {'provider': 'codex'}
             )
 
+    def test_preflight_checks_distinct_copilot_paths_for_each_role(self):
+        with tempfile.TemporaryDirectory() as temp:
+            valid_path = Path(temp) / 'developer-copilot'
+            valid_path.write_text('#!/bin/sh\n', encoding='utf-8')
+            valid_path.chmod(0o755)
+            missing_path = Path(temp) / 'reviewer-copilot'
+
+            with self.assertRaisesRegex(RuntimeError, 'Configured provider .copilot.'):
+                agentic.preflight_agent_settings(
+                    {'provider': 'copilot', 'executable_path': str(valid_path)},
+                    {'provider': 'copilot', 'executable_path': str(missing_path)},
+                )
+
+    def test_copilot_download_is_used_by_preflight_and_doctor_reports_remediation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            data_home = repo / 'xdg-data'
+            executable = data_home / 'gh' / 'copilot' / 'copilot'
+            executable.parent.mkdir(parents=True)
+            executable.write_text('#!/bin/sh\n', encoding='utf-8')
+            executable.chmod(0o755)
+            config = repo / 'agent_config.json'
+            config.write_text(json.dumps({
+                'task_source': 'local',
+                'test_commands': [['true']],
+                'developer': {'provider': 'copilot'},
+                'reviewer': {'provider': 'copilot'},
+            }))
+
+            with patch.dict(
+                'os.environ', {'XDG_DATA_HOME': str(data_home), 'COPILOT_PATH': ''},
+                clear=True,
+            ), patch('agentic.shutil.which', return_value=None):
+                agentic.preflight_agent_settings({'provider': 'copilot'})
+
+                def fake_probe(argv, cwd, **kwargs):
+                    if argv[:2] == ['git', 'rev-parse']:
+                        return True, str(repo)
+                    return True, 'ok'
+
+                with (patch('agentic.installed_git_version', return_value=(2, 48, 0)),
+                      patch('agentic.probe', side_effect=fake_probe),
+                      patch('agentic.preflight_test_commands'),
+                      patch('sys.stdout', new_callable=io.StringIO) as output):
+                    result = agentic.doctor(repo, config, json_output=True)
+
+        payload = json.loads(output.getvalue())
+        provider = next(
+            item for item in payload['checks']
+            if item['name'] == 'Developer provider (copilot)'
+        )
+        self.assertEqual(result, 0)
+        self.assertTrue(provider['ok'])
+        self.assertIn('Copilot CLI was found at', provider['detail'])
+        self.assertIn('not on PATH', provider['detail'])
+
+    def test_copilot_executable_path_is_configured_and_reaches_normalized_settings(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'copilot'
+            config_path = Path(temp) / 'agent_config.json'
+            config_path.write_text(json.dumps({
+                'test_commands': [['true']],
+                'developer': {
+                    'provider': 'copilot',
+                    'executable_path': str(path),
+                },
+            }))
+            config = agentic.load_config(config_path)
+        self.assertEqual(config['developer_agent']['executable_path'], str(path))
+        self.assertIsNone(config['reviewer_agent']['executable_path'])
+
 
     def test_isolated_preflight_uses_tools_from_the_sandbox_image(self):
         sandbox = {'enabled': True, 'engine': 'docker', 'image': 'test-image'}
@@ -714,8 +785,9 @@ class ConfigurationTests(unittest.TestCase):
                 patch('agentic.installed_git_version', return_value=(2, 48, 0)),
                 patch('agentic.probe', side_effect=fake_probe),
                 patch('agentic.shutil.which', side_effect=fake_which),
+                patch.dict('os.environ', {'XDG_DATA_HOME': str(repo / 'empty-xdg'), 'COPILOT_PATH': ''}),
             )
-            with patches[0], patches[1], patches[2], \
+            with patches[0], patches[1], patches[2], patches[3], \
                     patch('sys.stdout', new_callable=io.StringIO) as output:
                 result = agentic.doctor(repo, config, json_output=True)
             payload = json.loads(output.getvalue())
@@ -724,13 +796,17 @@ class ConfigurationTests(unittest.TestCase):
                 if item['name'] == 'Developer provider (copilot)'
             )
 
-            with patches[0], patches[1], patches[2], \
+            with patches[0], patches[1], patches[2], patches[3], \
                     patch('sys.stdout', new_callable=io.StringIO) as output:
                 human_result = agentic.doctor(repo, config)
 
         self.assertEqual(result, 1)
         self.assertEqual(human_result, 1)
-        self.assertEqual(provider_check['detail'], 'executable not found on PATH')
+        self.assertEqual(
+            provider_check['detail'],
+            "executable not found on PATH; 'gh copilot' is available, locate the "
+            "downloaded binary and set COPILOT_PATH or copilot executable_path",
+        )
         self.assertIn('executable not found on PATH', output.getvalue())
         self.assertNotIn('private-provider-secret', output.getvalue())
 

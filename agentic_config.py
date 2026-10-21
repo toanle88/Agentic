@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from agentic_models import AgentSettings
+from agentic_providers import resolve_provider_executable
 from agentic_sandbox import sandbox_build_command, validate_sandbox
 
 
@@ -92,6 +93,7 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
     timeout = raw.get("timeout_seconds", legacy_timeout)
     api_key_env = raw.get("api_key_env")
     base_url = raw.get("base_url")
+    executable_path = raw.get("executable_path")
     max_tool_turns = raw.get("max_tool_turns")
     command_timeout = raw.get("command_timeout_seconds")
     allow_network = raw.get("allow_network", False)
@@ -102,6 +104,12 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
     for name, value in (("model", model), ("reasoning_effort", reasoning), ("base_url", base_url)):
         if value is not None and (not isinstance(value, str) or not value.strip()):
             raise ValueError(f"{section}.{name} must be a nonempty string or null")
+    if executable_path is not None and (
+        not isinstance(executable_path, str) or not executable_path.strip()
+    ):
+        raise ValueError(f"{section}.executable_path must be a nonempty string or null")
+    if provider != "copilot" and executable_path is not None:
+        raise ValueError(f"{section}.executable_path is only valid for copilot")
     if timeout is not None and (type(timeout) is not int or not 1 <= timeout <= 86400):
         raise ValueError(f"{section}.timeout_seconds must be null or an integer from 1 to 86400")
     if max_tool_turns is not None and (
@@ -144,7 +152,7 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
         )
     return AgentSettings(
         provider, model, reasoning, timeout, api_key_env, base_url,
-        max_tool_turns, command_timeout, allow_network, json_mode,
+        max_tool_turns, command_timeout, allow_network, json_mode, executable_path,
     )
 
 
@@ -243,13 +251,9 @@ def load_config(path: Path) -> dict[str, Any]:
 
 def preflight_agent_settings(*settings: dict[str, Any],
                              sandbox: dict[str, Any] | None = None) -> None:
-    """Check selected providers before creating work or spending API time."""
-    checked: set[str] = set()
+    """Check each configured role before creating work or spending API time."""
     for item in settings:
         provider = str(item.get("provider", "codex"))
-        if provider in checked:
-            continue
-        checked.add(provider)
         if provider == "openrouter":
             env_name = item.get("api_key_env") or "OPENROUTER_API_KEY"
             if not os.environ.get(env_name):
@@ -266,7 +270,13 @@ def preflight_agent_settings(*settings: dict[str, Any],
                     f"Sandbox credential environment variables are missing: {names}"
                 )
             continue
-        executable = shutil.which(provider)
+        if provider == "copilot":
+            resolved = resolve_provider_executable(
+                provider, item.get("executable_path"), discover_copilot=True,
+            )
+            executable = resolved.path
+        else:
+            executable = shutil.which(provider)
         if not executable:
             install_hint = {
                 "codex": "install/authenticate the Codex CLI",
@@ -274,6 +284,11 @@ def preflight_agent_settings(*settings: dict[str, Any],
                 "claude": "install/authenticate Claude Code",
                 "copilot": "install/authenticate GitHub Copilot CLI",
             }.get(provider, "install the provider CLI")
+            if provider == "copilot":
+                install_hint += (
+                    "; if installed with 'gh copilot', set COPILOT_PATH or "
+                    "developer/reviewer executable_path to the downloaded binary"
+                )
             raise RuntimeError(f"Configured provider {provider!r} is unavailable; {install_hint}")
 
 
