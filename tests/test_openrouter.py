@@ -16,6 +16,36 @@ import agentic_openrouter_tools
 
 
 class OpenRouterTests(unittest.TestCase):
+    def test_openrouter_permission_policy_network_overrides_legacy_flag(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            responses = iter([
+                {'choices': [{'message': {
+                    'role': 'assistant', 'content': None,
+                    'tool_calls': [{'id': 'call-1', 'function': {
+                        'name': 'run_command',
+                        'arguments': json.dumps({'argv': ['curl', 'https://example.test']}),
+                    }}],
+                }}]},
+                {'choices': [{'message': {'role': 'assistant', 'content': 'done'}}]},
+            ])
+            policy = {
+                'read_files': True, 'search_files': True, 'edit_files': True,
+                'create_files': True, 'git_read': True, 'run_checks': True,
+                'network': True, 'allow_dangerous': False,
+            }
+            with (patch.dict(agentic.os.environ, {'ROUTER_KEY': 'secret'}, clear=False),
+                  patch('agentic_openrouter._openrouter_request', side_effect=lambda *args: next(responses)),
+                  patch('agentic_openrouter._openrouter_tool_call', return_value='exit 0') as tool_call):
+                ok, message = agentic.run_openrouter(
+                    root, 'prompt', output=root / 'developer.txt', model='openai/test',
+                    api_key_env='ROUTER_KEY', allow_network=False,
+                    permission_policy=policy,
+                )
+            self.assertTrue(ok)
+            self.assertEqual(message, 'done')
+            self.assertTrue(tool_call.call_args.kwargs['allow_network'])
+
     def test_openrouter_requires_model_and_never_reads_key_from_config(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / 'agent_config.json'
@@ -217,6 +247,49 @@ class OpenRouterTests(unittest.TestCase):
         )
         self.assertTrue(allowed, reason)
 
+    def test_openrouter_developer_inspection_stays_inside_worktree(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for argv in (
+                ['rg', 'needle', '/etc'],
+                ['ls', '../outside'],
+                ['file', str(root.parent / 'outside')],
+            ):
+                allowed, reason = agentic_openrouter._openrouter_command_allowed(
+                    argv, readonly=False, worktree=root,
+                )
+                self.assertFalse(allowed, (argv, reason))
+                self.assertIn('worktree', reason)
+            allowed, reason = agentic_openrouter._openrouter_command_allowed(
+                ['rg', 'needle', '.'], readonly=False, worktree=root,
+            )
+            self.assertTrue(allowed, reason)
+
+    def test_openrouter_git_diff_disables_malicious_external_diff_config(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            marker = root / 'external-diff-ran'
+            helper = root / 'external-diff'
+            helper.write_text(
+                f'#!/bin/sh\ntouch {marker}\n', encoding='utf-8',
+            )
+            helper.chmod(0o700)
+            def run(*argv):
+                return subprocess.run(
+                    ['git', *argv], cwd=root, check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+            run('init', '-q')
+            run('config', 'diff.external', str(helper))
+            (root / 'tracked.txt').write_text('before\n', encoding='utf-8')
+            run('add', 'tracked.txt')
+            (root / 'tracked.txt').write_text('after\n', encoding='utf-8')
+            result = agentic_openrouter._openrouter_tool_call(
+                root, 'run_command', {'argv': ['git', 'diff']}, readonly=True,
+            )
+            self.assertNotIn('ERROR:', result)
+            self.assertFalse(marker.exists(), result)
+
     def test_openrouter_commands_use_configured_sandbox(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -273,17 +346,24 @@ class OpenRouterTests(unittest.TestCase):
                 'enabled': True, 'engine': 'docker', 'image': 'test-image',
                 'allow_network': True,
             }
+            permission_policy = {
+                'read_files': True, 'search_files': True, 'edit_files': True,
+                'create_files': True, 'git_read': True, 'run_checks': True,
+                'network': True, 'allow_dangerous': False,
+            }
             with (patch.dict(agentic.os.environ, {'ROUTER_KEY': 'secret'}, clear=False),
                   patch('agentic_openrouter._openrouter_request', side_effect=lambda *args: next(responses)),
                   patch('agentic_openrouter._openrouter_tool_call', return_value='exit 0') as tool_call):
                 ok, message = agentic.run_openrouter(
                     root, 'prompt', output=root / 'developer.txt', model='openai/test',
-                    api_key_env='ROUTER_KEY', sandbox=settings, chat_restricted=True,
+                    api_key_env='ROUTER_KEY', sandbox=settings,
+                    permission_policy=permission_policy, chat_restricted=True,
                 )
             self.assertTrue(ok)
             self.assertEqual(message, 'done')
             self.assertTrue(tool_call.call_args.kwargs['restricted'])
             self.assertFalse(tool_call.call_args.kwargs['allow_network'])
+            self.assertFalse(tool_call.call_args.kwargs['permission_policy']['network'])
 
     def test_openrouter_request_translates_http_network_and_payload_errors(self):
         from io import BytesIO

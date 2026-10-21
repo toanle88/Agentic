@@ -28,6 +28,7 @@ from agentic_openrouter_tools import (
     _openrouter_tool_call,
     _openrouter_tools,
 )
+from agentic_policy import default_permission_policy
 from agentic_output import is_transient_progress, strip_ansi, style_text
 from agentic_security import redact_secrets
 from agentic_telemetry import combine_usage, normalize_usage, record_operation
@@ -41,6 +42,8 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                    max_tool_turns: int | None = None,
                    command_timeout: int | None = None,
                    allow_network: bool = False,
+                   permission_policy: dict[str, bool] | None = None,
+                   check_commands: list[list[str]] | None = None,
                    allow_runner_source: bool = False,
                    json_mode: bool = False,
                    sandbox: dict[str, Any] | None = None,
@@ -48,13 +51,26 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
     """Run an OpenAI-compatible OpenRouter agent with scoped local tools."""
     if not model:
         raise RuntimeError("OpenRouter requires a model, for example openai/gpt-5.4")
+    role_policy = default_permission_policy("reviewer" if readonly else "developer")
+    if permission_policy is None:
+        # Preserve the legacy OpenRouter-only switch for old direct callers.
+        role_policy["network"] = bool(allow_network)
+    else:
+        # Once the common policy is supplied, it is the source of truth. Do
+        # not require the legacy flag to repeat permission_policy.network.
+        role_policy.update(permission_policy)
+    if chat_restricted and not readonly:
+        # Restricted chat is an additional capability boundary.  Apply it to
+        # the effective policy so downstream tool calls cannot restore the
+        # configured network capability from the original policy.
+        role_policy["network"] = False
+    permission_policy = role_policy
+    allow_network = bool(permission_policy.get("network"))
     max_tool_turns = max_tool_turns or OPENROUTER_MAX_TURNS
     command_timeout = command_timeout or DEFAULT_OPENROUTER_COMMAND_TIMEOUT
     api_key = os.environ.get(api_key_env)
     if not api_key:
         raise RuntimeError(f"OpenRouter API key is missing; set ${api_key_env}")
-    if chat_restricted and not readonly:
-        allow_network = False
     prompt = guidance_prompt(
         worktree, prompt, readonly=readonly, audit_folder=output.parent,
         phase=guidance_phase(output, readonly=readonly),
@@ -74,7 +90,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
             + ("This is a read-only review: do not edit files or run project code." if readonly else "You may edit files and run the project's checks.")
         ),
     }, {"role": "user", "content": prompt}]
-    tools = _openrouter_tools(readonly)
+    tools = _openrouter_tools(readonly, permission_policy)
     started = time.monotonic()
     started_at = datetime.datetime.now(datetime.timezone.utc)
     last_message = ""
@@ -195,6 +211,8 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                 result = _openrouter_tool_call(
                     worktree, name, arguments, readonly=readonly,
                     command_timeout=tool_timeout, allow_network=allow_network,
+                    permission_policy=permission_policy,
+                    check_commands=check_commands,
                     sandbox=sandbox, allow_runner_source=allow_runner_source,
                     restricted=chat_restricted and not readonly,
                 )

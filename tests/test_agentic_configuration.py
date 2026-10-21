@@ -300,6 +300,123 @@ class ConfigurationTests(unittest.TestCase):
         self.assertTrue(settings['allow_network'])
         self.assertTrue(settings['json_mode'])
 
+    def test_permission_policy_defaults_are_provider_independent(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'defaults.json'
+            path.write_text(json.dumps({'test_commands': [['python', '--version']]}))
+            config = agentic.load_config(path)
+        developer = config['developer_agent']['permission_policy']
+        reviewer = config['reviewer_agent']['permission_policy']
+        self.assertTrue(developer['edit_files'])
+        self.assertTrue(developer['create_files'])
+        self.assertTrue(developer['run_checks'])
+        self.assertFalse(developer['network'])
+        self.assertFalse(developer['allow_dangerous'])
+        self.assertTrue(reviewer['read_files'])
+        self.assertFalse(reviewer['edit_files'])
+        self.assertFalse(reviewer['create_files'])
+        self.assertFalse(reviewer['run_checks'])
+
+    def test_permission_policy_rejects_reviewer_writes_and_dangerous_trusted_mode(self):
+        cases = [
+            ({'reviewer': {'edit_files': True}}, 'read-only'),
+            ({'developer': {'allow_dangerous': True}}, "requires security_mode 'isolated'"),
+        ]
+        for policy, expected in cases:
+            with self.subTest(policy=policy), tempfile.TemporaryDirectory() as temp:
+                path = Path(temp) / 'invalid.json'
+                path.write_text(json.dumps({
+                    'test_commands': [['python', '--version']],
+                    'permission_policy': policy,
+                }))
+                with self.assertRaisesRegex(ValueError, expected):
+                    agentic.load_config(path)
+
+    def test_permission_policy_rejects_unknown_top_level_role(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'invalid-role.json'
+            path.write_text(json.dumps({
+                'test_commands': [['python', '--version']],
+                'permission_policy': {'develper': {'edit_files': False}},
+            }))
+            with self.assertRaisesRegex(ValueError, 'unsupported top-level key'):
+                agentic.load_config(path)
+
+    def test_permission_policy_requires_isolated_mode_for_dangerous_opt_in(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'isolated.json'
+            path.write_text(json.dumps({
+                'test_commands': [['python', '--version']],
+                'developer': {'provider': 'claude'},
+                'security_mode': 'isolated',
+                'sandbox': {'enabled': True, 'engine': 'docker', 'image': 'test-image'},
+                'permission_policy': {'developer': {'allow_dangerous': True}},
+            }))
+            config = agentic.load_config(path)
+        self.assertTrue(config['developer_agent']['permission_policy']['allow_dangerous'])
+
+    def test_gemini_network_policy_is_rejected_without_a_scoped_translation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name, extra in (
+                ('trusted', {}),
+                ('sandboxed', {
+                    'sandbox': {'enabled': True, 'engine': 'docker', 'image': 'test-image'},
+                }),
+            ):
+                with self.subTest(mode=name):
+                    path = root / f'{name}.json'
+                    path.write_text(json.dumps({
+                        'test_commands': [['python', '--version']],
+                        'developer': {'provider': 'gemini'},
+                        'permission_policy': {'developer': {'network': True}},
+                        **extra,
+                    }))
+                    with self.assertRaisesRegex(ValueError, 'cannot represent network=true'):
+                        agentic.load_config(path)
+
+    def test_claude_rejects_create_only_file_capability(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'invalid-claude-policy.json'
+            path.write_text(json.dumps({
+                'test_commands': [['python', '--version']],
+                'developer': {'provider': 'claude'},
+                'permission_policy': {
+                    'developer': {'edit_files': False, 'create_files': True},
+                },
+            }))
+            with self.assertRaisesRegex(ValueError, 'Claude cannot represent create_files'):
+                agentic.load_config(path)
+
+    def test_copilot_rejects_asymmetric_file_capability_during_load(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'invalid-copilot-policy.json'
+            path.write_text(json.dumps({
+                'test_commands': [['python', '--version']],
+                'developer': {'provider': 'copilot'},
+                'permission_policy': {
+                    'developer': {'edit_files': True, 'create_files': False},
+                },
+            }))
+            with self.assertRaisesRegex(ValueError, 'Copilot cannot represent independent'):
+                agentic.load_config(path)
+
+    def test_codex_rejects_unrepresentable_permission_policy_during_load(self):
+        cases = [
+            ({'edit_files': True, 'create_files': False}, 'edit_files and create_files'),
+            ({'run_checks': False}, 'run_checks must match'),
+        ]
+        for policy, expected in cases:
+            with self.subTest(policy=policy), tempfile.TemporaryDirectory() as temp:
+                path = Path(temp) / 'invalid-codex-policy.json'
+                path.write_text(json.dumps({
+                    'test_commands': [['python', '--version']],
+                    'developer': {'provider': 'codex'},
+                    'permission_policy': {'developer': policy},
+                }))
+                with self.assertRaisesRegex(ValueError, 'Codex cannot represent.*' + expected):
+                    agentic.load_config(path)
+
 
     def test_isolated_security_mode_requires_sandbox_and_supports_openrouter(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -15,6 +15,7 @@ from agentic_execution_stream import (
 )
 from agentic_execution_guard import restricted_process_environment
 from agentic_guidance import guidance_phase, guidance_prompt
+from agentic_policy import default_permission_policy
 from agentic_providers import (
     cli_provider_command,
     codex_command,
@@ -27,6 +28,7 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
               schema: Path | None = None, timeout: int | None = None,
               model: str | None = None,
               reasoning_effort: str | None = None,
+              permission_policy: dict[str, bool] | None = None,
               sandbox: dict[str, Any] | None = None,
               chat_restricted: bool = False) -> tuple[bool, str]:
     # Each invocation creates a fresh session. The repository is the memory.
@@ -34,9 +36,12 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
         worktree, prompt, readonly=readonly, audit_folder=output.parent,
         phase=guidance_phase(output, readonly=readonly),
     )
+    command_kwargs: dict[str, Any] = {}
+    if permission_policy is not None:
+        command_kwargs["permission_policy"] = permission_policy
     args = codex_command(
         prompt, readonly=readonly, schema=schema, output=output,
-        model=model, reasoning_effort=reasoning_effort,
+        model=model, reasoning_effort=reasoning_effort, **command_kwargs,
     )
     label = "REVIEW" if readonly else "DEVELOPER"
     invocation_started = time.monotonic()
@@ -151,6 +156,8 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
                      provider: str, readonly: bool = False,
                      timeout: int | None = None,
                      model: str | None = None,
+                     permission_policy: dict[str, bool] | None = None,
+                     check_commands: list[list[str]] | None = None,
                      executable_path: str | None = None,
                      host: str | None = None,
                      sandbox: dict[str, Any] | None = None,
@@ -170,8 +177,21 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
         effective_path = resolved.path or executable_path
         if effective_path:
             command_kwargs["executable_path"] = effective_path
+    if permission_policy is not None:
+        command_kwargs["permission_policy"] = permission_policy
+    if check_commands is not None:
+        command_kwargs["check_commands"] = check_commands
+    policy = default_permission_policy("reviewer" if readonly else "developer")
+    if permission_policy:
+        policy.update(permission_policy)
+    effective_sandbox = dict(sandbox) if sandbox is not None else None
+    command_kwargs["sandbox_enabled"] = bool(effective_sandbox and effective_sandbox.get("enabled"))
+    command_kwargs["sandbox_allow_network"] = bool(
+        effective_sandbox and effective_sandbox.get("allow_network")
+    )
     args, structured = cli_provider_command(
-        provider, prompt, readonly=readonly, model=model, **command_kwargs,
+        provider, prompt, readonly=readonly, model=model, worktree=worktree,
+        **command_kwargs,
     )
 
     label = "REVIEW" if readonly else "DEVELOPER"
@@ -189,7 +209,7 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
             args, worktree, label=label, log_file=output.with_suffix(".log"),
             timeout=timeout, codex_json=structured,
             progress_parser=(lambda line: _provider_progress(line, provider)) if structured else None,
-            sandbox=sandbox, sandbox_read_only=readonly,
+            sandbox=effective_sandbox, sandbox_read_only=readonly,
             sandbox_pass_env=sandbox_pass_env,
             metrics_folder=output.parent, env=process_env,
             sandbox_restricted=chat_restricted and not readonly,

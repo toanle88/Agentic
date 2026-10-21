@@ -27,6 +27,37 @@ pushes, publication, protected files, secret-like files, and GitHub workflow
 changes during normal development. Trusted host execution cannot provide the
 same OS-level Git or network enforcement.
 
+Agentic applies one provider-independent permission policy before provider
+execution. Developers may read/search, edit/create worktree files, inspect
+Git, and run configured checks by default. Reviewers may read/search and use
+read-only Git inspection only. Network-capable tool commands and dangerous
+provider permissions are opt-in. Native provider flags are translations of
+this policy, not a replacement for the optional container boundary. Native
+developer turns receive exact allow rules for configured check argv and
+read-only Git commands; native reviewer turns receive file-inspection tools
+only, while Agentic captures the staged patch with its own argv-only Git
+runner. Gemini's CLI receives command-scoped `ShellTool(git ...)` rules for
+developer turns, while configured checks are still run by Agentic itself.
+Gemini's native
+network-capable shell tool is unrestricted, so `permission_policy.network=true`
+is rejected rather than translated into a wildcard permission; a sandbox does
+not make arbitrary shell commands equivalent to network-only access.
+`run_checks: false` is available for edit-only trusted turns;
+reviewers receive no native shell access. The `gh` command is
+not included in native network allowlists, so GitHub publication remains an
+Agentic approval boundary. OpenRouter uses the scoped Agentic
+file and argv tools directly. Claude file tools are rooted at the assigned
+worktree, and Claude/Copilot network access is limited to explicit
+network-tool patterns when `network: true` is enabled; neither provider
+receives a wildcard shell grant from that opt-in.
+
+The granular `permission_policy` fields are `read_files`, `search_files`,
+`edit_files`, `create_files`, `git_read`, `run_checks`, `network`, and
+`allow_dangerous`. `allow_dangerous` is rejected outside isolated mode,
+warned about prominently, and recorded in `run.json`. It is never permitted
+for reviewers and does not authorize protected-path writes, commits, pushes,
+or publication.
+
 Docker/Podman sandboxing mounts the task worktree, the required linked-worktree
 Git metadata read-only, and the run-output directory, uses a read-only
 container root, drops Linux capabilities, limits resources, and disables
@@ -35,7 +66,9 @@ Credentials are passed only for environment names explicitly listed in
 `sandbox.pass_env`.
 OpenRouter's API request and scoped file inspection remain in the host Python
 process, but OpenRouter command tools are also routed through the configured
-sandbox.
+sandbox. Copilot developer turns receive no native shell access because its
+persisted approvals cannot be closed by exact shell allow rules; Agentic runs
+configured checks and Git inspection with its own argv-only runner.
 
 Read-only filesystem access and networking are separate controls. If
 `sandbox.allow_network` is enabled, outbound networking is available to both

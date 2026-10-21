@@ -15,7 +15,14 @@ from pathlib import Path
 from typing import Any
 
 from agentic_models import AgentSettings, DEFAULT_GITHUB_HOST
-from agentic_providers import resolve_provider_executable
+from agentic_policy import (
+    validate_permission_policy,
+    validate_permission_policy_container,
+)
+from agentic_providers import (
+    resolve_provider_executable,
+    validate_provider_permission_policy,
+)
 from agentic_sandbox import sandbox_build_command, validate_sandbox
 
 
@@ -82,7 +89,8 @@ def sandbox_env_for_provider(provider: str, sandbox: dict[str, Any] | None) -> l
 def _agent_settings_from_config(data: dict[str, Any], section: str, *,
                                 legacy_provider: str, legacy_model: str | None,
                                 legacy_reasoning: str | None,
-                                legacy_timeout: int | None) -> AgentSettings:
+                                legacy_timeout: int | None,
+                                security_mode: str) -> AgentSettings:
     raw = data.get(section)
     if raw is None and section == "developer":
         raw = data.get("agent")
@@ -108,6 +116,22 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
     command_timeout = raw.get("command_timeout_seconds")
     allow_network = raw.get("allow_network", False)
     json_mode = raw.get("json_mode", False)
+    policy_value = raw.get("permission_policy")
+    if policy_value is None:
+        policy_config = data.get("permission_policy")
+        if policy_config is None:
+            policy_config = data.get("permissions")
+        if isinstance(policy_config, dict) and section in policy_config:
+            policy_value = policy_config[section]
+        elif policy_config is not None and not isinstance(policy_config, dict):
+            policy_value = policy_config
+        elif isinstance(policy_config, dict) and any(
+            name in policy_config for name in (
+                "read_files", "search_files", "edit_files", "create_files",
+                "git_read", "run_checks", "network", "allow_dangerous",
+            )
+        ):
+            policy_value = policy_config
     if not isinstance(provider, str) or provider not in SUPPORTED_PROVIDERS:
         choices = ", ".join(SUPPORTED_PROVIDERS)
         raise ValueError(f"{section}.provider must be one of: {choices}")
@@ -162,6 +186,16 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
             f"{section}.max_tool_turns, {section}.command_timeout_seconds, and "
             f"{section}.allow_network, and {section}.json_mode are only valid for openrouter"
         )
+    permission_policy = validate_permission_policy(
+        policy_value,
+        role="developer" if section == "developer" else "reviewer",
+        security_mode=security_mode,
+        default_network=(
+            bool(allow_network)
+            if provider == "openrouter" and policy_value is None else False
+        ),
+    )
+    validate_provider_permission_policy(provider, permission_policy)
     return AgentSettings(
         provider=provider,
         model=model,
@@ -175,11 +209,14 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
         json_mode=json_mode,
         executable_path=executable_path,
         host=host,
+        permission_policy=permission_policy,
     )
 
 
 def load_config(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
+    for field_name in ("permission_policy", "permissions"):
+        validate_permission_policy_container(data.get(field_name), field_name=field_name)
     task_source = data.get("task_source", "github")
     if task_source not in {"github", "local"}:
         raise ValueError("task_source must be 'github' or 'local'")
@@ -231,10 +268,12 @@ def load_config(path: Path) -> dict[str, Any]:
     developer_agent = _agent_settings_from_config(
         data, "developer", legacy_provider="codex", legacy_model=codex_model,
         legacy_reasoning=reasoning_effort, legacy_timeout=codex_timeout,
+        security_mode=security_mode,
     )
     reviewer_agent = _agent_settings_from_config(
         data, "reviewer", legacy_provider="codex", legacy_model=codex_model,
         legacy_reasoning=reasoning_effort, legacy_timeout=codex_timeout,
+        security_mode=security_mode,
     )
     sandbox = validate_sandbox(data.get("sandbox"))
     if security_mode == "isolated" and not sandbox["enabled"]:
@@ -265,6 +304,10 @@ def load_config(path: Path) -> dict[str, Any]:
         "security_mode": security_mode,
         "developer_agent": developer_agent.as_dict(),
         "reviewer_agent": reviewer_agent.as_dict(),
+        "permission_policy": {
+            "developer": developer_agent.permission_policy,
+            "reviewer": reviewer_agent.permission_policy,
+        },
         "sandbox": sandbox,
     }
     # Keep the returned shape of older configurations unchanged. An explicit

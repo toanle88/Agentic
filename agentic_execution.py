@@ -48,16 +48,24 @@ def run_cli_provider(*args, **kwargs):
     old_command = _providers.cli_provider_command
     _providers.streamed_command = streamed_command
     def compatible_command(*command_args, **command_kwargs):
-        try:
-            return cli_provider_command(*command_args, **command_kwargs)
-        except TypeError as exc:
-            if (
-                "executable_path" not in command_kwargs
-                or "executable_path" not in str(exc)
-            ):
-                raise
-            command_kwargs.pop("executable_path")
-            return cli_provider_command(*command_args, **command_kwargs)
+        while True:
+            try:
+                return cli_provider_command(*command_args, **command_kwargs)
+            except TypeError as exc:
+                unsupported = next(
+                    (
+                        name for name in (
+                            "executable_path", "worktree", "sandbox_enabled",
+                            "sandbox_allow_network", "check_commands",
+                            "permission_policy",
+                        )
+                        if name in command_kwargs and name in str(exc)
+                    ),
+                    None,
+                )
+                if unsupported is None:
+                    raise
+                command_kwargs.pop(unsupported)
     _providers.cli_provider_command = compatible_command
     try:
         return _providers.run_cli_provider(*args, **kwargs)

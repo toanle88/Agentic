@@ -22,10 +22,11 @@
     "task_timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 86400, "default": 1800 },
     "system_prompt": { "type": ["string", "null"], "minLength": 1 },
     "security_mode": { "enum": ["trusted", "isolated"], "default": "trusted" },
+    "permission_policy": { "$ref": "#/$defs/permissionPolicy" },
     "sandbox": { "$ref": "#/$defs/sandbox" },
-    "developer": { "$ref": "#/$defs/agent" },
-    "reviewer": { "$ref": "#/$defs/agent" },
-    "agent": { "$ref": "#/$defs/agent" }
+    "developer": { "$ref": "#/$defs/developerAgent" },
+    "reviewer": { "$ref": "#/$defs/reviewerAgent" },
+    "agent": { "$ref": "#/$defs/developerAgent" }
   },
   "$defs": {
     "sandbox": {
@@ -61,8 +62,71 @@
         "max_tool_turns": { "type": ["integer", "null"], "minimum": 1, "maximum": 200 },
         "command_timeout_seconds": { "type": ["integer", "null"], "minimum": 1, "maximum": 86400 },
         "allow_network": { "type": "boolean" },
-        "json_mode": { "type": "boolean", "default": false }
+        "json_mode": { "type": "boolean", "default": false },
+        "permission_policy": { "$ref": "#/$defs/rolePermissions" }
       }
+    },
+    "developerAgent": {
+      "allOf": [
+        { "$ref": "#/$defs/agent" },
+        { "properties": { "permission_policy": { "$ref": "#/$defs/developerPermissions" } } }
+      ]
+    },
+    "reviewerAgent": {
+      "allOf": [
+        { "$ref": "#/$defs/agent" },
+        { "properties": { "permission_policy": { "$ref": "#/$defs/reviewerPermissions" } } }
+      ]
+    },
+    "permissionPolicy": {
+      "type": "object",
+      "properties": {
+        "developer": { "$ref": "#/$defs/developerPermissions" },
+        "reviewer": { "$ref": "#/$defs/reviewerPermissions" }
+      },
+      "additionalProperties": false
+    },
+    "developerPermissions": {
+      "type": "object",
+      "properties": {
+        "read_files": { "type": "boolean", "default": true },
+        "search_files": { "type": "boolean", "default": true },
+        "edit_files": { "type": "boolean", "default": true },
+        "create_files": { "type": "boolean", "default": true },
+        "git_read": { "type": "boolean", "default": true },
+        "run_checks": { "type": "boolean", "default": true },
+        "network": { "type": "boolean", "default": false },
+        "allow_dangerous": { "type": "boolean", "default": false }
+      },
+      "additionalProperties": false
+    },
+    "reviewerPermissions": {
+      "type": "object",
+      "properties": {
+        "read_files": { "type": "boolean", "default": true },
+        "search_files": { "type": "boolean", "default": true },
+        "edit_files": { "const": false, "default": false },
+        "create_files": { "const": false, "default": false },
+        "git_read": { "type": "boolean", "default": true },
+        "run_checks": { "const": false, "default": false },
+        "network": { "type": "boolean", "default": false },
+        "allow_dangerous": { "const": false, "default": false }
+      },
+      "additionalProperties": false
+    },
+    "rolePermissions": {
+      "type": "object",
+      "properties": {
+        "read_files": { "type": "boolean" },
+        "search_files": { "type": "boolean" },
+        "edit_files": { "type": "boolean" },
+        "create_files": { "type": "boolean" },
+        "git_read": { "type": "boolean" },
+        "run_checks": { "type": "boolean" },
+        "network": { "type": "boolean" },
+        "allow_dangerous": { "type": "boolean" }
+      },
+      "additionalProperties": false
     }
   }
 }

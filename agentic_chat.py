@@ -425,6 +425,8 @@ def run_chat_session(
                 "timeout": config.get("effective_developer_timeout_seconds"),
                 "chat_restricted": may_edit,
             }
+            if may_edit and config.get("test_commands") is not None:
+                agent_kwargs["check_commands"] = config["test_commands"]
             if config.get("sandbox", {}).get("enabled"):
                 agent_kwargs["sandbox"] = config["sandbox"]
             ok, response = run_agent(worktree, prompt, output=output_path, **agent_kwargs)
