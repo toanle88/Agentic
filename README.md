@@ -245,6 +245,8 @@ and successful command progress stays as live terminal status, while failures,
 timeouts, final results, and diagnostics remain in the human-readable log. Use
 `agentic --issue 119 --verbose` or `/run 119 --verbose` to retain detailed
 progress. Structured provider events remain in the adjacent `.jsonl` trace.
+In the interactive shell, `/logs JOB|PID|ISSUE --verbose` replays the captured
+detailed output; the default `/logs JOB|PID|ISSUE` view stays concise.
 
 Interactive input keeps a two-line status prompt with the developer provider
 and model, working directory, and active task. Up/Down recalls command history;

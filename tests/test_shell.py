@@ -481,6 +481,99 @@ class ShellTests(unittest.TestCase):
             self.assertIn('[TESTS] PASSED', plain.getvalue())
 
 
+    def test_logs_concise_replay_filters_routine_progress_but_keeps_diagnostics(self):
+        from contextlib import redirect_stdout
+
+        lines = [
+            '[DEVELOPER] Started (PID 123); progress log: /tmp/provider.log',
+            '[DEVELOPER] Started (OpenRouter/openai/test)',
+            '[DEVELOPER] Codex session started',
+            '[DEVELOPER] Running command: python tests.py',
+            '[DEVELOPER] Command finished (exit 0)',
+            '[DEVELOPER] Modified files: a.py',
+            '[DEVELOPER] Modified files: b.py',
+            '[DEVELOPER] Command finished (exit 3)',
+            '[DEVELOPER] ERROR: provider failed',
+            '[TESTS] FAILED (exit 2)',
+            '[TIMEOUT] Time limit reached (10s). Stopping process.',
+            '[CANCEL] Cancelled by user.',
+            '[REVIEW] Finding: missing regression coverage',
+            '[DEVELOPER] Finished in 2s (exit 0)',
+            '[RESULT] final response',
+        ]
+        script = f'import sys; sys.stdout.write({chr(10).join(lines)!r})'
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            job = shell._launch([sys.executable, '-c', script])
+            job.process.wait(timeout=5)
+            shell.refresh()
+
+            concise = StringIO()
+            with redirect_stdout(concise):
+                shell.show_logs(['/logs', str(job.number)])
+            rendered = concise.getvalue()
+            replay = "\n".join(rendered.splitlines()[1:])
+            self.assertNotIn('[DEVELOPER] Started (PID', replay)
+            self.assertNotIn('[DEVELOPER] Started (OpenRouter/', replay)
+            self.assertNotIn('[DEVELOPER] Codex session started', replay)
+            self.assertNotIn('[DEVELOPER] Command finished (exit 0)', replay)
+            self.assertNotIn('Modified files: a.py', replay)
+            self.assertNotIn('Modified files: b.py', replay)
+            self.assertIn('Modified files: 2 files changed', replay)
+            self.assertIn('Command finished (exit 3)', replay)
+            self.assertIn('ERROR: provider failed', replay)
+            self.assertIn('[TESTS] FAILED (exit 2)', replay)
+            self.assertIn('[TIMEOUT] Time limit reached (10s). Stopping process.', replay)
+            self.assertIn('[CANCEL] Cancelled by user.', replay)
+            self.assertIn('[REVIEW] Finding: missing regression coverage', replay)
+            self.assertIn('Finished in 2s (exit 0)', replay)
+            self.assertIn('final response', replay)
+
+            verbose = StringIO()
+            with redirect_stdout(verbose):
+                shell.show_logs(['/logs', str(job.number), '--verbose'])
+            detailed = verbose.getvalue()
+            detailed_replay = "\n".join(detailed.splitlines()[1:])
+            self.assertIn('Started (PID 123)', detailed_replay)
+            self.assertIn('Started (OpenRouter/openai/test)', detailed_replay)
+            self.assertIn('Codex session started', detailed_replay)
+            self.assertIn('Command finished (exit 0)', detailed_replay)
+            self.assertIn('Modified files: a.py', detailed_replay)
+            self.assertIn('Modified files: b.py', detailed_replay)
+
+
+    def test_running_logs_filter_split_routine_lines_and_show_tty_progress(self):
+        from contextlib import redirect_stdout
+
+        script = (
+            'import sys,time; '
+            'sys.stdout.write("[DEVELOPER] Command finished (exit 0)\\n"); '
+            'sys.stdout.flush(); time.sleep(.15); '
+            'sys.stdout.write("[DEVELOPER] ERROR: provider "); '
+            'sys.stdout.flush(); time.sleep(.15); '
+            'print("failed")'
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            job = shell._launch([sys.executable, '-c', script])
+            output = StringIO()
+            with patch('agentic_shell._is_interactive_terminal', return_value=True), \
+                 patch('agentic_shell._shell_write_transient') as transient, \
+                 redirect_stdout(output):
+                shell.show_logs(['/logs', str(job.number)])
+
+            job.process.wait(timeout=5)
+            replay = output.getvalue()
+            replay_body = "\n".join(replay.splitlines()[1:])
+            self.assertNotIn('Command finished (exit 0)', replay_body)
+            self.assertIn('ERROR: provider failed', replay_body)
+            self.assertTrue(
+                any('Command finished (exit 0)' in call.args[0] for call in transient.call_args_list)
+            )
+
+
     def test_log_replay_colors_patch_diff_stat_only_on_a_terminal(self):
         from contextlib import redirect_stdout
 
@@ -855,6 +948,24 @@ class ShellTests(unittest.TestCase):
             self.assertIn('second', rendered)
             self.assertIn('full log:', rendered)
             self.assertEqual(shell.terminal_mode, agentic_shell.TerminalMode.OUTPUT)
+
+    def test_logs_accepts_issue_number(self):
+        from contextlib import redirect_stdout
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            job = shell._launch([
+                sys.executable, '-c', 'print("issue output")', '--issue', '119',
+            ])
+            job.process.wait(timeout=5)
+            shell.refresh()
+
+            output = StringIO()
+            with redirect_stdout(output):
+                shell.show_logs(['/logs', '119'])
+            self.assertIn('issue output', output.getvalue())
+            self.assertIn(f'job {job.number}:', output.getvalue())
 
     def test_logs_follow_uses_live_output_mode_until_follow_finishes(self):
         with tempfile.TemporaryDirectory() as temp:
