@@ -45,6 +45,7 @@ RUNTIME_MODULES = (
     "agentic_shell.py",
     "agentic_shell_commands.py",
     "agentic_shell_input.py",
+    "agentic_persistence.py",
     "agentic_workflow.py",
     "agentic_worktrees.py",
 )

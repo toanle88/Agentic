@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from agentic_context import INSTRUCTION_CONTEXT_CHARS, _bounded_text
+from agentic_persistence import atomic_write_json
 from agentic_security import redact_secrets
 
 
@@ -35,7 +36,7 @@ def _load_run_record(folder: Path) -> tuple[Path, dict[str, Any]]:
 
 
 def _write_run_record(path: Path, data: dict[str, Any]) -> None:
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    atomic_write_json(path, data)
 
 
 def _number(value: Any) -> int | None:
@@ -231,7 +232,8 @@ def record_run_instruction(folder: Path, instruction: str) -> None:
 
 
 def record_issue_metadata(folder: Path, *, number: int | None, title: str,
-                          state: str, source: str = "github") -> None:
+                          state: str, source: str = "github",
+                          body: str = "") -> None:
     """Persist bounded issue identity for read-only dashboards and resumes."""
     path, data = _load_run_record(folder)
     data["issue_metadata"] = {
@@ -240,7 +242,30 @@ def record_issue_metadata(folder: Path, *, number: int | None, title: str,
         "state": _bounded_text(state, 40).upper() or "UNKNOWN",
         "source": _bounded_text(source, 40) or "github",
     }
+    # Keep a bounded, redacted task snapshot so an existing run can be resumed
+    # during a GitHub outage.  It is intentionally separate from run.json and
+    # excluded from dashboard log listings.
+    atomic_write_json(folder / "issue-snapshot.json", {
+        "number": number,
+        "title": _bounded_text(redact_secrets(title), 280),
+        "body": _bounded_text(redact_secrets(body), 12_000),
+        "state": _bounded_text(state, 40).upper() or "UNKNOWN",
+        "source": _bounded_text(source, 40) or "github",
+    })
     _write_run_record(path, data)
+
+
+def read_issue_snapshot(folder: Path) -> dict[str, Any] | None:
+    """Read the bounded issue snapshot used by offline run resumes."""
+    try:
+        value = json.loads((folder / "issue-snapshot.json").read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    if not isinstance(value.get("body"), str) or not isinstance(value.get("title"), str):
+        return None
+    return value
 
 
 def record_operation(folder: Path, role: str, name: str, *,

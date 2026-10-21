@@ -30,6 +30,7 @@ from agentic_output import (
     sanitize_terminal_text,
     untag_system_prefix,
 )
+from agentic_persistence import atomic_write_text
 from agentic_shell_input import (  # noqa: F401
     COMMAND_DESCRIPTIONS,
     HELP,
@@ -564,9 +565,7 @@ class AgenticShell:
             "session_id": job.session_id,
             "stop_requested": job.stop_requested,
         }
-        temporary = job.record_path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-        temporary.replace(job.record_path)
+        atomic_write_text(job.record_path, json.dumps(record, indent=2) + "\n")
 
     def _load_persisted_jobs(self) -> None:
         for record_path in sorted(self.session_dir.glob("job-*.json")):
@@ -1040,7 +1039,7 @@ class AgenticShell:
         if not any(line.strip() for line in lines):
             raise ValueError("local task must not be empty")
         path = self.session_dir / f"task-{uuid.uuid4().hex[:12]}.md"
-        path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+        atomic_write_text(path, "\n".join(lines).strip() + "\n")
         _shell_print(f"Local task saved: {path}")
         return path
 

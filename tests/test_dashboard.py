@@ -1,5 +1,7 @@
 import json
+import os
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -441,6 +443,73 @@ class DashboardTests(unittest.TestCase):
             self.assertIn("Issue #73", second)
             self.assertNotEqual(first, second)
 
+    def test_dashboard_refuses_remote_binding_without_explicit_opt_in(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            logs = root / "logs"
+            logs.mkdir()
+            with self.assertRaisesRegex(RuntimeError, "Refusing non-loopback"):
+                agentic_dashboard.main([
+                    "--repo", str(root), "--logs", str(logs), "--output", str(root / "dashboard.html"),
+                    "--serve", "--host", "0.0.0.0", "--port", "0",
+                ])
+
+    def test_dashboard_remote_binding_requires_and_passes_bearer_token(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            logs = root / "logs"
+            logs.mkdir()
+            with patch.dict(os.environ, {"AGENTIC_DASHBOARD_TOKEN": "test-token"}), \
+                 patch.object(agentic_dashboard, "_serve_dashboard") as serve:
+                self.assertEqual(agentic_dashboard.main([
+                    "--repo", str(root), "--logs", str(logs), "--output", str(root / "dashboard.html"),
+                    "--serve", "--allow-remote", "--host", "0.0.0.0", "--port", "0",
+                    "--tls-certfile", str(root / "server.crt"),
+                    "--tls-keyfile", str(root / "server.key"),
+                ]), 0)
+            self.assertEqual(serve.call_args.kwargs["auth_token"], "test-token")
+            self.assertEqual(serve.call_args.kwargs["tls_certfile"], root / "server.crt")
+            self.assertEqual(serve.call_args.kwargs["tls_keyfile"], root / "server.key")
+
+    def test_dashboard_loopback_does_not_inherit_remote_token_auth(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            logs = root / "logs"
+            logs.mkdir()
+            with patch.dict(os.environ, {"AGENTIC_DASHBOARD_TOKEN": "test-token"}), \
+                 patch.object(agentic_dashboard, "_serve_dashboard") as serve:
+                self.assertEqual(agentic_dashboard.main([
+                    "--repo", str(root), "--logs", str(logs), "--output", str(root / "dashboard.html"),
+                    "--serve", "--host", "127.0.0.1", "--port", "0",
+                ]), 0)
+            self.assertIsNone(serve.call_args.kwargs["auth_token"])
+
+    def test_dashboard_remote_binding_requires_tls(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            logs = root / "logs"
+            logs.mkdir()
+            with patch.dict(os.environ, {"AGENTIC_DASHBOARD_TOKEN": "test-token"}), \
+                 self.assertRaisesRegex(RuntimeError, "requires --tls-certfile"):
+                agentic_dashboard.main([
+                    "--repo", str(root), "--logs", str(logs), "--output", str(root / "dashboard.html"),
+                    "--serve", "--allow-remote", "--host", "0.0.0.0", "--port", "0",
+                ])
+
+    def test_dashboard_tls_context_rejects_legacy_protocol_versions(self):
+        with patch.object(agentic_dashboard.ssl, "SSLContext") as ssl_context:
+            context = ssl_context.return_value
+            result = agentic_dashboard._dashboard_tls_context(
+                Path("server.crt"), Path("server.key"),
+            )
+
+        self.assertIs(result, context)
+        ssl_context.assert_called_once_with(ssl.PROTOCOL_TLS_SERVER)
+        self.assertEqual(context.minimum_version, ssl.TLSVersion.TLSv1_2)
+        context.load_cert_chain.assert_called_once_with(
+            Path("server.crt"), Path("server.key"),
+        )
+
     def test_dashboard_renders_navigable_views_filters_and_log_actions(self):
         html = agentic_dashboard.render_dashboard([], "demo", ".demo-agent-runs")
         for view in ("dashboard", "runs", "logs", "tokens", "issues", "settings"):
@@ -464,6 +533,8 @@ class DashboardTests(unittest.TestCase):
             self.assertIn(f'value="{severity}"', html)
         self.assertIn("Latest recorded run activity, newest first.", html)
         self.assertIn("Issue status", html)
+        self.assertIn("Next action", html)
+        self.assertIn("suggestedCommand", html)
 
     def test_dashboard_token_sort_contract_uses_timestamp_and_run_id_tie_breaker(self):
         html = agentic_dashboard.render_dashboard([], "demo", ".demo-agent-runs")
@@ -629,6 +700,43 @@ console.log(JSON.stringify({{newest, oldest}}));
             handler.do_GET()
         send_error.assert_called_once_with(404, "Not found")
         render_current.assert_not_called()
+
+    def test_dashboard_server_checks_bearer_token_when_configured(self):
+        render_current = Mock(return_value="<html>dashboard</html>")
+        handler_type = agentic_dashboard._dashboard_handler(
+            "dashboard.html", render_current, "test-token",
+        )
+        handler = handler_type.__new__(handler_type)
+        handler.path = "/dashboard.html"
+        handler.headers = {"Authorization": "Bearer wrong-token"}
+        handler.send_response = Mock()
+        handler.send_header = Mock()
+        handler.end_headers = Mock()
+        handler.wfile = Mock()
+        handler.do_GET()
+        handler.send_response.assert_called_once_with(401)
+        render_current.assert_not_called()
+
+    def test_dashboard_server_accepts_browser_basic_auth_when_configured(self):
+        render_current = Mock(return_value="<html>dashboard</html>")
+        handler_type = agentic_dashboard._dashboard_handler(
+            "dashboard.html", render_current, "test-token",
+        )
+        handler = handler_type.__new__(handler_type)
+        handler.path = "/dashboard.html"
+        handler.headers = {"Authorization": "Basic YWdlbnRpYzp0ZXN0LXRva2Vu"}
+        handler.send_response = Mock()
+        handler.send_header = Mock()
+        handler.end_headers = Mock()
+        handler.wfile = Mock()
+        handler.do_GET()
+        handler.send_response.assert_called_once_with(200)
+        render_current.assert_called_once_with()
+        self.assertTrue(any(
+            call.args[0] == "Content-Security-Policy"
+            and "connect-src 'self'" in call.args[1]
+            for call in handler.send_header.call_args_list
+        ))
 
     def test_dashboard_links_state_and_legacy_worktrees_from_branch_names(self):
         with tempfile.TemporaryDirectory() as temp:

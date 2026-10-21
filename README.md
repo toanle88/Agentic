@@ -196,6 +196,7 @@ agentic runs --json                       # alias for status
 agentic --issue 119                      # create or resume issue 119
 agentic --issue 119 --instruction "Bump the version when complete"
 agentic --issue 119 --review              # rerun tests and review only
+agentic --issue 119 --offline             # resume an existing issue run without GitHub API calls
 agentic --issue 119 --mark-done                     # optional reason is recorded automatically
 agentic --issue 119 --mark-done --reason "Human reviewed; remaining finding is out of scope"
 agentic --issue 119 --publish             # offer draft-PR publication for the approved patch
@@ -297,7 +298,7 @@ jobs. Use `/stop --all` to request termination for every running Agentic job.
 | `agentic doctor` | Diagnose repository, GitHub task access, and developer/reviewer agent prerequisites. |
 | `agentic --state-dir PATH ...` | Store worktrees and runtime artifacts in a chosen location. |
 | `agentic cleanup --issue N` | Preview removal of a clean issue worktree; add `--yes` to confirm. |
-| `agentic dashboard` | Generate the HTML run dashboard. Add `--serve` for a loopback server that regenerates it for live polling. |
+| `agentic dashboard` | Generate the HTML run dashboard. Add `--serve` for a loopback server that regenerates it for live polling. Remote serving requires `--allow-remote`, `AGENTIC_DASHBOARD_TOKEN`, and TLS certificate/key files. |
 | `agentic --help` | Show CLI help. |
 | `agentic --version` | Show the installed version. |
 

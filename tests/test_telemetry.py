@@ -10,6 +10,7 @@ from agentic_telemetry import (
     read_run_instruction,
     record_operation,
     record_issue_metadata,
+    read_issue_snapshot,
     record_run_instruction,
     record_security_policy,
     record_usage,
@@ -45,6 +46,19 @@ class TelemetryTests(unittest.TestCase):
                 title,
                 "Investigate api_key=[REDACTED] in dashboard metadata",
             )
+
+    def test_issue_snapshot_is_bounded_redacted_and_readable_for_offline_resume(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            record_issue_metadata(
+                folder, number=72, title="Offline resume", state="open",
+                body="api_key=issue-secret-value\n" + ("x" * 20_000),
+            )
+            snapshot = read_issue_snapshot(folder)
+            self.assertEqual(snapshot["number"], 72)
+            self.assertNotIn("issue-secret-value", json.dumps(snapshot))
+            self.assertLessEqual(len(snapshot["body"]), 12_000)
+            self.assertNotIn("issue-snapshot.json", json.dumps(read_run_usage(folder)))
 
     def test_run_instruction_is_optional_bounded_and_replaceable(self):
         with tempfile.TemporaryDirectory() as temp:

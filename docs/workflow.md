@@ -126,6 +126,18 @@ Run the same issue again to resume its existing worktree:
 agentic --issue 119
 ```
 
+If GitHub is temporarily unavailable, resume an existing GitHub run from the
+bounded issue snapshot recorded at the start of an earlier run:
+
+```bash
+agentic --issue 119 --offline
+```
+
+Offline mode does not contact GitHub or refresh the base branch. It is limited
+to an existing issue worktree, and provider or project checks may still use
+their configured network access. Run the issue once online before relying on
+offline resume so the snapshot is available.
+
 Use `--profile slow` when the issue needs the configured integration, browser, or release checks:
 
 ```bash
@@ -333,6 +345,22 @@ Open the printed `http://127.0.0.1:8765/dashboard.html` URL. Each dashboard
 request rescans the run logs, and the page polls that endpoint every 30 seconds;
 the browser updates its views in place. The server binds to loopback by
 default and exposes no write or publication actions.
+
+To serve the dashboard on a non-loopback interface, opt in explicitly, provide
+a TLS certificate and key, and set a random token through an environment
+variable:
+
+```bash
+export AGENTIC_DASHBOARD_TOKEN='use-a-long-random-value'
+agentic dashboard --serve --host 0.0.0.0 --allow-remote \
+  --tls-certfile server.crt --tls-keyfile server.key
+```
+
+Remote serving uses HTTPS with TLS 1.2 or newer and refuses to start without both TLS files,
+`--allow-remote`, and the token environment variable. API clients may send
+`Authorization: Bearer <token>`. Browsers can use HTTP Basic authentication
+with username `agentic` and the token as the password; this also allows live
+refreshes to continue working.
 
 In the interactive shell, `/dashboard` generates the snapshot and opens it with
 the host operating system's default browser. Use `/dashboard PATH` to choose a

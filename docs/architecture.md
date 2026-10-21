@@ -27,6 +27,7 @@ Agentic is intentionally small and uses the Python standard library at runtime.
 | `agentic_shell_commands.py` | Pure interactive-shell command and option validation; returns argv fragments without executing them. |
 | `agentic_dashboard.py` | Read-only parser and renderer for durable run logs. |
 | `agentic_dashboard_data.py` | Read-only durable-log parsing and legacy/centralized snapshot merging for the dashboard. |
+| `agentic_persistence.py` | Crash-safe atomic writes for run metadata and durable artifacts. |
 | `agentic_models.py` | Immutable task, run, state, and provider configuration models. |
 | `agentic_security.py` | Shared credential redaction for logs and dashboard output. |
 | `agentic_telemetry.py` | Optional provider usage normalization and durable cost records. |
@@ -54,7 +55,9 @@ historical public and patchable helpers, so existing integrations keep working.
 Prompt construction is implemented by `agentic_prompts.py` and exposed through
 `agentic.agent_prompt`; shell option parsing and TTY input are separate from
 the job supervisor. Provider streaming, provider adapters, OpenRouter policy,
-and the OpenRouter loop follow the same facade pattern. The dashboard renderer
+and the OpenRouter loop follow the same facade pattern. Durable artifact writes
+use a shared persistence boundary so the dashboard cannot observe partially
+written JSON after an interrupted process. The dashboard renderer
 and run-log parser are separate so HTML presentation does not own durable-schema
 compatibility.
 

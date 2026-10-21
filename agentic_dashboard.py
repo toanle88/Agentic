@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as dt
+import hmac
 import json
+import os
+import ssl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -16,6 +20,7 @@ from agentic import (
     legacy_worktrees_dir,
     state_paths,
 )
+from agentic_persistence import atomic_write_text
 
 
 def default_logs_root(repo: Path, state_dir: Path | None = None) -> Path:
@@ -53,7 +58,7 @@ function renderSettings(){const settings=DATA.settings||{};const policy=DATA.run
 function updateFilterOptions(){const options=(selector,values,label)=>{const select=document.querySelector(selector);const current=select.value;select.innerHTML=`<option value="all">All ${label}</option>`+values.filter(Boolean).sort().map(value=>`<option value="${esc(value)}">${esc(value)}</option>`).join("");select.value=values.includes(current)?current:"all";state[select.id]=select.value};options("#issue",[...new Set(DATA.runs.map(run=>run.issue==null?"local":String(run.issue)))],"issues");options("#model",[...new Set(DATA.runs.flatMap(run=>run.models||[]))],"models");options("#provider",[...new Set(DATA.runs.flatMap(run=>run.providers||[]))],"providers")}
 function renderAll(){renderMetrics();renderList();renderDetail();renderLogs();renderTokenChart();renderIssues();renderSettings()}function setView(view){state.view=view;document.querySelectorAll(".view").forEach(panel=>panel.classList.toggle("active",panel.dataset.panel===view));document.querySelectorAll("[data-view]").forEach(button=>button.classList.toggle("active",button.dataset.view===view));document.querySelector("#page-title").textContent=view==="tokens"?"Token usage":view[0].toUpperCase()+view.slice(1)}function findFile(runId,name){return DATA.runs.find(run=>run.id===runId)?.files?.find(file=>file.name===name)?.content||""}async function copyText(value){try{await navigator.clipboard.writeText(value)}catch{const area=document.createElement("textarea");area.value=value;document.body.appendChild(area);area.select();document.execCommand("copy");area.remove()}}function downloadText(name,value){const link=document.createElement("a");link.href=URL.createObjectURL(new Blob([value],{type:"text/plain"}));link.download=name;link.click();URL.revokeObjectURL(link.href)}
 async function refreshDashboard(){if(!/^https?:$/.test(location.protocol)){document.querySelector("#live-status").textContent="Live refresh needs the generated file to be served over HTTP; regenerate the snapshot to refresh file:// views.";return}try{const response=await fetch(`${location.pathname}?refresh=${Date.now()}`,{cache:"no-store"});const html=await response.text();const next=JSON.parse(new DOMParser().parseFromString(html,"text/html").querySelector("#dashboard-data").textContent);Object.keys(DATA).forEach(key=>delete DATA[key]);Object.assign(DATA,next);searchableCache.clear();updateFilterOptions();renderAll();document.querySelector("#live-status").textContent=`Live update received at ${new Date().toLocaleTimeString()}`}catch{document.querySelector("#live-status").textContent="Live update unavailable; showing the last generated snapshot."}}
-document.querySelectorAll("[data-view]").forEach(button=>button.addEventListener("click",()=>setView(button.dataset.view)));["search","status","issue","stage","severity","model","provider","period"].forEach(id=>document.querySelector(`#${id}`).addEventListener(id==="search"?"input":"change",event=>{state[id]=event.target.value;renderAll()}));document.addEventListener("click",event=>{const copy=event.target.closest("[data-copy]"),download=event.target.closest("[data-download]"),recent=event.target.closest("[data-recent-run]");if(copy)copyText(findFile(copy.dataset.copy,copy.dataset.file));if(download)downloadText(download.dataset.file,findFile(download.dataset.download,download.dataset.file));if(recent){state.selected=recent.dataset.recentRun;setView("runs");renderList();renderDetail()}});document.querySelector("#refresh").addEventListener("click",refreshDashboard);document.querySelector("#theme").addEventListener("click",()=>document.documentElement.dataset.theme=document.documentElement.dataset.theme==="light"?"dark":"light");document.querySelector("#repo-name").textContent=DATA.repo;document.querySelector("#source").textContent=`Logs: ${DATA.logs} · Generated: ${DATA.generated}`;updateFilterOptions();setView("dashboard");renderAll();if(/^https?:$/.test(location.protocol))window.setInterval(refreshDashboard,30000);
+document.querySelectorAll("[data-view]").forEach(button=>button.addEventListener("click",()=>setView(button.dataset.view)));["search","status","issue","stage","severity","model","provider","period"].forEach(id=>document.querySelector(`#${id}`).addEventListener(id==="search"?"input":"change",event=>{state[id]=event.target.value;renderAll()}));document.addEventListener("click",event=>{const copy=event.target.closest("[data-copy]"),download=event.target.closest("[data-download]"),command=event.target.closest("[data-command]"),recent=event.target.closest("[data-recent-run]");if(copy)copyText(findFile(copy.dataset.copy,copy.dataset.file));if(download)downloadText(download.dataset.file,findFile(download.dataset.download,download.dataset.file));if(command)copyText(command.dataset.command);if(recent){state.selected=recent.dataset.recentRun;setView("runs");renderList();renderDetail()}});document.querySelector("#refresh").addEventListener("click",refreshDashboard);document.querySelector("#theme").addEventListener("click",()=>document.documentElement.dataset.theme=document.documentElement.dataset.theme==="light"?"dark":"light");document.querySelector("#repo-name").textContent=DATA.repo;document.querySelector("#source").textContent=`Logs: ${DATA.logs} · Generated: ${DATA.generated}`;updateFilterOptions();setView("dashboard");renderAll();if(/^https?:$/.test(location.protocol))window.setInterval(refreshDashboard,30000);
 </script></body></html>'''
     # Preserve recognizable hooks used by integrations and older dashboard
     # checks while the client implementation is split into navigable views.
@@ -76,6 +81,19 @@ run.blocked && run.status !== \"no_changes\" && run.result?.status !== \"NO_CHAN
                           '</select></label>')
     detail_script = r'''<script>
 Object.assign(labels,{"investigation-invalid":"Investigation invalid","awaiting-development":"Awaiting development"});
+function suggestedCommand(run){
+  if(run.issue==null)return null;
+  const suffix=run.status==="approved"?" --publish":run.status==="awaiting-review"?" --review":"";
+  return `agentic --issue ${run.issue}${suffix}`;
+}
+function nextAction(run){
+  if(run.result?.next_action)return run.result.next_action;
+  if(run.status==="in-progress")return "The run is active; follow its log output.";
+  if(run.status==="approved")return "The patch is approved and ready for explicit publication.";
+  if(run.status==="awaiting-review")return "Run a fresh validation and read-only review.";
+  if(run.status==="no-activity")return "Start the run to begin investigation.";
+  return "Resume the run to continue from the preserved worktree.";
+}
 function renderDetail(){
   const run=DATA.runs.find(item=>item.id===state.selected), detail=document.querySelector("#detail");
   if(!run){detail.innerHTML=`<div class="empty">No run selected.</div>`;return;}
@@ -90,8 +108,9 @@ function renderDetail(){
   const policy=run.usage?.security_policy, history=Array.isArray(run.usage?.security_policy_history)?run.usage.security_policy_history:[], latestPolicy=history.length&&history[history.length-1]?.policy||policy;
   const policyChange=history.length>1?`<p class="subtle">Latest recorded policy: ${esc(latestPolicy?.mode||"unknown")} · Network: ${esc(latestPolicy?.network||"unknown")} · Git metadata: ${esc(latestPolicy?.git_metadata_mount||"unknown")}</p>`:"";
   const instruction=run.instruction?`<section class="callout"><strong>Per-run instruction</strong><p>${esc(run.instruction)}</p></section>`:"";
+  const command=suggestedCommand(run), action=`<section class="callout"><strong>Next action</strong><p>${esc(nextAction(run))}</p>${command?`<div class="log-actions"><button class="small-button" data-command="${esc(command)}" type="button">Copy command: ${esc(command)}</button></div>`:""}</section>`;
   const files=run.files?.length?run.files.map(file=>`<details><summary>${esc(file.name)} · ${esc(file.updated)}</summary><pre>${esc(file.content)}</pre><div class="log-actions"><button class="small-button" data-copy="${esc(run.id)}" data-file="${esc(file.name)}" type="button">Copy</button><button class="small-button" data-download="${esc(run.id)}" data-file="${esc(file.name)}" type="button">Download</button></div></details>`).join(""):`<div class="empty">No log files recorded.</div>`;
-  detail.innerHTML=`<div class="detail-top"><div><h2>${esc(run.label)}</h2><div class="branch">${esc(run.branch)}</div></div>${badge(run.status)}</div><div class="meta"><span>Stage: ${esc(run.stage)}</span><span>Severity: ${esc(run.severity)}</span><span>Provider: ${esc(run.providers?.join(", ")||"unknown")}</span><span>Model: ${esc(run.models?.join(", ")||"unknown")}</span></div>${instruction}<section class="callout"><strong>Run metrics</strong><p>${esc(tokenValue(run)==null?"Provider usage unavailable":`${formatTokens(tokenValue(run))} tokens`)}${run.usage.estimated_cost_usd==null?"":` · $${Number(run.usage.estimated_cost_usd).toFixed(4)} estimated`} · ${esc(runDuration(run))}</p></section>${blocked}${result}<section class="callout ${esc(run.review.status)}"><strong>Review · ${esc(labels[run.review.status]||run.review.status)}</strong><p>${esc(run.review.summary)}</p>${findings}</section>${recurring}${skipped}<h3>Investigation</h3><p>${esc(run.investigation.summary)}</p>${investigationFindings}<h3>Tests · ${esc(run.tests.status)}</h3><pre>${esc(run.tests.summary)}</pre><h3>Security policy</h3><pre class="json-block">${esc(formatJson(latestPolicy))}</pre>${policyChange}<h3>Run logs</h3><div class="file-list">${files}</div>`;
+  detail.innerHTML=`<div class="detail-top"><div><h2>${esc(run.label)}</h2><div class="branch">${esc(run.branch)}</div></div>${badge(run.status)}</div><div class="meta"><span>Stage: ${esc(run.stage)}</span><span>Severity: ${esc(run.severity)}</span><span>Provider: ${esc(run.providers?.join(", ")||"unknown")}</span><span>Model: ${esc(run.models?.join(", ")||"unknown")}</span></div>${action}${instruction}<section class="callout"><strong>Run metrics</strong><p>${esc(tokenValue(run)==null?"Provider usage unavailable":`${formatTokens(tokenValue(run))} tokens`)}${run.usage.estimated_cost_usd==null?"":` · $${Number(run.usage.estimated_cost_usd).toFixed(4)} estimated`} · ${esc(runDuration(run))}</p></section>${blocked}${result}<section class="callout ${esc(run.review.status)}"><strong>Review · ${esc(labels[run.review.status]||run.review.status)}</strong><p>${esc(run.review.summary)}</p>${findings}</section>${recurring}${skipped}<h3>Investigation</h3><p>${esc(run.investigation.summary)}</p>${investigationFindings}<h3>Tests · ${esc(run.tests.status)}</h3><pre>${esc(run.tests.summary)}</pre><h3>Security policy</h3><pre class="json-block">${esc(formatJson(latestPolicy))}</pre>${policyChange}<h3>Run logs</h3><div class="file-list">${files}</div>`;
 }
 state.tokenSort="newest";
 function invocationTimestamp(entry){
@@ -164,11 +183,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-dir", type=Path, help="Agentic state root")
     parser.add_argument("--output", type=Path, help="HTML output path")
     parser.add_argument("--serve", action="store_true",
-                        help="Serve a regenerating read-only dashboard over HTTP")
+                        help="Serve a regenerating read-only dashboard over HTTP(S)")
     parser.add_argument("--host", default="127.0.0.1",
-                        help="HTTP bind address for --serve (default: 127.0.0.1)")
+                        help="HTTP(S) bind address for --serve (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8765,
                         help="HTTP port for --serve (default: 8765)")
+    parser.add_argument(
+        "--allow-remote", action="store_true",
+        help="Allow --serve to bind beyond loopback; requires a token and TLS",
+    )
+    parser.add_argument(
+        "--auth-token-env", default="AGENTIC_DASHBOARD_TOKEN",
+        help="Environment variable containing the --serve dashboard token",
+    )
+    parser.add_argument(
+        "--tls-certfile", type=Path,
+        help="TLS certificate PEM file for --serve",
+    )
+    parser.add_argument(
+        "--tls-keyfile", type=Path,
+        help="TLS private-key PEM file for --serve",
+    )
     return parser
 
 
@@ -236,13 +271,29 @@ def _render_current_dashboard(repo: Path, state_dir: Path,
     )
 
 
-def _dashboard_handler(output_name: str, render_current: Any) -> type[BaseHTTPRequestHandler]:
+def _dashboard_handler(output_name: str, render_current: Any,
+                       auth_token: str | None = None) -> type[BaseHTTPRequestHandler]:
     class DashboardHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             path = unquote(urlsplit(self.path).path).lstrip("/")
             if path not in {"", output_name}:
                 self.send_error(404, "Not found")
                 return
+            if auth_token is not None:
+                supplied = self.headers.get("Authorization", "")
+                expected_bearer = f"Bearer {auth_token}"
+                expected_basic = "Basic " + base64.b64encode(
+                    f"agentic:{auth_token}".encode("utf-8"),
+                ).decode("ascii")
+                if not (
+                    hmac.compare_digest(supplied, expected_bearer)
+                    or hmac.compare_digest(supplied, expected_basic)
+                ):
+                    self.send_response(401)
+                    self.send_header("WWW-Authenticate", 'Basic realm="Agentic dashboard"')
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
             try:
                 payload = render_current().encode("utf-8")
             except Exception:
@@ -252,6 +303,9 @@ def _dashboard_handler(output_name: str, render_current: Any) -> type[BaseHTTPRe
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(payload)))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
+            self.send_header("Referrer-Policy", "no-referrer")
             self.end_headers()
             self.wfile.write(payload)
 
@@ -261,12 +315,23 @@ def _dashboard_handler(output_name: str, render_current: Any) -> type[BaseHTTPRe
     return DashboardHandler
 
 
-def _serve_dashboard(output: Path, render_current: Any, host: str, port: int) -> None:
+def _serve_dashboard(output: Path, render_current: Any, host: str, port: int,
+                     *, auth_token: str | None = None,
+                     tls_certfile: Path | None = None,
+                     tls_keyfile: Path | None = None) -> None:
     """Serve a read-only dashboard whose HTML is regenerated for every GET."""
     output_name = output.name
-    server = ThreadingHTTPServer((host, port), _dashboard_handler(output_name, render_current))
+    tls_context = None
+    if tls_certfile is not None and tls_keyfile is not None:
+        tls_context = _dashboard_tls_context(tls_certfile, tls_keyfile)
+    server = ThreadingHTTPServer(
+        (host, port), _dashboard_handler(output_name, render_current, auth_token),
+    )
+    if tls_context is not None:
+        server.socket = tls_context.wrap_socket(server.socket, server_side=True)
     url_host = "localhost" if host in {"0.0.0.0", "::"} else host
-    print(f"Dashboard serving at http://{url_host}:{server.server_port}/{output_name}")
+    scheme = "https" if tls_context is not None else "http"
+    print(f"Dashboard serving at {scheme}://{url_host}:{server.server_port}/{output_name}")
     print("Press Ctrl-C to stop the read-only dashboard server.")
     try:
         server.serve_forever()
@@ -274,6 +339,14 @@ def _serve_dashboard(output: Path, render_current: Any, host: str, port: int) ->
         return
     finally:
         server.server_close()
+
+
+def _dashboard_tls_context(certfile: Path, keyfile: Path) -> ssl.SSLContext:
+    """Create the dashboard's server context with a modern TLS floor."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(certfile, keyfile)
+    return context
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -285,19 +358,46 @@ def main(argv: list[str] | None = None) -> int:
     repo = args.repo.resolve()
     state_dir = (args.state_dir or default_state_dir()).expanduser().resolve()
     logs_argument = args.logs.resolve() if args.logs is not None else None
+    token: str | None = None
+    if args.serve:
+        loopback = args.host in {"127.0.0.1", "localhost", "::1"}
+        if not loopback and not args.allow_remote:
+            raise RuntimeError(
+                "Refusing non-loopback dashboard binding; add --allow-remote only when intentional"
+            )
+        if args.tls_certfile is not None and args.tls_keyfile is None:
+            raise RuntimeError("--tls-certfile requires --tls-keyfile")
+        if args.tls_keyfile is not None and args.tls_certfile is None:
+            raise RuntimeError("--tls-keyfile requires --tls-certfile")
+        if args.allow_remote:
+            token = os.environ.get(args.auth_token_env)
+            if not token:
+                raise RuntimeError(
+                    f"Remote dashboard serving requires a token in ${args.auth_token_env}"
+                )
+            if args.tls_certfile is None or args.tls_keyfile is None:
+                raise RuntimeError(
+                    "Remote dashboard serving requires --tls-certfile and --tls-keyfile"
+                )
     output = (args.output or state_paths(repo, state_dir).dashboards / "dashboard.html").resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     runs, logs_root = _dashboard_snapshot(repo, state_dir, logs_argument)
-    output.write_text(render_dashboard(
+    atomic_write_text(output, render_dashboard(
         runs, repo.name, logs_root.name, settings=_dashboard_settings(repo, runs),
-    ), encoding="utf-8")
+    ))
     print(f"Dashboard written to {output}")
     print(f"Runs found: {len(runs)}")
     if args.serve:
+        if args.host not in {"127.0.0.1", "localhost", "::1"}:
+            print(
+                "WARNING: dashboard is remotely reachable; protect the listener and keep "
+                f"${args.auth_token_env} secret."
+            )
         _serve_dashboard(
             output,
             lambda: _render_current_dashboard(repo, state_dir, logs_argument),
-            args.host, args.port,
+            args.host, args.port, auth_token=token,
+            tls_certfile=args.tls_certfile, tls_keyfile=args.tls_keyfile,
         )
     return 0
 

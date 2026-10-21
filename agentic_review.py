@@ -8,6 +8,8 @@ from pathlib import Path
 import re
 from typing import Any
 
+from agentic_persistence import atomic_write_json
+
 
 FINDING_SEVERITIES = (
     "BLOCKER", "CRITICAL", "MAJOR", "HIGH", "MEDIUM", "MINOR", "LOW",
@@ -94,7 +96,7 @@ def record_review_findings(folder: Path, verdict: dict[str, Any]) -> dict[str, A
         "approved": bool(verdict.get("approved")),
         "findings": details,
     })
-    history_path.write_text(json.dumps(history[-50:], indent=2), encoding="utf-8")
+    atomic_write_json(history_path, history[-50:])
     verdict["_finding_analysis"] = details
     verdict["_repeated_findings"] = repeated
     return verdict

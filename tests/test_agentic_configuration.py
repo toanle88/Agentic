@@ -864,13 +864,13 @@ class ConfigurationTests(unittest.TestCase):
         }
         claude = auth_checks['Developer agent authentication (claude)']
         self.assertEqual(claude['auth_mode'], 'api_key')
-        self.assertEqual(claude['api_key_env'], 'CLAUDE_ROLE_KEY')
         self.assertTrue(claude['credential_set'])
         self.assertIsNone(claude['sandbox_passed'])
+        self.assertNotIn('api_key_env', claude)
         self.assertNotIn(['/usr/bin/provider', 'auth', 'status'], probed)
         codex = auth_checks['Reviewer agent authentication (codex)']
-        self.assertEqual(codex['api_key_env'], 'CODEX_ROLE_KEY')
         self.assertTrue(codex['credential_set'])
+        self.assertNotIn('api_key_env', codex)
 
     def test_doctor_reports_openrouter_host_credential_with_sandbox(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -917,9 +917,9 @@ class ConfigurationTests(unittest.TestCase):
         for role in ('Developer', 'Reviewer'):
             check = auth_checks[f'{role} agent authentication (openrouter)']
             self.assertEqual(check['auth_mode'], 'api_key')
-            self.assertEqual(check['api_key_env'], 'OPENROUTER_API_KEY')
             self.assertTrue(check['credential_set'])
             self.assertIsNone(check['sandbox_passed'])
+            self.assertNotIn('api_key_env', check)
 
 
     def test_doctor_separates_github_access_checks_and_local_mode_skips_them(self):
@@ -1225,6 +1225,7 @@ class ConfigurationTests(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertEqual(payload['command_results'][0]['status'], 'passed')
         self.assertEqual(payload['command_results'][0]['exit_code'], 0)
+        self.assertNotIn('normal = lambda value', output.getvalue())
         worktree_check = next(item for item in payload['checks'] if item['name'] == 'Command worktree')
         self.assertTrue(worktree_check['ok'])
         lock.assert_called_once()
@@ -1270,6 +1271,7 @@ class ConfigurationTests(unittest.TestCase):
         self.assertFalse(execution['ok'])
         self.assertEqual(execution['detail'], 'fast command failed (exit code 3)')
         self.assertNotIn('configured-command-secret', output.getvalue())
+        self.assertNotIn('print(', output.getvalue())
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

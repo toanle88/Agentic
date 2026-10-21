@@ -25,7 +25,7 @@ agentic-dashboard = "agentic_dashboard:main"
 agentic-shell = "agentic_shell:main"
 
 [tool.setuptools]
-py-modules = ["agentic", "agentic_config", "agentic_context", "agentic_diagnostics", "agentic_dashboard", "agentic_dashboard_data", "agentic_execution", "agentic_execution_providers", "agentic_execution_stream", "agentic_guidance", "agentic_openrouter", "agentic_openrouter_loop", "agentic_openrouter_tools", "agentic_output", "agentic_policy", "agentic_prompts", "agentic_shell", "agentic_shell_commands", "agentic_shell_input", "agentic_models", "agentic_security", "agentic_telemetry", "agentic_sandbox", "agentic_providers", "agentic_review", "agentic_test_discovery", "agentic_workflow", "agentic_worktrees"]
+py-modules = ["agentic", "agentic_config", "agentic_context", "agentic_diagnostics", "agentic_dashboard", "agentic_dashboard_data", "agentic_execution", "agentic_execution_providers", "agentic_execution_stream", "agentic_guidance", "agentic_openrouter", "agentic_openrouter_loop", "agentic_openrouter_tools", "agentic_output", "agentic_policy", "agentic_prompts", "agentic_shell", "agentic_shell_commands", "agentic_shell_input", "agentic_models", "agentic_persistence", "agentic_security", "agentic_telemetry", "agentic_sandbox", "agentic_providers", "agentic_review", "agentic_test_discovery", "agentic_workflow", "agentic_worktrees"]
 
 [tool.setuptools.dynamic]
 version = {attr = "agentic.__version__"}
