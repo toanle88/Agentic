@@ -95,6 +95,17 @@ _STATUS_RE = re.compile(
     r"EXIT\s+0|SUCCESS|FINISHED|RUNNING|STARTED)(?![\w./\\-])",
     re.IGNORECASE,
 )
+_DIFF_STAT_LINE_RE = re.compile(
+    r"^.+?\s+\|\s+\d+(?P<graph>\s+[+-]+)?\s*$"
+)
+_DIFF_STAT_TOTAL_LINE_RE = re.compile(
+    r"^\s*\d+\s+files?\s+changed"
+    r"(?:,\s+\d+\s+insertions?\(\+\))?"
+    r"(?:,\s+\d+\s+deletions?\(-\))?\s*$"
+)
+_DIFF_STAT_TOTAL_TOKEN_RE = re.compile(
+    r"\d+\s+insertions?\(\+\)|\d+\s+deletions?\(-\)"
+)
 
 _PREFIX_COLORS = {
     "DEVELOPER": "36",
@@ -287,6 +298,15 @@ def _style_line(line: str, stream: Any = None, *, style_status_tokens: bool = Tr
     spans = _styled_spans(line, style_status_tokens=style_status_tokens)
     if not spans:
         return line
+    return _render_spans(line, spans, stream)
+
+
+def _render_spans(
+    line: str,
+    spans: list[tuple[int, int, str]],
+    stream: Any = None,
+) -> str:
+    """Render non-overlapping terminal-only spans in a plain line."""
     output: list[str] = []
     cursor = 0
     for start, end, code in spans:
@@ -294,6 +314,40 @@ def _style_line(line: str, stream: Any = None, *, style_status_tokens: bool = Tr
         output.append(paint(line[start:end], code, stream))
         cursor = end
     output.append(line[cursor:])
+    return "".join(output)
+
+
+def _diff_stat_spans(line: str) -> list[tuple[int, int, str]]:
+    """Find additions and removals in a recognized Git diff-stat line."""
+    spans: list[tuple[int, int, str]] = []
+    stat = _DIFF_STAT_LINE_RE.match(line)
+    if stat and stat.group("graph"):
+        graph_start = stat.start("graph")
+        for marker in re.finditer(r"\++|-+", stat.group("graph")):
+            start = graph_start + marker.start()
+            end = graph_start + marker.end()
+            spans.append((start, end, "32" if marker.group().startswith("+") else "31"))
+
+    if _DIFF_STAT_TOTAL_LINE_RE.match(line):
+        for total in _DIFF_STAT_TOTAL_TOKEN_RE.finditer(line):
+            spans.append((total.start(), total.end(), "32" if "insertion" in total.group() else "31"))
+    return spans
+
+
+def style_patch_summary(value: Any, stream: Any = None) -> str:
+    """Style a ``[PATCH]`` message and its Git diff-stat additions/removals."""
+    text = strip_ansi(value)
+    if not color_enabled(stream):
+        return text
+    output: list[str] = []
+    for index, line in enumerate(text.splitlines(keepends=True)):
+        body = line.rstrip("\r\n")
+        ending = line[len(body):]
+        spans = _diff_stat_spans(body)
+        if index == 0:
+            spans.extend(_styled_spans(body, style_status_tokens=False))
+        spans.sort()
+        output.append(_render_spans(body, spans, stream) + ending)
     return "".join(output)
 
 

@@ -147,7 +147,9 @@ it again before publication.
 On an interactive terminal, chat responses are marked as `[CHAT] Agent response`
 and workflow prefixes such as `[DEVELOPER]`, `[TESTS]`, `[REVIEW]`, `[PATCH]`,
 `[GIT]`, `[RETRY]`, `[ERROR]`, and `[RESULT]` are styled without coloring their
-message bodies. System-generated prefixes use the shared formatter, including
+message bodies. The `[PATCH]` Git diff-stat summary is the intentional exception:
+added graph markers and insertion totals are green, while removed markers and
+deletion totals are red. System-generated prefixes use the shared formatter, including
 new categories supplied through its explicit system-prefix boundary; generic
 provider and user text remains unclassified. Repeated provider progress and elapsed-time updates use one
 replaceable status row; important events remain in scrollback. Redirected output,
