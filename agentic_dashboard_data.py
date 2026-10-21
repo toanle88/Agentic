@@ -423,8 +423,6 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
         status = "approved"
     elif review["status"] == "rejected":
         status = "needs-fix"
-    elif tests["status"] == "failed":
-        status = "tests-failed"
     elif all_files:
         status = "awaiting-review"
     else:
