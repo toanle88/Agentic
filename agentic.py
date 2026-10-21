@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
@@ -67,6 +68,12 @@ from agentic_prompts import (  # noqa: F401
     _untrusted_prompt_context,
 )
 from agentic_diagnostics import run_doctor as _run_doctor
+from agentic_test_discovery import (
+    DISCOVERY_TIMEOUT_SECONDS,
+    MAX_DISCOVERY_TIMEOUT_SECONDS,
+    DiscoveryResult,
+    discover_and_validate,
+)
 from agentic_execution import (  # noqa: F401
     _absolute_path,
     _console_print,
@@ -101,7 +108,7 @@ from agentic_telemetry import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.55"
+__version__ = "1.1.56"
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 INSTRUCTION_CONTEXT_CHARS = _INSTRUCTION_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module
@@ -619,7 +626,9 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
                      sandbox_image: str | None = None,
                      sandbox_dockerfile: str | None = None,
                      sandbox_context: str = ".",
-                     sandbox_language: str | None = None) -> int:
+                     sandbox_language: str | None = None,
+                     discover_tests: bool = False,
+                     discovery_timeout: int = DISCOVERY_TIMEOUT_SECONDS) -> int:
     """Create personal target-repository setup without overwriting it by default."""
     if security_mode not in SECURITY_MODES:
         raise ValueError(f"security_mode must be one of: {', '.join(SECURITY_MODES)}")
@@ -664,10 +673,59 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
         "build_network": True,
         "pass_env": sandbox_env_for_providers(provider, reviewer_provider),
     })
+    slow_commands: list[list[str]] = []
+    discovery_result: DiscoveryResult | None = None
+    if discover_tests and (
+        not isinstance(discovery_timeout, int)
+        or isinstance(discovery_timeout, bool)
+        or not 1 <= discovery_timeout <= MAX_DISCOVERY_TIMEOUT_SECONDS
+    ):
+        raise ValueError(
+            "discovery timeout must be from 1 to "
+            f"{MAX_DISCOVERY_TIMEOUT_SECONDS} seconds"
+        )
+    skip_protected_discovery = discover_tests and config_path.exists() and not force
+    if discover_tests and not skip_protected_discovery:
+        # Isolated discovery must fail closed before a provider or candidate
+        # command can run. Trusted discovery deliberately retains its host
+        # execution behavior; its sandbox is disabled by policy.
+        if security_mode == "isolated":
+            preflight_security(security_mode, sandbox, repo=repo)
+        agent_settings = default_provider_settings(provider)
+        # Discovery is deliberately bounded even when a provider's normal
+        # developer timeout is much larger.
+        agent_settings["timeout_seconds"] = min(
+            int(agent_settings.get("timeout_seconds") or discovery_timeout),
+            discovery_timeout,
+        )
+        with tempfile.TemporaryDirectory(prefix="agentic-discovery-") as temp:
+            discovery_result = discover_and_validate(
+                repo,
+                agent_runner=run_agent,
+                agent_settings=agent_settings,
+                output=Path(temp) / "agent-message.txt",
+                timeout=discovery_timeout,
+                sandbox=sandbox,
+            )
+        _print_discovery_results(discovery_result)
+        if discovery_result.agent_status:
+            _status_print(f"[DISCOVERY] {discovery_result.agent_status}")
+        if not discovery_result.fast_commands:
+            _status_print(
+                "[DISCOVERY] No passing fast checks were found; configuration was not written",
+                file=sys.stderr,
+            )
+            return 1
+        if not _confirm_discovered_configuration():
+            _status_print("[INIT] Discovery declined; no configuration was written")
+            return 0
+        commands = discovery_result.fast_commands
+        slow_commands = discovery_result.slow_commands
+        detection = "Assisted test discovery"
     config = {
         "task_source": "github",
         "test_commands": commands,
-        "slow_test_commands": [],
+        "slow_test_commands": slow_commands,
         "max_retries": 3,
         "max_files": None,
         "test_timeout_seconds": DEFAULT_TEST_TIMEOUT,
@@ -709,6 +767,29 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
         )
     _status_print("[INIT] Review agent_config.json before the first issue run")
     return 0
+
+
+def _print_discovery_results(result: DiscoveryResult) -> None:
+    """Print bounded candidate evidence without including command output."""
+    _status_print("[DISCOVERY] Candidate checks:")
+    for item in result.results:
+        status = str(item.get("status", ""))
+        label = {
+            "passed": "SLOW" if str(item.get("profile", "")) == "slow" else "OK",
+            "missing-dependency": "SKIP",
+            "timeout": "TIMEOUT",
+            "failed": "FAIL",
+        }.get(status, "SKIP")
+        detail = str(item.get("detail", ""))[:240]
+        _status_print(f"  [{label:<7}] {item.get('display', '')} — {detail}")
+
+
+def _confirm_discovered_configuration() -> bool:
+    try:
+        answer = input("Save these commands to agent_config.json? [y/N]: ")
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return answer.strip().lower() in {"y", "yes"}
 
 
 def doctor(
@@ -876,6 +957,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--new", action="store_true", help="Make another worktree even if one already exists")
     parser.add_argument("--force", action="store_true", help="Allow init to replace generated setup files")
+    parser.add_argument(
+        "--discover-tests", action="store_true",
+        help="With init, discover, validate, classify, and confirm test commands before saving",
+    )
+    parser.add_argument(
+        "--discovery-timeout", type=int, default=DISCOVERY_TIMEOUT_SECONDS,
+        help="With --discover-tests, maximum seconds for each candidate check (default: 60)",
+    )
     parser.add_argument("--agents", action="store_true", help="With init, create a starter AGENTS.md")
     parser.add_argument(
         "--provider", choices=SUPPORTED_PROVIDERS, default="codex",
@@ -1222,6 +1311,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "help":
             parser.print_help()
             return 0
+        if args.command != "init" and (
+            args.discover_tests or args.discovery_timeout != DISCOVERY_TIMEOUT_SECONDS
+        ):
+            parser.error("--discover-tests and --discovery-timeout are only valid with init")
         if args.command == "init":
             return init_repository(
                 Path(args.repo), force=args.force, create_agents=args.agents,
@@ -1231,6 +1324,8 @@ def main(argv: list[str] | None = None) -> int:
                 sandbox_dockerfile=args.sandbox_dockerfile,
                 sandbox_context=args.sandbox_context,
                 sandbox_language=args.sandbox_language,
+                discover_tests=args.discover_tests,
+                discovery_timeout=args.discovery_timeout,
             )
         if args.secure:
             parser.error("--secure is only valid with init")
