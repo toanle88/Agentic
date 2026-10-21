@@ -54,7 +54,8 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str,
     generated = dt.datetime.now().astimezone().isoformat(timespec="seconds")
     data = _json_for_script({"runs": runs, "repo": repo_name, "logs": logs_name,
                              "generated": generated, "settings": settings or {}})
-    escape = lambda value: html.escape(str(value), quote=True)
+    def escape(value):
+        return html.escape(str(value), quote=True)
     fallback_metrics = "".join(
         f'<div class="metric"><span class="label">{escape(label)}</span>'
         f'<strong>{escape(value)}</strong></div>'
@@ -131,10 +132,6 @@ const invocationRows = invocations.map
 Tokens: ${esc(formatTokens(tokenValue(run)))}</span>
 run.blocked && run.status !== \"no_changes\" && run.result?.status !== \"NO_CHANGES\"
 --><title>Agentic run dashboard</title>"""
-    token_sort_control = ('<label>Order <select id="token-sort">'
-                          '<option value="newest">Newest first</option>'
-                          '<option value="oldest">Oldest first</option>'
-                          '</select></label>')
     navigation_fallback_script = r'''<script>
 (function(){
   const panels=document.querySelectorAll(".view"), buttons=document.querySelectorAll("[data-view]"), title=document.querySelector("#page-title");
