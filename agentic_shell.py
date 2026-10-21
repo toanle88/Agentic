@@ -1080,7 +1080,14 @@ class AgenticShell:
     def run_chat(self, parts: list[str], raw_line: str | None = None) -> None:
         """Open chat or preserve the historical one-shot chat task forms."""
         if len(parts) < 2:
-            raise ValueError("usage: /chat ISSUE [MESSAGE] or /chat MESSAGE (local mode)")
+            raise ValueError("usage: /chat ISSUE [MESSAGE], /chat pr PR, or /chat MESSAGE (local mode)")
+        if parts[1].casefold() == "pr":
+            if len(parts) != 3 or not parts[2].isascii() or not parts[2].isdigit():
+                raise ValueError("usage: /chat pr PR")
+            pull_request = parts[2]
+            self.active_task = f"PR #{pull_request} repair"
+            self._run_foreground(self._runner_args(None, ["--chat", "--pr", pull_request]))
+            return
         message_parts = parts[2:] if parts[1].isdigit() else parts[1:]
         multiline_message: str | None = None
         if raw_line is not None and "\n" in raw_line:

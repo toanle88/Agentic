@@ -626,6 +626,10 @@ _HELP_SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
                 "/chat ISSUE",
                 "open a conversational session in an existing run",
             ),
+            (
+                "/chat pr PR",
+                "repair an existing pull request after CI failure",
+            ),
             ("/chat ISSUE MESSAGE", "run an issue with a one-shot instruction"),
             (
                 "/chat MESSAGE",
