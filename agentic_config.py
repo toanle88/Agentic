@@ -14,7 +14,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from agentic_models import AgentSettings
+from agentic_models import AgentSettings, DEFAULT_GITHUB_HOST
 from agentic_providers import resolve_provider_executable
 from agentic_sandbox import sandbox_build_command, validate_sandbox
 
@@ -42,6 +42,15 @@ DEFAULT_REVIEWER_TIMEOUT = 300
 DEFAULT_TASK_TIMEOUT = 1800
 MAX_TASK_TIMEOUT = 86400
 DEFAULT_OPENROUTER_COMMAND_TIMEOUT = 300
+HOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+
+
+def _validate_host(value: Any, field: str, *, allow_none: bool = True) -> str | None:
+    if value is None and allow_none:
+        return None
+    if not isinstance(value, str) or not HOST_RE.fullmatch(value) or ".." in value:
+        raise ValueError(f"{field} must be a hostname without a scheme or path")
+    return value
 
 
 def _effective_timeout(value: int | None, default: int) -> int:
@@ -94,6 +103,7 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
     api_key_env = raw.get("api_key_env")
     base_url = raw.get("base_url")
     executable_path = raw.get("executable_path")
+    host = _validate_host(raw.get("host"), f"{section}.host")
     max_tool_turns = raw.get("max_tool_turns")
     command_timeout = raw.get("command_timeout_seconds")
     allow_network = raw.get("allow_network", False)
@@ -110,6 +120,8 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
         raise ValueError(f"{section}.executable_path must be a nonempty string or null")
     if provider != "copilot" and executable_path is not None:
         raise ValueError(f"{section}.executable_path is only valid for copilot")
+    if provider != "copilot" and host is not None:
+        raise ValueError(f"{section}.host is only valid for copilot")
     if timeout is not None and (type(timeout) is not int or not 1 <= timeout <= 86400):
         raise ValueError(f"{section}.timeout_seconds must be null or an integer from 1 to 86400")
     if max_tool_turns is not None and (
@@ -151,8 +163,18 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
             f"{section}.allow_network, and {section}.json_mode are only valid for openrouter"
         )
     return AgentSettings(
-        provider, model, reasoning, timeout, api_key_env, base_url,
-        max_tool_turns, command_timeout, allow_network, json_mode, executable_path,
+        provider=provider,
+        model=model,
+        reasoning_effort=reasoning,
+        timeout_seconds=timeout,
+        api_key_env=api_key_env,
+        base_url=base_url,
+        max_tool_turns=max_tool_turns,
+        command_timeout_seconds=command_timeout,
+        allow_network=allow_network,
+        json_mode=json_mode,
+        executable_path=executable_path,
+        host=host,
     )
 
 
@@ -161,6 +183,9 @@ def load_config(path: Path) -> dict[str, Any]:
     task_source = data.get("task_source", "github")
     if task_source not in {"github", "local"}:
         raise ValueError("task_source must be 'github' or 'local'")
+    github_host = _validate_host(
+        data.get("github_host", DEFAULT_GITHUB_HOST), "github_host", allow_none=False,
+    )
     commands = data.get("test_commands")
     if not isinstance(commands, list) or not commands or not all(
         isinstance(c, list) and c and all(isinstance(part, str) and part for part in c)
@@ -216,6 +241,7 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError("security_mode 'isolated' requires sandbox.enabled=true")
     result = {
         "task_source": task_source,
+        "github_host": github_host,
         "test_commands": commands,
         "slow_test_commands": slow_commands,
         "max_retries": retries,
@@ -454,6 +480,7 @@ def default_provider_settings(provider: str) -> dict[str, Any]:
         "model": None,
         "reasoning_effort": None,
         "timeout_seconds": DEFAULT_DEVELOPER_TIMEOUT,
+        "host": None,
     }
     if provider == "openrouter":
         settings.update({

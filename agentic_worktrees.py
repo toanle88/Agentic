@@ -17,7 +17,7 @@ import uuid
 from typing import Any
 
 from agentic_execution import _console_print
-from agentic_models import Issue, Run, StatePaths
+from agentic_models import DEFAULT_GITHUB_HOST, Issue, Run, StatePaths
 from agentic_security import redact_secrets
 from agentic_output import style_system_text, style_text
 
@@ -102,12 +102,12 @@ def issue_fingerprint(issue: Issue) -> str:
 
 
 def command(argv: list[str], cwd: Path, *, timeout: int = 180,
-            check: bool = True) -> subprocess.CompletedProcess[str]:
+            check: bool = True, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     """Subprocess without a shell; issue data never becomes shell code."""
     try:
         result = subprocess.run(argv, cwd=cwd, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True, timeout=timeout,
-                                check=False)
+                                check=False, env=env)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f"Could not execute {argv[0]!r}: {exc}") from exc
     if check and result.returncode:
@@ -138,13 +138,16 @@ def installed_git_version(executable: str = "git") -> tuple[int, int, int] | Non
     return tuple(int(part or 0) for part in match.groups())  # type: ignore[return-value]
 
 
-def probe(argv: list[str], cwd: Path, *, timeout: int = 10) -> tuple[bool, str]:
+def probe(
+    argv: list[str], cwd: Path, *, timeout: int = 10,
+    env: dict[str, str] | None = None,
+) -> tuple[bool, str]:
     """Run a small diagnostic command without turning its output into an exception."""
     try:
         result = subprocess.run(
             argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace", timeout=timeout,
-            check=False,
+            check=False, env=env,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, str(exc)
@@ -272,16 +275,32 @@ def worktree_lock(repo: Path, run: Run, state_dir: Path | None = None):
         yield
 
 
-def github_metadata(repo: Path) -> tuple[str, str]:
-    data = json.loads(command(["gh", "repo", "view", "--json", "nameWithOwner,defaultBranchRef"], repo).stdout)
+def _github_command(host: str, *args: str) -> list[str]:
+    """Build a GitHub CLI argv; the caller supplies the host per process."""
+    return ["gh", *args]
+
+
+def _github_environment(host: str) -> dict[str, str]:
+    environment = os.environ.copy()
+    environment["GH_HOST"] = host
+    return environment
+
+
+def github_metadata(repo: Path, github_host: str = DEFAULT_GITHUB_HOST) -> tuple[str, str]:
+    data = json.loads(command(
+        _github_command(github_host, "repo", "view", "--json", "nameWithOwner,defaultBranchRef"),
+        repo, env=_github_environment(github_host),
+    ).stdout)
     return data["nameWithOwner"], data["defaultBranchRef"]["name"]
 
 
-def fetch_issues(repo: Path, github_repo: str) -> list[Issue]:
-    raw = json.loads(command([
-        "gh", "issue", "list", "--repo", github_repo, "--state", "open", "--limit", "100",
+def fetch_issues(
+    repo: Path, github_repo: str, github_host: str = DEFAULT_GITHUB_HOST,
+) -> list[Issue]:
+    raw = json.loads(command(_github_command(
+        github_host, "issue", "list", "--repo", github_repo, "--state", "open", "--limit", "100",
         "--json", "number,title,body,state",
-    ], repo).stdout)
+    ), repo, env=_github_environment(github_host)).stdout)
     # No metadata-based filtering or ranking: present oldest issues first.
     return sorted(
         (issue for item in raw if eligible(issue := Issue.parse(item))),
@@ -289,11 +308,13 @@ def fetch_issues(repo: Path, github_repo: str) -> list[Issue]:
     )
 
 
-def get_issue(repo: Path, github_repo: str, number: int) -> Issue:
-    raw = json.loads(command([
-        "gh", "issue", "view", str(number), "--repo", github_repo,
+def get_issue(
+    repo: Path, github_repo: str, number: int, github_host: str = DEFAULT_GITHUB_HOST,
+) -> Issue:
+    raw = json.loads(command(_github_command(
+        github_host, "issue", "view", str(number), "--repo", github_repo,
         "--json", "number,title,body,state",
-    ], repo).stdout)
+    ), repo, env=_github_environment(github_host)).stdout)
     return Issue.parse(raw)
 
 
@@ -305,10 +326,13 @@ def load_local_task(path: Path) -> Issue:
     return Issue.from_local_text(text, path.resolve())
 
 
-def github_repo_from_remote(repo: Path) -> str | None:
+def github_repo_from_remote(
+    repo: Path, github_host: str = DEFAULT_GITHUB_HOST,
+) -> str | None:
     """Extract owner/repository from a GitHub origin without contacting GitHub."""
     remote = git(repo, "remote", "get-url", "origin", check=False).strip()
-    match = re.search(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?$", remote)
+    escaped_host = re.escape(github_host)
+    match = re.search(rf"(?:{escaped_host})[:/]([^/]+)/([^/]+?)(?:\.git)?$", remote)
     return f"{match.group(1)}/{match.group(2)}" if match else None
 
 

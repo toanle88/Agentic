@@ -432,6 +432,37 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(config['developer_agent']['executable_path'], str(path))
         self.assertIsNone(config['reviewer_agent']['executable_path'])
 
+    def test_github_and_role_specific_copilot_hosts_are_normalized(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config_path = Path(temp) / 'agent_config.json'
+            config_path.write_text(json.dumps({
+                'github_host': 'github.example.com',
+                'test_commands': [['true']],
+                'developer': {'provider': 'copilot', 'host': 'copilot.example.com'},
+                'reviewer': {'provider': 'copilot', 'host': 'review.example.com'},
+            }))
+            config = agentic.load_config(config_path)
+        self.assertEqual(config['github_host'], 'github.example.com')
+        self.assertEqual(config['developer_agent']['host'], 'copilot.example.com')
+        self.assertEqual(config['reviewer_agent']['host'], 'review.example.com')
+
+    def test_hosts_reject_urls_and_non_copilot_provider_hosts(self):
+        for field, value in (('github_host', 'https://github.example.com'),
+                             ('github_host', 'github.example.com/path')):
+            with self.subTest(field=field, value=value), tempfile.TemporaryDirectory() as temp:
+                path = Path(temp) / 'agent_config.json'
+                path.write_text(json.dumps({'test_commands': [['true']], field: value}))
+                with self.assertRaisesRegex(ValueError, field):
+                    agentic.load_config(path)
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'agent_config.json'
+            path.write_text(json.dumps({
+                'test_commands': [['true']],
+                'developer': {'provider': 'codex', 'host': 'copilot.example.com'},
+            }))
+            with self.assertRaisesRegex(ValueError, r'developer\.host'):
+                agentic.load_config(path)
+
 
     def test_isolated_preflight_uses_tools_from_the_sandbox_image(self):
         sandbox = {'enabled': True, 'engine': 'docker', 'image': 'test-image'}
@@ -588,7 +619,7 @@ class ConfigurationTests(unittest.TestCase):
         self.assertIn('Agentic config', output.getvalue())
         self.assertIn('provider (codex)', output.getvalue())
         self.assertIn(
-            ['/usr/bin/gh', 'auth', 'status', '--active', '--hostname', 'github.com'],
+            ['/usr/bin/gh', 'auth', 'status', '--active'],
             probed,
         )
 
@@ -689,6 +720,36 @@ class ConfigurationTests(unittest.TestCase):
         self.assertIn(
             ['/usr/bin/tool', 'issue', 'list', '--limit', '1', '--json', 'number'], probed,
         )
+
+    def test_doctor_uses_configured_github_host_for_all_github_probes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            config = repo / 'agent_config.json'
+            config.write_text(json.dumps({
+                'github_host': 'github.example.com',
+                'test_commands': [[sys.executable, '-c', 'pass']],
+            }))
+            probed = []
+            probe_envs = []
+
+            def fake_probe(argv, cwd, **kwargs):
+                probed.append(argv)
+                probe_envs.append(kwargs.get('env'))
+                return True, 'ok'
+
+            with (patch('agentic.installed_git_version', return_value=(2, 48, 0)),
+                  patch('agentic.probe', side_effect=fake_probe),
+                  patch('agentic.shutil.which', return_value='/usr/bin/gh'),
+                  patch('sys.stdout', new_callable=io.StringIO)):
+                self.assertEqual(agentic.doctor(repo, config, json_output=True), 0)
+
+        gh_commands = [
+            argv for argv in probed
+            if argv and argv[0] == '/usr/bin/gh'
+            and len(argv) > 1 and argv[1] in {'auth', 'repo', 'issue'}
+        ]
+        self.assertEqual(len(gh_commands), 3)
+        self.assertTrue(all(env['GH_HOST'] == 'github.example.com' for env in probe_envs if env))
 
 
     def test_doctor_skips_undocumented_native_auth_status_probes(self):

@@ -93,7 +93,7 @@ from agentic_openrouter import (  # noqa: F401
     run_openrouter,
 )
 from agentic_policy import forbidden  # noqa: F401
-from agentic_models import AgentSettings, Issue, Run, StatePaths  # noqa: F401
+from agentic_models import DEFAULT_GITHUB_HOST, AgentSettings, Issue, Run, StatePaths  # noqa: F401
 from agentic_review import (  # noqa: F401
     parse_review_result,
     record_review_findings, review_history_feedback,
@@ -108,7 +108,7 @@ from agentic_telemetry import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.56"
+__version__ = "1.1.57"
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 INSTRUCTION_CONTEXT_CHARS = _INSTRUCTION_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module
@@ -250,10 +250,12 @@ def repair_relative_worktree(repo: Path, worktree: Path) -> bool:
     return True
 
 
-def command(argv: list[str], cwd: Path, *, timeout: int = 180,
-            check: bool = True) -> subprocess.CompletedProcess[str]:
+def command(
+    argv: list[str], cwd: Path, *, timeout: int = 180,
+    check: bool = True, env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     """Compatibility wrapper keeping command patching at the CLI boundary."""
-    return _agentic_worktrees.command(argv, cwd, timeout=timeout, check=check)
+    return _agentic_worktrees.command(argv, cwd, timeout=timeout, check=check, env=env)
 
 
 def git(repo: Path, *args: str, check: bool = True) -> str:
@@ -264,22 +266,37 @@ def refresh_base(repo: Path, base: str) -> None:
     git(repo, "fetch", "origin", base)
 
 
-def fetch_issues(repo: Path, github_repo: str) -> list[Issue]:
-    raw = json.loads(command([
-        "gh", "issue", "list", "--repo", github_repo, "--state", "open", "--limit", "100",
+def _github_command(host: str, *args: str) -> list[str]:
+    """Build GitHub CLI argv; the caller supplies the host per process."""
+    return ["gh", *args]
+
+
+def _github_environment(host: str) -> dict[str, str]:
+    environment = os.environ.copy()
+    environment["GH_HOST"] = host
+    return environment
+
+
+def fetch_issues(
+    repo: Path, github_repo: str, github_host: str = DEFAULT_GITHUB_HOST,
+) -> list[Issue]:
+    raw = json.loads(command(_github_command(
+        github_host, "issue", "list", "--repo", github_repo, "--state", "open", "--limit", "100",
         "--json", "number,title,body,state",
-    ], repo).stdout)
+    ), repo, env=_github_environment(github_host)).stdout)
     return sorted(
         (issue for item in raw if eligible(issue := Issue.parse(item))),
         key=lambda issue: issue.number if issue.number is not None else 0,
     )
 
 
-def get_issue(repo: Path, github_repo: str, number: int) -> Issue:
-    raw = json.loads(command([
-        "gh", "issue", "view", str(number), "--repo", github_repo,
+def get_issue(
+    repo: Path, github_repo: str, number: int, github_host: str = DEFAULT_GITHUB_HOST,
+) -> Issue:
+    raw = json.loads(command(_github_command(
+        github_host, "issue", "view", str(number), "--repo", github_repo,
         "--json", "number,title,body,state",
-    ], repo).stdout)
+    ), repo, env=_github_environment(github_host)).stdout)
     return Issue.parse(raw)
 
 def logs_path(repo: Path, run: Run, state_dir: Path | None = None) -> Path:
@@ -724,6 +741,7 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
         detection = "Assisted test discovery"
     config = {
         "task_source": "github",
+        "github_host": DEFAULT_GITHUB_HOST,
         "test_commands": commands,
         "slow_test_commands": slow_commands,
         "max_retries": 3,
@@ -1046,11 +1064,12 @@ def execute_chat(args: argparse.Namespace, repo: Path) -> int:
             "agent_config.json or pass --config explicitly"
         )
     config = load_config(config_path)
+    github_host = config.get("github_host", DEFAULT_GITHUB_HOST)
     preflight_security(config["security_mode"], config["sandbox"], repo=repo)
     preflight_agent_settings(config["developer_agent"], sandbox=config["sandbox"])
     state_dir = Path(args.state_dir).expanduser().resolve() if args.state_dir else default_state_dir()
-    github_repo, _ = github_metadata(repo)
-    issue = get_issue(repo, github_repo, args.issue)
+    github_repo, _ = github_metadata(repo, github_host)
+    issue = get_issue(repo, github_repo, args.issue, github_host)
     previous = runs_for_issue(repo, args.issue)
     if not previous:
         raise RuntimeError(
@@ -1095,8 +1114,12 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
             show_runs(repo)
         return 0
     if args.list:
-        github_repo, _ = github_metadata(repo)
-        show_issues(repo, fetch_issues(repo, github_repo))
+        config_path = Path(args.config).resolve() if args.config else repo / "agent_config.json"
+        github_host = DEFAULT_GITHUB_HOST
+        if config_path.is_file():
+            github_host = load_config(config_path)["github_host"]
+        github_repo, _ = github_metadata(repo, github_host)
+        show_issues(repo, fetch_issues(repo, github_repo, github_host))
         return 0
     config_path = Path(args.config).resolve() if args.config else repo / "agent_config.json"
     if not config_path.is_file():
@@ -1105,6 +1128,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
             "agent_config.json or pass --config explicitly"
         )
     config = load_config(config_path)
+    github_host = config.get("github_host", DEFAULT_GITHUB_HOST)
     test_commands = (
         config["test_commands"] if args.publish
         else test_commands_for_profile(config, args.profile)
@@ -1133,25 +1157,25 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
             issue = Issue.from_local_text(args.task)
         else:
             raise RuntimeError("Local task mode requires --task or --task-file; from the shell use /run to paste a task")
-        github_repo = github_repo_from_remote(repo)
+        github_repo = github_repo_from_remote(repo, github_host)
         base = default_base_branch(repo)
         previous = runs_for_task(repo, issue.task_key or "")
     else:
         if args.task is not None or args.task_file is not None:
             raise RuntimeError("This repository uses GitHub issue mode; remove --task/--task-file or set task_source to local")
-        github_repo, base = github_metadata(repo)
+        github_repo, base = github_metadata(repo, github_host)
         if args.issue is None:
-            issues = fetch_issues(repo, github_repo)
+            issues = fetch_issues(repo, github_repo, github_host)
             show_issues(repo, issues)
             number = select_issue(issues)
         else:
             number = args.issue
         previous = runs_for_issue(repo, number)
-        issue = get_issue(repo, github_repo, number)
+        issue = get_issue(repo, github_repo, number, github_host)
 
     if args.publish and not github_repo:
         try:
-            github_repo, base = github_metadata(repo)
+            github_repo, base = github_metadata(repo, github_host)
         except RuntimeError as exc:
             raise RuntimeError(
                 "Publishing requires a GitHub origin remote and GitHub CLI access"
@@ -1253,7 +1277,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
             run, issue, config, folder, deadline=task_deadline,
         )
     if not fresh and github_repo:
-        existing = check_existing_pr(run.worktree, github_repo, run.branch)
+        existing = check_existing_pr(run.worktree, github_repo, run.branch, github_host)
         if existing:
             raise RuntimeError(f"A PR already exists: {existing[0]['url']}. Review it instead of editing here")
     if fresh:

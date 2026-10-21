@@ -44,7 +44,7 @@ from agentic_execution import (
     run_codex,
     streamed_command,
 )
-from agentic_models import AgentSettings, Issue, Run
+from agentic_models import DEFAULT_GITHUB_HOST, AgentSettings, Issue, Run
 from agentic_openrouter import run_openrouter
 from agentic_output import strip_ansi, style_patch_summary, style_system_text, style_text
 from agentic_policy import forbidden
@@ -415,6 +415,13 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
     cli_kwargs: dict[str, Any] = {}
     if selected.get("executable_path") is not None:
         cli_kwargs["executable_path"] = selected["executable_path"]
+    if provider == "copilot" and selected.get("host") is not None:
+        cli_kwargs["host"] = selected["host"]
+    if provider == "copilot" and selected.get("host") and provider_sandbox is not None:
+        pass_env = list(provider_sandbox.get("pass_env", []))
+        if "COPILOT_GH_HOST" not in pass_env:
+            pass_env.append("COPILOT_GH_HOST")
+        provider_sandbox["pass_env"] = pass_env
     return run_cli_provider(
         worktree, prompt, output=output, provider=provider,
         readonly=readonly, timeout=timeout, model=model,
@@ -1090,11 +1097,20 @@ def validate_publication_approval(run: Run, issue: Issue, base: str,
     return base_sha, digest, summary
 
 
-def check_existing_pr(repo: Path, github_repo: str, branch: str) -> list[dict[str, Any]]:
+def _github_environment(host: str) -> dict[str, str]:
+    environment = os.environ.copy()
+    environment["GH_HOST"] = host
+    return environment
+
+
+def check_existing_pr(
+    repo: Path, github_repo: str, branch: str,
+    github_host: str = DEFAULT_GITHUB_HOST,
+) -> list[dict[str, Any]]:
     return json.loads(command([
         "gh", "pr", "list", "--repo", github_repo, "--head", branch,
         "--state", "all", "--json", "number,url,state", "--limit", "20",
-    ], repo).stdout)
+    ], repo, env=_github_environment(github_host)).stdout)
 
 
 _ANSI_SEQUENCE_RE = re.compile(
@@ -1160,7 +1176,8 @@ def _publish(run: Run, issue: Issue, github_repo: str, base: str,
     if not eligible(issue):
         raise RuntimeError("Issue is closed; publication blocked")
     _status_print("[PUBLISH] Running: checking the approved patch", flush=True)
-    prs = check_existing_pr(run.worktree, github_repo, run.branch)
+    github_host = config.get("github_host", DEFAULT_GITHUB_HOST)
+    prs = check_existing_pr(run.worktree, github_repo, run.branch, github_host)
     if prs:
         _status_print(
             f"[PUBLISH] Completed: existing PR for this branch: "
@@ -1236,7 +1253,7 @@ def _publish(run: Run, issue: Issue, github_repo: str, base: str,
         "gh", "pr", "create", "--repo", github_repo, "--draft", "--base", base,
         "--head", run.branch, "--title", f"{title_prefix}: {issue.title[:110]}",
         "--body", body,
-    ], run.worktree)
+    ], run.worktree, env=_github_environment(github_host))
     _status_print("[PUBLISH] Completed: Draft PR: " + result.stdout.strip())
 
 

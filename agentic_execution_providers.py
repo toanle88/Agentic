@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -150,6 +152,7 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
                      timeout: int | None = None,
                      model: str | None = None,
                      executable_path: str | None = None,
+                     host: str | None = None,
                      sandbox: dict[str, Any] | None = None,
                      chat_restricted: bool = False) -> tuple[bool, str]:
     """Run a locally installed coding CLI in its non-interactive mode."""
@@ -173,21 +176,36 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
 
     label = "REVIEW" if readonly else "DEVELOPER"
     invocation_started = time.monotonic()
+    sandbox_pass_env = list((sandbox or {}).get("pass_env", []))
+    if provider == "copilot" and host and "COPILOT_GH_HOST" not in sandbox_pass_env:
+        sandbox_pass_env.append("COPILOT_GH_HOST")
     with restricted_process_environment(
         chat_restricted and not readonly, sandbox_enabled=bool((sandbox or {}).get("enabled")),
     ) as process_env:
+        if provider == "copilot" and host:
+            process_env = dict(process_env or os.environ)
+            process_env["COPILOT_GH_HOST"] = host
         result = streamed_command(
             args, worktree, label=label, log_file=output.with_suffix(".log"),
             timeout=timeout, codex_json=structured,
             progress_parser=(lambda line: _provider_progress(line, provider)) if structured else None,
             sandbox=sandbox, sandbox_read_only=readonly,
-            sandbox_pass_env=(sandbox or {}).get("pass_env", []),
+            sandbox_pass_env=sandbox_pass_env,
             metrics_folder=output.parent, env=process_env,
             sandbox_restricted=chat_restricted and not readonly,
         )
     raw_path = output.with_suffix(".jsonl") if structured else None
     raw = raw_path.read_text(encoding="utf-8", errors="replace") if raw_path and raw_path.exists() else result.stdout
     message = redact_secrets(_extract_provider_message(raw, provider) or result.stdout[-10000:].strip())
+    if (
+        provider == "copilot" and host and model and result.returncode != 0
+        and re.search(r"model .*?(?:not available|unavailable)", message, re.IGNORECASE)
+    ):
+        message = (
+            f"Copilot model {model!r} is unavailable on provider host {host!r}. "
+            "Verify the model is provisioned for that Copilot host and account.\n"
+            + message
+        )
     output.write_text(message, encoding="utf-8")
     usage = extract_jsonl_usage(raw, provider=provider)
     _record_provider_usage(

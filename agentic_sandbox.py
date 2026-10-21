@@ -155,6 +155,7 @@ def sandbox_command(
     argv: list[str], cwd: Path, settings: dict[str, Any] | None,
     *, output_root: Path | None = None, read_only: bool = False,
     pass_env: list[str] | None = None, restricted: bool = False,
+    env: dict[str, str] | None = None,
 ) -> list[str]:
     """Build a hardened container command while preserving argv semantics."""
     policy = validate_sandbox(settings)
@@ -214,8 +215,9 @@ def sandbox_command(
         if output != root and output.is_dir():
             command.extend(["-v", f"{output}:/agentic-output:rw"])
             replacements.append((output, "/agentic-output"))
+    source_env = os.environ if env is None else env
     for name in policy["pass_env"] if pass_env is None else pass_env:
-        if name in os.environ:
+        if name in source_env:
             command.extend(["--env", name])
     rendered_argv: list[str] = []
     for part in argv:
