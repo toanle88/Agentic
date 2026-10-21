@@ -9,6 +9,10 @@
   "test_timeout_seconds": 300,
   "task_timeout_seconds": 1800,
   "security_mode": "trusted",
+  "permission_policy": {
+    "developer": {"read_files": true, "search_files": true, "edit_files": true, "create_files": true, "git_read": true, "run_checks": true, "network": false, "allow_dangerous": false},
+    "reviewer": {"read_files": true, "search_files": true, "git_read": true, "network": false}
+  },
   "sandbox": {
     "enabled": false,
     "engine": "docker",

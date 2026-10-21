@@ -414,6 +414,7 @@ class StreamingTests(unittest.TestCase):
                         ok, message = agentic_execution.run_cli_provider(
                             root, 'review this patch', output=output,
                             provider=provider, readonly=True, model='test-model', timeout=10,
+                            permission_policy={'read_files': True},
                         )
                         self.assertTrue(ok)
                         self.assertEqual(message, f'{provider} final')

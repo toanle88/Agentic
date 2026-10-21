@@ -171,6 +171,25 @@ class TelemetryTests(unittest.TestCase):
             self.assertEqual(read_run_usage(folder)["security_policy"], policy)
             self.assertNotIn("secret-value", json.dumps(raw))
 
+    def test_record_security_policy_records_permission_policy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            record_security_policy(folder, {
+                "security_mode": "isolated",
+                "sandbox": {"enabled": True, "engine": "docker", "image": "runner"},
+                "developer_agent": {
+                    "provider": "claude",
+                    "permission_policy": {"allow_dangerous": True},
+                },
+                "reviewer_agent": {
+                    "provider": "codex",
+                    "permission_policy": {"allow_dangerous": False},
+                },
+            })
+            policy = json.loads((folder / "run.json").read_text())["security_policy"]
+        self.assertTrue(policy["permission_policy"]["developer"]["allow_dangerous"])
+        self.assertFalse(policy["permission_policy"]["reviewer"]["allow_dangerous"])
+
     def test_record_security_policy_preserves_resume_history(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)

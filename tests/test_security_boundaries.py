@@ -44,6 +44,108 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
             allowed, reason = agentic_openrouter._openrouter_command_allowed(argv, readonly=True)
             self.assertTrue(allowed, reason)
 
+    def test_git_read_is_an_explicit_allowlist_for_developer_and_reviewer(self):
+        allowed_git = ("status", "diff", "log", "show")
+        blocked_git = ("add", "config", "merge", "rebase", "commit", "push")
+        for readonly in (False, True):
+            for subcommand in allowed_git:
+                allowed, reason = agentic_openrouter._openrouter_command_allowed(
+                    ["git", subcommand], readonly=readonly,
+                )
+                self.assertTrue(allowed, (readonly, subcommand, reason))
+            for subcommand in blocked_git:
+                allowed, reason = agentic_openrouter._openrouter_command_allowed(
+                    ["git", subcommand], readonly=readonly,
+                )
+                self.assertFalse(allowed, (readonly, subcommand))
+
+    def test_openrouter_permission_policy_blocks_capabilities(self):
+        restricted = {
+            "read_files": True,
+            "search_files": True,
+            "edit_files": False,
+            "create_files": False,
+            "git_read": True,
+            "run_checks": False,
+            "network": False,
+            "allow_dangerous": False,
+        }
+        allowed, reason = agentic_openrouter._openrouter_command_allowed(
+            ["python", "-m", "unittest"], readonly=False,
+            permission_policy=restricted,
+        )
+        self.assertFalse(allowed)
+        self.assertIn("disabled", reason)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            result = agentic_openrouter._openrouter_tool_call(
+                root, "write_file", {"path": "new.txt", "content": "nope"},
+                readonly=False, permission_policy=restricted,
+            )
+        self.assertIn("disabled", result)
+
+    def test_openrouter_commands_require_write_capabilities_or_configured_checks(self):
+        restricted = {
+            "read_files": True, "search_files": True,
+            "edit_files": False, "create_files": False,
+            "git_read": True, "run_checks": True,
+            "network": False, "allow_dangerous": False,
+        }
+        for argv in (["touch", "new.txt"], ["rm", "existing.txt"]):
+            allowed, reason = agentic_openrouter._openrouter_command_allowed(
+                list(argv), readonly=False, permission_policy=restricted,
+            )
+            self.assertFalse(allowed, (argv, reason))
+            self.assertIn("edit_files", reason)
+        allowed, reason = agentic_openrouter._openrouter_command_allowed(
+            ["perl", "-i", "-e", "s/x/y/", "file.txt"],
+            readonly=False, permission_policy=restricted,
+        )
+        self.assertFalse(allowed)
+        self.assertIn("code-evaluation", reason)
+        configured = [["python", "-m", "unittest"]]
+        allowed, reason = agentic_openrouter._openrouter_command_allowed(
+            configured[0], readonly=False, permission_policy=restricted,
+            check_commands=configured,
+        )
+        self.assertTrue(allowed, reason)
+        allowed, reason = agentic_openrouter._openrouter_command_allowed(
+            ["python", "-m", "unittest", "discover"], readonly=False,
+            permission_policy=restricted, check_commands=configured,
+        )
+        self.assertFalse(allowed)
+        self.assertIn("configured checks", reason)
+
+    def test_openrouter_permission_policy_network_is_effective_without_legacy_flag(self):
+        policy = {
+            "read_files": True, "search_files": True, "edit_files": True,
+            "create_files": True, "git_read": True, "run_checks": True,
+            "network": True, "allow_dangerous": False,
+        }
+        allowed, reason = agentic_openrouter._openrouter_command_allowed(
+            ["curl", "https://example.test"], readonly=False,
+            permission_policy=policy,
+        )
+        self.assertTrue(allowed, reason)
+
+    def test_openrouter_reviewer_checks_policy_before_readonly_classification(self):
+        policy = {
+            "read_files": True,
+            "search_files": False,
+            "edit_files": False,
+            "create_files": False,
+            "git_read": False,
+            "run_checks": False,
+            "network": False,
+            "allow_dangerous": False,
+        }
+        for argv in (["git", "status"], ["git", "diff"], ["rg", "needle", "."]):
+            allowed, reason = agentic_openrouter._openrouter_command_allowed(
+                list(argv), readonly=True, permission_policy=policy,
+            )
+            self.assertFalse(allowed, argv)
+            self.assertIn("disabled", reason)
+
     def test_file_tool_resolves_before_sensitive_check(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

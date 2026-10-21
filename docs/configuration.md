@@ -108,6 +108,7 @@ Use commands that are actually supported by the target repository. Agentic does 
 | `task_timeout_seconds` | integer | `1800` | Maximum wall-clock time for one task invocation, including checks and review. |
 | `github_host` | hostname | `github.com` | Host used explicitly for GitHub CLI repository, issue, and publication operations. This is independent of provider hosts. |
 | `system_prompt` | nonempty string or `null` | `null` | Optional persistent project guidance included as bounded, untrusted context in developer and reviewer prompts. |
+| `permission_policy` | object | safe role defaults | Provider-independent capabilities for `developer` and `reviewer`; legacy configurations are normalized to these defaults. |
 | `security_mode` | `trusted` or `isolated` | `trusted` | `isolated` requires the configured Docker/Podman engine and image and fails closed when either is unavailable. |
 | `sandbox` | object | disabled | Optional Docker/Podman isolation for provider, OpenRouter tool, and test processes. `pass_env` names explicit credential variables to pass into the container. |
 | `developer` | object | Codex defaults | Provider settings for the coding agent. |
@@ -129,6 +130,59 @@ Each provider object supports these fields:
 | `command_timeout_seconds` | integer or `null` | OpenRouter only: maximum duration of one tool command; `null` uses 300 seconds. |
 | `allow_network` | boolean | OpenRouter only: allow explicitly network-capable commands. Defaults to `false`. This is not an OS-level network sandbox. |
 | `json_mode` | boolean | OpenRouter only: request JSON-mode responses when the configured model/provider endpoint is known to support it. Defaults to `false`; local schema validation is always used. |
+
+### Permission policy
+
+The normalized policy is independent of the selected provider. The developer
+defaults permit file reads/searches, edits and new files inside the assigned
+worktree, read-only Git inspection (`status`, `diff`, `log`, and `show`), and
+configured checks. Network-capable tool commands and dangerous permissions are
+disabled by default. The reviewer defaults permit only reads, searches, and
+read-only Git inspection; review never enables writes, arbitrary checks, or
+dangerous permissions.
+
+The policy fields are `read_files`, `search_files`, `edit_files`,
+`create_files`, `git_read`, `run_checks`, `network`, and `allow_dangerous`.
+OpenRouter enforces these fields in its scoped tools. Native providers receive
+provider-specific tool allow/deny rules: Claude developer turns receive
+path-scoped `Read`, `Glob`, `Grep`, `Edit`, and `Write` rules rooted at the
+assigned worktree (or `/workspace` in a container), plus exact patterns for
+configured check argv and read-only Git commands plus explicit denials for Git
+output redirection and external diff/text conversion. Claude reviewer turns
+receive only file-inspection tools; Agentic supplies the staged patch from its
+argv-only Git runner. With `network: true`, Claude additionally receives
+explicit network shell patterns and its web tools; it does not receive a
+wildcard shell grant. Claude does not support a create-only policy: a
+configuration with `create_files: true` and `edit_files: false` is rejected.
+Gemini developer turns receive its safe-tool approval list plus command-scoped
+`ShellTool(git status)`, `ShellTool(git diff)`, `ShellTool(git log)`, and
+`ShellTool(git show)` entries when `git_read` is enabled. Gemini reviewers
+receive only file-inspection tools; Agentic supplies the staged patch from its
+argv-only Git runner. A developer with `run_checks: true` is represented by
+Agentic running the configured checks itself; it does not grant Gemini
+unrestricted shell access. Gemini
+`network: true` is rejected because its native network-capable shell tool is
+unrestricted; a sandbox does not make arbitrary shell commands an equivalent
+network-only capability. Set `run_checks: false` for trusted edit-only turns.
+Reviewers receive no native shell access. The `gh` command is
+excluded from native network allowlists so publication remains an explicit
+Agentic workflow step.
+Copilot developer turns receive only file and search tools plus the cwd-scoped
+bare `write` rule for worktree files; they do not receive native shell access.
+Agentic runs configured checks and Git inspection in its own argv-only runner,
+which avoids Copilot's prompt and persisted-approval boundary. Copilot
+`network: true` is rejected because its native network capability requires
+unrestricted shell access. Copilot reviewer turns likewise receive only
+file-inspection tools and no shell. The
+Agentic sandbox, when enabled, remains the filesystem and process boundary.
+
+`allow_dangerous: true` is an explicit escape hatch for the developer only.
+It is rejected unless `security_mode` is `isolated`, emits a prominent warning,
+and is recorded in run security metadata. It enables provider-specific
+dangerous approval flags (including Claude bypass permissions and Copilot
+allow-all flags) but does not permit reviewers to write, bypass protected
+paths, commit, push, or publish. Keep it disabled unless the additional
+capability is necessary.
 
 ### Providers
 

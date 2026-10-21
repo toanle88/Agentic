@@ -131,6 +131,43 @@ class ChatTests(unittest.TestCase):
             self.assertEqual(chat.call_args.args[:3], (agentic.Issue(45, 'Issue', 'Body'), run.worktree, folder))
             self.assertIs(chat.call_args.kwargs['run_agent'], agentic.run_agent)
 
+    def test_chat_records_policy_and_warns_for_dangerous_permissions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            state = repo / 'state'
+            config_path = repo / 'agent_config.json'
+            config_path.write_text('{}')
+            args = agentic.build_parser().parse_args([
+                '--repo', str(repo), '--state-dir', str(state),
+                '--config', str(config_path), '--chat', '--issue', '45',
+            ])
+            run = agentic.Run(45, 'agent/issue-45-aabbccdd', repo / 'worktree')
+            config = {
+                'security_mode': 'isolated',
+                'sandbox': {'enabled': True, 'engine': 'docker', 'image': 'runner'},
+                'developer_agent': {
+                    'provider': 'claude',
+                    'permission_policy': {'allow_dangerous': True},
+                },
+                'test_commands': [['python', '-c', 'pass']],
+            }
+            with patch.object(agentic, 'load_config', return_value=config), \
+                 patch.object(agentic, 'preflight_security'), \
+                 patch.object(agentic, 'preflight_agent_settings'), \
+                 patch.object(agentic, 'github_metadata', return_value=('owner/repo', 'main')), \
+                 patch.object(agentic, 'get_issue', return_value=agentic.Issue(45, 'Issue', 'Body')), \
+                 patch.object(agentic, 'runs_for_issue', return_value=[run]), \
+                 patch.object(agentic, 'choose_existing', return_value=run), \
+                 patch.object(agentic, 'logs_path', return_value=state / 'logs'), \
+                 patch.object(agentic, 'record_security_policy') as record, \
+                 patch.object(agentic, 'run_chat_session', return_value=0), \
+                 patch.object(agentic, '_status_print') as status:
+                self.assertEqual(agentic.execute_chat(args, repo), 0)
+
+        record.assert_called_once_with(state / 'logs', config)
+        warning = status.call_args.args[0]
+        self.assertIn('WARNING: dangerous provider permissions are enabled for developer', warning)
+
     def test_pr_chat_resolves_existing_head_worktree_and_enables_repair_mode(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = Path(temp)
