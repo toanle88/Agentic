@@ -11,7 +11,13 @@ from unittest.mock import patch
 
 import agentic
 import agentic_execution
-from agentic_output import is_transient_progress, style_patch_summary, style_system_text, style_text
+from agentic_output import (
+    PatchSummaryStream,
+    is_transient_progress,
+    style_patch_summary,
+    style_system_text,
+    style_text,
+)
 
 
 def sh(*args, cwd):
@@ -94,6 +100,39 @@ class StreamingTests(unittest.TestCase):
         with patch.dict('os.environ', {'NO_COLOR': '1', 'AGENTIC_PLAIN': ''}), \
              patch('sys.stdout', new=TTYBuffer()):
             self.assertEqual(style_patch_summary(summary), summary)
+
+    def test_patch_summary_stream_styles_split_live_log_chunks(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        output = TTYBuffer()
+        with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+             patch('sys.stdout', new=output):
+            renderer = PatchSummaryStream()
+            rendered = renderer.feed('[PATCH] Proposed changes:\n src/App.py | 4 ')
+            rendered += renderer.feed('++--\n 1 file changed, 2 insertions(+), ')
+            rendered += renderer.feed('2 deletions(-)\n[REVIEW] next\n')
+            rendered += renderer.flush()
+
+            timestamped = PatchSummaryStream(output)
+            rendered_timestamped = timestamped.feed('[13:42:27')
+            rendered_timestamped += timestamped.feed(
+                '] [PATCH] Proposed changes:\n src/App.py | 4 ++--\n'
+            )
+            rendered_timestamped += timestamped.flush()
+
+        self.assertIn('\033[95m[PATCH]\033[0m Proposed changes:', rendered)
+        self.assertIn(' src/App.py | 4 \033[32m++\033[0m\033[31m--\033[0m', rendered)
+        self.assertIn('\033[32m2 insertions(+)\033[0m', rendered)
+        self.assertIn('\033[31m2 deletions(-)\033[0m', rendered)
+        self.assertIn('\033[35m[REVIEW]\033[0m next', rendered)
+
+        self.assertIn('\033[95m[PATCH]\033[0m Proposed changes:', rendered_timestamped)
+        self.assertIn(
+            ' src/App.py | 4 \033[32m++\033[0m\033[31m--\033[0m',
+            rendered_timestamped,
+        )
 
     def test_status_styling_is_tty_only_and_honors_no_color(self):
         class TTYBuffer(StringIO):

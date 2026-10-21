@@ -24,7 +24,12 @@ from pathlib import Path
 from typing import Any, Callable, TextIO
 
 from agentic import __version__  # noqa: F401
-from agentic_output import is_transient_progress, sanitize_terminal_text, untag_system_prefix
+from agentic_output import (
+    PatchSummaryStream,
+    is_transient_progress,
+    sanitize_terminal_text,
+    untag_system_prefix,
+)
 from agentic_shell_input import (  # noqa: F401
     COMMAND_DESCRIPTIONS,
     HELP,
@@ -802,6 +807,7 @@ class AgenticShell:
                 pending = ""
                 previous_was_carriage_return = False
                 prompt_was_displayed = False
+                patch_stream = PatchSummaryStream()
 
                 def emit_line(line: str, *, terminated: bool) -> None:
                     nonlocal prompt_was_displayed
@@ -818,6 +824,7 @@ class AgenticShell:
                         _shell_print(
                             _normalize_foreground_output(line),
                             style_status_tokens=False,
+                            patch_stream=patch_stream if generated_prefix is None else None,
                             system_prefix=generated_prefix,
                             flush=True,
                         )
@@ -838,6 +845,7 @@ class AgenticShell:
                         _shell_print(
                             _normalize_foreground_output(line),
                             style_status_tokens=False,
+                            patch_stream=patch_stream,
                             flush=True,
                         )
 
@@ -1213,7 +1221,12 @@ class AgenticShell:
                 initial_start = max(0, initial_end - 200_000)
                 stream.seek(initial_start)
                 initial = stream.read(initial_end - initial_start)
-                _shell_print(_tail_from_text(initial, lines), style_status_tokens=False)
+                patch_stream = PatchSummaryStream()
+                _shell_print(
+                    _tail_from_text(initial, lines),
+                    style_status_tokens=False,
+                    patch_stream=patch_stream,
+                )
                 # Keep the position at the end of the initial snapshot rather
                 # than seeking to the current EOF, so a concurrent write is
                 # still included in the first live read.
@@ -1223,7 +1236,7 @@ class AgenticShell:
                     self._refresh(job)
                     chunk = stream.read()
                     if chunk:
-                        _shell_write_log(chunk)
+                        _shell_write_log(chunk, patch_stream=patch_stream)
                     if not job.running:
                         break
                     time.sleep(0.1)
@@ -1233,7 +1246,9 @@ class AgenticShell:
                 self._refresh(job)
                 chunk = stream.read()
                 if chunk:
-                    _shell_write_log(chunk)
+                    _shell_write_log(chunk, patch_stream=patch_stream, final=True)
+                else:
+                    _shell_write_log("", patch_stream=patch_stream, final=True)
         except KeyboardInterrupt:
             _shell_print("\n--- live output follow stopped; job continues running ---")
         except OSError as exc:

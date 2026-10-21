@@ -440,6 +440,45 @@ class ShellTests(unittest.TestCase):
             self.assertIn('[TESTS] PASSED', plain.getvalue())
 
 
+    def test_log_replay_colors_patch_diff_stat_only_on_a_terminal(self):
+        from contextlib import redirect_stdout
+
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        summary = (
+            '[PATCH] Proposed changes:\n'
+            ' src/App.py | 4 ++--\n'
+            ' 1 file changed, 2 insertions(+), 2 deletions(-)\n'
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            job = shell._launch([
+                sys.executable,
+                '-c',
+                f'import sys; sys.stdout.write({summary!r})',
+            ])
+            job.process.wait(timeout=5)
+            shell.refresh()
+
+            colored = TTYBuffer()
+            with patch.dict(os.environ, {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), redirect_stdout(colored):
+                shell.show_logs(['/logs', str(job.number), '5'])
+            rendered = colored.getvalue()
+            self.assertIn('\033[95m[PATCH]\033[0m Proposed changes:', rendered)
+            self.assertIn('\033[32m++\033[0m\033[31m--\033[0m', rendered)
+            self.assertIn('\033[32m2 insertions(+)\033[0m', rendered)
+            self.assertIn('\033[31m2 deletions(-)\033[0m', rendered)
+
+            plain = StringIO()
+            with redirect_stdout(plain):
+                shell.show_logs(['/logs', str(job.number), '5'])
+            self.assertNotIn('\033[', plain.getvalue())
+            self.assertIn(summary, plain.getvalue())
+
+
     def test_runner_command_forwarding_uses_terminal_styling(self):
         from contextlib import redirect_stdout
         from subprocess import CompletedProcess
