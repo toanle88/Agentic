@@ -5,8 +5,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import agentic_config
-from agentic_sandbox import sandbox_command, validate_sandbox
+import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
+from agentic_runner import config as agentic_config
+from agentic_runner.sandbox import sandbox_command, validate_sandbox
 
 
 @unittest.skipUnless(

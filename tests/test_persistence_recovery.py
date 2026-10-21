@@ -5,13 +5,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import agentic
-import agentic_dashboard_data
-import agentic_workflow
-from agentic_models import Issue
-from agentic_persistence import atomic_write_json, atomic_write_text
-from agentic_review import record_review_findings
-from agentic_telemetry import read_issue_snapshot, read_run_usage, record_usage
+import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
+from agentic_runner import cli as agentic
+from agentic_runner import dashboard_data as agentic_dashboard_data
+from agentic_runner import workflow as agentic_workflow
+from agentic_runner.models import Issue
+from agentic_runner.persistence import atomic_write_json, atomic_write_text
+from agentic_runner.review import record_review_findings
+from agentic_runner.telemetry import read_issue_snapshot, read_run_usage, record_usage
 
 
 class PersistenceRecoveryTests(unittest.TestCase):

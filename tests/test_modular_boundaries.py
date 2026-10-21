@@ -7,11 +7,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import agentic_shell
-import agentic_shell_jobs
-import agentic_workflow
-import agentic_workflow_state
-from agentic_models import Issue
+import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
+from agentic_runner import shell as agentic_shell
+from agentic_runner import shell_jobs as agentic_shell_jobs
+from agentic_runner import workflow as agentic_workflow
+from agentic_runner import workflow_state as agentic_workflow_state
+from agentic_runner.models import Issue
 
 
 class ModularBoundaryTests(unittest.TestCase):

@@ -5,14 +5,14 @@ lives in agentic_openrouter_loop. Historical private imports remain available.
 """
 import subprocess
 import urllib
-import agentic_openrouter_loop as _loop
-import agentic_openrouter_tools as _tools
-from agentic_config import (  # noqa: F401
+from . import openrouter_loop as _loop
+from . import openrouter_tools as _tools
+from .config import (  # noqa: F401
     DEFAULT_OPENROUTER_BASE_URL,
     DEFAULT_OPENROUTER_COMMAND_TIMEOUT,
     OPENROUTER_MAX_TURNS,
 )
-from agentic_openrouter_tools import (  # noqa: F401
+from .openrouter_tools import (  # noqa: F401
     ALWAYS_BLOCKED_COMMANDS,
     GIT_UNSAFE_OPTIONS,
     INTERPRETER_EVAL_OPTIONS,
@@ -66,4 +66,3 @@ def run_openrouter(*args, **kwargs):
         _loop._openrouter_tool_call = old_tool_call
         _loop.OPENROUTER_MAX_TURNS = old_max_turns
         _loop.DEFAULT_OPENROUTER_COMMAND_TIMEOUT = old_command_timeout
-

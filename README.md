@@ -355,7 +355,7 @@ After that PR is merged, the preferred path is the GitHub Actions workflow:
 3. Confirm the workflow succeeds and find the GitHub Release and verified
    `release-artifacts` in the run summary.
 
-The workflow reads `agentic.__version__`, runs the same compile, offline test,
+The workflow reads `agentic_runner.__version__`, runs the same compile, offline test,
 and build checks as a tag release, then verifies that the tag and GitHub release
 are unused before creating both from the checked commit. No version input is
 needed. If the UI path is unavailable, use the local fallback from a

@@ -49,4 +49,3 @@ def redact_secrets(text: str, extra_values: Iterable[str] = ()) -> str:
     for value in sorted(set(values), key=len, reverse=True):
         redacted = redacted.replace(value, "[REDACTED]")
     return redacted
-

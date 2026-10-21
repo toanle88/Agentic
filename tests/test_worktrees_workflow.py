@@ -11,8 +11,9 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import agentic
-import agentic_workflow
+import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
+from agentic_runner import cli as agentic
+from agentic_runner import workflow as agentic_workflow
 from test_worktrees import _GitRepositoryTestCase
 
 
@@ -124,9 +125,10 @@ class WorkflowTests(_GitRepositoryTestCase):
                 sys.executable,
                 "-c",
                 (
+                    "import sys; sys.path.insert(0, 'src'); "
                     "from pathlib import Path; "
-                    "from agentic_models import Issue; "
-                    "import agentic_workflow; "
+                    "from agentic_runner.models import Issue; "
+                    "import agentic_runner.workflow as agentic_workflow; "
                     "assert agentic_workflow.next_log(Path('.'), 'test').name == 'test-001.txt'; "
                     "assert 'ISSUE #1' in agentic_workflow.agent_prompt(Issue(1, 'title', 'body'))"
                 ),

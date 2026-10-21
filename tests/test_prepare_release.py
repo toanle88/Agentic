@@ -23,7 +23,8 @@ class PrepareReleaseTests(unittest.TestCase):
     def test_update_package_version_preserves_assignment_style(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            source = root / "agentic.py"
+            source = root / "src" / "agentic_runner" / "__init__.py"
+            source.parent.mkdir(parents=True)
             source.write_text("#!/usr/bin/env python3\n__version__ = '1.0.0'\n", encoding="utf-8")
 
             prepare_release.update_package_version(root, "1.0.1")
@@ -33,7 +34,9 @@ class PrepareReleaseTests(unittest.TestCase):
     def test_update_package_version_requires_one_literal_assignment(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            (root / "agentic.py").write_text("__version__ = '1.0.0'\n__version__ = '1.0.1'\n", encoding="utf-8")
+            source = root / "src" / "agentic_runner" / "__init__.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("__version__ = '1.0.0'\n__version__ = '1.0.1'\n", encoding="utf-8")
 
             with self.assertRaises(prepare_release.ReleaseError):
                 prepare_release.update_package_version(root, "1.0.2")
@@ -41,7 +44,8 @@ class PrepareReleaseTests(unittest.TestCase):
     def test_dry_run_does_not_mutate_or_require_github_auth(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            source = root / "agentic.py"
+            source = root / "src" / "agentic_runner" / "__init__.py"
+            source.parent.mkdir(parents=True)
             source.write_text("__version__ = '1.0.0'\n", encoding="utf-8")
             output = StringIO()
 
@@ -60,7 +64,8 @@ class PrepareReleaseTests(unittest.TestCase):
     def test_prepare_updates_commits_pushes_and_opens_pull_request(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            source = root / "agentic.py"
+            source = root / "src" / "agentic_runner" / "__init__.py"
+            source.parent.mkdir(parents=True)
             source.write_text("__version__ = '1.0.0'\n", encoding="utf-8")
             checked_calls = []
 
@@ -81,7 +86,7 @@ class PrepareReleaseTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertEqual(source.read_text(encoding="utf-8"), "__version__ = '1.0.1'\n")
             self.assertIn(("git", "switch", "-c", "codex/release-v1.0.1"), checked_calls)
-            self.assertIn(("git", "add", "agentic.py"), checked_calls)
+            self.assertIn(("git", "add", "src/agentic_runner/__init__.py"), checked_calls)
             self.assertIn(("git", "push", "--set-upstream", "origin", "codex/release-v1.0.1"), checked_calls)
             self.assertTrue(any(command[:3] == ("gh", "pr", "create") for command in checked_calls))
 

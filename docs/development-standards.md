@@ -16,8 +16,9 @@ design choices in [`decisions/`](decisions/).
 
 - Use descriptive `snake_case` for Python functions and variables and
   `PascalCase` for classes.
-- Keep the compatibility-facing CLI in `agentic.py`; put cohesive new
-  boundaries in focused modules and preserve existing public wrappers.
+- Keep the canonical CLI in `src/agentic_runner/cli.py`; keep the three root
+  command files as thin compatibility wrappers and put cohesive boundaries in
+  focused package modules.
 - Keep provider command construction separate from process execution and keep
   read-only review paths separate from the write-capable developer path.
 

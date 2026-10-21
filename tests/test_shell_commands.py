@@ -1,8 +1,9 @@
 """Focused tests for shell argv validation independent of process lifecycle."""
 import unittest
 
-from agentic_output import ConciseLogStream
-from agentic_shell_commands import parse_job_command, parse_log_command, parse_options
+import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
+from agentic_runner.output import ConciseLogStream
+from agentic_runner.shell_commands import parse_job_command, parse_log_command, parse_options
 
 
 class ShellCommandTests(unittest.TestCase):

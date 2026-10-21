@@ -11,9 +11,10 @@ from subprocess import CompletedProcess
 from unittest.mock import call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import agentic
-import agentic_execution
-from agentic_sandbox import sandbox_command
+import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
+from agentic_runner import cli as agentic
+from agentic_runner import execution as agentic_execution
+from agentic_runner.sandbox import sandbox_command
 
 
 def sh(*args, cwd):

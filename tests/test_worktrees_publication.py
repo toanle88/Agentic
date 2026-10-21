@@ -7,7 +7,8 @@ from unittest.mock import call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import agentic
+import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
+from agentic_runner import cli as agentic
 from test_worktrees import _GitRepositoryTestCase, sh
 
 
@@ -102,7 +103,7 @@ class PublicationTests(_GitRepositoryTestCase):
         )
         with (patch('agentic.check_existing_pr', return_value=[]),
               patch('agentic.verify_and_review') as verify,
-              patch('agentic.run_tests') as tests,
+              patch('agentic.run_tests') as run_tests,
               patch('agentic_shell_input._interactive_line', return_value='no') as confirm,
               patch('agentic.command', wraps=agentic.command) as mock_command):
             agentic.publish(run, issue, 'fake/repo', 'main', cfg, folder)
@@ -111,7 +112,7 @@ class PublicationTests(_GitRepositoryTestCase):
                 system_prefix='PUBLISH',
             )
             verify.assert_not_called()
-            tests.assert_not_called()
+            run_tests.assert_not_called()
             self.assertFalse(any(c.args[0][:2] == ['gh', 'pr'] for c in mock_command.call_args_list))
             self.assertFalse(any(c.args[0][:3] == ['git', 'push', '-u'] for c in mock_command.call_args_list))
         self.assertIn('fix.py', agentic.git(run.worktree, 'diff', '--cached', '--name-only'))
@@ -200,12 +201,12 @@ class PublicationTests(_GitRepositoryTestCase):
         config = {'test_commands': [['missing-test-command']], 'max_files': 10}
         with (patch('agentic.check_existing_pr', return_value=[]),
               patch('agentic.verify_and_review') as verify,
-              patch('agentic.run_tests') as tests,
+              patch('agentic.run_tests') as run_tests,
               patch('agentic._status_print') as status):
             with self.assertRaisesRegex(RuntimeError, 'No approval recorded'):
                 agentic.publish(run, issue, 'fake/repo', 'main', config, folder)
         verify.assert_not_called()
-        tests.assert_not_called()
+        run_tests.assert_not_called()
         self.assertTrue(any(
             message.startswith('[PUBLISH] Failed: No approval recorded')
             for message in (call.args[0] for call in status.call_args_list)
@@ -344,7 +345,7 @@ class PublicationTests(_GitRepositoryTestCase):
 
         with (patch('agentic.check_existing_pr', return_value=[]),
               patch('agentic.verify_and_review') as automated_verify,
-              patch('agentic.run_tests') as tests,
+              patch('agentic.run_tests') as run_tests,
               patch('agentic.prepare_patch', return_value=(
                   approval['base_sha'], approval['patch_digest'], 'summary',
               )),
@@ -356,7 +357,7 @@ class PublicationTests(_GitRepositoryTestCase):
                 manual_approval=approval,
             )
         automated_verify.assert_not_called()
-        tests.assert_not_called()
+        run_tests.assert_not_called()
         pr_command = next(argv for argv in commands if argv[:3] == ['gh', 'pr', 'create'])
         self.assertIn('## Review status', pr_command[-1])
         self.assertIn('Automated review was not run during publication', pr_command[-1])

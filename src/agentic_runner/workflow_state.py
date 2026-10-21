@@ -12,12 +12,12 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-from agentic_execution import _short
-from agentic_models import Issue, Run
-from agentic_output import strip_ansi
-from agentic_persistence import atomic_write_json, atomic_write_text
-from agentic_security import redact_secrets
-from agentic_worktrees import issue_fingerprint
+from .execution import _short
+from .models import Issue, Run
+from .output import strip_ansi
+from .persistence import atomic_write_json, atomic_write_text
+from .security import redact_secrets
+from .worktrees import issue_fingerprint
 
 
 def next_log(folder: Path, kind: str, ext: str = "txt") -> Path:

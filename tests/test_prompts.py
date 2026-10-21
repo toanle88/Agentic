@@ -1,8 +1,9 @@
 """Focused tests for the extracted prompt-boundary module."""
 import unittest
 
-from agentic_models import Issue
-from agentic_prompts import build_agent_prompt
+import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
+from agentic_runner.models import Issue
+from agentic_runner.prompts import build_agent_prompt
 
 
 class PromptBoundaryTests(unittest.TestCase):

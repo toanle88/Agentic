@@ -8,8 +8,8 @@ from pathlib import Path
 import re
 from typing import Any
 
-from agentic_persistence import atomic_write_json
-from agentic_security import redact_secrets
+from .persistence import atomic_write_json
+from .security import redact_secrets
 
 
 FINDING_SEVERITIES = (

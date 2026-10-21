@@ -4,14 +4,14 @@ Streaming/process concerns live in agentic_execution_stream; provider message
 and command adapters live in agentic_execution_providers. Historical imports
 remain available from this module.
 """
-import agentic_execution_providers as _providers
-from agentic_execution_providers import (  # noqa: F401
+from . import execution_providers as _providers
+from .execution_providers import (  # noqa: F401
     _extract_provider_message,
     _message_text,
     _provider_progress,
 )
-from agentic_providers import cli_provider_command, codex_command
-from agentic_execution_stream import (  # noqa: F401
+from .providers import cli_provider_command, codex_command
+from .execution_stream import (  # noqa: F401
     _absolute_path,
     _codex_progress,
     _console_print,
@@ -72,4 +72,3 @@ def run_cli_provider(*args, **kwargs):
     finally:
         _providers.streamed_command = old_streamed
         _providers.cli_provider_command = old_command
-

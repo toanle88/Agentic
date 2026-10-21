@@ -1,12 +1,12 @@
 import json
-import re
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import agentic_execution
-from agentic_guidance import (
+import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
+from agentic_runner import execution as agentic_execution
+from agentic_runner.guidance import (
     MAX_GUIDANCE_FILE_BYTES,
     MAX_GUIDANCE_FILE_CHARS,
     MAX_GUIDANCE_TOTAL_CHARS,
@@ -14,37 +14,30 @@ from agentic_guidance import (
     guidance_phase,
     guidance_prompt,
 )
-from agentic_telemetry import read_run_usage
+from agentic_runner.telemetry import read_run_usage
 
 
 class GuidanceTests(unittest.TestCase):
-    def test_guidance_module_is_in_the_setuptools_manifest(self):
+    def test_guidance_module_is_in_the_src_package(self):
         root = Path(__file__).resolve().parents[1]
-        pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
-        match = re.search(r"py-modules\s*=\s*\[(.*?)\]", pyproject, re.DOTALL)
-        self.assertIsNotNone(match)
-        self.assertIn('"agentic_guidance"', match.group(1))
+        self.assertTrue((root / "src" / "agentic_runner" / "guidance.py").is_file())
 
-    def test_split_runtime_modules_are_in_the_setuptools_manifest(self):
+    def test_runtime_modules_are_in_the_src_package(self):
         root = Path(__file__).resolve().parents[1]
-        pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
-        match = re.search(r"py-modules\s*=\s*\[(.*?)\]", pyproject, re.DOTALL)
-        self.assertIsNotNone(match)
-        manifest = match.group(1)
         for module in (
-            "agentic_dashboard_data",
-            "agentic_execution_providers",
-            "agentic_execution_stream",
-            "agentic_openrouter_loop",
-            "agentic_openrouter_tools",
-            "agentic_prompts",
-            "agentic_shell_commands",
-            "agentic_shell_input",
-            "agentic_workflow",
-            "agentic_worktrees",
+            "dashboard_data",
+            "execution_providers",
+            "execution_stream",
+            "openrouter_loop",
+            "openrouter_tools",
+            "prompts",
+            "shell_commands",
+            "shell_input",
+            "workflow",
+            "worktrees",
         ):
             with self.subTest(module=module):
-                self.assertIn(f'"{module}"', manifest)
+                self.assertTrue((root / "src" / "agentic_runner" / f"{module}.py").is_file())
 
     def test_discovers_standard_guidance_and_records_bounded_audit_metadata(self):
         with tempfile.TemporaryDirectory() as temp:

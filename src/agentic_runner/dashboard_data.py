@@ -13,9 +13,9 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
-from agentic_review import finding_severity
-from agentic_security import redact_secrets
-from agentic_telemetry import read_run_usage
+from .review import finding_severity
+from .security import redact_secrets
+from .telemetry import read_run_usage
 
 
 RUN_NAME = re.compile(

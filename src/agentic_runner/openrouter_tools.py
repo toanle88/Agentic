@@ -9,10 +9,10 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from agentic_execution import _short
-from agentic_sandbox import sandbox_command
-from agentic_security import redact_secrets
-from agentic_policy import default_permission_policy, forbidden, sensitive_read
+from .execution import _short
+from .sandbox import sandbox_command
+from .security import redact_secrets
+from .policy import default_permission_policy, forbidden, sensitive_read
 
 OPENROUTER_READ_FILE_CHARS = 12_000
 OPENROUTER_READ_CHUNK_CHARS = 8_192
@@ -254,6 +254,7 @@ def _bounded_file_text(path: Path, *, start_line: int | None = None,
                 text[:OPENROUTER_READ_FILE_CHARS - len(marker)] + marker
                 if truncated else text
             )
+        assert start_line is not None and end_line is not None
         line_number = 1
         while True:
             block = stream.read(OPENROUTER_READ_CHUNK_CHARS)

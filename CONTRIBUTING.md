@@ -14,7 +14,7 @@ The CI workflow tests Python 3.10 through 3.14, runs static checks, coverage, Do
 
 ## Releases
 
-The package version is defined by `agentic.__version__` and exposed by:
+The package version is defined by `agentic_runner.__version__` and exposed by:
 
 ```bash
 agentic --version
@@ -36,7 +36,7 @@ merged, use the preferred GitHub Actions path:
 3. Confirm the workflow succeeds and inspect the GitHub Release and
    `release-artifacts` in the run summary.
 
-The workflow derives the tag from `agentic.__version__`, runs the shared
+The workflow derives the tag from `agentic_runner.__version__`, runs the shared
 compile, offline test, and build checks, and refuses an existing tag or release.
 If the UI path is unavailable, use the local tag helper from synchronized
 `main` as a fallback:

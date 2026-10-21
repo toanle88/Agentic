@@ -15,20 +15,20 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Callable, ContextManager
 
-from agentic_config import (
+from .config import (
     api_key_env_for_provider,
     auth_mode_for_settings,
     load_config,
     sandbox_env_for_provider,
 )
-from agentic_execution import _doctor_public_detail
-from agentic_models import DEFAULT_GITHUB_HOST
-from agentic_output import style_system_text
-from agentic_providers import (
+from .execution import _doctor_public_detail
+from .models import DEFAULT_GITHUB_HOST
+from .output import style_system_text
+from .providers import (
     display_provider_path,
     resolve_provider_executable,
 )
-from agentic_sandbox import sandbox_command
+from .sandbox import sandbox_command
 
 
 AGENT_CONFIG_FILENAME = "agent_config.json"
@@ -461,7 +461,7 @@ def run_doctor(
                     )
                     executable = resolved.path
                     provider_ok, _provider_output = probe([executable, "--version"], repo) if executable else (False, "")
-                    if provider_ok:
+                    if provider_ok and executable:
                         if provider == "copilot" and resolved.source == "GitHub CLI download":
                             detail = (
                                 f"Copilot CLI was found at {display_provider_path(executable)} "

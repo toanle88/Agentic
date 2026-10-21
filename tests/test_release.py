@@ -16,7 +16,9 @@ class ReleaseScriptTests(unittest.TestCase):
     def test_package_version_reads_literal_without_executing_module(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            (root / "agentic.py").write_text('__version__ = "1.2.3"\nraise RuntimeError("not executed")\n')
+            source = root / "src" / "agentic_runner" / "__init__.py"
+            source.parent.mkdir(parents=True)
+            source.write_text('__version__ = "1.2.3"\nraise RuntimeError("not executed")\n')
             self.assertEqual(release.package_version(root), "1.2.3")
 
     def test_release_tag_requires_workflow_compatible_semver(self):
@@ -27,7 +29,9 @@ class ReleaseScriptTests(unittest.TestCase):
     def test_dry_run_does_not_create_or_push_tag(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            (root / "agentic.py").write_text('__version__ = "0.2.0"\n')
+            source = root / "src" / "agentic_runner" / "__init__.py"
+            source.parent.mkdir(parents=True)
+            source.write_text('__version__ = "0.2.0"\n')
             calls = []
 
             def fake_run(argv, *, root, capture_output=False):
@@ -96,7 +100,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_manual_release_is_guarded_to_main_and_uses_package_version(self):
         self.assertIn("workflow_dispatch:", self.workflow)
         self.assertIn('if [[ "$REF" != "refs/heads/main" ]]', self.workflow)
-        self.assertIn("actual=\"$(python -c 'import agentic; print(agentic.__version__)')\"", self.workflow)
+        self.assertIn("          PYTHONPATH: src", self.workflow)
+        self.assertIn("actual=\"$(python -c 'import agentic_runner; print(agentic_runner.__version__)')\"", self.workflow)
         self.assertIn('[[ ! "$actual" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]]', self.workflow)
         self.assertIn('tag="v$actual"', self.workflow)
 
