@@ -46,7 +46,7 @@ from agentic_execution import (
 )
 from agentic_models import AgentSettings, Issue, Run
 from agentic_openrouter import run_openrouter
-from agentic_output import strip_ansi, style_system_text, style_text
+from agentic_output import strip_ansi, style_patch_summary, style_system_text, style_text
 from agentic_policy import forbidden
 from agentic_prompts import build_agent_prompt, _run_instruction_context, _system_prompt_context
 from agentic_review import parse_review_result, record_review_findings
@@ -64,16 +64,22 @@ class NoCodeChangesError(RuntimeError):
 
 def _status_print(message: Any, *, file: Any = None, flush: bool = False,
                   style_status_tokens: bool = True,
-                  system_prefix: str | None = None) -> None:
+                  system_prefix: str | None = None,
+                  style_patch_stat: bool = False) -> None:
     """Print human-facing status with TTY-only styling."""
     from agentic_execution import _console_print
 
-    renderer = style_system_text if system_prefix is not None else style_text
+    if style_patch_stat:
+        renderer = style_patch_summary
+    else:
+        renderer = style_system_text if system_prefix is not None else style_text
+    render_kwargs: dict[str, Any] = {}
+    if not style_patch_stat:
+        render_kwargs["style_status_tokens"] = style_status_tokens
+        if system_prefix is not None:
+            render_kwargs["system_prefix"] = system_prefix
     _console_print(
-        renderer(
-            message, file, style_status_tokens=style_status_tokens,
-            **({"system_prefix": system_prefix} if system_prefix is not None else {}),
-        ),
+        renderer(message, file, **render_kwargs),
         file=file,
         flush=flush,
     )
@@ -1010,7 +1016,11 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
         _console_print(strip_ansi(report[-2500:]))
         return False, report, {}, "", ""
     base_sha, digest, summary = prepare_patch(run.worktree, base, config["max_files"])
-    _status_print("[PATCH] Proposed changes:\n" + summary, style_status_tokens=False)
+    _status_print(
+        "[PATCH] Proposed changes:\n" + summary,
+        style_status_tokens=False,
+        style_patch_stat=True,
+    )
     verdict = review(
         run.worktree, issue, folder, base_sha, test_report=report,
         developer_report=developer_report,
@@ -1072,7 +1082,11 @@ def validate_publication_approval(run: Run, issue: Issue, base: str,
     base_sha, digest, summary = prepare_patch(run.worktree, base, config["max_files"])
     if base_sha != approval.get("base_sha") or digest != approval.get("patch_digest"):
         raise RuntimeError("Patch changed since approval; rerun development or review before publishing")
-    _status_print("[PATCH] Proposed changes:\n" + summary, style_status_tokens=False)
+    _status_print(
+        "[PATCH] Proposed changes:\n" + summary,
+        style_status_tokens=False,
+        style_patch_stat=True,
+    )
     return base_sha, digest, summary
 
 

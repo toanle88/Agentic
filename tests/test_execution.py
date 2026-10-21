@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import agentic
 import agentic_execution
-from agentic_output import is_transient_progress, style_system_text, style_text
+from agentic_output import is_transient_progress, style_patch_summary, style_system_text, style_text
 
 
 def sh(*args, cwd):
@@ -19,6 +19,65 @@ def sh(*args, cwd):
 
 
 class StreamingTests(unittest.TestCase):
+    def test_style_patch_summary_colors_git_additions_and_removals(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        summary = (
+            '[PATCH] Proposed changes:\n'
+            ' src/App.css      | 51 +++++++++++++-\n'
+            ' src/App.test.tsx | 19 +++++\n'
+            ' 2 files changed, 70 insertions(+), 1 deletion(-)\n'
+        )
+        with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+             patch('sys.stdout', new=TTYBuffer()):
+            styled = style_patch_summary(summary)
+
+        self.assertIn('\033[95m[PATCH]\033[0m Proposed changes:', styled)
+        self.assertIn(' src/App.css      | 51 \033[32m+++++++++++++\033[0m\033[31m-\033[0m', styled)
+        self.assertIn(' src/App.test.tsx | 19 \033[32m+++++\033[0m', styled)
+        self.assertIn(
+            '\033[32m70 insertions(+)\033[0m, \033[31m1 deletion(-)\033[0m',
+            styled,
+        )
+        self.assertEqual(style_patch_summary(styled), summary)
+
+    def test_style_patch_summary_preserves_unsafe_or_non_stat_lines(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        summary = (
+            '[PATCH] Proposed changes:\n'
+            ' weird+file-.txt | 2 +-\n'
+            ' image.bin        | Bin 0 -> 4 bytes\n'
+            ' old-name.txt => new-name.txt | 0\n'
+            ' 2 files changed\n'
+        )
+        with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+             patch('sys.stdout', new=TTYBuffer()):
+            styled = style_patch_summary(summary)
+
+        self.assertIn(' weird+file-.txt | 2 \033[32m+\033[0m\033[31m-\033[0m', styled)
+        self.assertIn(' image.bin        | Bin 0 -> 4 bytes', styled)
+        self.assertIn(' old-name.txt => new-name.txt | 0', styled)
+        self.assertIn(' 2 files changed', styled)
+        stat_line = styled.split(' weird+file-.txt', 1)[1].splitlines()[0]
+        self.assertNotIn('\033[', stat_line.split('|', 1)[0])
+
+    def test_style_patch_summary_is_plain_for_redirected_output_and_no_color(self):
+        summary = '[PATCH] Proposed changes:\n file.py | 2 ++\n 1 file changed, 2 insertions(+)\n'
+        self.assertEqual(style_patch_summary(summary), summary)
+
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        with patch.dict('os.environ', {'NO_COLOR': '1', 'AGENTIC_PLAIN': ''}), \
+             patch('sys.stdout', new=TTYBuffer()):
+            self.assertEqual(style_patch_summary(summary), summary)
+
     def test_status_styling_is_tty_only_and_honors_no_color(self):
         class TTYBuffer(StringIO):
             def isatty(self):
