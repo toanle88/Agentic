@@ -202,6 +202,10 @@ def record_security_policy(folder: Path, config: dict[str, Any]) -> None:
             "provider": reviewer.get("provider", "codex"),
             "filesystem": "read-only",
         },
+        "permission_policy": {
+            "developer": dict(developer.get("permission_policy", {})),
+            "reviewer": dict(reviewer.get("permission_policy", {})),
+        },
     }
     path, data = _load_run_record(folder)
     history = data.get("security_policy_history")

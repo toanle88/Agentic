@@ -12,7 +12,7 @@ from typing import Any
 from agentic_execution import _short
 from agentic_sandbox import sandbox_command
 from agentic_security import redact_secrets
-from agentic_policy import forbidden, sensitive_read
+from agentic_policy import default_permission_policy, forbidden, sensitive_read
 
 OPENROUTER_READ_FILE_CHARS = 12_000
 OPENROUTER_READ_CHUNK_CHARS = 8_192
@@ -20,7 +20,10 @@ OPENROUTER_COMMAND_OUTPUT_CHARS = 6_000
 OPENROUTER_LIST_FILES_PAGE_SIZE = 300
 NETWORK_COMMANDS = {"curl", "wget", "ssh", "scp", "sftp", "ftp", "nc", "netcat", "telnet", "gh"}
 ALWAYS_BLOCKED_COMMANDS = {"gh", "ssh", "scp", "sftp"}
-READONLY_GIT_COMMANDS = {"status", "diff", "log", "show", "branch", "rev-parse"}
+READONLY_GIT_COMMANDS = {"status", "diff", "log", "show"}
+# Retained as a compatibility-facing import for older integrations. Branch
+# inspection is intentionally no longer part of the permission allowlist.
+READONLY_BRANCH_OPTIONS: set[str] = set()
 READONLY_INSPECTION_COMMANDS = {"rg", "grep", "ls", "pwd", "file"}
 INTERPRETER_EXECUTABLES = {
     "node", "nodejs", "perl", "php", "python", "python3", "py", "ruby",
@@ -29,10 +32,6 @@ INTERPRETER_EVAL_OPTIONS = {"-c", "--command", "-e", "--eval", "-exec"}
 GIT_UNSAFE_OPTIONS = {
     "-c", "--config-env", "--exec-path", "--git-dir", "--work-tree", "-C",
     "--output", "-o", "--ext-diff", "--textconv", "--no-index",
-}
-READONLY_BRANCH_OPTIONS = {
-    "--list", "-l", "--show-current", "-r", "--remotes", "-a", "--all",
-    "-v", "-vv", "--verbose",
 }
 
 def _safe_worktree_path(worktree: Path, relative: str, *, write: bool = False) -> Path:
@@ -52,7 +51,7 @@ def _safe_worktree_path(worktree: Path, relative: str, *, write: bool = False) -
 
 
 def _readonly_git_command_allowed(argv: list[str]) -> tuple[bool, str]:
-    """Allow only inspection-oriented Git commands in a review worktree.
+    """Allow only inspection-oriented Git commands in a worktree.
 
     The command is run with ``cwd=worktree``.  Options that can redirect Git
     to another repository, execute an external diff, or write output are
@@ -63,8 +62,6 @@ def _readonly_git_command_allowed(argv: list[str]) -> tuple[bool, str]:
     subcommand = argv[1]
     if subcommand not in READONLY_GIT_COMMANDS:
         return False, f"git {subcommand} is not allowed during read-only review"
-    if subcommand == "branch" and any(part not in READONLY_BRANCH_OPTIONS for part in argv[2:]):
-        return False, "only inspection-oriented git branch options are allowed during read-only review"
     for index, part in enumerate(argv[2:], 2):
         option = part.split("=", 1)[0]
         if option in GIT_UNSAFE_OPTIONS or option.startswith(("--git-dir", "--work-tree", "--output")):
@@ -74,8 +71,6 @@ def _readonly_git_command_allowed(argv: list[str]) -> tuple[bool, str]:
         if part.startswith("-") and subcommand == "status" and part not in {
             "--short", "--porcelain", "--branch", "--untracked-files=no",
         }:
-            return False, f"git option {part} is not allowed during read-only review"
-        if index == 2 and subcommand == "rev-parse" and part in {"--show-toplevel", "--git-dir", "--git-common-dir"}:
             return False, f"git option {part} is not allowed during read-only review"
     return True, ""
 
@@ -100,7 +95,36 @@ def _readonly_inspection_command_allowed(argv: list[str]) -> tuple[bool, str]:
     return True, ""
 
 
-def _openrouter_tools(readonly: bool) -> list[dict[str, Any]]:
+def _developer_inspection_command_allowed(
+    argv: list[str], worktree: Path | None,
+) -> tuple[bool, str]:
+    """Apply the same worktree operand boundary to developer inspection."""
+    allowed, reason = _readonly_inspection_command_allowed(argv)
+    if not allowed:
+        return False, reason
+    if worktree is None:
+        return True, ""
+    for part in argv[1:]:
+        if part.startswith("-"):
+            continue
+        try:
+            _safe_worktree_path(worktree, part)
+        except ValueError:
+            return False, "inspection paths must stay inside the worktree"
+    return True, ""
+
+
+def _safe_readonly_git_argv(argv: list[str]) -> list[str]:
+    """Disable Git helpers before running native read-only inspection."""
+    if len(argv) >= 2 and argv[1] in {"diff", "show"}:
+        return [argv[0], argv[1], "--no-ext-diff", "--no-textconv", *argv[2:]]
+    return list(argv)
+
+
+def _openrouter_tools(
+    readonly: bool, permission_policy: dict[str, bool] | None = None,
+) -> list[dict[str, Any]]:
+    policy = permission_policy or default_permission_policy("reviewer" if readonly else "developer")
     tools = [
         {
             "type": "function",
@@ -139,7 +163,7 @@ def _openrouter_tools(readonly: bool) -> list[dict[str, Any]]:
             },
         },
     ]
-    if not readonly:
+    if not readonly and (policy.get("edit_files") or policy.get("create_files")):
         tools.append({
             "type": "function",
             "function": {
@@ -154,11 +178,21 @@ def _openrouter_tools(readonly: bool) -> list[dict[str, Any]]:
     return tools
 
 
-def _openrouter_command_allowed(argv: Any, readonly: bool,
-                                allow_network: bool = False) -> tuple[bool, str]:
+def _openrouter_command_allowed(
+    argv: Any, readonly: bool, allow_network: bool = False,
+    permission_policy: dict[str, bool] | None = None,
+    check_commands: list[list[str]] | None = None,
+    worktree: Path | None = None,
+) -> tuple[bool, str]:
     if not isinstance(argv, list) or not argv or not all(isinstance(part, str) and part for part in argv):
         return False, "argv must be a non-empty array of strings"
     executable = Path(argv[0]).name.lower()
+    policy = default_permission_policy("reviewer" if readonly else "developer")
+    if permission_policy is None:
+        policy["network"] = bool(allow_network)
+    else:
+        policy.update(permission_policy)
+        allow_network = bool(policy.get("network"))
     if executable in {"bash", "sh", "zsh", "fish", "cmd", "powershell", "pwsh"}:
         return False, "shell commands are not allowed; provide argv directly"
     if executable in INTERPRETER_EXECUTABLES and any(
@@ -167,22 +201,40 @@ def _openrouter_command_allowed(argv: Any, readonly: bool,
         return False, f"{executable} code-evaluation flags are not allowed from an OpenRouter tool call"
     if executable in ALWAYS_BLOCKED_COMMANDS:
         return False, f"{executable} is not allowed from an OpenRouter tool call"
-    if executable in NETWORK_COMMANDS and not allow_network:
+    if executable in NETWORK_COMMANDS and not (allow_network and policy.get("network")):
         return False, f"{executable} is not allowed from an OpenRouter tool call"
     if executable == "git":
-        if readonly:
-            return _readonly_git_command_allowed(argv)
-        for part in argv[1:]:
-            option = part.split("=", 1)[0]
-            if option in GIT_UNSAFE_OPTIONS or option.startswith(("--git-dir", "--work-tree", "--exec-path")):
-                return False, f"git option {part} is not allowed"
-            if part in {"--upload-pack", "--receive-pack"} or part.startswith(("--upload-pack=", "--receive-pack=")):
-                return False, f"git option {part} is not allowed"
-        subcommand = argv[1] if len(argv) > 1 else ""
-        if subcommand in {"commit", "push", "reset", "clean", "checkout", "switch", "worktree"}:
-            return False, f"git {subcommand} is not allowed"
+        if not policy.get("git_read"):
+            return False, "Git inspection is disabled by the permission policy"
+        # ``git_read`` is intentionally an allowlist, not a denylist. A
+        # denylist would leave mutating commands such as ``git add`` and
+        # ``git config`` executable as soon as a new subcommand is added.
+        return _readonly_git_command_allowed(argv)
     if readonly:
+        if executable in READONLY_INSPECTION_COMMANDS and not policy.get("search_files"):
+            return False, "file search is disabled by the permission policy"
         return _readonly_inspection_command_allowed(argv)
+    if executable in READONLY_INSPECTION_COMMANDS:
+        if not policy.get("search_files"):
+            return False, "file search is disabled by the permission policy"
+        return _developer_inspection_command_allowed(argv, worktree)
+    if not policy.get("run_checks"):
+        return False, "command execution is disabled by the permission policy"
+    if check_commands is not None:
+        if not isinstance(check_commands, list) or any(
+            not isinstance(command, list)
+            or not command
+            or not all(isinstance(part, str) and part for part in command)
+            for command in check_commands
+        ):
+            return False, "configured checks must be non-empty argv arrays"
+        if argv not in check_commands:
+            return False, "command is not one of the configured checks"
+    elif not (policy.get("edit_files") and policy.get("create_files")):
+        return False, (
+            "command execution requires edit_files and create_files, "
+            "or an exact configured check"
+        )
     return True, ""
 
 
@@ -273,11 +325,21 @@ def _list_files_page(target: Path, root: Path, page: int) -> tuple[list[str], bo
 def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                           *, readonly: bool, command_timeout: int | None = None,
                           allow_network: bool = False,
+                          permission_policy: dict[str, bool] | None = None,
+                          check_commands: list[list[str]] | None = None,
                           sandbox: dict[str, Any] | None = None,
                           allow_runner_source: bool = False,
                           restricted: bool = False) -> str:
     try:
+        policy = default_permission_policy("reviewer" if readonly else "developer")
+        if permission_policy is None:
+            policy["network"] = bool(allow_network)
+        else:
+            policy.update(permission_policy)
+            allow_network = bool(policy.get("network"))
         if name == "list_files":
+            if not policy.get("search_files"):
+                return "ERROR: file listing is disabled by the permission policy"
             relative = arguments.get("path", ".")
             target = worktree.resolve() if relative == "." else _safe_worktree_path(worktree, relative)
             if not target.is_dir():
@@ -292,6 +354,8 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                 result += f"\n...[more files; call list_files with page={page + 1}]"
             return result
         if name == "read_file":
+            if not policy.get("read_files"):
+                return "ERROR: file reading is disabled by the permission policy"
             relative = arguments.get("path", "")
             target = _safe_worktree_path(worktree, relative)
             normalized = target.relative_to(worktree.resolve()).as_posix()
@@ -312,6 +376,10 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
             if readonly:
                 return "ERROR: write_file is unavailable during review"
             target = _safe_worktree_path(worktree, arguments.get("path", ""), write=True)
+            if target.exists() and not policy.get("edit_files"):
+                return "ERROR: editing files is disabled by the permission policy"
+            if not target.exists() and not policy.get("create_files"):
+                return "ERROR: creating files is disabled by the permission policy"
             relative = str(target.relative_to(worktree.resolve()))
             relative_parts = [part.lower() for part in Path(relative).parts]
             self_hosted_ci = (
@@ -329,11 +397,13 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
             argv = arguments.get("argv")
             if not isinstance(argv, list):
                 return "ERROR: argv must be a non-empty array of strings"
-            allowed, reason = _openrouter_command_allowed(argv, readonly, allow_network)
+            allowed, reason = _openrouter_command_allowed(
+                argv, readonly, allow_network, permission_policy, check_commands, worktree,
+            )
             if not allowed:
                 return "ERROR: " + reason
             process_argv = sandbox_command(
-                argv, worktree, sandbox, read_only=readonly, pass_env=[],
+                _safe_readonly_git_argv(argv), worktree, sandbox, read_only=readonly, pass_env=[],
                 restricted=restricted,
             )
             try:

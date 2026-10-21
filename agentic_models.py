@@ -123,6 +123,7 @@ class AgentSettings:
     json_mode: bool = False
     executable_path: str | None = None
     host: str | None = None
+    permission_policy: dict[str, bool] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -138,5 +139,6 @@ class AgentSettings:
             "allow_network": self.allow_network,
             "json_mode": self.json_mode,
             "host": self.host,
+            "permission_policy": dict(self.permission_policy or {}),
         }
 

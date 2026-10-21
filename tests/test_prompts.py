@@ -25,6 +25,15 @@ class PromptBoundaryTests(unittest.TestCase):
         self.assertIn("Finding 1: finding", prompt)
         self.assertIn("new feedback", prompt)
 
+    def test_copilot_developer_prompt_uses_runner_for_shell_and_git(self):
+        prompt = build_agent_prompt(
+            Issue(47, "Refactor", "Issue body"), provider="copilot",
+        )
+        self.assertIn("COPILOT DEVELOPER TOOL BOUNDARY", prompt)
+        self.assertIn("Agentic performs configured checks and Git inspection", prompt)
+        self.assertNotIn("git status", prompt)
+        self.assertNotIn("git diff --cached", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

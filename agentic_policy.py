@@ -1,7 +1,88 @@
-"""Repository-path policy shared by the runner and provider tools."""
+"""Repository-path and provider-independent permission policy."""
 from __future__ import annotations
 
+from typing import Any
 from pathlib import PurePosixPath
+
+
+PERMISSION_FIELDS = (
+    "read_files",
+    "search_files",
+    "edit_files",
+    "create_files",
+    "git_read",
+    "run_checks",
+    "network",
+    "allow_dangerous",
+)
+PERMISSION_ROLES = ("developer", "reviewer")
+
+
+def default_permission_policy(role: str) -> dict[str, bool]:
+    """Return the safe, provider-independent policy for one workflow role."""
+    if role not in {"developer", "reviewer"}:
+        raise ValueError("permission policy role must be developer or reviewer")
+    developer = role == "developer"
+    return {
+        "read_files": True,
+        "search_files": True,
+        "edit_files": developer,
+        "create_files": developer,
+        "git_read": True,
+        "run_checks": developer,
+        "network": False,
+        "allow_dangerous": False,
+    }
+
+
+def validate_permission_policy_container(raw: Any, *, field_name: str) -> None:
+    """Reject unknown top-level role or legacy capability keys."""
+    if raw is None or not isinstance(raw, dict):
+        return
+    keys = set(raw)
+    if keys & set(PERMISSION_ROLES):
+        unknown = sorted(keys - set(PERMISSION_ROLES))
+    else:
+        unknown = sorted(keys - set(PERMISSION_FIELDS))
+    if unknown:
+        raise ValueError(
+            f"{field_name} contains unsupported top-level key(s): {', '.join(unknown)}"
+        )
+
+
+def validate_permission_policy(
+    raw: Any,
+    *,
+    role: str,
+    security_mode: str = "trusted",
+    default_network: bool = False,
+) -> dict[str, bool]:
+    """Normalize a role policy and fail closed for unsafe or unknown fields."""
+    policy = default_permission_policy(role)
+    if default_network:
+        policy["network"] = True
+    if raw is None:
+        return policy
+    if not isinstance(raw, dict):
+        raise ValueError(f"{role}.permission_policy must be an object")
+    unknown = sorted(set(raw) - set(PERMISSION_FIELDS))
+    if unknown:
+        raise ValueError(
+            f"{role}.permission_policy contains unsupported field(s): {', '.join(unknown)}"
+        )
+    for name, value in raw.items():
+        if type(value) is not bool:
+            raise ValueError(f"{role}.permission_policy.{name} must be a boolean")
+        policy[name] = value
+    if role == "reviewer" and any(
+        policy[name] for name in ("edit_files", "create_files", "run_checks", "allow_dangerous")
+    ):
+        raise ValueError("reviewer.permission_policy must remain read-only")
+    if policy["allow_dangerous"] and security_mode != "isolated":
+        raise ValueError(
+            f"{role}.permission_policy.allow_dangerous requires security_mode 'isolated'"
+        )
+    return policy
 
 
 def forbidden(filename: str) -> bool:

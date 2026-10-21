@@ -35,6 +35,11 @@ should remain ignored by Git. Its `max_tool_turns`,
 tool loop; leave network access disabled unless the repository explicitly
 needs it.
 
+All templates include the provider-independent `permission_policy`. Its safe
+developer defaults allow worktree edits and configured checks, while reviewer
+defaults remain read-only. Keep `allow_dangerous` false; enabling it requires
+isolated mode and is recorded and warned about by Agentic.
+
 For Copilot installed through `gh copilot`, trusted mode automatically checks
 the GitHub CLI download location. You can instead set
 `"executable_path": "/path/to/copilot"` in the developer or reviewer provider

@@ -135,7 +135,11 @@ class PureTests(unittest.TestCase):
             folder = worktree / 'logs'
             folder.mkdir()
             issue = agentic.Issue(19, 'Review', '')
-            with patch('agentic.run_codex', return_value=(True, 'not json')):
+            with (patch.dict(
+                      'agentic_workflow._WORKFLOW_IMPLEMENTATIONS',
+                      {'_review_diff_context': lambda worktree, base: '<staged_patch>'},
+                  ),
+                  patch('agentic.run_codex', return_value=(True, 'not json'))):
                 verdict = agentic.review(worktree, issue, folder, 'base')
         self.assertTrue(verdict['_tooling_error'])
         self.assertFalse(verdict['approved'])
@@ -147,9 +151,13 @@ class PureTests(unittest.TestCase):
             folder = worktree / 'logs'
             folder.mkdir()
             issue = agentic.Issue(20, 'Review shape', '')
-            with patch('agentic.run_agent', return_value=(True, json.dumps({
-                'approved': 'yes', 'summary': 'bad', 'findings': [],
-            }))):
+            with (patch.dict(
+                      'agentic_workflow._WORKFLOW_IMPLEMENTATIONS',
+                      {'_review_diff_context': lambda worktree, base: '<staged_patch>'},
+                  ),
+                  patch('agentic.run_agent', return_value=(True, json.dumps({
+                      'approved': 'yes', 'summary': 'bad', 'findings': [],
+                  })))):
                 verdict = agentic.review(worktree, issue, folder, 'base')
         self.assertTrue(verdict['_tooling_error'])
         self.assertIn('wrong shape', verdict['summary'])
@@ -168,9 +176,13 @@ class PureTests(unittest.TestCase):
             folder = worktree / 'logs'
             folder.mkdir()
             issue = agentic.Issue(20, 'Review skipped shape', '')
-            with patch('agentic.run_agent', return_value=(True, json.dumps({
-                'approved': True, 'summary': 'bad', 'findings': [], 'skipped': 'not a list',
-            }))):
+            with (patch.dict(
+                      'agentic_workflow._WORKFLOW_IMPLEMENTATIONS',
+                      {'_review_diff_context': lambda worktree, base: '<staged_patch>'},
+                  ),
+                  patch('agentic.run_agent', return_value=(True, json.dumps({
+                      'approved': True, 'summary': 'bad', 'findings': [], 'skipped': 'not a list',
+                  })))):
                 verdict = agentic.review(worktree, issue, folder, 'base')
         self.assertTrue(verdict['_tooling_error'])
         self.assertIn('wrong shape', verdict['summary'])
@@ -382,7 +394,8 @@ class PureTests(unittest.TestCase):
 
             with patch('agentic_execution.streamed_command', side_effect=fake_stream) as streamed:
                 ok, message = agentic.run_cli_provider(
-                    root, 'prompt', output=output, provider='gemini', model='gemini-3-pro-preview'
+                    root, 'prompt', output=output, provider='gemini', model='gemini-3-pro-preview',
+                    permission_policy={'run_checks': False},
                 )
             self.assertTrue(ok)
             self.assertEqual(message, 'finished')
@@ -391,7 +404,7 @@ class PureTests(unittest.TestCase):
             self.assertIn('--output-format', argv)
             self.assertIn('stream-json', argv)
             self.assertIn('--approval-mode', argv)
-            self.assertIn('yolo', argv)
+            self.assertIn('auto_edit', argv)
 
 
     def test_cli_provider_modes_are_restricted_for_reviewers(self):
@@ -428,15 +441,31 @@ class PureTests(unittest.TestCase):
                 copilot_developer = streamed.call_args.args[0]
 
             self.assertIn('--permission-mode', claude_review)
-            self.assertIn('plan', claude_review)
+            self.assertIn('dontAsk', claude_review)
+            self.assertNotIn('plan', claude_review)
             self.assertNotIn('--dangerously-skip-permissions', claude_review)
-            self.assertIn('--dangerously-skip-permissions', claude_developer)
-            self.assertNotIn('--permission-mode', claude_developer)
+            self.assertIn('--permission-mode', claude_developer)
+            self.assertIn('dontAsk', claude_developer)
+            self.assertNotIn('acceptEdits', claude_developer)
+            self.assertNotIn('--dangerously-skip-permissions', claude_developer)
             self.assertIn('--available-tools', copilot_review)
-            self.assertIn('--deny-tool', copilot_review)
+            self.assertEqual(
+                copilot_review[copilot_review.index('--available-tools') + 1],
+                'view,grep,glob',
+            )
+            self.assertNotIn('bash', copilot_review)
+            self.assertNotIn('--allow-tool', copilot_review)
+            self.assertNotIn('--deny-tool', copilot_review)
             self.assertNotIn('--allow-all-tools', copilot_review)
-            self.assertIn('--allow-all-tools', copilot_developer)
-            self.assertIn('--allow-all-paths', copilot_developer)
+            self.assertIn('--available-tools', copilot_developer)
+            self.assertEqual(
+                copilot_developer[copilot_developer.index('--available-tools') + 1],
+                'view,grep,glob,edit,create',
+            )
+            self.assertNotIn('bash', copilot_developer)
+            self.assertNotIn('--deny-tool', copilot_developer)
+            self.assertNotIn('--allow-all-tools', copilot_developer)
+            self.assertNotIn('--allow-all-paths', copilot_developer)
 
     def test_copilot_host_is_scoped_to_provider_environment_and_model_errors_are_clear(self):
         with tempfile.TemporaryDirectory() as temp:

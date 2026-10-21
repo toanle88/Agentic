@@ -93,7 +93,7 @@ from agentic_output import style_system_text, style_text, tag_system_prefix
 from agentic_openrouter import (  # noqa: F401
     run_openrouter,
 )
-from agentic_policy import forbidden  # noqa: F401
+from agentic_policy import default_permission_policy, forbidden  # noqa: F401
 from agentic_models import DEFAULT_GITHUB_HOST, AgentSettings, Issue, PullRequest, Run, StatePaths  # noqa: F401
 from agentic_review import (  # noqa: F401
     parse_review_result,
@@ -109,7 +109,7 @@ from agentic_telemetry import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-__version__ = "1.1.60"
+__version__ = "1.1.61"
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 INSTRUCTION_CONTEXT_CHARS = _INSTRUCTION_CONTEXT_CHARS
 # Keep the configuration constants available from the historical runner module
@@ -125,6 +125,22 @@ def _status_print(message: Any, *, file: Any = None, flush: bool = False,
     else:
         rendered = style_system_text(message, file, system_prefix=system_prefix)
     _console_print(rendered, file=file, flush=flush)
+
+
+def _warn_dangerous_permissions(config: dict[str, Any]) -> None:
+    """Warn whenever a run enables an explicit dangerous provider escape hatch."""
+    dangerous_roles = [
+        role for role in ("developer", "reviewer")
+        if config.get(f"{role}_agent", {}).get("permission_policy", {}).get("allow_dangerous")
+    ]
+    if dangerous_roles:
+        _status_print(
+            "WARNING: dangerous provider permissions are enabled for "
+            + ", ".join(dangerous_roles)
+            + "; Agentic will record this exception and the isolated sandbox remains required.",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def _chat_output(message: Any) -> None:
@@ -755,6 +771,10 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
         "test_timeout_seconds": DEFAULT_TEST_TIMEOUT,
         "task_timeout_seconds": DEFAULT_TASK_TIMEOUT,
         "system_prompt": None,
+        "permission_policy": {
+            "developer": default_permission_policy("developer"),
+            "reviewer": default_permission_policy("reviewer"),
+        },
         "developer": developer_settings,
         "reviewer": reviewer_settings,
         "security_mode": security_mode,
@@ -1166,6 +1186,8 @@ def execute_chat(args: argparse.Namespace, repo: Path) -> int:
             )
         run = choose_existing(previous)
     folder = logs_path(repo, run, state_dir)
+    record_security_policy(folder, config)
+    _warn_dangerous_permissions(config)
 
     def status_reader() -> str:
         return capture_worktree_snapshot(run.worktree)
@@ -1326,6 +1348,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
     record_security_policy(folder, config)
     manual_approval = load_publication_approval(folder)
     print_run_header(issue, run, fresh)
+    _warn_dangerous_permissions(config)
     _status_print(
         f"Providers: developer={config['developer_agent']['provider']} "
         f"reviewer={config['reviewer_agent']['provider']}",

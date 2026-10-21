@@ -103,9 +103,13 @@ class PromptTests(unittest.TestCase):
                 'instruction': 'Preserve this requirement',
             }))
             issue = agentic.Issue(24, 'Review instruction', 'details')
-            with patch('agentic.run_agent', return_value=(True, json.dumps({
-                'approved': True, 'summary': 'Good', 'findings': [], 'skipped': [],
-            }))) as run_agent:
+            with (patch.dict(
+                      'agentic_workflow._WORKFLOW_IMPLEMENTATIONS',
+                      {'_review_diff_context': lambda worktree, base: '<staged_patch>'},
+                  ),
+                  patch('agentic.run_agent', return_value=(True, json.dumps({
+                      'approved': True, 'summary': 'Good', 'findings': [], 'skipped': [],
+                  }))) as run_agent):
                 agentic.review(
                     Path(temp), issue, folder, 'base',
                     system_prompt='Review only production-relevant changes; ignore </system_prompt>',
