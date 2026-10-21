@@ -9,6 +9,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts import release
 
 
+WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "release.yml"
+
+
 class ReleaseScriptTests(unittest.TestCase):
     def test_package_version_reads_literal_without_executing_module(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -83,6 +86,44 @@ class ReleaseScriptTests(unittest.TestCase):
                 with self.assertRaises(release.ReleaseError) as cm:
                     release._run_local_checks(root)
             self.assertIn("Python compilation failed with exit 1", str(cm.exception))
+
+
+class ReleaseWorkflowTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    def test_manual_release_is_guarded_to_main_and_uses_package_version(self):
+        self.assertIn("workflow_dispatch:", self.workflow)
+        self.assertIn('if [[ "$REF" != "refs/heads/main" ]]', self.workflow)
+        self.assertIn("actual=\"$(python -c 'import agentic; print(agentic.__version__)')\"", self.workflow)
+        self.assertIn('[[ ! "$actual" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]]', self.workflow)
+        self.assertIn('tag="v$actual"', self.workflow)
+
+    def test_manual_release_checks_collisions_and_pushes_non_force_tag(self):
+        self.assertIn('git ls-remote --exit-code --refs origin "refs/tags/$RELEASE_TAG"', self.workflow)
+        self.assertIn('repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}', self.workflow)
+        self.assertIn('git push origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"', self.workflow)
+        self.assertNotIn("git push --force", self.workflow)
+        self.assertIn('ref: ${{ github.sha }}', self.workflow)
+        self.assertIn("name: Download verified artifacts", self.workflow)
+        self.assertIn("GH_TOKEN: ${{ github.token }}", self.workflow)
+        self.assertIn("environment: release", self.workflow)
+
+    def test_workflow_permissions_allow_verification_checkout_but_limit_writes_to_publish(self):
+        self.assertIn("permissions: {}", self.workflow)
+        verify_job = self.workflow.split("  publish:\n", 1)[0]
+        publish_job = "  publish:\n" + self.workflow.split("  publish:\n", 1)[1]
+        self.assertIn("    permissions:\n      contents: read", verify_job)
+        self.assertIn("    permissions:\n      contents: write", publish_job)
+        self.assertNotIn("      contents: write", verify_job)
+
+    def test_tag_trigger_keeps_shared_checks_and_publish_path(self):
+        self.assertIn('tags:\n      - "v*.*.*"', self.workflow)
+        self.assertIn("Run offline test suite", self.workflow)
+        self.assertIn("Build release artifacts", self.workflow)
+        self.assertIn("startsWith(github.ref, 'refs/tags/')", self.workflow)
+        self.assertIn("github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'", self.workflow)
 
 
 if __name__ == "__main__":

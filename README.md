@@ -340,18 +340,27 @@ python scripts/prepare_release.py          # prompt for the new version
 The helper runs the local checks, creates a `codex/release-vVERSION` branch,
 commits the version change, pushes it, and opens a normal GitHub PR. It
 requires the GitHub CLI to be installed and authenticated with `gh auth login`.
-After that PR is merged, run the release helper from the synchronized `main`:
+After that PR is merged, the preferred path is the GitHub Actions workflow:
+
+1. Open **Actions → Release → Run workflow** and select `main`.
+2. Start the run and, when configured, approve the protected `release` environment.
+3. Confirm the workflow succeeds and find the GitHub Release and verified
+   `release-artifacts` in the run summary.
+
+The workflow reads `agentic.__version__`, runs the same compile, offline test,
+and build checks as a tag release, then verifies that the tag and GitHub release
+are unused before creating both from the checked commit. No version input is
+needed. If the UI path is unavailable, use the local fallback from a
+synchronized `main` checkout:
 
 ```bash
 python scripts/release.py --dry-run  # check everything without creating a tag
 python scripts/release.py            # check, confirm, tag, and push
 ```
 
-The second helper verifies that `main` is clean and synchronized with
-`origin/main`, runs the compile checks, and prevents reuse of an existing
-tag. The GitHub Actions release workflow then builds the package
-artifacts and creates the GitHub release. Use `--yes` only when the release has
-already been reviewed and should run without a prompt. See
+The helper verifies that `main` is clean and synchronized with `origin/main`,
+runs the compile checks, and prevents reuse of an existing tag. Use `--yes` only
+when the release has already been reviewed and should run without a prompt. See
 [Development](docs/development.md) for the complete release process.
 
 ## Safety summary

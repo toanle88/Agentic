@@ -6,6 +6,8 @@ on:
       - "v*.*.*"
   workflow_dispatch:
 
+permissions: {}
+
 jobs:
   verify:
     name: Verify release
@@ -17,16 +19,40 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          ref: ${{ github.sha }}
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - name: Verify tag matches package version
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Validate release source and package version
+        id: release_version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          expected="${GITHUB_REF_NAME#v}"
+          set -euo pipefail
           actual="$(python -c 'import agentic; print(agentic.__version__)')"
-          test "$expected" = "$actual"
+          if [[ ! "$actual" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Unsupported package version: $actual" >&2
+            exit 1
+          fi
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ "$REF" != "refs/heads/main" ]]; then
+              echo "Manual releases must be dispatched from main (got $REF)" >&2
+              exit 1
+            fi
+            tag="v$actual"
+          else
+            expected="${REF_NAME#v}"
+            if [[ "$expected" != "$actual" ]]; then
+              echo "Tag version $expected does not match package version $actual" >&2
+              exit 1
+            fi
+            tag="$REF_NAME"
+          fi
+          printf 'version=%s\n' "$actual" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
       - name: Verify release commit belongs to main
         if: startsWith(github.ref, 'refs/tags/')
         run: |
@@ -46,20 +72,79 @@ jobs:
           name: release-artifacts
           path: dist/*
 
+    outputs:
+      release_tag: ${{ steps.release_version.outputs.tag }}
+      version: ${{ steps.release_version.outputs.version }}
+
   publish:
     name: Publish GitHub release
-    if: startsWith(github.ref, 'refs/tags/')
+    if: >-
+      startsWith(github.ref, 'refs/tags/') ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     needs: verify
     runs-on: ubuntu-latest
+    environment: release
     permissions:
       contents: write
     steps:
+      - name: Check out verified commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
       - name: Download verified artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-artifacts
           path: dist
+      - name: Verify release does not already exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if git ls-remote --exit-code --refs origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+              echo "Tag $RELEASE_TAG already exists on origin" >&2
+              exit 1
+            else
+              status=$?
+              if [[ "$status" -ne 2 ]]; then
+                echo "Could not verify whether tag $RELEASE_TAG exists (git ls-remote exit $status)" >&2
+                exit "$status"
+              fi
+            fi
+          fi
+
+          response=""
+          api_status=0
+          response="$(gh api --include "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" 2>&1)" || api_status=$?
+          http_status="$(printf '%s\n' "$response" | awk '$1 ~ /^HTTP\// { code=$2 } END { print code }')"
+          if [[ "$http_status" =~ ^2 ]]; then
+            echo "GitHub release for $RELEASE_TAG already exists" >&2
+            exit 1
+          fi
+          if [[ -z "$http_status" || "$http_status" != "404" ]]; then
+            echo "Could not verify whether GitHub release $RELEASE_TAG exists (HTTP ${http_status:-unknown})" >&2
+            printf '%s\n' "$response" >&2
+            if [[ "$api_status" -eq 0 ]]; then
+              exit 1
+            fi
+            exit "$api_status"
+          fi
+      - name: Create release tag for manual dispatch
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag --annotate "$RELEASE_TAG" "$GITHUB_SHA" --message "Release $RELEASE_TAG"
+          git push origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create --repo "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" dist/* --generate-notes --title "$GITHUB_REF_NAME"
+          RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
+        run: gh release create --repo "$GITHUB_REPOSITORY" "$RELEASE_TAG" dist/* --generate-notes --title "$RELEASE_TAG"

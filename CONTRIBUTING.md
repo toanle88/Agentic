@@ -29,7 +29,17 @@ python scripts/prepare_release.py
 
 The helper prompts for a new semantic version, runs local checks, pushes a
 release branch, and opens a normal pull request. After that pull request is
-merged, run the tag helper from the resulting `main` checkout:
+merged, use the preferred GitHub Actions path:
+
+1. Open **Actions → Release → Run workflow** and select `main`.
+2. Start the run and approve the protected `release` environment if required.
+3. Confirm the workflow succeeds and inspect the GitHub Release and
+   `release-artifacts` in the run summary.
+
+The workflow derives the tag from `agentic.__version__`, runs the shared
+compile, offline test, and build checks, and refuses an existing tag or release.
+If the UI path is unavailable, use the local tag helper from synchronized
+`main` as a fallback:
 
 ```bash
 python scripts/release.py --dry-run
