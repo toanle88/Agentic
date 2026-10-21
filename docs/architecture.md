@@ -6,34 +6,34 @@ Agentic is intentionally small and uses the Python standard library at runtime.
 
 | Component | Responsibility |
 | --- | --- |
-| `agentic.py` | Compatibility-facing CLI entry point and workflow orchestration. |
-| `agentic_worktrees.py` | Repository identity, locks, Git worktree creation, discovery, and issue intake. |
-| `agentic_workflow.py` | Developer execution, validation, investigation, review, and publication workflow. |
-| `agentic_workflow_state.py` | Bounded workflow run markers, approvals, resume task materialization, and durable evidence helpers. |
-| `agentic_context.py` | Bounded issue, feedback, and provider-history context formatting. |
-| `agentic_prompts.py` | Bounded, delimited developer/reviewer prompt construction. |
-| `agentic_execution.py` | Compatibility facade for provider execution helpers. |
-| `agentic_execution_stream.py` | Safe argv process streaming, terminal rendering, progress, and usage recording. |
-| `agentic_execution_providers.py` | Codex and native provider command/message adapters. |
-| `agentic_output.py` | Shared TTY-only styling and ANSI stripping for terminal presentation and plain logs. |
-| `agentic_openrouter.py` | Compatibility facade for OpenRouter tools and API execution. |
-| `agentic_openrouter_tools.py` | Scoped file/command policy and bounded tool execution for review/development. |
-| `agentic_openrouter_loop.py` | OpenRouter request/response loop and tool-turn orchestration. |
-| `agentic_policy.py` | Protected-path and sensitive-file policy shared by the runner and API tools. |
-| `agentic_config.py` | Target-repository configuration loading, provider validation/preflight, test-command detection, and setup defaults. |
-| `agentic_test_discovery.py` | Deterministic metadata inspection, optional read-only candidate assistance, bounded argv validation, and fast/slow classification. |
-| `agentic_diagnostics.py` | Repository prerequisite checks and secure-sandbox/provider diagnostics. |
-| `agentic_shell.py` | Interactive supervisor for background jobs and terminal log tails. |
-| `agentic_shell_input.py` | TTY input editing, completion, key decoding, styling, and banner presentation. |
-| `agentic_shell_commands.py` | Pure interactive-shell command and option validation; returns argv fragments without executing them. |
-| `agentic_shell_jobs.py` | Shell job records, process-group cancellation, bounded log tails, and foreground input forwarding. |
-| `agentic_dashboard.py` | Read-only parser and renderer for durable run logs. |
-| `agentic_dashboard_data.py` | Read-only durable-log parsing and legacy/centralized snapshot merging for the dashboard. |
-| `agentic_persistence.py` | Crash-safe atomic writes for run metadata and durable artifacts. |
-| `agentic_models.py` | Immutable task, run, state, and provider configuration models. |
-| `agentic_security.py` | Shared credential redaction for logs and dashboard output. |
-| `agentic_telemetry.py` | Optional provider usage normalization and durable cost records. |
-| `agentic_sandbox.py` | Optional Docker/Podman command wrapping for providers, OpenRouter tool commands, and checks. |
+| `src/agentic_runner/cli.py` | Canonical CLI entry point and workflow orchestration. |
+| `src/agentic_runner/worktrees.py` | Repository identity, locks, Git worktree creation, discovery, and issue intake. |
+| `src/agentic_runner/workflow.py` | Developer execution, validation, investigation, review, and publication workflow. |
+| `src/agentic_runner/workflow_state.py` | Bounded workflow run markers, approvals, resume task materialization, and durable evidence helpers. |
+| `src/agentic_runner/context.py` | Bounded issue, feedback, and provider-history context formatting. |
+| `src/agentic_runner/prompts.py` | Bounded, delimited developer/reviewer prompt construction. |
+| `src/agentic_runner/execution.py` | Compatibility facade for provider execution helpers. |
+| `src/agentic_runner/execution_stream.py` | Safe argv process streaming, terminal rendering, progress, and usage recording. |
+| `src/agentic_runner/execution_providers.py` | Codex and native provider command/message adapters. |
+| `src/agentic_runner/output.py` | Shared TTY-only styling and ANSI stripping for terminal presentation and plain logs. |
+| `src/agentic_runner/openrouter.py` | Compatibility facade for OpenRouter tools and API execution. |
+| `src/agentic_runner/openrouter_tools.py` | Scoped file/command policy and bounded tool execution for review/development. |
+| `src/agentic_runner/openrouter_loop.py` | OpenRouter request/response loop and tool-turn orchestration. |
+| `src/agentic_runner/policy.py` | Protected-path and sensitive-file policy shared by the runner and API tools. |
+| `src/agentic_runner/config.py` | Target-repository configuration loading, provider validation/preflight, test-command detection, and setup defaults. |
+| `src/agentic_runner/test_discovery.py` | Deterministic metadata inspection, optional read-only candidate assistance, bounded argv validation, and fast/slow classification. |
+| `src/agentic_runner/diagnostics.py` | Repository prerequisite checks and secure-sandbox/provider diagnostics. |
+| `src/agentic_runner/shell.py` | Interactive supervisor for background jobs and terminal log tails. |
+| `src/agentic_runner/shell_input.py` | TTY input editing, completion, key decoding, styling, and banner presentation. |
+| `src/agentic_runner/shell_commands.py` | Pure interactive-shell command and option validation; returns argv fragments without executing them. |
+| `src/agentic_runner/shell_jobs.py` | Shell job records, process-group cancellation, bounded log tails, and foreground input forwarding. |
+| `src/agentic_runner/dashboard.py` | Read-only parser and renderer for durable run logs. |
+| `src/agentic_runner/dashboard_data.py` | Read-only durable-log parsing and legacy/centralized snapshot merging for the dashboard. |
+| `src/agentic_runner/persistence.py` | Crash-safe atomic writes for run metadata and durable artifacts. |
+| `src/agentic_runner/models.py` | Immutable task, run, state, and provider configuration models. |
+| `src/agentic_runner/security.py` | Shared credential redaction for logs and dashboard output. |
+| `src/agentic_runner/telemetry.py` | Optional provider usage normalization and durable cost records. |
+| `src/agentic_runner/sandbox.py` | Optional Docker/Podman command wrapping for providers, OpenRouter tool commands, and checks. |
 | `scripts/agent_benchmark.py` | Compatibility-facing benchmark CLI and scenario aggregation orchestration. |
 | `scripts/agent_benchmark_config.py` | Benchmark corpus schema, safe path validation, and argv placeholder rendering. |
 | `scripts/agent_benchmark_scenarios.py` | Disposable fixture preparation, argv-only adapter execution, checks, and result normalization. |
@@ -47,15 +47,16 @@ Agentic is intentionally small and uses the Python standard library at runtime.
 
 ## Incremental modularization
 
-The main runner remains the compatibility-facing entry point, but cohesive
-boundaries are extracted one at a time. `agentic_config.py` owns configuration
+The canonical runtime lives in `src/agentic_runner/`; the root command files
+are thin compatibility wrappers. Cohesive boundaries are kept in focused
+package modules. `config.py` owns configuration
 parsing, provider preflight, test-command detection, and setup defaults;
-`agentic_diagnostics.py` owns the `doctor` workflow; `agentic_worktrees.py`
-owns repository/worktree lifecycle; and `agentic_workflow.py` owns the
-developer-to-publication path. `agentic.py` binds those components behind the
+`diagnostics.py` owns the `doctor` workflow; `worktrees.py` owns repository/
+worktree lifecycle; and `workflow.py` owns the
+developer-to-publication path. `cli.py` binds those components behind the
 historical public and patchable helpers, so existing integrations keep working.
-Prompt construction is implemented by `agentic_prompts.py` and exposed through
-`agentic.agent_prompt`; shell option parsing and TTY input are separate from
+Prompt construction is implemented by `prompts.py` and exposed through
+`cli.agent_prompt`; shell option parsing and TTY input are separate from
 the job supervisor. Provider streaming, provider adapters, OpenRouter policy,
 and the OpenRouter loop follow the same facade pattern. Durable artifact writes
 use a shared, redacting persistence boundary so the dashboard cannot observe
@@ -65,6 +66,11 @@ untrusted evidence. The dashboard renderer
 and run-log parser are separate so HTML presentation does not own durable-schema
 compatibility.
 
+The supported installed import surface is `agentic_runner` plus the three
+historical command wrappers. Former top-level implementation modules are
+internal package modules and are not installed as separate compatibility
+imports.
+
 Tests follow the same boundaries: provider behavior remains in
 `tests/test_execution.py` and `tests/test_openrouter.py`; runner configuration
 and prompting are split into `tests/test_agentic_configuration.py` and
@@ -72,12 +78,12 @@ and prompting are split into `tests/test_agentic_configuration.py` and
 and worktree publication/workflow coverage is in
 `tests/test_worktrees_publication.py` and `tests/test_worktrees_workflow.py`.
 The interactive-shell facade delegates job/process primitives to
-`agentic_shell_jobs.py` while retaining command dispatch and terminal-mode
+`src/agentic_runner/shell_jobs.py` while retaining command dispatch and terminal-mode
 ownership. The workflow facade delegates durable run-state helpers to
-`agentic_workflow_state.py` while retaining provider, validation, review, and
+`src/agentic_runner/workflow_state.py` while retaining provider, validation, review, and
 publication transitions. Both extracted modules are directly importable and
 covered by import-boundary characterization tests; the historical
-`agentic.py` wrappers remain the compatibility surface.
+the three root command wrappers remain the compatibility surface.
 Benchmark corpus validation, scenario execution, and reporting are split across
 `scripts/agent_benchmark_config.py`, `scripts/agent_benchmark_scenarios.py`,
 and `scripts/agent_benchmark_reporting.py`; `scripts/agent_benchmark.py`
@@ -87,7 +93,7 @@ coverage, and verify the full offline suite.
 
 ## Dependency direction
 
-The compatibility-facing `agentic.py` workflow coordinates configuration,
+The canonical `src/agentic_runner/cli.py` workflow coordinates configuration,
 worktrees, providers, checks, review, and publication. Focused modules may
 depend on shared models, policy, security, context, guidance, and telemetry,
 but provider adapters must not own workflow or publication decisions. The

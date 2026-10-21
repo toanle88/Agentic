@@ -7,9 +7,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import agentic_shell
-import agentic_shell_input
-from agentic_output import strip_ansi
+import tests
+from agentic_runner import shell as agentic_shell
+from agentic_runner import shell_input as agentic_shell_input
+from agentic_runner.output import strip_ansi
 
 
 from test_shell import _create_mock_reader

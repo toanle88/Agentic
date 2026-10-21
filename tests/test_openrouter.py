@@ -9,10 +9,11 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
 
-import agentic
-import agentic_context
-import agentic_openrouter
-import agentic_openrouter_tools
+import tests
+from agentic_runner import cli as agentic
+from agentic_runner import context as agentic_context
+from agentic_runner import openrouter as agentic_openrouter
+from agentic_runner import openrouter_tools as agentic_openrouter_tools
 
 
 class OpenRouterTests(unittest.TestCase):

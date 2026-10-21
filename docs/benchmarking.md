@@ -22,7 +22,7 @@ regression checks:
 ```json
 [
   {"name": "unit checks", "command": ["python", "-m", "unittest", "discover", "-s", "tests", "-q"]},
-  {"name": "compile", "command": ["python", "-m", "py_compile", "agentic.py"]}
+  {"name": "compile", "command": ["python", "-m", "py_compile", "src/agentic_runner/cli.py"]}
 ]
 ```
 

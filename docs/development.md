@@ -23,7 +23,7 @@ python -m unittest discover -s tests -q
 Compile all runtime Python modules:
 
 ```bash
-python -m py_compile agentic.py agentic_config.py agentic_context.py agentic_diagnostics.py agentic_dashboard.py agentic_dashboard_data.py agentic_execution.py agentic_execution_providers.py agentic_execution_stream.py agentic_guidance.py agentic_openrouter.py agentic_openrouter_loop.py agentic_openrouter_tools.py agentic_output.py agentic_policy.py agentic_prompts.py agentic_shell.py agentic_shell_commands.py agentic_shell_input.py agentic_shell_jobs.py agentic_models.py agentic_persistence.py agentic_security.py agentic_telemetry.py agentic_sandbox.py agentic_providers.py agentic_review.py agentic_workflow.py agentic_workflow_state.py agentic_worktrees.py
+python -m py_compile agentic.py agentic_shell.py agentic_dashboard.py src/agentic_runner/*.py
 git diff --check
 ```
 
@@ -59,7 +59,7 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md) for the repository contribution policy
 
 ## Releases
 
-The package version is defined by `agentic.__version__` and exposed by:
+The package version is defined by `agentic_runner.__version__` and exposed by:
 
 ```bash
 agentic --version
@@ -74,7 +74,7 @@ python scripts/prepare_release.py 1.0.1
 ```
 
 The preparation helper requires a new `MAJOR.MINOR.PATCH` version greater than
-the current one. It updates `agentic.__version__`, runs the compile
+the current one. It updates `agentic_runner.__version__`, runs the compile
 checks, creates `codex/release-vVERSION`, commits the change, pushes the branch,
 and opens a normal GitHub pull request using the `gh` CLI. Authenticate first
 with `gh auth login`. Use `--dry-run` to validate the starting branch and run
@@ -87,7 +87,7 @@ After the version PR is merged, the preferred release path is GitHub Actions:
 3. Confirm the workflow succeeds and inspect the GitHub Release and
    `release-artifacts` in the run summary.
 
-The workflow reads `agentic.__version__`, validates the supported
+The workflow reads `agentic_runner.__version__`, validates the supported
 `MAJOR.MINOR.PATCH` form, runs the compile, offline test, and build checks, and
 refuses an existing tag or release. If the UI path is unavailable, update local
 `main` and use the local tag helper as a fallback:
@@ -100,7 +100,7 @@ python scripts/release.py
 The tag helper fetches `origin/main`, requires a clean and synchronized local
 `main`, runs the compile checks, verifies that the generated tag is
 unused, and asks for confirmation before creating and pushing it. The
-current package version is read from `agentic.__version__`, so version `1.0.1`
+current package version is read from `agentic_runner.__version__`, so version `1.0.1`
 produces tag `v1.0.1`.
 
 The release workflow verifies that the tag matches the package version, builds

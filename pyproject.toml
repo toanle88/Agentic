@@ -8,8 +8,7 @@ dynamic = ["version"]
 description = "A resumable multi-provider coding-agent runner"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "MIT"
-license-files = ["LICENSE"]
+license = {text = "MIT"}
 dependencies = []
 
 [project.optional-dependencies]
@@ -20,15 +19,18 @@ dev = [
 ]
 
 [project.scripts]
-agentic = "agentic:main"
-agentic-dashboard = "agentic_dashboard:main"
-agentic-shell = "agentic_shell:main"
+agentic = "agentic_runner.cli:main"
+agentic-dashboard = "agentic_runner.dashboard:main"
+agentic-shell = "agentic_runner.shell:main"
 
 [tool.setuptools]
-py-modules = ["agentic", "agentic_config", "agentic_context", "agentic_diagnostics", "agentic_dashboard", "agentic_dashboard_data", "agentic_execution", "agentic_execution_providers", "agentic_execution_stream", "agentic_guidance", "agentic_openrouter", "agentic_openrouter_loop", "agentic_openrouter_tools", "agentic_output", "agentic_policy", "agentic_prompts", "agentic_shell", "agentic_shell_commands", "agentic_shell_input", "agentic_shell_jobs", "agentic_models", "agentic_persistence", "agentic_security", "agentic_telemetry", "agentic_sandbox", "agentic_providers", "agentic_review", "agentic_test_discovery", "agentic_workflow", "agentic_workflow_state", "agentic_worktrees"]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.setuptools.dynamic]
-version = {attr = "agentic.__version__"}
+version = {attr = "agentic_runner.__version__"}
 
 [tool.ruff]
 target-version = "py310"

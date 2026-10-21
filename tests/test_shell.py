@@ -9,10 +9,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import agentic
-import agentic_shell
-import agentic_shell_input
-from agentic import state_paths
+import tests
+from agentic_runner import cli as agentic
+from agentic_runner import shell as agentic_shell
+from agentic_runner import shell_input as agentic_shell_input
+from agentic_runner.cli import state_paths
 
 
 class ShellTests(unittest.TestCase):

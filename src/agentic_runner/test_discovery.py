@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from agentic_sandbox import sandbox_command
+from .sandbox import sandbox_command
 
 
 DISCOVERY_TIMEOUT_SECONDS = 60

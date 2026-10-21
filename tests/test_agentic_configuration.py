@@ -11,9 +11,10 @@ from subprocess import CompletedProcess
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import agentic
-import agentic_config
-import agentic_diagnostics
+import tests
+from agentic_runner import cli as agentic
+from agentic_runner import config as agentic_config
+from agentic_runner import diagnostics as agentic_diagnostics
 
 from test_agentic import sh
 

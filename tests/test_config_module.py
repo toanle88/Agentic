@@ -1,7 +1,8 @@
 import unittest
 
-import agentic
-import agentic_config
+import tests
+from agentic_runner import cli as agentic
+from agentic_runner import config as agentic_config
 
 
 class ConfigModuleTests(unittest.TestCase):

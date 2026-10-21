@@ -22,8 +22,8 @@ import unicodedata
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, cast
 
-from agentic import __version__
-from agentic_output import (
+from . import __version__
+from .output import (
     color_enabled,
     paint,
     PatchSummaryStream,
@@ -34,7 +34,7 @@ from agentic_output import (
     style_text,
 )
 if TYPE_CHECKING:
-    from agentic_shell import Job
+    from .shell import Job
 
 
 _OUTPUT_LOCK = threading.RLock()

@@ -16,10 +16,10 @@ import subprocess
 import uuid
 from typing import Any
 
-from agentic_execution import _console_print
-from agentic_models import DEFAULT_GITHUB_HOST, Issue, PullRequest, Run, StatePaths
-from agentic_security import redact_secrets
-from agentic_output import style_system_text, style_text
+from .execution import _console_print
+from .models import DEFAULT_GITHUB_HOST, Issue, PullRequest, Run, StatePaths
+from .security import redact_secrets
+from .output import style_system_text, style_text
 
 BRANCH_RE = re.compile(r"^agent/issue-(\d+)-([a-f0-9]{8})$")
 LOCAL_BRANCH_RE = re.compile(
@@ -34,9 +34,11 @@ class UserCancelled(RuntimeError):
 
 def _status_print(message: Any, *, file: Any = None, flush: bool = False,
                   system_prefix: str | None = None) -> None:
-    renderer = style_system_text if system_prefix is not None else style_text
-    kwargs = {"system_prefix": system_prefix} if system_prefix is not None else {}
-    _console_print(renderer(message, file, **kwargs), file=file, flush=flush)
+    if system_prefix is not None:
+        rendered = style_system_text(message, file, system_prefix=system_prefix)
+    else:
+        rendered = style_text(message, file)
+    _console_print(rendered, file=file, flush=flush)
 
 def default_state_dir() -> Path:
     """Return the user-level state root, overridable for shared WSL/Windows storage."""

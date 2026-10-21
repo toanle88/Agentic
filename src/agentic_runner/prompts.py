@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import html
 
-from agentic_context import (
+from .context import (
     FEEDBACK_CONTEXT_CHARS,
     INSTRUCTION_CONTEXT_CHARS,
     _bounded_text,
     _issue_context,
 )
-from agentic_models import Issue
+from .models import Issue
 
 
 def _untrusted_prompt_context(header: str, tag: str, value: str | None) -> str:

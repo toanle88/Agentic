@@ -143,4 +143,3 @@ class AgentSettings:
             "host": self.host,
             "permission_policy": dict(self.permission_policy or {}),
         }
-

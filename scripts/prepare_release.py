@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Prepare a package-version pull request for Agentic.
 
-This command updates ``agentic.__version__`` on a release branch, runs the
+This command updates ``agentic_runner.__version__`` on a release branch, runs the
 local release checks, pushes the branch, and opens a normal GitHub pull
 request. After that pull request is merged, the GitHub Actions Release workflow
 can create the tag and GitHub Release from ``main``; ``scripts/release.py``
@@ -56,8 +56,8 @@ def version_parts(version: str) -> tuple[int, int, int]:
 
 
 def update_package_version(root: Path, version: str) -> None:
-    """Update the single literal ``__version__`` assignment in agentic.py."""
-    source = root / "agentic.py"
+    """Update the single literal ``__version__`` assignment in the package."""
+    source = root / "src" / "agentic_runner" / "__init__.py"
     try:
         lines = source.read_text(encoding="utf-8").splitlines(keepends=True)
     except OSError as exc:
@@ -174,7 +174,7 @@ def _pull_request_body(tag: str) -> str:
         "This pull request updates the Agentic package version.\n\n"
         "After merging, open Actions → Release → Run workflow, select `main`, "
         "and approve the `release` environment if required. The workflow reads "
-        "`agentic.__version__`, runs the release checks, and creates the tag and "
+        "`agentic_runner.__version__`, runs the release checks, and creates the tag and "
         "GitHub Release. If the UI path is unavailable, run `python "
         "scripts/release.py` from synchronized `main` as the local fallback."
     )
@@ -223,7 +223,7 @@ def main(argv: Sequence[str] | None = None, *, root: Path = ROOT) -> int:
             raise ReleaseError(f"Version update did not produce {requested_version!r}")
         _run_local_checks(root)
         _run_checked(("git", "diff", "--check"), root=root)
-        _run_checked(("git", "add", "agentic.py"), root=root)
+        _run_checked(("git", "add", "src/agentic_runner/__init__.py"), root=root)
         _run_checked(("git", "commit", "-m", f"chore: prepare release {tag}"), root=root)
         _run_checked(("git", "push", "--set-upstream", args.remote, branch), root=root)
         pr = _run_checked(

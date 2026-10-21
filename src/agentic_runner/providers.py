@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from agentic_policy import PERMISSION_FIELDS, default_permission_policy
+from .policy import PERMISSION_FIELDS, default_permission_policy
 
 
 _NETWORK_TOOL_NAMES = (

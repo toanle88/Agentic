@@ -3,7 +3,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agentic_providers import (
+import tests
+from agentic_runner.providers import (
     cli_provider_command,
     codex_command,
     resolve_provider_executable,

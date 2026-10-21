@@ -12,7 +12,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from agentic_security import redact_secrets
+from .security import redact_secrets
 
 
 def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:

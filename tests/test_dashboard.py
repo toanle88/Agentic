@@ -10,10 +10,11 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import agentic_dashboard
-import agentic_dashboard_data
-from agentic_models import StatePaths
-from agentic_dashboard_data import filter_runs
+import tests
+from agentic_runner import dashboard as agentic_dashboard
+from agentic_runner import dashboard_data as agentic_dashboard_data
+from agentic_runner.models import StatePaths
+from agentic_runner.dashboard_data import filter_runs
 
 
 class DashboardTests(unittest.TestCase):

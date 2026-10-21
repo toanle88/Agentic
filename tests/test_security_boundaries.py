@@ -5,19 +5,20 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import agentic
-import agentic_execution
-import agentic_dashboard_data
-import agentic_openrouter
-from agentic_openrouter_tools import _openrouter_tool_call
-from agentic_config import PROVIDER_API_KEY_ENV, provider_process_environment
-from agentic_sandbox import sandbox_command, validate_sandbox
-from agentic_security import redact_secrets
-from agentic_execution_stream import streamed_command
-from agentic_persistence import atomic_write_text
-from agentic_telemetry import record_issue_metadata, record_run_instruction, record_usage
-from agentic_review import record_review_findings
-from agentic_models import Issue, Run
+import tests
+from agentic_runner import cli as agentic
+from agentic_runner import execution as agentic_execution
+from agentic_runner import dashboard_data as agentic_dashboard_data
+from agentic_runner import openrouter as agentic_openrouter
+from agentic_runner.openrouter_tools import _openrouter_tool_call
+from agentic_runner.config import PROVIDER_API_KEY_ENV, provider_process_environment
+from agentic_runner.sandbox import sandbox_command, validate_sandbox
+from agentic_runner.security import redact_secrets
+from agentic_runner.execution_stream import streamed_command
+from agentic_runner.persistence import atomic_write_text
+from agentic_runner.telemetry import record_issue_metadata, record_run_instruction, record_usage
+from agentic_runner.review import record_review_findings
+from agentic_runner.models import Issue, Run
 
 
 class ReadOnlyBoundaryTests(unittest.TestCase):

@@ -7,7 +7,8 @@ from unittest.mock import call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import agentic
+import tests
+from agentic_runner import cli as agentic
 from test_worktrees import _GitRepositoryTestCase, sh
 
 

@@ -15,8 +15,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from agentic_models import Issue, Run
-from agentic_output import (
+from .models import Issue, Run
+from .output import (
     is_transient_progress,
     paint,
     sanitize_terminal_text,
@@ -24,9 +24,9 @@ from agentic_output import (
     style_system_text,
     style_text,
 )
-from agentic_sandbox import sandbox_command
-from agentic_security import redact_secrets
-from agentic_telemetry import record_operation, record_usage
+from .sandbox import sandbox_command
+from .security import redact_secrets
+from .telemetry import record_operation, record_usage
 
 def _short(value: Any, limit: int = 180) -> str:
     """Display single-line progress without flooding the terminal."""
@@ -79,7 +79,7 @@ def _record_provider_usage(output: Path, readonly: bool, usage: dict[str, Any], 
                            status: str | None = None,
                            exit_code: int | None = None) -> None:
     role = "reviewer" if readonly else "developer"
-    invocation = {"name": output.stem}
+    invocation: dict[str, Any] = {"name": output.stem}
     if model:
         invocation["model"] = model
     if prompt_chars is not None:

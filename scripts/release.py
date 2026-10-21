@@ -21,33 +21,40 @@ ROOT = Path(__file__).resolve().parents[1]
 VERSION_PATTERN = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 RUNTIME_MODULES = (
     "agentic.py",
-    "agentic_config.py",
-    "agentic_context.py",
-    "agentic_models.py",
-    "agentic_security.py",
-    "agentic_sandbox.py",
-    "agentic_telemetry.py",
-    "agentic_diagnostics.py",
-    "agentic_dashboard_data.py",
-    "agentic_providers.py",
-    "agentic_review.py",
-    "agentic_dashboard.py",
-    "agentic_execution.py",
-    "agentic_execution_providers.py",
-    "agentic_execution_stream.py",
-    "agentic_guidance.py",
-    "agentic_openrouter.py",
-    "agentic_openrouter_loop.py",
-    "agentic_openrouter_tools.py",
-    "agentic_output.py",
-    "agentic_policy.py",
-    "agentic_prompts.py",
     "agentic_shell.py",
-    "agentic_shell_commands.py",
-    "agentic_shell_input.py",
-    "agentic_persistence.py",
-    "agentic_workflow.py",
-    "agentic_worktrees.py",
+    "agentic_dashboard.py",
+    "src/agentic_runner/__init__.py",
+    "src/agentic_runner/cli.py",
+    "src/agentic_runner/config.py",
+    "src/agentic_runner/context.py",
+    "src/agentic_runner/diagnostics.py",
+    "src/agentic_runner/dashboard.py",
+    "src/agentic_runner/dashboard_data.py",
+    "src/agentic_runner/execution.py",
+    "src/agentic_runner/execution_providers.py",
+    "src/agentic_runner/execution_stream.py",
+    "src/agentic_runner/guidance.py",
+    "src/agentic_runner/openrouter.py",
+    "src/agentic_runner/openrouter_loop.py",
+    "src/agentic_runner/openrouter_tools.py",
+    "src/agentic_runner/output.py",
+    "src/agentic_runner/policy.py",
+    "src/agentic_runner/prompts.py",
+    "src/agentic_runner/shell.py",
+    "src/agentic_runner/shell_commands.py",
+    "src/agentic_runner/shell_input.py",
+    "src/agentic_runner/shell_jobs.py",
+    "src/agentic_runner/models.py",
+    "src/agentic_runner/persistence.py",
+    "src/agentic_runner/security.py",
+    "src/agentic_runner/telemetry.py",
+    "src/agentic_runner/sandbox.py",
+    "src/agentic_runner/providers.py",
+    "src/agentic_runner/review.py",
+    "src/agentic_runner/test_discovery.py",
+    "src/agentic_runner/workflow.py",
+    "src/agentic_runner/workflow_state.py",
+    "src/agentic_runner/worktrees.py",
 )
 
 
@@ -111,7 +118,7 @@ def _combined_output(result: subprocess.CompletedProcess[str]) -> str:
 
 def package_version(root: Path) -> str:
     """Read the literal package version without executing project code."""
-    source = root / "agentic.py"
+    source = root / "src" / "agentic_runner" / "__init__.py"
     try:
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
     except (OSError, SyntaxError) as exc:

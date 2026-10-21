@@ -3,7 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agentic_telemetry import (
+import tests
+from agentic_runner.telemetry import (
     combine_usage,
     extract_jsonl_usage,
     read_run_usage,

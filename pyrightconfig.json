@@ -1,17 +1,12 @@
 {
   "include": [
+    "src/agentic_runner",
     "agentic.py",
-    "agentic_config.py",
-    "agentic_models.py",
-    "agentic_security.py",
-    "agentic_sandbox.py",
-    "agentic_telemetry.py",
-    "agentic_providers.py",
-    "agentic_review.py",
     "agentic_dashboard.py",
     "agentic_shell.py"
   ],
   "exclude": ["build", "dist", ".venv"],
   "typeCheckingMode": "basic",
-  "reportMissingImports": "error"
+  "reportMissingImports": "error",
+  "reportUnsupportedDunderAll": "none"
 }

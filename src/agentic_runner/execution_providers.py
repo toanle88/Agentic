@@ -9,22 +9,22 @@ import time
 from pathlib import Path
 from typing import Any
 
-from agentic_execution_stream import (
+from .execution_stream import (
     _record_provider_usage,
     _short,
     streamed_command,
 )
-from agentic_guidance import guidance_phase, guidance_prompt
-from agentic_config import PROVIDER_API_KEY_ENV, provider_process_environment
-from agentic_persistence import atomic_write_text
-from agentic_policy import default_permission_policy
-from agentic_providers import (
+from .guidance import guidance_phase, guidance_prompt
+from .config import PROVIDER_API_KEY_ENV, provider_process_environment
+from .persistence import atomic_write_text
+from .policy import default_permission_policy
+from .providers import (
     cli_provider_command,
     codex_command,
     resolve_provider_executable,
 )
-from agentic_security import redact_secrets
-from agentic_telemetry import extract_jsonl_usage
+from .security import redact_secrets
+from .telemetry import extract_jsonl_usage
 
 def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = False,
               schema: Path | None = None, timeout: int | None = None,

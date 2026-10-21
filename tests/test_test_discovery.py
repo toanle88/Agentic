@@ -10,8 +10,9 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import agentic
-from agentic_test_discovery import (
+import tests
+from agentic_runner import cli as agentic
+from agentic_runner.test_discovery import (
     MAX_OUTPUT_TAIL_BYTES,
     MAX_DISCOVERY_TIMEOUT_SECONDS,
     DiscoveryResult,

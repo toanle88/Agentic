@@ -6,8 +6,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import agentic
-import agentic_worktrees
+import tests
+from agentic_runner import cli as agentic
+from agentic_runner import worktrees as agentic_worktrees
 
 
 def sh(*args, cwd):

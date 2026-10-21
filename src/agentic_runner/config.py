@@ -14,16 +14,16 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from agentic_models import AgentSettings, DEFAULT_GITHUB_HOST
-from agentic_policy import (
+from .models import AgentSettings, DEFAULT_GITHUB_HOST
+from .policy import (
     validate_permission_policy,
     validate_permission_policy_container,
 )
-from agentic_providers import (
+from .providers import (
     resolve_provider_executable,
     validate_provider_permission_policy,
 )
-from agentic_sandbox import sandbox_build_command, validate_sandbox
+from .sandbox import sandbox_build_command, validate_sandbox
 
 
 SUPPORTED_PROVIDERS = ("codex", "gemini", "claude", "copilot", "openrouter")

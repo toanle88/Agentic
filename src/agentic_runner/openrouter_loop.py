@@ -10,29 +10,29 @@ import time
 from pathlib import Path
 from typing import Any
 
-from agentic_config import (
+from .config import (
     DEFAULT_OPENROUTER_BASE_URL,
     DEFAULT_OPENROUTER_COMMAND_TIMEOUT,
     OPENROUTER_MAX_TURNS,
 )
-from agentic_context import _compact_openrouter_history
-from agentic_execution import (
+from .context import _compact_openrouter_history
+from .execution import (
     _console_print,
     _message_text,
     _record_provider_usage,
     _short,
 )
-from agentic_guidance import guidance_phase, guidance_prompt
-from agentic_persistence import atomic_write_text
-from agentic_openrouter_tools import (
+from .guidance import guidance_phase, guidance_prompt
+from .persistence import atomic_write_text
+from .openrouter_tools import (
     _openrouter_request,
     _openrouter_tool_call,
     _openrouter_tools,
 )
-from agentic_policy import default_permission_policy
-from agentic_output import is_transient_progress, strip_ansi, style_text
-from agentic_security import redact_secrets
-from agentic_telemetry import combine_usage, normalize_usage, record_operation
+from .policy import default_permission_policy
+from .output import is_transient_progress, strip_ansi, style_text
+from .security import redact_secrets
+from .telemetry import combine_usage, normalize_usage, record_operation
 
 def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                    readonly: bool = False, schema: Path | None = None,

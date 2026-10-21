@@ -13,7 +13,7 @@ from pathlib import Path
 import stat
 from typing import Any
 
-from agentic_telemetry import record_guidance_loads
+from .telemetry import record_guidance_loads
 
 
 MAX_GUIDANCE_FILE_CHARS = 12_000
@@ -129,7 +129,7 @@ def discover_guidance(worktree: Path) -> list[GuidanceFile]:
     except (OSError, RuntimeError):
         return []
 
-    paths = list(GUIDANCE_FILES)
+    paths: list[str] = list(GUIDANCE_FILES)
     decisions = root / "docs" / "decisions"
     try:
         decision_paths = sorted(

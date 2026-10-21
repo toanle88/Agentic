@@ -16,8 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, TextIO
 
-from agentic_output import ConciseLogStream
-from agentic_shell_input import _KeyReader
+from .output import ConciseLogStream
+from .shell_input import _KeyReader
 
 
 @dataclass
