@@ -318,6 +318,65 @@ class WorkflowTests(_GitRepositoryTestCase):
         self.assertIn(' src/App.tsx | 4 \033[32m++\033[0m\033[31m--\033[0m', rendered)
         self.assertIn('\033[32m2 insertions(+)\033[0m, \033[31m2 deletions(-)\033[0m', rendered)
 
+        for path in folder.iterdir():
+            if path.is_file():
+                self.assertNotIn('\033[', path.read_text(encoding='utf-8'))
+
+
+    def test_verify_and_review_keeps_patch_diff_stat_plain_when_redirected(self):
+        run = agentic.create_worktree(self.repo, 'main', 123)
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(123, 'Plain patch summary', '')
+        config = {'test_commands': [['python', '-c', 'print("ok")']], 'max_files': None}
+        summary = (
+            ' src/App.tsx | 4 ++--\n'
+            ' 1 file changed, 2 insertions(+), 2 deletions(-)\n'
+        )
+        verdict = {'approved': True, 'summary': 'Good', 'findings': [], 'skipped': []}
+        console = StringIO()
+        with (patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}),
+              patch('sys.stdout', console),
+              patch('agentic.run_tests', return_value=(True, 'tests passed')),
+              patch('agentic.prepare_patch', side_effect=[
+                  ('base-sha', 'digest', summary), ('base-sha', 'digest', summary),
+              ]),
+              patch('agentic.review', return_value=verdict)):
+            passed, *_ = agentic.verify_and_review(run, issue, 'main', config, folder)
+
+        self.assertTrue(passed)
+        rendered = console.getvalue()
+        self.assertIn('[PATCH] Proposed changes:\n' + summary, rendered)
+        self.assertNotIn('\033[', rendered)
+
+
+    def test_verify_and_review_keeps_patch_diff_stat_plain_with_no_color_on_tty(self):
+        run = agentic.create_worktree(self.repo, 'main', 124)
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(124, 'No color patch summary', '')
+        config = {'test_commands': [['python', '-c', 'print("ok")']], 'max_files': None}
+
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        console = TTYBuffer()
+        summary = (
+            ' src/App.tsx | 4 ++--\n'
+            ' 1 file changed, 2 insertions(+), 2 deletions(-)\n'
+        )
+        verdict = {'approved': True, 'summary': 'Good', 'findings': [], 'skipped': []}
+        with (patch.dict('os.environ', {'NO_COLOR': '1', 'AGENTIC_PLAIN': ''}),
+              patch('sys.stdout', console),
+              patch('agentic.run_tests', return_value=(True, 'tests passed')),
+              patch('agentic.prepare_patch', side_effect=[
+                  ('base-sha', 'digest', summary), ('base-sha', 'digest', summary),
+              ]),
+              patch('agentic.review', return_value=verdict)):
+            passed, *_ = agentic.verify_and_review(run, issue, 'main', config, folder)
+
+        self.assertTrue(passed)
+        self.assertNotIn('\033[', console.getvalue())
+
 
     def test_develop_returns_review_feedback_to_the_next_attempt(self):
         run = agentic.create_worktree(self.repo, 'main', 33)

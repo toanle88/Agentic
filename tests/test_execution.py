@@ -66,6 +66,23 @@ class StreamingTests(unittest.TestCase):
         stat_line = styled.split(' weird+file-.txt', 1)[1].splitlines()[0]
         self.assertNotIn('\033[', stat_line.split('|', 1)[0])
 
+    def test_style_patch_summary_colors_diff_totals_without_english_labels(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        summary = (
+            '[PATCH] Proposed changes:\n'
+            ' 2 Dateien geändert, 4 Einfügungen(+), 1 Löschungen(-)\n'
+        )
+        with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+             patch('sys.stdout', new=TTYBuffer()):
+            styled = style_patch_summary(summary)
+
+        self.assertIn('\033[32m4 Einfügungen(+)\033[0m', styled)
+        self.assertIn('\033[31m1 Löschungen(-)\033[0m', styled)
+        self.assertEqual(style_patch_summary(styled), summary)
+
     def test_style_patch_summary_is_plain_for_redirected_output_and_no_color(self):
         summary = '[PATCH] Proposed changes:\n file.py | 2 ++\n 1 file changed, 2 insertions(+)\n'
         self.assertEqual(style_patch_summary(summary), summary)
