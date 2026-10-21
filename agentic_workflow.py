@@ -24,6 +24,9 @@ from typing import Any
 from agentic_config import (
     DEFAULT_OPENROUTER_BASE_URL,
     OPENROUTER_MAX_TURNS,
+    api_key_env_for_provider,
+    auth_mode_for_settings,
+    PROVIDER_API_KEY_ENV,
     sandbox_env_for_provider,
 )
 from agentic_context import (
@@ -395,9 +398,22 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
         permission_policy = default_permission_policy("reviewer" if readonly else "developer")
     policy_kwargs = {"permission_policy": permission_policy} if policy_explicit else {}
     provider_sandbox = None
+    auth = auth_mode_for_settings(selected)
+    selected_env = (
+        api_key_env_for_provider(provider, selected.get("api_key_env"))
+        if auth in {"api_key", "both"} else None
+    )
     if sandbox is not None:
         provider_sandbox = dict(sandbox)
-        provider_sandbox["pass_env"] = sandbox_env_for_provider(provider, sandbox)
+        provider_sandbox["pass_env"] = sandbox_env_for_provider(
+            provider, sandbox, selected_env,
+        )
+        canonical_env = PROVIDER_API_KEY_ENV.get(provider)
+        if (
+            selected_env and canonical_env and selected_env != canonical_env
+            and selected_env in provider_sandbox["pass_env"]
+        ):
+            provider_sandbox["pass_env"].append(canonical_env)
     if selected.get("model") is not None:
         model = selected["model"]
     if selected.get("reasoning_effort") is not None:
@@ -408,6 +424,7 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
         return run_codex(
             worktree, prompt, output=output, readonly=readonly, schema=schema,
             timeout=timeout, model=model, reasoning_effort=reasoning_effort,
+            **({"api_key_env": selected_env} if selected_env else {}),
             **policy_kwargs,
             **({"sandbox": provider_sandbox} if provider_sandbox is not None else {}),
         )
@@ -449,6 +466,7 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
     return run_cli_provider(
         worktree, prompt, output=output, provider=provider,
         readonly=readonly, timeout=timeout, model=model,
+        **({"api_key_env": selected_env} if selected_env else {}),
         **policy_kwargs,
         **cli_kwargs,
         **({"sandbox": provider_sandbox} if provider_sandbox is not None else {}),

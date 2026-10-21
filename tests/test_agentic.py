@@ -13,6 +13,7 @@ from unittest.mock import call, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import agentic
 import agentic_execution
+from agentic_sandbox import sandbox_command
 
 
 def sh(*args, cwd):
@@ -564,6 +565,81 @@ class PureTests(unittest.TestCase):
                 schema=None, timeout=None, model='router-model', reasoning_effort=None,
                 api_key_env='ROUTER_KEY', base_url='https://router.test',
             )
+
+
+    def test_run_agent_passes_only_selected_api_key_to_isolated_native_provider(self):
+        root = Path('/tmp/agentic-provider-sandbox-auth-test')
+        sandbox = {
+            'enabled': True, 'image': 'agent-image',
+            'pass_env': ['ROLE_KEY', 'OTHER_PROVIDER_KEY'],
+        }
+        with patch('agentic.run_cli_provider', return_value=(True, 'cli')) as cli:
+            result = agentic.run_agent(
+                root, 'prompt', output=root / 'message.txt',
+                settings=agentic.AgentSettings(
+                    provider='claude', auth='api_key', api_key_env='ROLE_KEY',
+                ), sandbox=sandbox,
+            )
+        self.assertEqual(result, (True, 'cli'))
+        passed_sandbox = cli.call_args.kwargs['sandbox']
+        self.assertEqual(passed_sandbox['pass_env'], ['ROLE_KEY', 'ANTHROPIC_API_KEY'])
+
+
+    def test_native_provider_maps_custom_credential_name_to_cli_environment(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            captured = {}
+
+            def fake_stream(argv, cwd, **kwargs):
+                captured.update(kwargs)
+                return CompletedProcess(argv, 0, stdout='done')
+
+            with patch.dict(agentic.os.environ, {'ROLE_KEY': 'secret'}, clear=True), \
+                 patch('agentic_execution.streamed_command', side_effect=fake_stream):
+                ok, message = agentic.run_cli_provider(
+                    root, 'prompt', output=root / 'provider.txt',
+                    provider='claude', api_key_env='ROLE_KEY',
+                )
+        self.assertTrue(ok)
+        self.assertEqual(message, 'done')
+        self.assertEqual(captured['env']['ROLE_KEY'], 'secret')
+        self.assertEqual(captured['env']['ANTHROPIC_API_KEY'], 'secret')
+
+
+    def test_isolated_native_provider_passes_alias_value_as_canonical_environment(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            captured = {}
+
+            def fake_stream(argv, cwd, **kwargs):
+                captured.update(kwargs)
+                captured['process_argv'] = sandbox_command(
+                    argv, cwd, kwargs['sandbox'],
+                    pass_env=kwargs['sandbox_pass_env'], env=kwargs['env'],
+                )
+                return CompletedProcess(argv, 0, stdout='done')
+
+            with (patch.dict(agentic.os.environ, {'ROLE_KEY': 'secret'}, clear=True),
+                  patch('agentic_execution.streamed_command', side_effect=fake_stream)):
+                ok, message = agentic.run_agent(
+                    root, 'prompt', output=root / 'provider.txt',
+                    settings=agentic.AgentSettings(
+                        provider='claude', auth='api_key', api_key_env='ROLE_KEY',
+                    ),
+                    sandbox={
+                        'enabled': True, 'image': 'agent-image',
+                        'pass_env': ['ROLE_KEY'],
+                    },
+                )
+
+        self.assertTrue(ok)
+        self.assertEqual(message, 'done')
+        self.assertEqual(captured['sandbox_pass_env'], ['ROLE_KEY', 'ANTHROPIC_API_KEY'])
+        self.assertEqual(captured['env']['ROLE_KEY'], 'secret')
+        self.assertEqual(captured['env']['ANTHROPIC_API_KEY'], 'secret')
+        for name in ('ROLE_KEY', 'ANTHROPIC_API_KEY'):
+            env_index = captured['process_argv'].index(name)
+            self.assertEqual(captured['process_argv'][env_index - 1], '--env')
 
 
 

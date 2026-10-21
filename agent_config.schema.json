@@ -57,6 +57,7 @@
         "reasoning_effort": { "type": ["string", "null"] },
         "timeout_seconds": { "type": ["integer", "null"], "minimum": 1, "maximum": 86400 },
         "executable_path": { "type": ["string", "null"], "minLength": 1, "description": "Copilot executable path; use an image-visible path in isolated mode" },
+        "auth": { "enum": ["native_cli", "api_key", "both"], "default": "native_cli", "description": "Authentication mode; api_key and both use api_key_env or the provider default" },
         "api_key_env": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
         "base_url": { "type": "string", "format": "uri" },
         "max_tool_turns": { "type": ["integer", "null"], "minimum": 1, "maximum": 200 },

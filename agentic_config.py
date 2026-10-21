@@ -37,6 +37,15 @@ PROVIDER_SANDBOX_ENV = {
     "copilot": ("GH_TOKEN",),
     "openrouter": (),
 }
+PROVIDER_API_KEY_ENV = {
+    "codex": "OPENAI_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "claude": "ANTHROPIC_API_KEY",
+    "copilot": "GH_TOKEN",
+    "openrouter": "OPENROUTER_API_KEY",
+}
+AUTH_MODES = ("native_cli", "api_key", "both")
+ENVIRONMENT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # Bound worst-case repeated context cost; callers can raise this explicitly
 # for unusually large tasks.
@@ -76,11 +85,49 @@ def _runtime_agent_settings(config: dict[str, Any], role: str) -> dict[str, Any]
     return settings
 
 
-def sandbox_env_for_provider(provider: str, sandbox: dict[str, Any] | None) -> list[str]:
+def api_key_env_for_provider(provider: str, api_key_env: str | None = None) -> str | None:
+    """Return the selected provider credential name without reading its value."""
+    return api_key_env or PROVIDER_API_KEY_ENV.get(provider)
+
+
+def provider_process_environment(provider: str, api_key_env: str | None) -> dict[str, str] | None:
+    """Map a configured credential name to the native CLI's canonical name."""
+    canonical = PROVIDER_API_KEY_ENV.get(provider)
+    if not api_key_env or not canonical or api_key_env == canonical:
+        return None
+    value = os.environ.get(api_key_env)
+    if not value:
+        return None
+    environment = dict(os.environ)
+    environment[canonical] = value
+    return environment
+
+
+def auth_mode_for_settings(settings: dict[str, Any]) -> str:
+    """Resolve the explicit or compatibility authentication mode."""
+    provider = str(settings.get("provider", "codex"))
+    configured = settings.get("auth")
+    if configured is None:
+        if provider == "openrouter" or settings.get("api_key_env") is not None:
+            return "api_key"
+        return "native_cli"
+    if configured == "native":
+        configured = "native_cli"
+    if configured not in AUTH_MODES:
+        raise ValueError(
+            f"{provider} auth must be one of: {', '.join(AUTH_MODES)}"
+        )
+    return str(configured)
+
+
+def sandbox_env_for_provider(provider: str, sandbox: dict[str, Any] | None,
+                             api_key_env: str | None = None) -> list[str]:
     """Select only the explicit credential names relevant to one provider."""
     configured = list((sandbox or {}).get("pass_env", []))
     if provider == "openrouter":
         return []
+    if api_key_env is not None:
+        return [name for name in configured if name == api_key_env]
     expected = set(PROVIDER_SANDBOX_ENV.get(provider, ()))
     matched = [name for name in configured if name in expected]
     return matched or configured
@@ -108,6 +155,7 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
     model = raw.get("model", legacy_model)
     reasoning = raw.get("reasoning_effort", legacy_reasoning)
     timeout = raw.get("timeout_seconds", legacy_timeout)
+    auth = raw.get("auth")
     api_key_env = raw.get("api_key_env")
     base_url = raw.get("base_url")
     executable_path = raw.get("executable_path")
@@ -169,23 +217,38 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
     if type(json_mode) is not bool:
         raise ValueError(f"{section}.json_mode must be a boolean")
     if api_key_env is not None and (
-        not isinstance(api_key_env, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", api_key_env)
+        not isinstance(api_key_env, str) or not ENVIRONMENT_NAME_RE.fullmatch(api_key_env)
     ):
         raise ValueError(f"{section}.api_key_env must be a valid environment variable name")
+    if auth == "native":
+        auth = "native_cli"
+    if auth is not None and auth not in AUTH_MODES:
+        raise ValueError(f"{section}.auth must be one of: {', '.join(AUTH_MODES)}")
     if provider == "openrouter":
         if not model:
             raise ValueError(f"{section}.model is required when provider is openrouter")
         api_key_env = api_key_env or "OPENROUTER_API_KEY"
+        auth = auth or "api_key"
+        if auth != "api_key":
+            raise ValueError(f"{section}.auth must be api_key for openrouter")
         base_url = base_url or DEFAULT_OPENROUTER_BASE_URL
         if not re.match(r"^https?://", base_url, re.IGNORECASE):
             raise ValueError(f"{section}.base_url must start with http:// or https://")
-    elif api_key_env is not None or base_url is not None:
-        raise ValueError(f"{section}.api_key_env and {section}.base_url are only valid for openrouter")
-    elif max_tool_turns is not None or command_timeout is not None or allow_network or json_mode:
-        raise ValueError(
-            f"{section}.max_tool_turns, {section}.command_timeout_seconds, and "
-            f"{section}.allow_network, and {section}.json_mode are only valid for openrouter"
-        )
+    elif base_url is not None:
+        raise ValueError(f"{section}.base_url is only valid for openrouter")
+    else:
+        auth = auth or ("api_key" if api_key_env is not None else "native_cli")
+        if auth == "native_cli" and api_key_env is not None:
+            raise ValueError(
+                f"{section}.api_key_env requires auth=api_key or auth=both"
+            )
+        if auth in {"api_key", "both"}:
+            api_key_env = api_key_env or PROVIDER_API_KEY_ENV[provider]
+        if max_tool_turns is not None or command_timeout is not None or allow_network or json_mode:
+            raise ValueError(
+                f"{section}.max_tool_turns, {section}.command_timeout_seconds, and "
+                f"{section}.allow_network, and {section}.json_mode are only valid for openrouter"
+            )
     permission_policy = validate_permission_policy(
         policy_value,
         role="developer" if section == "developer" else "reviewer",
@@ -201,6 +264,7 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
         model=model,
         reasoning_effort=reasoning,
         timeout_seconds=timeout,
+        auth=auth or "native_cli",
         api_key_env=api_key_env,
         base_url=base_url,
         max_tool_turns=max_tool_turns,
@@ -323,14 +387,26 @@ def preflight_agent_settings(*settings: dict[str, Any],
     """Check each configured role before creating work or spending API time."""
     for item in settings:
         provider = str(item.get("provider", "codex"))
-        if provider == "openrouter":
-            env_name = item.get("api_key_env") or "OPENROUTER_API_KEY"
-            if not os.environ.get(env_name):
-                raise RuntimeError(f"OpenRouter API key is missing; set ${env_name}")
-            continue
+        auth = auth_mode_for_settings(item)
+        api_key_env = (
+            api_key_env_for_provider(provider, item.get("api_key_env"))
+            if auth in {"api_key", "both"} else None
+        )
+        if api_key_env is not None:
+            if not os.environ.get(api_key_env):
+                credential = "GitHub token" if provider == "copilot" else "API key"
+                raise RuntimeError(f"{provider.title()} {credential} is missing; set ${api_key_env}")
         if sandbox and sandbox.get("enabled"):
+            selected_env = sandbox_env_for_provider(provider, sandbox, api_key_env)
+            # OpenRouter sends its API request from the host. Its sandbox is
+            # only used for scoped tool commands, so the API credential must
+            # not be required or passed into that container.
+            if provider != "openrouter" and api_key_env and api_key_env not in selected_env:
+                raise RuntimeError(
+                    f"{provider.title()} credential ${api_key_env} must be listed in sandbox.pass_env"
+                )
             missing_env = [
-                name for name in sandbox_env_for_provider(provider, sandbox)
+                name for name in selected_env
                 if not os.environ.get(name)
             ]
             if missing_env:
@@ -524,10 +600,12 @@ def default_provider_settings(provider: str) -> dict[str, Any]:
         "reasoning_effort": None,
         "timeout_seconds": DEFAULT_DEVELOPER_TIMEOUT,
         "host": None,
+        "auth": "native_cli",
     }
     if provider == "openrouter":
         settings.update({
             "model": "openai/gpt-5.4",
+            "auth": "api_key",
             "api_key_env": "OPENROUTER_API_KEY",
             "base_url": DEFAULT_OPENROUTER_BASE_URL,
             "max_tool_turns": OPENROUTER_MAX_TURNS,

@@ -14,6 +14,7 @@ from agentic_execution_stream import (
     streamed_command,
 )
 from agentic_guidance import guidance_phase, guidance_prompt
+from agentic_config import provider_process_environment
 from agentic_policy import default_permission_policy
 from agentic_providers import (
     cli_provider_command,
@@ -27,6 +28,7 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
               schema: Path | None = None, timeout: int | None = None,
               model: str | None = None,
               reasoning_effort: str | None = None,
+              api_key_env: str | None = None,
               permission_policy: dict[str, bool] | None = None,
               sandbox: dict[str, Any] | None = None) -> tuple[bool, str]:
     # Each invocation creates a fresh session. The repository is the memory.
@@ -49,6 +51,7 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
         sandbox_read_only=readonly,
         sandbox_pass_env=(sandbox or {}).get("pass_env", []),
         metrics_folder=output.parent,
+        env=provider_process_environment("codex", api_key_env),
     )
     message = output.read_text(encoding="utf-8") if output.exists() else result.stdout[-4000:]
     message = redact_secrets(message)
@@ -154,6 +157,7 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
                      check_commands: list[list[str]] | None = None,
                      executable_path: str | None = None,
                      host: str | None = None,
+                     api_key_env: str | None = None,
                      sandbox: dict[str, Any] | None = None) -> tuple[bool, str]:
     """Run a locally installed coding CLI in its non-interactive mode."""
     prompt = guidance_prompt(
@@ -192,9 +196,9 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
     sandbox_pass_env = list((sandbox or {}).get("pass_env", []))
     if provider == "copilot" and host and "COPILOT_GH_HOST" not in sandbox_pass_env:
         sandbox_pass_env.append("COPILOT_GH_HOST")
-    process_env = None
+    process_env = provider_process_environment(provider, api_key_env)
     if provider == "copilot" and host:
-        process_env = dict(os.environ)
+        process_env = dict(process_env or os.environ)
         process_env["COPILOT_GH_HOST"] = host
     result = streamed_command(
         args, worktree, label=label, log_file=output.with_suffix(".log"),
