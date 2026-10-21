@@ -1,9 +1,14 @@
 """Scoped OpenRouter tool policy and agent execution."""
 from __future__ import annotations
 
+import codecs
 import json
 import os
+import queue
+import signal
 import subprocess
+import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -17,6 +22,8 @@ from .policy import default_permission_policy, forbidden, sensitive_read
 OPENROUTER_READ_FILE_CHARS = 12_000
 OPENROUTER_READ_CHUNK_CHARS = 8_192
 OPENROUTER_COMMAND_OUTPUT_CHARS = 6_000
+OPENROUTER_COMMAND_READ_CHUNK_BYTES = 4_096
+OPENROUTER_COMMAND_DRAIN_TIMEOUT_SECONDS = 1.0
 OPENROUTER_LIST_FILES_PAGE_SIZE = 300
 NETWORK_COMMANDS = {"curl", "wget", "ssh", "scp", "sftp", "ftp", "nc", "netcat", "telnet", "gh"}
 ALWAYS_BLOCKED_COMMANDS = {"gh", "ssh", "scp", "sftp"}
@@ -323,6 +330,158 @@ def _list_files_page(target: Path, root: Path, page: int) -> tuple[list[str], bo
     return paths, has_more
 
 
+def _stop_command_process(process: subprocess.Popen[Any]) -> None:
+    """Stop a command and its descendants without leaving the output pipe open."""
+    if os.name != "nt":
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            pass
+    else:
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, check=False,
+            )
+        except OSError:
+            pass
+    try:
+        if process.poll() is None:
+            process.kill()
+    except OSError:
+        pass
+
+
+def _bounded_command_capture(
+    process_argv: list[str], worktree: Path, timeout: int | None,
+) -> tuple[int, str, bool, bool]:
+    """Run a command while retaining only a bounded decoded output tail."""
+    popen_kwargs: dict[str, Any] = {
+        "cwd": worktree,
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.STDOUT,
+        "bufsize": 0,
+    }
+    if os.name != "nt":
+        popen_kwargs["start_new_session"] = True
+    else:
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    process = subprocess.Popen(process_argv, **popen_kwargs)
+    if process.stdout is None:
+        raise OSError("command output pipe was not created")
+
+    chunks: queue.Queue[bytes | None] = queue.Queue(maxsize=1)
+    stop_reader = threading.Event()
+    stream = process.stdout
+
+    def reader() -> None:
+        try:
+            while not stop_reader.is_set():
+                chunk = stream.read(OPENROUTER_COMMAND_READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                while not stop_reader.is_set():
+                    try:
+                        chunks.put(chunk, timeout=0.1)
+                        break
+                    except queue.Full:
+                        continue
+        except (OSError, ValueError):
+            pass
+        finally:
+            while not stop_reader.is_set():
+                try:
+                    chunks.put(None, timeout=0.1)
+                    break
+                except queue.Full:
+                    continue
+
+    reader_thread = threading.Thread(target=reader, daemon=True)
+    reader_thread.start()
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    output_tail = ""
+    output_chars = 0
+    truncated = False
+    timed_out = False
+    terminated = False
+    reader_done = False
+    deadline = time.monotonic() + timeout if timeout is not None else None
+    drain_deadline: float | None = None
+
+    def append_output(data: bytes, *, final: bool = False) -> None:
+        nonlocal output_tail, output_chars, truncated
+        decoded = decoder.decode(data, final=final)
+        if not decoded:
+            return
+        output_chars = min(
+            OPENROUTER_COMMAND_OUTPUT_CHARS + 1,
+            output_chars + len(decoded),
+        )
+        if output_chars > OPENROUTER_COMMAND_OUTPUT_CHARS:
+            truncated = True
+        output_tail = (output_tail + decoded)[-OPENROUTER_COMMAND_OUTPUT_CHARS:]
+
+    try:
+        while True:
+            now = time.monotonic()
+            if not terminated and deadline is not None and now >= deadline:
+                timed_out = True
+                terminated = True
+                drain_deadline = now + OPENROUTER_COMMAND_DRAIN_TIMEOUT_SECONDS
+                _stop_command_process(process)
+            if terminated and reader_done:
+                break
+            if terminated and drain_deadline is not None and now >= drain_deadline:
+                break
+            if not terminated and reader_done and process.poll() is not None:
+                break
+            wait_for = 0.1
+            if deadline is not None and not terminated:
+                wait_for = max(0.01, min(wait_for, deadline - now))
+            if terminated and drain_deadline is not None:
+                wait_for = max(0.01, min(wait_for, drain_deadline - now))
+            try:
+                chunk = chunks.get(timeout=wait_for)
+            except queue.Empty:
+                continue
+            if chunk is None:
+                reader_done = True
+                continue
+            append_output(chunk)
+            if truncated and not terminated:
+                terminated = True
+                drain_deadline = time.monotonic() + OPENROUTER_COMMAND_DRAIN_TIMEOUT_SECONDS
+                _stop_command_process(process)
+        if not terminated:
+            process.wait()
+        else:
+            try:
+                process.wait(timeout=OPENROUTER_COMMAND_DRAIN_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                _stop_command_process(process)
+                process.wait()
+        if not timed_out:
+            append_output(b"", final=True)
+    finally:
+        # Capture errors must not leave a write-capable command running after
+        # the tool call has failed.  The normal overflow/timeout paths have
+        # already stopped and waited for the process, but this also covers
+        # unexpected pipe or wait failures.
+        if process.poll() is None:
+            _stop_command_process(process)
+        try:
+            process.wait(timeout=OPENROUTER_COMMAND_DRAIN_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            _stop_command_process(process)
+            process.wait()
+        stop_reader.set()
+        stream.close()
+        reader_thread.join(timeout=OPENROUTER_COMMAND_DRAIN_TIMEOUT_SECONDS)
+    return process.returncode, output_tail, truncated, timed_out
+
+
 def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                           *, readonly: bool, command_timeout: int | None = None,
                           allow_network: bool = False,
@@ -406,21 +565,16 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
             process_argv = sandbox_command(
                 _safe_readonly_git_argv(argv), worktree, sandbox, read_only=readonly, pass_env=[],
             )
-            try:
-                result = subprocess.run(
-                    process_argv, cwd=worktree, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, encoding="utf-8", errors="replace", check=False,
-                    timeout=command_timeout,
-                )
-            except subprocess.TimeoutExpired:
+            returncode, output, truncated, timed_out = _bounded_command_capture(
+                process_argv, worktree, command_timeout,
+            )
+            if timed_out:
                 return f"ERROR: command timed out after {command_timeout}s"
-            output = redact_secrets(result.stdout, extra_values=redaction_values or ())
-            if len(output) > OPENROUTER_COMMAND_OUTPUT_CHARS:
+            output = redact_secrets(output, extra_values=redaction_values or ())
+            if truncated or len(output) > OPENROUTER_COMMAND_OUTPUT_CHARS:
                 marker = "...[command output truncated; showing the tail]\n"
-                output = (
-                    marker + output[-(OPENROUTER_COMMAND_OUTPUT_CHARS - len(marker)):]
-                )
-            return f"exit {result.returncode}\n{output}"
+                output = marker + output[-(OPENROUTER_COMMAND_OUTPUT_CHARS - len(marker)):]
+            return f"exit {returncode}\n{output}"
         return f"ERROR: unknown tool {name!r}"
     except (OSError, UnicodeError, ValueError) as exc:
         return f"ERROR: {redact_secrets(str(exc), extra_values=redaction_values or ())}"

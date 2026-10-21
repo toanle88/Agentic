@@ -1,12 +1,13 @@
 """OpenRouter policy and tool-loop tests."""
 import json
+import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from io import StringIO
 from pathlib import Path
-from subprocess import CompletedProcess
 from unittest.mock import patch
 
 import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
@@ -330,8 +331,8 @@ class OpenRouterTests(unittest.TestCase):
                 'allow_network': False, 'pass_env': ['OPENAI_API_KEY'],
             }
             with (patch.dict(agentic.os.environ, {'OPENAI_API_KEY': 'secret'}, clear=True),
-                  patch('agentic_openrouter.subprocess.run', return_value=CompletedProcess(
-                      ['docker'], 0, stdout='sandboxed\n'
+                  patch('agentic_openrouter_tools._bounded_command_capture', return_value=(
+                      0, 'sandboxed\n', False, False,
                   )) as run):
                 result = agentic_openrouter._openrouter_tool_call(
                     root, 'run_command', {'argv': ['python', '-m', 'unittest']},
@@ -564,13 +565,98 @@ class OpenRouterTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, '\\.git'):
                 agentic_openrouter._safe_worktree_path(root, '.git/config', write=True)
 
-    def test_openrouter_tool_command_timeout_is_reported(self):
+    def test_openrouter_command_output_is_bounded_and_process_is_stopped(self):
         with tempfile.TemporaryDirectory() as temp:
-            with patch('agentic_openrouter.subprocess.run', side_effect=subprocess.TimeoutExpired('python', 1)):
-                    result = agentic_openrouter._openrouter_tool_call(
-                    Path(temp), 'run_command',
-                    {'argv': [sys.executable, '-m', 'unittest']},
-                    readonly=False, command_timeout=1,
-                )
-        self.assertIn('timed out after 1s', result)
+            root = Path(temp)
+            pid_file = root / 'pid'
+            script = root / 'emit-output.py'
+            script.write_text(
+                'import os\n'
+                'import time\n'
+                f'open({str(pid_file)!r}, "w").write(str(os.getpid()))\n'
+                'os.write(1, b"A" * 7000 + b"TAIL")\n'
+                'time.sleep(30)\n',
+                encoding='utf-8',
+            )
+            result = agentic_openrouter._openrouter_tool_call(
+                root, 'run_command', {'argv': [sys.executable, str(script)]},
+                readonly=False, command_timeout=5,
+            )
+            for _ in range(100):
+                if pid_file.exists():
+                    break
+                time.sleep(0.01)
+            self.assertTrue(pid_file.exists())
+            pid = int(pid_file.read_text(encoding='utf-8'))
+            self.assertIn('command output truncated; showing the tail', result)
+            self.assertTrue(result.endswith('TAIL'))
+            self.assertLessEqual(
+                len(result.split('\n', 1)[1]),
+                agentic_openrouter.OPENROUTER_COMMAND_OUTPUT_CHARS,
+            )
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+
+    def test_openrouter_tool_command_timeout_is_reported_and_process_is_stopped(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pid_file = root / 'pid'
+            script = root / 'sleep-command.py'
+            script.write_text(
+                'import os\n'
+                'import time\n'
+                f'open({str(pid_file)!r}, "w").write(str(os.getpid()))\n'
+                'time.sleep(30)\n',
+                encoding='utf-8',
+            )
+            result = agentic_openrouter._openrouter_tool_call(
+                root, 'run_command', {'argv': [sys.executable, str(script)]},
+                readonly=False, command_timeout=1,
+            )
+            pid = int(pid_file.read_text(encoding='utf-8'))
+            self.assertIn('timed out after 1s', result)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+
+    def test_openrouter_command_capture_failure_stops_and_reaps_process(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pid_file = root / 'pid'
+            script = root / 'sleep-command.py'
+            script.write_text(
+                'import os\n'
+                'import time\n'
+                f'open({str(pid_file)!r}, "w").write(str(os.getpid()))\n'
+                'time.sleep(30)\n',
+                encoding='utf-8',
+            )
+            def fail_after_command_starts(*args, **kwargs):
+                for _ in range(100):
+                    if pid_file.exists():
+                        break
+                    time.sleep(0.01)
+                raise RuntimeError('capture failed')
+
+            with patch(
+                'agentic_openrouter_tools._stop_command_process',
+                wraps=agentic_openrouter_tools._stop_command_process,
+            ) as stop:
+                with patch(
+                    'agentic_openrouter_tools.queue.Queue.get',
+                    side_effect=fail_after_command_starts,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, 'capture failed'):
+                        agentic_openrouter._openrouter_tool_call(
+                            root, 'run_command', {'argv': [sys.executable, str(script)]},
+                            readonly=False, command_timeout=5,
+                        )
+            for _ in range(100):
+                if pid_file.exists():
+                    break
+                time.sleep(0.01)
+            self.assertTrue(pid_file.exists())
+            pid = int(pid_file.read_text(encoding='utf-8'))
+            stop.assert_called_once()
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
 
