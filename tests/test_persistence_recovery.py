@@ -11,7 +11,7 @@ import agentic_workflow
 from agentic_models import Issue
 from agentic_persistence import atomic_write_json, atomic_write_text
 from agentic_review import record_review_findings
-from agentic_telemetry import read_issue_snapshot, read_run_usage, record_issue_metadata, record_usage
+from agentic_telemetry import read_issue_snapshot, read_run_usage, record_usage
 
 
 class PersistenceRecoveryTests(unittest.TestCase):
