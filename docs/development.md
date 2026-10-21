@@ -23,7 +23,7 @@ python -m unittest discover -s tests -q
 Compile all runtime Python modules:
 
 ```bash
-python -m py_compile agentic.py agentic_chat.py agentic_config.py agentic_context.py agentic_diagnostics.py agentic_dashboard.py agentic_dashboard_data.py agentic_execution.py agentic_execution_guard.py agentic_execution_providers.py agentic_execution_stream.py agentic_guidance.py agentic_openrouter.py agentic_openrouter_loop.py agentic_openrouter_tools.py agentic_output.py agentic_policy.py agentic_prompts.py agentic_shell.py agentic_shell_commands.py agentic_shell_input.py agentic_models.py agentic_security.py agentic_telemetry.py agentic_sandbox.py agentic_providers.py agentic_review.py agentic_workflow.py agentic_worktrees.py
+python -m py_compile agentic.py agentic_config.py agentic_context.py agentic_diagnostics.py agentic_dashboard.py agentic_dashboard_data.py agentic_execution.py agentic_execution_providers.py agentic_execution_stream.py agentic_guidance.py agentic_openrouter.py agentic_openrouter_loop.py agentic_openrouter_tools.py agentic_output.py agentic_policy.py agentic_prompts.py agentic_shell.py agentic_shell_commands.py agentic_shell_input.py agentic_models.py agentic_security.py agentic_telemetry.py agentic_sandbox.py agentic_providers.py agentic_review.py agentic_workflow.py agentic_worktrees.py
 git diff --check
 ```
 

@@ -46,8 +46,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                    check_commands: list[list[str]] | None = None,
                    allow_runner_source: bool = False,
                    json_mode: bool = False,
-                   sandbox: dict[str, Any] | None = None,
-                   chat_restricted: bool = False) -> tuple[bool, str]:
+                   sandbox: dict[str, Any] | None = None) -> tuple[bool, str]:
     """Run an OpenAI-compatible OpenRouter agent with scoped local tools."""
     if not model:
         raise RuntimeError("OpenRouter requires a model, for example openai/gpt-5.4")
@@ -59,11 +58,6 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
         # Once the common policy is supplied, it is the source of truth. Do
         # not require the legacy flag to repeat permission_policy.network.
         role_policy.update(permission_policy)
-    if chat_restricted and not readonly:
-        # Restricted chat is an additional capability boundary.  Apply it to
-        # the effective policy so downstream tool calls cannot restore the
-        # configured network capability from the original policy.
-        role_policy["network"] = False
     permission_policy = role_policy
     allow_network = bool(permission_policy.get("network"))
     max_tool_turns = max_tool_turns or OPENROUTER_MAX_TURNS
@@ -214,7 +208,6 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                     permission_policy=permission_policy,
                     check_commands=check_commands,
                     sandbox=sandbox, allow_runner_source=allow_runner_source,
-                    restricted=chat_restricted and not readonly,
                 )
                 messages.append({
                     "role": "tool",

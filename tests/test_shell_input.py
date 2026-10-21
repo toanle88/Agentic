@@ -49,22 +49,6 @@ class InteractiveInputTests(unittest.TestCase):
         self.assertNotIn('\033[', rendered)
         self.assertIn(raw_prompt + 'y', rendered)
 
-    def test_chat_prompt_styles_exact_unbracketed_text(self):
-        output = TTYBuffer()
-        with patch('agentic_shell_input.sys.stdout', new=output), \
-             patch('agentic_shell_input.shutil.get_terminal_size',
-                   return_value=os.terminal_size((80, 8))), \
-             patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}):
-            state = agentic_shell_input._InteractiveOutputState()
-            foreground = agentic_shell_input._ForegroundOutputState(state)
-            foreground.set_prompt(
-                'chat> ', system_prefix='CHAT', system_prefix_text='chat> ',
-            )
-
-        rendered = output.getvalue()
-        self.assertIn('\033[96mchat> \033[0m', rendered)
-        self.assertEqual(foreground.prompt, 'chat> ')
-
     def test_shell_print_can_style_explicit_future_system_prefix(self):
         output = TTYBuffer()
         with patch('agentic_shell_input.sys.stdout', new=output), \
@@ -84,7 +68,6 @@ class InteractiveInputTests(unittest.TestCase):
 
         for mode in (
             agentic_shell_input.TerminalMode.OUTPUT,
-            agentic_shell_input.TerminalMode.CHAT,
             agentic_shell_input.TerminalMode.CONFIRMATION,
             agentic_shell_input.TerminalMode.LIVE_OUTPUT,
             agentic_shell_input.TerminalMode.EXIT,
@@ -319,10 +302,10 @@ class InteractiveInputTests(unittest.TestCase):
              patch('sys.stdout', output), \
              patch('agentic_shell_input.shutil.get_terminal_size',
                    return_value=os.terminal_size((80, 8))):
-            foreground.set_prompt('chat> ', system_prefix='CHAT', system_prefix_text='chat> ')
-            foreground.write('\033[96m[CHAT]\033[0m Agent response:\nplain response\n')
+            foreground.set_prompt('[PUBLISH] Publish this patch? [y/N]: ', system_prefix='PUBLISH')
+            foreground.write('\033[33m[PUBLISH]\033[0m publication response\n')
 
-        self.assertIn('\033[96m[CHAT]\033[0m', output.getvalue())
+        self.assertIn('\033[33m[PUBLISH]\033[0m', output.getvalue())
 
     def test_output_history_backspace_skips_ansi_tokens(self):
         styled = '\033[31mabc\033[0m\bX'
@@ -513,7 +496,7 @@ class InteractiveInputTests(unittest.TestCase):
         self.assertLessEqual(max(map(len, lines)), 40)
         for command in (
             '/run', '/ps', '/logs', '/list', '/runs', '/status', '/dashboard',
-            '/init', '/doctor', '/cleanup', '/version', '/chat', '/stop',
+            '/init', '/doctor', '/cleanup', '/version', '/stop',
             '/help', '/quit',
         ):
             self.assertIn(command, plain)
@@ -989,7 +972,6 @@ class InteractiveInputTests(unittest.TestCase):
             frame for frame in rendered.split('\033[1;1H')
             if '/run' in strip_ansi(frame)
             and '/ps' in strip_ansi(frame)
-            and '/chat' not in strip_ansi(frame)
         )
         plain_frame = strip_ansi(completion_frame)
         self.assertIn('/run', plain_frame)
@@ -1017,7 +999,7 @@ class InteractiveInputTests(unittest.TestCase):
         self.assertGreaterEqual(rendered.count('\033[2K'), 8)
 
     def test_completion_suggests_commands_options_and_job_ids(self):
-        self.assertIn('/chat', agentic_shell._completion_candidates('/ch'))
+        self.assertEqual(agentic_shell._completion_candidates('/ch'), [])
         self.assertEqual(
             agentic_shell._completion_candidates('/r'),
             ['/run', '/runs'],

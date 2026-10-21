@@ -382,17 +382,12 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
               model: str | None = None, reasoning_effort: str | None = None,
               timeout: int | None = None,
               sandbox: dict[str, Any] | None = None,
-              check_commands: list[list[str]] | None = None,
-              chat_restricted: bool = False) -> tuple[bool, str]:
+              check_commands: list[list[str]] | None = None) -> tuple[bool, str]:
     """Dispatch one developer/reviewer turn to the configured provider."""
     if isinstance(settings, AgentSettings):
         selected = settings.as_dict()
     else:
         selected = dict(settings or {})
-    if chat_restricted and not readonly and not (sandbox and sandbox.get("enabled")):
-        raise RuntimeError(
-            "Chat edit turns require an enabled sandbox; refusing unrestricted provider execution"
-        )
     provider = str(selected.get("provider", "codex"))
     permission_policy = selected.get("permission_policy")
     policy_explicit = isinstance(permission_policy, dict) and bool(permission_policy)
@@ -414,7 +409,6 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
             worktree, prompt, output=output, readonly=readonly, schema=schema,
             timeout=timeout, model=model, reasoning_effort=reasoning_effort,
             **policy_kwargs,
-            **({"chat_restricted": True} if chat_restricted else {}),
             **({"sandbox": provider_sandbox} if provider_sandbox is not None else {}),
         )
     if provider == "openrouter":
@@ -428,10 +422,6 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
             router_kwargs["command_timeout"] = selected.get("command_timeout_seconds")
         if "allow_network" in selected:
             router_kwargs["allow_network"] = bool(selected.get("allow_network"))
-        if chat_restricted:
-            router_kwargs["allow_runner_source"] = _runner_source_change_allowed(
-                worktree, "agentic.py"
-            )
         if selected.get("json_mode"):
             router_kwargs["json_mode"] = True
         if check_commands is not None:
@@ -441,7 +431,6 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
         return run_openrouter(
             worktree, prompt, output=output, readonly=readonly, schema=schema,
             timeout=timeout, model=model, reasoning_effort=reasoning_effort,
-            **({"chat_restricted": True} if chat_restricted else {}),
             **router_kwargs,
             **policy_kwargs,
         )
@@ -462,7 +451,6 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
         readonly=readonly, timeout=timeout, model=model,
         **policy_kwargs,
         **cli_kwargs,
-        **({"chat_restricted": True} if chat_restricted else {}),
         **({"sandbox": provider_sandbox} if provider_sandbox is not None else {}),
     )
 

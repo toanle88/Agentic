@@ -49,7 +49,6 @@ class TerminalMode(str, Enum):
     """Identify which interactive view currently owns the terminal."""
 
     COMMAND_READY = "command-ready"
-    CHAT = "chat"
     CONFIRMATION = "confirmation"
     LIVE_OUTPUT = "live-output"
     OUTPUT = "output"
@@ -624,19 +623,6 @@ _HELP_SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     (
         "Session",
         (
-            (
-                "/chat ISSUE",
-                "open a conversational session in an existing run",
-            ),
-            (
-                "/chat pr PR",
-                "repair an existing pull request after CI failure",
-            ),
-            ("/chat ISSUE MESSAGE", "run an issue with a one-shot instruction"),
-            (
-                "/chat MESSAGE",
-                "start a local one-shot task from chat style (local mode)",
-            ),
             ("/stop JOB|--all", "stop one or all running jobs"),
             ("/help", "show this help"),
             ("/quit", "leave the shell; running jobs continue"),
@@ -655,7 +641,6 @@ _HELP_NOTES = (
 SHELL_COMMANDS = (
     "/run",
     "/ps",
-    "/chat",
     "/logs",
     "/list",
     "/runs",
@@ -673,7 +658,6 @@ SHELL_COMMANDS = (
 )
 SHELL_OPTIONS = {
     "/run": ("--profile", "--instruction", "--review", "--publish", "--mark-done", "--reason", "--new", "--task-file"),
-    "/chat": (),
     "/ps": ("--all",),
     "/runs": ("--json",),
     "/status": ("--json",),
@@ -684,7 +668,6 @@ SHELL_OPTIONS = {
 }
 COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/run": "start a background job or local task",
-    "/chat": "open a conversational session in an existing issue run",
     "/ps": "show running or persisted background jobs",
     "/logs": "follow or show captured terminal output",
     "/list": "list open GitHub issues",

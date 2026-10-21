@@ -26,7 +26,7 @@ not authorized to modify GitHub issues.
 | Q-02 | Several compatibility-facing modules remain oversized. | Follow-up Q-02: extract `agentic_shell_input.py`, `agentic_workflow.py`, and `agentic_shell.py` behind characterization tests; preserve `agentic.py` wrappers. |
 | Q-03 | CI compiled only an older subset and omitted `git diff --check`. | Fixed: CI, coverage, release, and development documentation now use the complete runtime module set; CI also runs the whitespace check. |
 | Q-04 | Dashboard processing reread unbounded logs and rebuilt unchanged snapshots. | Fixed: bounded tail reads, one file index per snapshot, and bounded metadata-keyed snapshot caching; regression coverage includes large logs and repeated collection. |
-| Q-05 | OpenRouter and chat inspection scaled poorly on large trees/files. | Fixed: paginated traversal with protected-file filtering on every page, bounded reads, and streaming protected-file hashing; regression coverage includes continuation pages and large artifacts. |
+| Q-05 | OpenRouter inspection scaled poorly on large trees/files. | Fixed: paginated traversal with protected-file filtering on every page, bounded reads, and streaming protected-file hashing; regression coverage includes continuation pages and large artifacts. |
 | Q-06 | No reproducible performance corpus or comparison policy existed. | Fixed by the baseline contract below and `docs/benchmarking.md`; live provider measurements remain opt-in. |
 | Q-07 | Sandbox image/build inputs needed adversarial hardening. | Fixed for the identified injection risk: image references reject option-like values. Configured builds preserve functional dependency installation by default with `build_network: true`, while allowing an explicit `build_network: false` hardening policy. Dockerfile execution remains an explicit trusted-host boundary and is documented as such. |
 | Q-08 | Secret redaction and sensitive-file policy are heuristic. | Fixed as a documented threat model and expanded canary coverage; heuristic redaction is not claimed to be complete secret discovery. |
@@ -56,14 +56,14 @@ The reproducible offline corpus is:
 1. 500 valid run folders, each with 24 bounded artifacts and one 8 MiB log;
 2. a worktree containing 10,000 files in 1,000 directories, including 301
    readable files and representative protected names; and
-3. 1,000 tracked/untracked files for chat guard and Git status snapshots.
+3. 1,000 tracked/untracked files for Git status snapshots.
 
 Record cold and warm p50/p95/p99 duration and peak RSS for dashboard
-collection/rendering, OpenRouter listing/reading, chat guard capture, and Git
-snapshot operations. The initial budgets are dashboard collection p95 <= 2 s
+collection/rendering, OpenRouter listing/reading, and Git snapshot operations.
+The initial budgets are dashboard collection p95 <= 2 s
 and peak RSS <= 256 MiB, OpenRouter capped listing p95 <= 1 s and peak RSS <=
-128 MiB, and chat guard capture p95 <= 2 s and peak RSS <= 256 MiB on a local
-SSD. These are engineering budgets, not claims about every host. Compare
+128 MiB on a local SSD. These are engineering budgets, not claims about every
+host. Compare
 three repetitions on the same host; investigate any >20% p95 or >10% peak-RSS
 regression, and do not trade away path or secret safety to meet a budget.
 

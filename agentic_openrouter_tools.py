@@ -328,8 +328,7 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                           permission_policy: dict[str, bool] | None = None,
                           check_commands: list[list[str]] | None = None,
                           sandbox: dict[str, Any] | None = None,
-                          allow_runner_source: bool = False,
-                          restricted: bool = False) -> str:
+                          allow_runner_source: bool = False) -> str:
     try:
         policy = default_permission_policy("reviewer" if readonly else "developer")
         if permission_policy is None:
@@ -404,7 +403,6 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                 return "ERROR: " + reason
             process_argv = sandbox_command(
                 _safe_readonly_git_argv(argv), worktree, sandbox, read_only=readonly, pass_env=[],
-                restricted=restricted,
             )
             try:
                 result = subprocess.run(

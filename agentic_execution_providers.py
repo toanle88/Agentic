@@ -13,7 +13,6 @@ from agentic_execution_stream import (
     _short,
     streamed_command,
 )
-from agentic_execution_guard import restricted_process_environment
 from agentic_guidance import guidance_phase, guidance_prompt
 from agentic_policy import default_permission_policy
 from agentic_providers import (
@@ -29,8 +28,7 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
               model: str | None = None,
               reasoning_effort: str | None = None,
               permission_policy: dict[str, bool] | None = None,
-              sandbox: dict[str, Any] | None = None,
-              chat_restricted: bool = False) -> tuple[bool, str]:
+              sandbox: dict[str, Any] | None = None) -> tuple[bool, str]:
     # Each invocation creates a fresh session. The repository is the memory.
     prompt = guidance_prompt(
         worktree, prompt, readonly=readonly, audit_folder=output.parent,
@@ -45,17 +43,13 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
     )
     label = "REVIEW" if readonly else "DEVELOPER"
     invocation_started = time.monotonic()
-    with restricted_process_environment(
-        chat_restricted and not readonly, sandbox_enabled=bool((sandbox or {}).get("enabled")),
-    ) as process_env:
-        result = streamed_command(
-            args, worktree, label=label, log_file=output.with_suffix(".log"),
-            timeout=timeout, codex_json=True, sandbox=sandbox,
-            sandbox_read_only=readonly,
-            sandbox_pass_env=(sandbox or {}).get("pass_env", []),
-            metrics_folder=output.parent, env=process_env,
-            sandbox_restricted=chat_restricted and not readonly,
-        )
+    result = streamed_command(
+        args, worktree, label=label, log_file=output.with_suffix(".log"),
+        timeout=timeout, codex_json=True, sandbox=sandbox,
+        sandbox_read_only=readonly,
+        sandbox_pass_env=(sandbox or {}).get("pass_env", []),
+        metrics_folder=output.parent,
+    )
     message = output.read_text(encoding="utf-8") if output.exists() else result.stdout[-4000:]
     message = redact_secrets(message)
     output.write_text(message, encoding="utf-8")
@@ -160,8 +154,7 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
                      check_commands: list[list[str]] | None = None,
                      executable_path: str | None = None,
                      host: str | None = None,
-                     sandbox: dict[str, Any] | None = None,
-                     chat_restricted: bool = False) -> tuple[bool, str]:
+                     sandbox: dict[str, Any] | None = None) -> tuple[bool, str]:
     """Run a locally installed coding CLI in its non-interactive mode."""
     prompt = guidance_prompt(
         worktree, prompt, readonly=readonly, audit_folder=output.parent,
@@ -199,21 +192,18 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
     sandbox_pass_env = list((sandbox or {}).get("pass_env", []))
     if provider == "copilot" and host and "COPILOT_GH_HOST" not in sandbox_pass_env:
         sandbox_pass_env.append("COPILOT_GH_HOST")
-    with restricted_process_environment(
-        chat_restricted and not readonly, sandbox_enabled=bool((sandbox or {}).get("enabled")),
-    ) as process_env:
-        if provider == "copilot" and host:
-            process_env = dict(process_env or os.environ)
-            process_env["COPILOT_GH_HOST"] = host
-        result = streamed_command(
-            args, worktree, label=label, log_file=output.with_suffix(".log"),
-            timeout=timeout, codex_json=structured,
-            progress_parser=(lambda line: _provider_progress(line, provider)) if structured else None,
-            sandbox=effective_sandbox, sandbox_read_only=readonly,
-            sandbox_pass_env=sandbox_pass_env,
-            metrics_folder=output.parent, env=process_env,
-            sandbox_restricted=chat_restricted and not readonly,
-        )
+    process_env = None
+    if provider == "copilot" and host:
+        process_env = dict(os.environ)
+        process_env["COPILOT_GH_HOST"] = host
+    result = streamed_command(
+        args, worktree, label=label, log_file=output.with_suffix(".log"),
+        timeout=timeout, codex_json=structured,
+        progress_parser=(lambda line: _provider_progress(line, provider)) if structured else None,
+        sandbox=effective_sandbox, sandbox_read_only=readonly,
+        sandbox_pass_env=sandbox_pass_env,
+        metrics_folder=output.parent, env=process_env,
+    )
     raw_path = output.with_suffix(".jsonl") if structured else None
     raw = raw_path.read_text(encoding="utf-8", errors="replace") if raw_path and raw_path.exists() else result.stdout
     message = redact_secrets(_extract_provider_message(raw, provider) or result.stdout[-10000:].strip())

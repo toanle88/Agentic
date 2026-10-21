@@ -313,57 +313,6 @@ class OpenRouterTests(unittest.TestCase):
             self.assertNotIn('OPENAI_API_KEY', process_argv)
             self.assertNotIn('secret', process_argv)
 
-    def test_openrouter_restricted_chat_tools_force_sandbox_network_off(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            settings = {
-                'enabled': True, 'engine': 'docker', 'image': 'test-image',
-                'allow_network': True,
-            }
-            with patch('agentic_openrouter.subprocess.run', return_value=CompletedProcess(
-                ['docker'], 0, stdout='sandboxed\n'
-            )) as run:
-                agentic_openrouter._openrouter_tool_call(
-                    root, 'run_command', {'argv': ['python', '-m', 'unittest']},
-                    readonly=False, sandbox=settings, restricted=True,
-                )
-            process_argv = run.call_args.args[0]
-            self.assertEqual(process_argv[process_argv.index('--network') + 1], 'none')
-
-    def test_openrouter_chat_restriction_reaches_tool_loop(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            responses = iter([
-                {'choices': [{'message': {
-                    'role': 'assistant', 'content': None,
-                    'tool_calls': [{'id': 'call-1', 'function': {
-                        'name': 'run_command', 'arguments': '{}',
-                    }}],
-                }}]},
-                {'choices': [{'message': {'role': 'assistant', 'content': 'done'}}]},
-            ])
-            settings = {
-                'enabled': True, 'engine': 'docker', 'image': 'test-image',
-                'allow_network': True,
-            }
-            permission_policy = {
-                'read_files': True, 'search_files': True, 'edit_files': True,
-                'create_files': True, 'git_read': True, 'run_checks': True,
-                'network': True, 'allow_dangerous': False,
-            }
-            with (patch.dict(agentic.os.environ, {'ROUTER_KEY': 'secret'}, clear=False),
-                  patch('agentic_openrouter._openrouter_request', side_effect=lambda *args: next(responses)),
-                  patch('agentic_openrouter._openrouter_tool_call', return_value='exit 0') as tool_call):
-                ok, message = agentic.run_openrouter(
-                    root, 'prompt', output=root / 'developer.txt', model='openai/test',
-                    api_key_env='ROUTER_KEY', sandbox=settings,
-                    permission_policy=permission_policy, chat_restricted=True,
-                )
-            self.assertTrue(ok)
-            self.assertEqual(message, 'done')
-            self.assertTrue(tool_call.call_args.kwargs['restricted'])
-            self.assertFalse(tool_call.call_args.kwargs['allow_network'])
-            self.assertFalse(tool_call.call_args.kwargs['permission_policy']['network'])
 
     def test_openrouter_request_translates_http_network_and_payload_errors(self):
         from io import BytesIO

@@ -250,7 +250,7 @@ class StreamingTests(unittest.TestCase):
         expected = {
             'DEVELOPER': '36', 'REVIEW': '35', 'TESTS': '34', 'RETRY': '33',
             'GIT': '33', 'PATCH': '95', 'ERROR': '31', 'RESULT': '31',
-            'CHAT': '96', 'COST': '90', 'NO_CHANGES': '33', 'CANCEL': '33',
+            'COST': '90', 'NO_CHANGES': '33', 'CANCEL': '33',
             'DOCTOR': '36', 'TIMEOUT': '33', 'BLOCKED': '33', 'STOP': '33',
         }
         with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
@@ -302,61 +302,25 @@ class StreamingTests(unittest.TestCase):
         self.assertEqual(inferred, '\033[90m[FUTURE_STAGE]\033[0m provider text')
         self.assertEqual(plain, '\033[90m[FUTURE_STAGE]\033[0m provider text')
 
-    def test_style_system_text_styles_exact_unbracketed_prompts_only(self):
-        class TTYBuffer(StringIO):
-            def isatty(self):
-                return True
-
-        with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
-             patch('sys.stdout', new=TTYBuffer()):
-            styled = style_system_text(
-                'chat> ',
-                system_prefix='CHAT',
-                system_prefix_text='chat>',
-                style_status_tokens=False,
-            )
-            user_text = style_system_text(
-                'user text containing chat> ',
-                system_prefix='CHAT',
-                system_prefix_text='chat>',
-                style_status_tokens=False,
-            )
-        self.assertEqual(styled, '\033[96mchat>\033[0m ')
-        self.assertEqual(user_text, 'user text containing chat> ')
-
     def test_style_system_text_preserves_wrapping_and_plain_output(self):
         class TTYBuffer(StringIO):
             def isatty(self):
                 return True
 
-        message = '[CHAT] Agent response:\n[REVIEW] body\nnext line\n'
+        message = '[DEVELOPER] Agent response:\n[REVIEW] body\nnext line\n'
         with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
              patch('sys.stdout', new=TTYBuffer()):
-            styled = style_system_text(message, system_prefix='CHAT', style_status_tokens=False)
+            styled = style_system_text(message, system_prefix='DEVELOPER', style_status_tokens=False)
         self.assertEqual(
             styled,
-            '\033[96m[CHAT]\033[0m Agent response:\n[REVIEW] body\nnext line\n',
+            '\033[36m[DEVELOPER]\033[0m Agent response:\n[REVIEW] body\nnext line\n',
         )
 
         with patch.dict('os.environ', {'NO_COLOR': '1'}):
             self.assertEqual(
-                style_system_text(message, system_prefix='CHAT'),
+                style_system_text(message, system_prefix='DEVELOPER'),
                 message,
             )
-
-    def test_chat_output_styles_category_without_recoloring_response(self):
-        class TTYBuffer(StringIO):
-            def isatty(self):
-                return True
-
-        output = TTYBuffer()
-        with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
-             patch('sys.stdout', new=output):
-            agentic._chat_output('[CHAT] Agent response: FAILED\n[REVIEW] provider text')
-        self.assertEqual(
-            output.getvalue(),
-            '\033[96m[CHAT]\033[0m Agent response: FAILED\n[REVIEW] provider text\n',
-        )
 
     def test_stage_prefix_colors_follow_outcomes_without_painting_body(self):
         class TTYBuffer(StringIO):
