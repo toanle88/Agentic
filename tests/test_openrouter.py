@@ -274,10 +274,11 @@ class OpenRouterTests(unittest.TestCase):
                 f'#!/bin/sh\ntouch {marker}\n', encoding='utf-8',
             )
             helper.chmod(0o700)
-            run = lambda *argv: subprocess.run(
-                ['git', *argv], cwd=root, check=True,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            )
+            def run(*argv):
+                return subprocess.run(
+                    ['git', *argv], cwd=root, check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
             run('init', '-q')
             run('config', 'diff.external', str(helper))
             (root / 'tracked.txt').write_text('before\n', encoding='utf-8')
