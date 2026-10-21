@@ -45,7 +45,7 @@ Available commands:
 /run [--profile fast|slow]             Local mode: paste task, finish with /done
      [--review|--publish|--mark-done|--new|--verbose]
 /ps [--all]                            Show current or persisted job status
-/logs JOB|PID [LINES]                  Follow a running job or show recent output
+/logs JOB|PID|ISSUE [LINES] [--verbose] Follow a running job or show recent output
 /stop JOB|--all                        Stop one or all running jobs
 /list                                  List open GitHub issues
 /runs [--json]                         List existing Agentic worktrees
@@ -326,9 +326,11 @@ terminal status or summarized, while errors, non-zero exits, timeouts,
 cancellations, test failures, review findings, final responses, and duration
 remain durable. Pass `--verbose` to the regular CLI, for example
 `agentic --issue 119 --verbose`, or use `/run 119 --verbose` in the interactive
-shell to retain the detailed progress output. Structured providers keep the
-complete redacted event stream in the adjacent `.jsonl` file; the human log is
-not a replacement for that trace.
+shell to retain the detailed progress output. `/logs JOB|PID|ISSUE --verbose`
+shows the captured shell output without concise replay filtering;
+`/logs JOB|PID|ISSUE` keeps routine progress out of the human-readable view.
+Structured providers keep the complete redacted event stream in the adjacent
+`.jsonl` file; the human log is not a replacement for that trace.
 
 Generate a read-only HTML snapshot:
 

@@ -601,7 +601,7 @@ _HELP_SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         "Inspect",
         (
             ("/ps [--all]", "show current or persisted jobs"),
-            ("/logs JOB|PID [LINES]", "follow or show captured terminal output"),
+            ("/logs JOB|PID|ISSUE [LINES] [--verbose]", "follow or show captured terminal output"),
             ("/list", "list open GitHub issues"),
             ("/runs [--json]", "list existing Agentic worktrees"),
             ("/status [--json]", "show Agentic worktree status"),
@@ -658,6 +658,7 @@ SHELL_COMMANDS = (
 )
 SHELL_OPTIONS = {
     "/run": ("--profile", "--instruction", "--review", "--publish", "--mark-done", "--reason", "--new", "--verbose", "--task-file"),
+    "/logs": ("--verbose",),
     "/ps": ("--all",),
     "/runs": ("--json",),
     "/status": ("--json",),
@@ -745,6 +746,14 @@ def _completion_candidates(line: str, cursor: int | None = None,
 
     if command == "/stop" and (current.startswith("-") or not job_numbers):
         options = SHELL_OPTIONS["/stop"]
+        return [option for option in options if option.startswith(current)]
+
+    if command in {"/logs", "/stop"} and current.startswith("-"):
+        options = SHELL_OPTIONS[command]
+        return [option for option in options if option.startswith(current)]
+
+    if command == "/stop" and not job_numbers:
+        options = SHELL_OPTIONS[command]
         return [option for option in options if option.startswith(current)]
 
     if command in {"/logs", "/stop"}:

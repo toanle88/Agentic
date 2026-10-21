@@ -541,9 +541,90 @@ _TRANSIENT_COMPLETION_RE = re.compile(
     r")\s*$",
     re.IGNORECASE,
 )
+_ROUTINE_LOG_START_RE = re.compile(
+    r"^(?:\[\d{2}:\d{2}:\d{2}\]\s*)?(?:\[[^\]]+\]\s*)?"
+    r"(?:Started \(PID \d+\); progress log: .+|Started \(OpenRouter/.+\))$",
+    re.IGNORECASE,
+)
+_MODIFIED_FILES_RE = re.compile(
+    r"^(?:\[\d{2}:\d{2}:\d{2}\]\s*)?(?:\[[^\]]+\]\s*)?"
+    r"Modified files:\s*(.*)$",
+    re.IGNORECASE,
+)
+_MODIFIED_COUNT_RE = re.compile(r"\b(\d+)\s+files?\s+changed\b", re.IGNORECASE)
 
 
 def is_transient_progress(value: Any) -> bool:
     """Return whether a provider line can be replaced by live terminal status."""
     text = strip_ansi(value).replace("\r", " ").replace("\n", " ").strip()
     return bool(_TRANSIENT_PROGRESS_RE.match(text) or _TRANSIENT_COMPLETION_RE.match(text))
+
+
+def is_routine_log_progress(value: Any) -> bool:
+    """Return whether a human log line is safe to omit in concise replay."""
+    text = strip_ansi(value).replace("\r", " ").replace("\n", " ").strip()
+    return bool(is_transient_progress(text) or _ROUTINE_LOG_START_RE.match(text))
+
+
+class ConciseLogStream:
+    """Filter routine runner progress while preserving line-oriented output."""
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self._modified_paths: set[str] = set()
+        self._modified_count = 0
+        self._last_transient: str | None = None
+
+    def _record_modified_files(self, line: str) -> None:
+        match = _MODIFIED_FILES_RE.match(line.strip())
+        if not match:
+            return
+        details = match.group(1).strip()
+        count_match = _MODIFIED_COUNT_RE.search(details)
+        if count_match:
+            self._modified_count = max(self._modified_count, int(count_match.group(1)))
+            return
+        if details.lower() == "patch applied":
+            self._modified_count += 1
+            return
+        paths = {item.strip() for item in details.split(",") if item.strip()}
+        self._modified_paths.update(paths)
+        self._modified_count = max(self._modified_count, len(self._modified_paths), 1)
+
+    def _filter_line(self, line: str) -> str:
+        body = line.rstrip("\r\n")
+        if _MODIFIED_FILES_RE.match(body.strip()):
+            self._record_modified_files(body)
+            return ""
+        if is_routine_log_progress(body):
+            self._last_transient = body.strip()
+            return ""
+        return line
+
+    def take_transient(self) -> str | None:
+        """Return the latest routine status observed since the previous call."""
+        transient = self._last_transient
+        self._last_transient = None
+        return transient
+
+    def feed(self, value: Any) -> str:
+        """Filter complete lines and retain an incomplete trailing line."""
+        text = self._pending + strip_ansi(value)
+        self._pending = ""
+        lines = text.splitlines(keepends=True)
+        if lines and not lines[-1].endswith(("\n", "\r")):
+            self._pending = lines.pop()
+        return "".join(self._filter_line(line) for line in lines)
+
+    def flush(self) -> str:
+        """Flush an incomplete line and emit one file-change summary."""
+        output = self._filter_line(self._pending) if self._pending else ""
+        self._pending = ""
+        count = max(self._modified_count, len(self._modified_paths))
+        if count:
+            if output and not output.endswith(("\n", "\r")):
+                output += "\n"
+            output += f"Modified files: {count} file{'s' if count != 1 else ''} changed\n"
+        self._modified_paths.clear()
+        self._modified_count = 0
+        return output

@@ -13,6 +13,7 @@ _RUN_VALUE_OPTIONS = {"--profile", "--instruction", "--reason", "--task-file"}
 _RUN_BOOLEAN_OPTIONS = {
     "--review", "--publish", "--mark-done", "--new", "--offline", "--verbose",
 }
+_LOG_BOOLEAN_OPTIONS = {"--verbose"}
 
 
 def has_job_flag(flags: Sequence[str], option: str) -> bool:
@@ -84,6 +85,27 @@ def parse_job_command(parts: list[str]) -> tuple[str | None, list[str]]:
     if not has_job_flag(flags, "--mark-done") and "--reason" in seen_values:
         raise ValueError("/run --reason requires --mark-done")
     return issue, flags
+
+
+def parse_log_command(parts: list[str]) -> tuple[int, int, bool]:
+    """Validate ``/logs`` and return its identifier, tail size, and verbosity."""
+    if len(parts) < 2 or not parts[1].isdigit():
+        raise ValueError("usage: /logs JOB|PID|ISSUE [LINES] [--verbose]")
+    identifier = int(parts[1])
+    lines = 40
+    verbose = False
+    seen_lines = False
+    for value in parts[2:]:
+        if value in _LOG_BOOLEAN_OPTIONS:
+            if verbose:
+                raise ValueError("usage: /logs JOB|PID|ISSUE [LINES] [--verbose]")
+            verbose = True
+        elif value.isdigit() and not seen_lines and int(value) >= 1:
+            lines = min(int(value), 500)
+            seen_lines = True
+        else:
+            raise ValueError("usage: /logs JOB|PID|ISSUE [LINES] [--verbose]")
+    return identifier, lines, verbose
 
 
 def parse_options(

@@ -7,7 +7,7 @@ this facade retains job lifecycle, command dispatch, and public CLI behavior.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 import json
 import os
 from queue import Empty, Queue
@@ -25,6 +25,7 @@ from typing import Any, Callable, TextIO
 
 from agentic import __version__  # noqa: F401
 from agentic_output import (
+    ConciseLogStream,
     PatchSummaryStream,
     is_transient_progress,
     sanitize_terminal_text,
@@ -75,6 +76,7 @@ from agentic_shell_commands import (
     has_job_flag as _has_job_flag,
     option_value as _option_value,
     parse_job_command as _parse_job_command,
+    parse_log_command as _parse_log_command,
     parse_options as _parse_options,
 )
 
@@ -180,20 +182,39 @@ def _display_command(argv: list[str]) -> str:
     return shlex.join(argv)
 
 
-def _tail(path: Path, lines: int) -> str:
+def _job_for_issue(jobs: Iterable[Job], issue: int) -> Job | None:
+    """Find a persisted or active job whose runner targets an issue."""
+    issue_text = str(issue)
+    for job in jobs:
+        for index, argument in enumerate(job.argv):
+            if argument == "--issue" and index + 1 < len(job.argv):
+                if job.argv[index + 1] == issue_text:
+                    return job
+            elif argument == f"--issue={issue_text}":
+                return job
+    return None
+
+
+def _tail(path: Path, lines: int, *, verbose: bool = False) -> str:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         return f"Could not read {path}: {exc}"
     # Avoid loading an accidentally enormous log just to display its tail.
     text = text[-200_000:]
+    if not verbose:
+        concise = ConciseLogStream()
+        text = concise.feed(text) + concise.flush()
     selected = text.splitlines()[-lines:]
     return "\n".join(selected) or "(log is empty)"
 
 
-def _tail_from_text(text: str, lines: int) -> str:
+def _tail_from_text(text: str, lines: int, *, verbose: bool = False) -> str:
     """Return a bounded tail from text already read from an open log."""
     text = text[-200_000:]
+    if not verbose:
+        concise = ConciseLogStream()
+        text = concise.feed(text) + concise.flush()
     selected = text.splitlines()[-lines:]
     return "\n".join(selected) or "(log is empty)"
 
@@ -1115,20 +1136,15 @@ class AgenticShell:
             _shell_print(f"{job.number:<3} {status:<10} {job.pid:<7} {job.elapsed:>3}s  {session:<8} {_display_command(job.argv)}")
 
     def show_logs(self, parts: list[str]) -> None:
-        if len(parts) < 2 or not parts[1].isdigit():
-            raise ValueError("usage: /logs JOB|PID [LINES]")
-        identifier = int(parts[1])
+        identifier, lines, verbose = _parse_log_command(parts)
         job = self.jobs.get(identifier)
         if job is None:
             job = next((candidate for candidate in self.jobs.values()
                         if candidate.pid == identifier), None)
         if job is None:
-            raise ValueError(f"unknown job or PID: {parts[1]}")
-        lines = 40
-        if len(parts) > 3 or (len(parts) == 3 and (not parts[2].isdigit() or int(parts[2]) < 1)):
-            raise ValueError("usage: /logs JOB|PID [LINES]")
-        if len(parts) == 3:
-            lines = min(int(parts[2]), 500)
+            job = _job_for_issue(self.jobs.values(), identifier)
+        if job is None:
+            raise ValueError(f"unknown job, PID, or issue: {parts[1]}")
         self._refresh(job)
         _shell_print(
             f"--- job {job.number}: {_display_command(job.argv)} ---",
@@ -1138,17 +1154,20 @@ class AgenticShell:
             self._set_terminal_mode(TerminalMode.LIVE_OUTPUT)
             try:
                 _shell_print("--- following live output; press Ctrl-C to stop following ---")
-                self._follow_log(job, lines)
+                self._follow_log(job, lines, verbose=verbose)
             finally:
                 self._set_terminal_mode(TerminalMode.OUTPUT)
         else:
-            _shell_print(_tail(job.log_path, lines), style_status_tokens=False)
+            _shell_print(
+                _tail(job.log_path, lines, verbose=verbose),
+                style_status_tokens=False,
+            )
         _shell_print(
             f"--- end; full log: {job.log_path} ---",
             style_status_tokens=False,
         )
 
-    def _follow_log(self, job: Job, lines: int) -> None:
+    def _follow_log(self, job: Job, lines: int, *, verbose: bool = False) -> None:
         """Print a running job's existing tail and stream appended output."""
         self._set_terminal_mode(TerminalMode.LIVE_OUTPUT)
         try:
@@ -1159,8 +1178,14 @@ class AgenticShell:
                 stream.seek(initial_start)
                 initial = stream.read(initial_end - initial_start)
                 patch_stream = PatchSummaryStream()
+                concise = ConciseLogStream() if not verbose else None
+                if concise is not None:
+                    initial = concise.feed(initial)
+                    progress = concise.take_transient()
+                    if progress and _is_interactive_terminal():
+                        _shell_write_transient(progress)
                 _shell_print(
-                    _tail_from_text(initial, lines),
+                    _tail_from_text(initial, lines, verbose=True),
                     style_status_tokens=False,
                     patch_stream=patch_stream,
                 )
@@ -1173,6 +1198,13 @@ class AgenticShell:
                     self._refresh(job)
                     chunk = stream.read()
                     if chunk:
+                        if concise is not None:
+                            chunk = concise.feed(chunk)
+                            progress = concise.take_transient()
+                            if progress and _is_interactive_terminal():
+                                _shell_write_transient(progress)
+                        if not chunk:
+                            continue
                         _shell_write_log(chunk, patch_stream=patch_stream)
                     if not job.running:
                         break
@@ -1182,6 +1214,12 @@ class AgenticShell:
                 # process status changed. Drain once after observing exit.
                 self._refresh(job)
                 chunk = stream.read()
+                if concise is not None:
+                    chunk = concise.feed(chunk) + concise.flush()
+                    progress = concise.take_transient()
+                    if progress and _is_interactive_terminal():
+                        _shell_write_transient(progress)
+                _shell_clear_transient()
                 if chunk:
                     _shell_write_log(chunk, patch_stream=patch_stream, final=True)
                 else:
