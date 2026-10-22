@@ -33,7 +33,9 @@ python scripts/benchmark.py --cases benchmark-cases.json --output benchmark.json
 ```
 
 Results include pass/fail/timeout status, wall time, exit code, and a bounded
-output tail. Live-provider benchmarks should be opt-in and should add provider
+output tail. The legacy harness records only bounded command metadata
+(executable name and argv count), never literal argv values, and redacts
+credential-like values from output. Live-provider benchmarks should be opt-in and should add provider
 usage records from `run.json`; do not put credentials or full prompts into the
 benchmark artifact. Reviewer-quality accuracy requires a labeled corpus and
 should not be inferred from this offline harness alone.

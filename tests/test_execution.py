@@ -3,6 +3,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from io import StringIO
 from pathlib import Path
@@ -808,4 +809,26 @@ class StreamingTests(unittest.TestCase):
                     timeout=1, heartbeat=0)
             self.assertEqual(result.returncode, 124)
             self.assertIn('Time limit', (root / 'tests.log').read_text())
+
+    def test_stream_timeout_terminates_descendants(self):
+        from io import StringIO
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            marker = root / 'descendant-alive'
+            child = (
+                'import pathlib,time; time.sleep(0.5); '
+                f'pathlib.Path({str(marker)!r}).write_text("alive")'
+            )
+            parent = (
+                'import subprocess,sys,time; '
+                f'subprocess.Popen([sys.executable, "-c", {child!r}]); time.sleep(10)'
+            )
+            with patch('sys.stdout', new_callable=StringIO):
+                result = agentic.streamed_command(
+                    [sys.executable, '-c', parent], root, label='TESTS',
+                    log_file=root / 'tests.log', timeout=1, heartbeat=0,
+                )
+            time.sleep(0.8)
+        self.assertEqual(result.returncode, 124)
+        self.assertFalse(marker.exists())
 

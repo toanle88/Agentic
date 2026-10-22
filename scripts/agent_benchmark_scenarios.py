@@ -5,15 +5,20 @@ import json
 import os
 from pathlib import Path
 import shutil
-import signal
 import subprocess
 import time
 from typing import Any
 
 try:
     from scripts.agent_benchmark_config import _path_under_root, render_command
+    from scripts.benchmark_execution import (
+        run_command as _run_shared_command,
+    )
 except ModuleNotFoundError:  # Direct ``python scripts/agent_benchmark.py`` use.
     from agent_benchmark_config import _path_under_root, render_command
+    from benchmark_execution import (
+        run_command as _run_shared_command,
+    )
 
 
 SUCCESS_STATUSES = {"success", "completed", "passed", "approved"}
@@ -21,50 +26,13 @@ REPORTED_STATUSES = SUCCESS_STATUSES | {"failed", "timeout", "runner-error"}
 MAX_ERROR = 500
 
 
-def _process_group_kwargs() -> dict[str, Any]:
-    """Start benchmark commands in a group that can be terminated together."""
-    if os.name != "nt":
-        return {"start_new_session": True}
-    return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
-
-
-def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
-    """Terminate a timed-out command and descendants on both host platforms."""
-    if os.name != "nt":
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-    else:
-        try:
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
-                stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, check=False,
-            )
-        except OSError:
-            process.kill()
-    try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait()
-
-
 def _run_benchmark_command(
     command: list[str], *, cwd: Path, env: dict[str, str] | None = None,
     timeout: int,
 ) -> tuple[int, bool]:
     """Run one argv command and return (exit code, timed out)."""
-    process = subprocess.Popen(
-        command, cwd=cwd, env=env, stdout=subprocess.DEVNULL,
-        stderr=subprocess.STDOUT, **_process_group_kwargs(),
-    )
-    try:
-        process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        _terminate_process_tree(process)
-        return 124, True
-    return process.returncode, False
+    result = _run_shared_command(command, cwd=cwd, env=env, timeout=timeout)
+    return result.returncode, result.timed_out
 
 
 def _run_git(repo: Path, *args: str) -> None:

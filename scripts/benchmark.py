@@ -10,10 +10,21 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
+
+try:
+    from scripts.benchmark_execution import run_command
+except ModuleNotFoundError:  # Direct ``python scripts/benchmark.py`` use.
+    from benchmark_execution import run_command
+
+try:
+    from agentic_runner.security import redact_secrets
+except ModuleNotFoundError:  # Source checkout without an editable install.
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    from agentic_runner.security import redact_secrets
 
 
 def load_cases(path: Path) -> list[dict[str, Any]]:
@@ -36,30 +47,27 @@ def load_cases(path: Path) -> list[dict[str, Any]]:
 
 def run_case(repo: Path, case: dict[str, Any], timeout: int) -> dict[str, Any]:
     started = time.monotonic()
+    command = case["command"]
+    safe_command = {
+        "executable": Path(command[0]).name,
+        "argv_count": len(command),
+    }
     try:
-        result = subprocess.run(
-            case["command"], cwd=repo, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-            errors="replace", timeout=timeout, check=False,
+        result = run_command(
+            command, cwd=repo, timeout=timeout, capture_output=True,
         )
-        status = "passed" if result.returncode == 0 else "failed"
-        output = result.stdout[-6000:]
+        status = "timeout" if result.timed_out else "passed" if result.returncode == 0 else "failed"
+        output = redact_secrets(result.output, extra_values=command)
         return {
-            "name": case["name"], "command": case["command"], "status": status,
+            "name": case["name"], "command": safe_command, "status": status,
             "returncode": result.returncode, "duration_seconds": round(time.monotonic() - started, 3),
             "output": output,
         }
-    except subprocess.TimeoutExpired as exc:
-        return {
-            "name": case["name"], "command": case["command"], "status": "timeout",
-            "returncode": 124, "duration_seconds": round(time.monotonic() - started, 3),
-            "output": str(exc),
-        }
     except OSError as exc:
         return {
-            "name": case["name"], "command": case["command"], "status": "failed",
+            "name": case["name"], "command": safe_command, "status": "failed",
             "returncode": 127, "duration_seconds": round(time.monotonic() - started, 3),
-            "output": str(exc),
+            "output": redact_secrets(str(exc), extra_values=command),
         }
 
 
