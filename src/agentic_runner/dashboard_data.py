@@ -19,8 +19,10 @@ from .telemetry import read_run_usage
 
 RUN_NAME = re.compile(
     r"^(?:agent-issue-(?P<issue>\d+)-(?P<issue_token>[A-Za-z0-9_-]+)"
-    r"|agent-task-(?P<task>.+)-(?P<task_token>[a-f0-9]{12}(?:-[a-f0-9]{8})?)"
-    r"|agent-audit-(?P<audit_token>[a-f0-9]{12})(?P<audit_ident>-[a-f0-9]{8})?)$"
+    r"|agent-task-(?P<task>.+)-(?P<task_token>[a-f0-9]{12}"
+    r"(?:-\d{8}T\d{6}(?:\d{6})?Z(?:-[a-f0-9]{8})?|-[a-f0-9]{8})?)"
+    r"|agent-audit-(?P<audit_token>[a-f0-9]{12})"
+    r"(?P<audit_suffix>(?:-\d{8}T\d{6}(?:\d{6})?Z(?:-[a-f0-9]{8})?)|(?:-[a-f0-9]{8}))?)$"
 )
 NUMBERED_FILE = re.compile(r"^(?P<prefix>.+)-(?P<number>\d+)(?P<suffix>\.[^.]+)$")
 MAX_TEXT = 5_000
@@ -445,7 +447,7 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
     elif audit["state"] == "invalid" and not developer_paths and review["status"] == "not-run":
         status = "audit-invalid"
     elif audit["state"] == "recorded" and not developer_paths and review["status"] == "not-run":
-        status = "awaiting-development"
+        status = "audit-complete"
     elif investigation["state"] == "invalid" and not developer_paths and review["status"] == "not-run":
         status = "investigation-invalid"
     elif investigation["state"] == "recorded" and not developer_paths and review["status"] == "not-run":
@@ -515,10 +517,18 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
     else:
         stage = "idle"
     audit_key = match.group("audit_token")
-    audit_ident = match.group("audit_ident") or ""
+    audit_suffix = match.group("audit_suffix") or ""
+    audit_issue: dict[str, Any] | None = None
+    if audit_key is not None:
+        raw_audit_issue = _parse_json_object(_read(folder / "audit-issue.json", 10_000))
+        if isinstance(raw_audit_issue, dict) and isinstance(raw_audit_issue.get("url"), str):
+            audit_issue = {
+                "status": str(raw_audit_issue.get("status") or "published"),
+                "url": raw_audit_issue["url"],
+            }
     if audit_key is not None:
         label = "Repository audit"
-        branch = f"agent/audit-{audit_key}{audit_ident}"
+        branch = f"agent/audit-{audit_key}{audit_suffix}"
         issue_value: int | None = None
     elif issue is not None:
         label = f"Issue #{issue}"
@@ -559,6 +569,7 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
         "last_activity": _timestamp(last_activity) if last_activity else "unknown",
         "review": review, "blocked": blocked, "result": result, "tests": tests,
         "audit_report": audit,
+        "audit_issue": audit_issue,
         "developer": developer,
         "files": file_records, "file_count": len(all_files),
         "has_review": review_path is not None, "has_investigation": investigation_path is not None,

@@ -136,6 +136,7 @@ def is_foreground_prompt(text: str) -> bool:
 FOREGROUND_PROMPT_PREFIXES = {
     "[RESUME] Waiting for worktree selection. Enter a number or 'q' to cancel: ": "RESUME",
     "[PUBLISH] Waiting for worktree selection. Enter a number or 'q' to cancel: ": "PUBLISH",
+    "[PUBLISH] Create a GitHub issue from this audit report? [y/N]: ": "PUBLISH",
     "[PUBLISH] Publish this patch? [y/N]: ": "PUBLISH",
     "[PUBLISH] Waiting for publication confirmation. Type 'publish' to continue or 'q' to cancel: ": "PUBLISH",
     # Retain recognition for logs and older runner children.

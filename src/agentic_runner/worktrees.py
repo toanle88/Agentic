@@ -6,6 +6,7 @@ The compatibility-facing agentic module re-exports these helpers.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import datetime as dt
 import hashlib
 import json
 import os
@@ -21,12 +22,21 @@ from .models import DEFAULT_GITHUB_HOST, Issue, PullRequest, Run, StatePaths
 from .security import redact_secrets
 from .output import style_system_text, style_text
 
-BRANCH_RE = re.compile(r"^agent/issue-(\d+)-([a-f0-9]{8})$")
+BRANCH_RE = re.compile(
+    r"^agent/issue-(?P<number>\d+)-"
+    r"(?:(?P<timestamp>\d{8}T\d{6}(?:\d{6})?Z)-)?"
+    r"(?P<ident>[a-f0-9]{8})$"
+)
 LOCAL_BRANCH_RE = re.compile(
-    r"^agent/task-(?P<slug>[a-z0-9-]+)-(?P<key>[a-f0-9]{12})(?:-(?P<ident>[a-f0-9]{8}))?$"
+    r"^agent/task-(?P<slug>[a-z0-9-]+)-(?P<key>[a-f0-9]{12})"
+    r"(?:-(?P<timestamp>\d{8}T\d{6}(?:\d{6})?Z)"
+    r"(?:-(?P<ident>[a-f0-9]{8}))?|-(?P<legacy_ident>[a-f0-9]{8}))?$"
 )
 AUDIT_BRANCH_RE = re.compile(
-    r"^agent/audit-(?P<key>[a-f0-9]{12})(?:-(?P<ident>[a-f0-9]{8}))?$"
+    r"^agent/audit-(?P<key>[a-f0-9]{12})"
+    r"(?:(?:-(?P<timestamp>\d{8}T\d{6}(?:\d{6})?Z))"
+    r"(?:-(?P<ident>[a-f0-9]{8}))?"
+    r"|(?P<legacy_ident>-[a-f0-9]{8}))?$"
 )
 AUDIT_KEY = hashlib.sha256(b"agentic-repository-audit-v1").hexdigest()[:12]
 RELATIVE_WORKTREE_GIT = (2, 48, 0)
@@ -402,15 +412,36 @@ def discover_runs(repo: Path) -> list[Run]:
 
 
 def runs_for_issue(repo: Path, number: int) -> list[Run]:
-    return [run for run in discover_runs(repo) if run.issue_number == number]
+    runs = [run for run in discover_runs(repo) if run.issue_number == number]
+    return sorted(runs, key=_run_sort_key, reverse=True)
 
 
 def runs_for_task(repo: Path, task_key: str) -> list[Run]:
-    return [run for run in discover_runs(repo) if run.task_key == task_key]
+    runs = [run for run in discover_runs(repo) if run.task_key == task_key]
+    return sorted(runs, key=_run_sort_key, reverse=True)
 
 
 def runs_for_audit(repo: Path, audit_key: str = AUDIT_KEY) -> list[Run]:
-    return [run for run in discover_runs(repo) if run.audit_key == audit_key]
+    runs = [run for run in discover_runs(repo) if run.audit_key == audit_key]
+    return sorted(runs, key=_audit_sort_key, reverse=True)
+
+
+def _audit_sort_key(run: Run) -> str:
+    return _run_sort_key(run)[0]
+
+
+def _run_sort_key(run: Run) -> tuple[str, str]:
+    """Sort timestamped runs newest first, with legacy names sorted last."""
+    for pattern in (BRANCH_RE, LOCAL_BRANCH_RE, AUDIT_BRANCH_RE):
+        match = pattern.fullmatch(run.branch)
+        if match:
+            return match.groupdict().get("timestamp") or "", run.branch
+    return "", run.branch
+
+
+def _utc_timestamp() -> str:
+    now = dt.datetime.now(dt.timezone.utc)
+    return now.strftime("%Y%m%dT%H%M%S") + f"{now.microsecond:06d}Z"
 
 
 def run_for_branch(repo: Path, branch: str) -> Run | None:
@@ -473,13 +504,14 @@ def create_worktree(repo: Path, base: str, issue_number: int,
     with repository_lock(repo, state_dir):
         refresh_base(repo, base)
         relative_paths = configure_relative_worktree_paths(repo)
+        timestamp = _utc_timestamp()
         ident = uuid.uuid4().hex[:8]
-        branch = f"agent/issue-{issue_number}-{ident}"
+        branch = f"agent/issue-{issue_number}-{timestamp}-{ident}"
         # ``state_dir`` is supplied by the CLI. The legacy fallback keeps this
         # low-level helper compatible for callers that intentionally manage paths.
         parent = state_paths(repo, state_dir).worktrees if state_dir else legacy_worktrees_dir(repo)
         parent.mkdir(parents=True, exist_ok=True)
-        worktree = parent / f"issue-{issue_number}-{ident}"
+        worktree = parent / f"issue-{issue_number}-{timestamp}-{ident}"
         git(repo, "worktree", "add", "-b", branch, str(worktree), f"origin/{base}")
     if relative_paths:
         _status_print("[GIT] Using relative worktree paths for WSL/Windows compatibility")
@@ -502,11 +534,12 @@ def create_local_worktree(repo: Path, base: str, issue: Issue,
         refresh_base(repo, base)
         relative_paths = configure_relative_worktree_paths(repo)
         slug = _task_slug(issue.title)
+        timestamp = _utc_timestamp()
         ident = f"-{uuid.uuid4().hex[:8]}" if separate else ""
-        branch = f"agent/task-{slug}-{issue.task_key}{ident}"
+        branch = f"agent/task-{slug}-{issue.task_key}-{timestamp}{ident}"
         parent = state_paths(repo, state_dir).worktrees if state_dir else legacy_worktrees_dir(repo)
         parent.mkdir(parents=True, exist_ok=True)
-        worktree = parent / f"task-{slug}-{issue.task_key}{ident}"
+        worktree = parent / f"task-{slug}-{issue.task_key}-{timestamp}{ident}"
         git(repo, "worktree", "add", "-b", branch, str(worktree), f"origin/{base}")
     if relative_paths:
         _status_print("[GIT] Using relative worktree paths for WSL/Windows compatibility")
@@ -525,10 +558,11 @@ def create_audit_worktree(repo: Path, base: str, issue: Issue,
         refresh_base(repo, base)
         relative_paths = configure_relative_worktree_paths(repo)
         ident = f"-{uuid.uuid4().hex[:8]}" if separate else ""
-        branch = f"agent/audit-{issue.audit_key}{ident}"
+        timestamp = _utc_timestamp()
+        branch = f"agent/audit-{issue.audit_key}-{timestamp}{ident}"
         parent = state_paths(repo, state_dir).worktrees if state_dir else legacy_worktrees_dir(repo)
         parent.mkdir(parents=True, exist_ok=True)
-        worktree = parent / f"audit-{issue.audit_key}{ident}"
+        worktree = parent / f"audit-{issue.audit_key}-{timestamp}{ident}"
         git(repo, "worktree", "add", "-b", branch, str(worktree), f"origin/{base}")
     if relative_paths:
         _status_print("[GIT] Using relative worktree paths for WSL/Windows compatibility")

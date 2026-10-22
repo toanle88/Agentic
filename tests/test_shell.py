@@ -1289,6 +1289,7 @@ class ShellTests(unittest.TestCase):
     def test_foreground_publish_waiting_prompts_are_editable(self):
         prompts = (
             "[PUBLISH] Waiting for worktree selection. Enter a number or 'q' to cancel: ",
+            "[PUBLISH] Create a GitHub issue from this audit report? [y/N]: ",
             "[PUBLISH] Publish this patch? [y/N]: ",
             "[PUBLISH] Waiting for publication confirmation. Type 'publish' to continue or 'q' to cancel: ",
             "[PUBLISH] Publish this patch? Type 'publish' to approve: ",

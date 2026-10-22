@@ -202,9 +202,9 @@ agentic --issue 119 --mark-done                     # optional reason is recorde
 agentic --issue 119 --mark-done --reason "Human reviewed; remaining finding is out of scope"
 agentic --issue 119 --publish             # offer draft-PR publication for the approved patch
 agentic --issue 119 --new                 # explicitly create a second worktree
-agentic audit                              # audit and improve the current repository
-agentic audit --review                     # validate/review an existing audit worktree
-agentic audit --publish                    # confirm and publish an approved audit patch
+agentic audit                              # read-only audit with durable logs/report
+agentic audit --resume                      # reuse an existing audit report
+agentic audit --publish                    # confirm and create a GitHub issue from the report
 ```
 
 GitHub issues are the default task source. To use manually pasted requirements,
@@ -213,12 +213,16 @@ run `/run` in the interactive shell and finish the pasted task with `/done`.
 Local tasks use the same review and resume flow and can still be published as
 GitHub draft pull requests.
 
-`agentic audit` is independent of GitHub issue and local-task mode. It creates
-or reuses a first-class `agent/audit-*` worktree, runs a read-only audit across
-code quality, security, reliability, and performance, and passes a bounded
-report to the developer. The normal configured checks, independent read-only
-review, and safe default-no draft-PR confirmation still apply. Use `/audit` for
-the equivalent interactive command.
+`agentic audit` is independent of GitHub issue and local-task mode. Each plain
+invocation starts a fresh read-only audit in a first-class timestamped
+`agent/audit-<key>-<UTC timestamp>` worktree; audit selection sorts newest first.
+Use `audit --resume` to reuse an existing worktree and cached report,
+or `audit --new` to force a separate worktree even for the first attempt. It runs one read-only audit across
+code quality, security, reliability, and performance, and records a bounded
+report in the Agentic state logs for the dashboard. It never starts a developer,
+test, or review phase and does not modify repository code. Use `audit --publish`
+after reviewing the report to create a GitHub issue; use `/audit` for the
+equivalent interactive command.
 
 Before development, an independent read-only investigator analyzes the issue and
 records feedback about relevant code, tests, ambiguity, risks, and recommended
@@ -309,10 +313,10 @@ jobs. Use `/stop --all` to request termination for every running Agentic job.
 | `agentic --task-file PATH` | Start or resume a local task from a file. |
 | `agentic --task-file task.md --publish` | Publish a reviewed local task as a draft PR. |
 | `agentic --issue N --new` | Create a separate worktree for the issue. |
-| `agentic audit` | Audit and improve the current repository without an issue or task file. |
-| `agentic audit --new` | Create a separate audit worktree instead of reusing the current one. |
-| `agentic audit --review` | Re-run checks and the independent read-only review for an audit patch. |
-| `agentic audit --publish` | Show the patch/audit summary, ask for confirmation, and create a draft PR. |
+| `agentic audit` | Run a read-only repository audit without an issue or task file. |
+| `agentic audit --resume` | Reuse an existing audit worktree and cached report. |
+| `agentic audit --new` | Force a separate audit worktree. |
+| `agentic audit --publish` | Ask for confirmation and create a GitHub issue from the saved audit report. |
 | `agentic --list` | List open GitHub issues. |
 | `agentic --runs` | List existing Agentic worktrees. |
 | `agentic status --json` | Emit machine-readable worktree status. |
@@ -341,7 +345,6 @@ jobs. Use `/stop --all` to request termination for every running Agentic job.
 | [Architecture decisions](docs/decisions/) | Durable architecture decision records. |
 | [Security policy](SECURITY.md) | Threat model, credentials, logs, and sandbox limitations. |
 | [Development](docs/development.md) | Local development, tests, CI, releases, and contribution workflow. |
-| [Issue #73 audit (2026-10-21)](docs/audits/2026-10-21-issue-73.md) | Current quality, security, performance findings, measurements, and follow-ups. |
 | [`agent_config.schema.json`](agent_config.schema.json) | JSON Schema for editor-assisted configuration validation. |
 
 ## Development and releases
