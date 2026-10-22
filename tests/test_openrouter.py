@@ -594,7 +594,8 @@ class OpenRouterTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(RuntimeError, 'OpenRouter request failed') as raised:
                     agentic_openrouter._openrouter_request(
-                        'https://router.test/chat/completions', 'secret', {}, timeout=2
+                        'https://router.test/chat/completions', 'secret', {}, timeout=2,
+                        allow_custom_endpoint=True,
                     )
                 self.assertIn(expected, str(raised.exception))
 
@@ -604,7 +605,8 @@ class OpenRouterTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(RuntimeError, message):
                     agentic_openrouter._openrouter_request(
-                        'https://router.test/chat/completions', 'secret', {}, timeout=None
+                        'https://router.test/chat/completions', 'secret', {}, timeout=None,
+                        allow_custom_endpoint=True,
                     )
 
     def test_openrouter_tool_turn_limit_is_reported(self):

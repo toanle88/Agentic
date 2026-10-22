@@ -141,6 +141,7 @@ class AgentSettings:
     timeout_seconds: int | None = None
     api_key_env: str | None = None
     base_url: str | None = None
+    allow_custom_endpoint: bool = False
     max_tool_turns: int | None = None
     command_timeout_seconds: int | None = None
     allow_network: bool = False
@@ -159,6 +160,7 @@ class AgentSettings:
             "auth": self.auth,
             "api_key_env": self.api_key_env,
             "base_url": self.base_url,
+            "allow_custom_endpoint": self.allow_custom_endpoint,
             "executable_path": self.executable_path,
             "max_tool_turns": self.max_tool_turns,
             "command_timeout_seconds": self.command_timeout_seconds,

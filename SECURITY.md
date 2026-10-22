@@ -58,8 +58,9 @@ warned about prominently, and recorded in `run.json`. It is never permitted
 for reviewers and does not authorize protected-path writes, commits, pushes,
 or publication.
 
-Docker/Podman sandboxing mounts the task worktree, the required linked-worktree
-Git metadata read-only, and the run-output directory, uses a read-only
+Docker/Podman sandboxing mounts the task worktree while overlaying its `.git`
+entry and all required Git metadata read-only, and mounts the run-output
+directory, uses a read-only
 container root, drops Linux capabilities, limits resources, and disables
 networking by default. Native providers and configured checks run inside it.
 Credentials are passed only for environment names explicitly listed in

@@ -39,6 +39,7 @@ SEVERITY_RANK = {
     "LOW": 1,
 }
 _RUN_CACHE_LIMIT = 512
+_MAX_SNAPSHOT_RETRIES = 4
 _RUN_SNAPSHOT_CACHE: dict[tuple[str, str], tuple[tuple[tuple[str, int, int], ...], dict[str, Any] | None]] = {}
 _RUN_SNAPSHOT_CACHE_LOCK = threading.RLock()
 
@@ -55,7 +56,7 @@ def filter_runs(runs: Iterable[dict[str, Any]], *, query: str = "",
             "audit" if run.get("audit") else
             "local" if run.get("issue") is None else str(run.get("issue"))
         )
-        searchable = json.dumps(run, ensure_ascii=False, sort_keys=True).casefold()
+        searchable = _searchable_snapshot(run)
         if needle and needle not in searchable:
             continue
         if status != "all" and run.get("status") != status:
@@ -72,6 +73,31 @@ def filter_runs(runs: Iterable[dict[str, Any]], *, query: str = "",
             continue
         visible.append(run)
     return visible
+
+
+def _searchable_snapshot(value: Any) -> str:
+    """Build filter text without serializing bounded log payloads to JSON."""
+    parts: list[str] = []
+
+    def visit(item: Any) -> None:
+        if isinstance(item, dict):
+            for key, child in item.items():
+                visit(key)
+                visit(child)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                visit(child)
+        elif item is None:
+            parts.append("null")
+        elif item is True:
+            parts.append("true")
+        elif item is False:
+            parts.append("false")
+        else:
+            parts.append(str(item))
+
+    visit(value)
+    return " ".join(parts).casefold()
 
 
 def collect_runs_from_roots(logs_roots: Iterable[Path]) -> list[dict[str, Any]]:
@@ -624,28 +650,51 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
 def collect_runs(logs_root: Path) -> list[dict[str, Any]]:
     if not logs_root.is_dir():
         return []
-    # Serialize the complete cache transaction, including snapshot creation.
-    # A lock only around get/put is insufficient: two HTTP refresh handlers can
-    # otherwise compute old/new snapshots concurrently and let the old result
-    # overwrite the newer cache entry.
-    with _RUN_SNAPSHOT_CACHE_LOCK:
-        root_key = str(logs_root.resolve())
-        runs: list[dict[str, Any]] = []
-        for folder in logs_root.iterdir():
-            if not folder.is_dir():
-                continue
+    root_key = str(logs_root.resolve())
+    folders = [folder for folder in logs_root.iterdir() if folder.is_dir()]
+    runs: list[dict[str, Any]] = []
+    for folder in folders:
+        cache_key = (root_key, folder.name)
+        snapshot: dict[str, Any] | None = None
+        for _ in range(_MAX_SNAPSHOT_RETRIES):
             normalized_signature = _folder_signature(folder)
-            cache_key = (root_key, folder.name)
-            cached = _RUN_SNAPSHOT_CACHE.get(cache_key)
-            snapshot = (
-                cached[1]
-                if cached and cached[0] == normalized_signature
-                else _run_snapshot(folder)
-            )
-            if snapshot is not None:
-                runs.append(snapshot)
-                _RUN_SNAPSHOT_CACHE[cache_key] = (normalized_signature, snapshot)
+            with _RUN_SNAPSHOT_CACHE_LOCK:
+                cached = _RUN_SNAPSHOT_CACHE.get(cache_key)
+            if cached and cached[0] == normalized_signature:
+                snapshot = cached[1]
+                break
+
+            candidate = _run_snapshot(folder)
+            current_signature = _folder_signature(folder)
+            with _RUN_SNAPSHOT_CACHE_LOCK:
+                current = _RUN_SNAPSHOT_CACHE.get(cache_key)
+                if current_signature != normalized_signature:
+                    # The candidate was built from a stale view. Use a cache
+                    # entry only when it matches the newer signature; an
+                    # otherwise stale candidate must never reach the caller.
+                    if current and current[0] == current_signature:
+                        snapshot = current[1]
+                        break
+                    continue
+                if current and current[0] == current_signature:
+                    snapshot = current[1]
+                else:
+                    snapshot = candidate
+                    _RUN_SNAPSHOT_CACHE[cache_key] = (current_signature, candidate)
+                break
+        else:
+            # An actively written run may not have a stable view yet. Return
+            # a matching cached snapshot if one exists; otherwise omit this
+            # run rather than exposing a candidate known to be stale.
+            current_signature = _folder_signature(folder)
+            with _RUN_SNAPSHOT_CACHE_LOCK:
+                current = _RUN_SNAPSHOT_CACHE.get(cache_key)
+                if current and current[0] == current_signature:
+                    snapshot = current[1]
+        if snapshot is not None:
+            runs.append(snapshot)
+    with _RUN_SNAPSHOT_CACHE_LOCK:
         if len(_RUN_SNAPSHOT_CACHE) > _RUN_CACHE_LIMIT:
             for key in list(_RUN_SNAPSHOT_CACHE)[:len(_RUN_SNAPSHOT_CACHE) - _RUN_CACHE_LIMIT]:
                 _RUN_SNAPSHOT_CACHE.pop(key, None)
-        return sorted(runs, key=lambda run: (run["last_activity"], run["id"]), reverse=True)
+    return sorted(runs, key=lambda run: (run["last_activity"], run["id"]), reverse=True)

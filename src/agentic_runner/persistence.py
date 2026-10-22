@@ -15,6 +15,18 @@ from typing import Any
 from .security import redact_secrets
 
 
+def _fsync_parent_directory(path: Path) -> None:
+    """Durably publish a replacement on POSIX; Windows has no dir-fsync API."""
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_fd = os.open(path.parent, flags)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8",
                       redact: bool = True) -> None:
     """Optionally redact, then replace *path* after the complete write succeeds.
@@ -41,6 +53,7 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8",
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        _fsync_parent_directory(path)
         temporary = None
     finally:
         if temporary is not None:

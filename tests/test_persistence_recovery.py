@@ -35,6 +35,13 @@ class PersistenceRecoveryTests(unittest.TestCase):
             lambda path: atomic_write_json(path, {"status": "new"}), "state.json",
         )
 
+    def test_atomic_replacement_syncs_the_parent_directory(self):
+        with tempfile.TemporaryDirectory() as temp, patch(
+            "agentic_persistence._fsync_parent_directory"
+        ) as sync_parent:
+            atomic_write_text(Path(temp) / "state.txt", "complete\n")
+        sync_parent.assert_called_once()
+
     def test_each_durable_artifact_format_preserves_previous_state(self):
         artifacts = (
             ("run.json", atomic_write_json, {"schema_version": 1}),

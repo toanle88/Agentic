@@ -13,6 +13,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .models import AgentSettings, DEFAULT_GITHUB_HOST
 from .policy import (
@@ -48,6 +49,7 @@ PROVIDER_API_KEY_ENV = {
 AUTH_MODES = ("native_cli", "api_key", "both")
 ENVIRONMENT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_ALLOWED_HOSTS = frozenset({"openrouter.ai"})
 # Bound worst-case repeated context cost; callers can raise this explicitly
 # for unusually large tasks.
 OPENROUTER_MAX_TURNS = 40
@@ -60,6 +62,12 @@ DEFAULT_TASK_TIMEOUT = 1800
 MAX_TASK_TIMEOUT = 86400
 DEFAULT_OPENROUTER_COMMAND_TIMEOUT = 300
 HOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+PROVIDER_SETTING_FIELDS = frozenset({
+    "provider", "model", "reasoning_effort", "timeout_seconds", "auth",
+    "api_key_env", "base_url", "allow_custom_endpoint", "executable_path",
+    "host", "max_tool_turns", "command_timeout_seconds", "allow_network",
+    "json_mode", "permission_policy",
+})
 
 
 def _validate_host(value: Any, field: str, *, allow_none: bool = True) -> str | None:
@@ -73,6 +81,26 @@ def _validate_host(value: Any, field: str, *, allow_none: bool = True) -> str | 
 def _effective_timeout(value: int | None, default: int) -> int:
     """Turn legacy ``null`` timeout settings into safe runtime defaults."""
     return default if value is None else value
+
+
+def validate_openrouter_base_url(
+    value: str, field: str = "base_url", *, allow_custom_endpoint: bool = False,
+) -> str:
+    """Validate an OpenRouter endpoint before a credential can be sent to it."""
+    parsed = urlsplit(value)
+    host = (parsed.hostname or "").rstrip(".").lower()
+    if parsed.scheme.lower() != "https":
+        raise ValueError(f"{field} must use https://; credentials are never sent over HTTP")
+    if not host or parsed.username is not None or parsed.password is not None:
+        raise ValueError(f"{field} must be an HTTPS URL without embedded credentials")
+    if parsed.fragment:
+        raise ValueError(f"{field} must not contain a URL fragment")
+    if not allow_custom_endpoint and host not in OPENROUTER_ALLOWED_HOSTS:
+        raise ValueError(
+            f"{field} must use an approved OpenRouter host or set "
+            "allow_custom_endpoint=true for an explicit HTTPS custom endpoint"
+        )
+    return value
 
 
 def _runtime_agent_settings(config: dict[str, Any], role: str) -> dict[str, Any]:
@@ -146,6 +174,11 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
         raw = {}
     if not isinstance(raw, dict):
         raise ValueError(f"{section} must be an object")
+    unknown = sorted(set(raw) - PROVIDER_SETTING_FIELDS)
+    if unknown:
+        raise ValueError(
+            f"{section} contains unsupported field(s): {', '.join(unknown)}"
+        )
     for secret_field in ("api_key", "apiKey", "token", "secret"):
         if secret_field in raw:
             raise ValueError(
@@ -159,6 +192,7 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
     auth = raw.get("auth")
     api_key_env = raw.get("api_key_env")
     base_url = raw.get("base_url")
+    allow_custom_endpoint = raw.get("allow_custom_endpoint", False)
     executable_path = raw.get("executable_path")
     host = _validate_host(raw.get("host"), f"{section}.host")
     max_tool_turns = raw.get("max_tool_turns")
@@ -217,6 +251,8 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
         raise ValueError(f"{section}.allow_network must be a boolean")
     if type(json_mode) is not bool:
         raise ValueError(f"{section}.json_mode must be a boolean")
+    if type(allow_custom_endpoint) is not bool:
+        raise ValueError(f"{section}.allow_custom_endpoint must be a boolean")
     if api_key_env is not None and (
         not isinstance(api_key_env, str) or not ENVIRONMENT_NAME_RE.fullmatch(api_key_env)
     ):
@@ -233,10 +269,14 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
         if auth != "api_key":
             raise ValueError(f"{section}.auth must be api_key for openrouter")
         base_url = base_url or DEFAULT_OPENROUTER_BASE_URL
-        if not re.match(r"^https?://", base_url, re.IGNORECASE):
-            raise ValueError(f"{section}.base_url must start with http:// or https://")
+        validate_openrouter_base_url(
+            base_url, f"{section}.base_url",
+            allow_custom_endpoint=allow_custom_endpoint,
+        )
     elif base_url is not None:
         raise ValueError(f"{section}.base_url is only valid for openrouter")
+    elif allow_custom_endpoint:
+        raise ValueError(f"{section}.allow_custom_endpoint is only valid for openrouter")
     else:
         auth = auth or ("api_key" if api_key_env is not None else "native_cli")
         if auth == "native_cli" and api_key_env is not None:
@@ -268,6 +308,7 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
         auth=auth or "native_cli",
         api_key_env=api_key_env,
         base_url=base_url,
+        allow_custom_endpoint=allow_custom_endpoint,
         max_tool_turns=max_tool_turns,
         command_timeout_seconds=command_timeout,
         allow_network=allow_network,
@@ -280,10 +321,12 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
 
 def load_config(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("configuration root must be an object")
     for field_name in ("permission_policy", "permissions"):
         validate_permission_policy_container(data.get(field_name), field_name=field_name)
     task_source = data.get("task_source", "github")
-    if task_source not in {"github", "local"}:
+    if not isinstance(task_source, str) or task_source not in {"github", "local"}:
         raise ValueError("task_source must be 'github' or 'local'")
     github_host = _validate_host(
         data.get("github_host", DEFAULT_GITHUB_HOST), "github_host", allow_none=False,
@@ -320,11 +363,11 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError("test_timeout_seconds must be null or an integer from 1 to 86400")
     if type(task_timeout) is not int or not 1 <= task_timeout <= MAX_TASK_TIMEOUT:
         raise ValueError(f"task_timeout_seconds must be an integer from 1 to {MAX_TASK_TIMEOUT}")
-    if security_mode not in SECURITY_MODES:
+    if not isinstance(security_mode, str) or security_mode not in SECURITY_MODES:
         raise ValueError(
             f"security_mode must be one of: {', '.join(SECURITY_MODES)}"
         )
-    if workflow_mode not in WORKFLOW_MODES:
+    if not isinstance(workflow_mode, str) or workflow_mode not in WORKFLOW_MODES:
         raise ValueError(
             f"workflow_mode must be one of: {', '.join(WORKFLOW_MODES)}"
         )

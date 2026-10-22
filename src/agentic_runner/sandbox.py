@@ -202,14 +202,14 @@ def sandbox_command(
                 "--env", "GIT_COMMON_DIR=/agentic-git-common",
             ])
         command.extend(["--env", "GIT_WORK_TREE=/workspace"])
-        if restricted:
-            # A linked worktree's .git file is part of the writable worktree
-            # bind mount. Protect the marker itself too: otherwise a provider
-            # could replace it, run ``git init``, and create writable metadata
-            # outside the read-only mounts above.
-            marker = root / ".git"
-            if not marker.is_symlink() and (marker.is_file() or marker.is_dir()):
-                command.extend(["-v", f"{marker}:/workspace/.git:ro"])
+        # The complete worktree bind mount is writable for developers, so
+        # overlay the checkout's .git entry read-only as well. This is needed
+        # for normal directory-style checkouts, not only linked worktrees.
+        # Otherwise a provider can write refs, hooks, or the index through
+        # /workspace/.git despite the separate metadata mount above.
+        marker = root / ".git"
+        if not marker.is_symlink() and (marker.is_file() or marker.is_dir()):
+            command.extend(["-v", f"{marker}:/workspace/.git:ro"])
     if output_root is not None:
         output = output_root.resolve()
         if output != root and output.is_dir():

@@ -413,6 +413,16 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
         self.assertIn("GIT_COMMON_DIR=/agentic-git-common", command)
         self.assertIn("GIT_WORK_TREE=/workspace", command)
 
+    def test_sandbox_overlays_normal_checkout_git_directory_read_only(self):
+        with tempfile.TemporaryDirectory() as temp:
+            worktree = Path(temp)
+            (worktree / '.git').mkdir()
+            settings = validate_sandbox({
+                'enabled': True, 'engine': 'docker', 'image': 'test-image',
+            })
+            command = sandbox_command(['git', 'status'], worktree, settings)
+        self.assertIn(f'{(worktree / ".git").resolve()}:/workspace/.git:ro', command)
+
     def test_restricted_linked_worktree_git_pointer_is_read_only(self):
         with tempfile.TemporaryDirectory() as temp:
             parent = Path(temp)

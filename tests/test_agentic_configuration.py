@@ -299,6 +299,55 @@ class ConfigurationTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, expected):
                         agentic.load_config(path)
 
+    def test_openrouter_endpoint_requires_https_and_explicit_custom_opt_in(self):
+        base = {'test_commands': [['true']]}
+        cases = [
+            ({'base_url': 'http://openrouter.ai/api/v1'}, 'https'),
+            ({'base_url': 'https://router.example/api/v1'}, 'approved OpenRouter host'),
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            for settings, expected in cases:
+                with self.subTest(settings=settings):
+                    path = Path(temp) / f'{len(list(Path(temp).glob("*.json")))}.json'
+                    path.write_text(json.dumps({
+                        **base, 'developer': {
+                            'provider': 'openrouter', 'model': 'test', **settings,
+                        },
+                    }))
+                    with self.assertRaisesRegex(ValueError, expected):
+                        agentic.load_config(path)
+            path = Path(temp) / 'custom.json'
+            path.write_text(json.dumps({
+                **base, 'developer': {
+                    'provider': 'openrouter', 'model': 'test',
+                    'base_url': 'https://router.example/api/v1',
+                    'allow_custom_endpoint': True,
+                },
+            }))
+            config = agentic.load_config(path)
+        self.assertTrue(config['developer_agent']['allow_custom_endpoint'])
+
+    def test_malformed_configuration_root_and_enum_values_raise_value_error(self):
+        cases = [[], None, {'test_commands': [['true']], 'task_source': []},
+                 {'test_commands': [['true']], 'security_mode': {}},
+                 {'test_commands': [['true']], 'workflow_mode': []}]
+        with tempfile.TemporaryDirectory() as temp:
+            for index, value in enumerate(cases):
+                with self.subTest(value=value):
+                    path = Path(temp) / f'{index}.json'
+                    path.write_text(json.dumps(value))
+                    with self.assertRaises(ValueError):
+                        agentic.load_config(path)
+
+    def test_provider_config_rejects_unknown_fields(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'unknown.json'
+            path.write_text(json.dumps({
+                'test_commands': [['true']], 'developer': {'unexpected': True},
+            }))
+            with self.assertRaisesRegex(ValueError, 'unsupported field'):
+                agentic.load_config(path)
+
 
     def test_native_provider_api_key_auth_uses_provider_defaults_and_role_overrides(self):
         with tempfile.TemporaryDirectory() as temp:
