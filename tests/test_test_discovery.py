@@ -393,10 +393,11 @@ class TestDiscovery(unittest.TestCase):
                 }],
                 fast_commands=[["git", "diff", "--check"]], slow_commands=[],
             )
-            with patch("agentic.discover_and_validate", return_value=discovery), \
+            with patch("agentic.discover_and_validate", return_value=discovery) as discovery_mock, \
                  patch("builtins.input", return_value="n"):
                 self.assertEqual(agentic.init_repository(repo, discover_tests=True), 0)
             self.assertFalse((repo / "agent_config.json").exists())
+            discovery_mock.assert_not_called()
 
     def test_init_discovery_writes_only_after_confirmation(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -447,7 +448,7 @@ class TestDiscovery(unittest.TestCase):
 
             with (patch("agentic.preflight_security", side_effect=fake_preflight),
                   patch("agentic.discover_and_validate", side_effect=fake_discovery),
-                  patch("builtins.input", return_value="n")):
+                  patch("builtins.input", side_effect=["y", "n"])):
                 self.assertEqual(agentic.init_repository(
                     repo, security_mode="isolated", sandbox_image="test-image",
                     discover_tests=True,

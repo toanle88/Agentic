@@ -33,6 +33,32 @@ from .telemetry import record_operation, record_usage
 MAX_STREAM_QUEUE = 256
 MAX_RAW_LOG_BYTES = 2_000_000
 MAX_RAW_TRUNCATION_MARKER_BYTES = 256
+MAX_HUMAN_LOG_BYTES = 200_000
+HUMAN_LOG_TRUNCATION_MARKER = (
+    "[AGENTIC] agentic_stream_truncated: human-readable log limit reached.\n"
+)
+
+
+def _append_bounded_human_log(path: Path, text: str) -> bool:
+    """Append one human-log entry without exceeding the durable byte budget."""
+    encoded = text.encode("utf-8")
+    marker = HUMAN_LOG_TRUNCATION_MARKER.encode("utf-8")
+    try:
+        current = path.stat().st_size
+        if current >= MAX_HUMAN_LOG_BYTES:
+            return False
+        if current + len(encoded) <= MAX_HUMAN_LOG_BYTES - len(marker):
+            with path.open("ab") as stream:
+                stream.write(encoded)
+                stream.flush()
+            return True
+        if current + len(marker) <= MAX_HUMAN_LOG_BYTES:
+            with path.open("ab") as stream:
+                stream.write(marker)
+                stream.flush()
+        return False
+    except OSError:
+        return False
 
 def _short(value: Any, limit: int = 180) -> str:
     """Display single-line progress without flooding the terminal."""
@@ -428,6 +454,7 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
     raw_file = raw_path.open("w", encoding="utf-8") if raw_path else None
     raw_bytes = 0
     raw_log_truncated = False
+    human_log_truncated = False
     try:
         with log_file.open("w", encoding="utf-8", buffering=1) as human_log:
             live_status = False
@@ -444,7 +471,7 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
             def display(message: str, *, style_status_tokens: bool = False,
                         generated_status_spans: list[tuple[int, int]] | None = None,
                         transient: bool = False, persist: bool = True) -> None:
-                nonlocal last_notice, live_status
+                nonlocal human_log_truncated, last_notice, live_status
                 now = datetime.datetime.now().strftime("%H:%M:%S")
                 prefix = f"[{now}] [{label}]"
                 formatted = strip_ansi(f"{prefix} {message}")
@@ -466,7 +493,17 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                     clear_live_status()
                     _console_print(rendered, flush=True)
                 if persist:
-                    human_log.write(formatted + "\n")
+                    entry = formatted + "\n"
+                    encoded = entry.encode("utf-8")
+                    marker = HUMAN_LOG_TRUNCATION_MARKER.encode("utf-8")
+                    if not human_log_truncated:
+                        if human_log.tell() + len(encoded) <= MAX_HUMAN_LOG_BYTES - len(marker):
+                            human_log.write(entry)
+                            human_log.flush()
+                        else:
+                            human_log.write(HUMAN_LOG_TRUNCATION_MARKER)
+                            human_log.flush()
+                            human_log_truncated = True
                 last_notice = time.monotonic()
 
             def write_raw(line: str) -> None:
@@ -545,11 +582,12 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                         persist=persist,
                     )
             proc.wait()
-            if dropped_lines or raw_log_truncated:
+            if dropped_lines or raw_log_truncated or human_log_truncated:
                 marker = json.dumps({
                     "type": "agentic_stream_truncated",
                     "dropped_lines": dropped_lines,
                     "raw_log_truncated": raw_log_truncated,
+                    "human_log_truncated": human_log_truncated,
                 }) + "\n"
                 if raw_file:
                     encoded = marker.encode("utf-8")
@@ -560,7 +598,8 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                 display(
                     "Output truncated: "
                     f"{dropped_lines} queued line(s) dropped"
-                    + ("; raw JSONL log limit reached" if raw_log_truncated else "."),
+                    + ("; raw JSONL log limit reached" if raw_log_truncated else "")
+                    + ("; human-readable log limit reached" if human_log_truncated else "."),
                     style_status_tokens=True,
                 )
             seconds = int(time.monotonic() - started)
@@ -586,14 +625,11 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                     exit_code=124 if timed_out else code,
                 )
     except KeyboardInterrupt:
-        try:
-            with log_file.open("a", encoding="utf-8") as human_log:
-                human_log.write(
-                    f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
-                    f"[{label}] Cancelled by user.\n"
-                )
-        except OSError:
-            pass
+        _append_bounded_human_log(
+            log_file,
+            f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
+            f"[{label}] Cancelled by user.\n",
+        )
         if os.name != "nt":
             os.killpg(proc.pid, signal.SIGKILL)
         else:

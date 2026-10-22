@@ -775,6 +775,14 @@ def _audit_text(value: Any, limit: int) -> str:
     return _bounded_text(str(value or ""), limit).strip()
 
 
+def _audit_nullable_text(value: Any, limit: int) -> str | None:
+    """Normalize optional audit schema strings to string-or-null."""
+    if value is None:
+        return None
+    text = _audit_text(value, limit)
+    return text or None
+
+
 def _normalize_audit_report(value: Any, audit_key: str) -> dict[str, Any] | None:
     """Normalize and bound provider audit data before it becomes durable evidence."""
     if not isinstance(value, dict) or not isinstance(value.get("summary"), str):
@@ -810,33 +818,28 @@ def _normalize_audit_report(value: Any, audit_key: str) -> dict[str, Any] | None
             "description": _audit_text(raw.get("description"), 1_200),
             "evidence": [_audit_text(item, 600) for item in evidence[:6] if _audit_text(item, 600)],
             "recommendation": _audit_text(raw.get("recommendation"), 1_000),
+            "confidence": _audit_nullable_text(raw.get("confidence"), 40),
+            "measurement": None,
         }
-        confidence = _audit_text(raw.get("confidence"), 40)
-        if confidence:
-            record["confidence"] = confidence
         measurement = raw.get("measurement")
         if isinstance(measurement, dict):
-            bounded_measurement = {
-                str(key)[:60]: _audit_text(item, 300)
-                for key, item in list(measurement.items())[:8]
-                if isinstance(key, str) and isinstance(item, (str, int, float, bool))
+            record["measurement"] = {
+                "name": _audit_nullable_text(measurement.get("name"), 300),
+                "value": _audit_nullable_text(measurement.get("value"), 300),
+                "method": _audit_nullable_text(measurement.get("method"), 300),
             }
-            if bounded_measurement:
-                record["measurement"] = bounded_measurement
         if record["title"] and record["description"]:
             findings.append(record)
     findings.sort(key=lambda item: (-rank[item["severity"]], item["category"], item["id"]))
-    measurements: list[dict[str, str]] = []
+    measurements: list[dict[str, str | None]] = []
     for raw in raw_measurements[:20]:
         if not isinstance(raw, dict):
             continue
-        item = {
-            str(key)[:60]: _audit_text(value, 300)
-            for key, value in list(raw.items())[:8]
-            if isinstance(key, str) and isinstance(value, (str, int, float, bool))
-        }
-        if item:
-            measurements.append(item)
+        measurements.append({
+            "name": _audit_nullable_text(raw.get("name"), 300),
+            "value": _audit_nullable_text(raw.get("value"), 300),
+            "method": _audit_nullable_text(raw.get("method"), 300),
+        })
     return {
         "schema_version": 1,
         "audit_key": audit_key,

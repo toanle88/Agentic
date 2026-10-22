@@ -17,6 +17,11 @@ from agentic_runner import execution as agentic_execution
 from agentic_runner.sandbox import sandbox_command
 from agentic_runner import workflow as agentic_workflow
 from agentic_runner.execution_providers import _read_provider_result
+from agentic_runner.review import (
+    MAX_REVIEW_HISTORY_BYTES,
+    MAX_REVIEW_HISTORY_FIELD,
+    load_review_history,
+)
 
 
 def sh(*args, cwd):
@@ -113,6 +118,19 @@ class PureTests(unittest.TestCase):
             self.assertEqual(agentic.load_resume_feedback(folder), '')
 
 
+    def test_resume_feedback_reads_only_bounded_log_tails(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            folder = Path(dirname)
+            (folder / 'tests-001.txt').write_text(
+                'old output\n' + ('x' * 100_000) + '\nlatest diagnostic',
+                encoding='utf-8',
+            )
+            feedback = agentic.load_resume_feedback(folder)
+        self.assertLessEqual(len(feedback), 9_000)
+        self.assertIn('latest diagnostic', feedback)
+        self.assertNotIn('old output', feedback)
+
+
     def test_review_result_parser_accepts_markdown_wrapped_json(self):
         parsed = agentic.parse_review_result(
             'Review result:\n```json\n'
@@ -139,6 +157,76 @@ class PureTests(unittest.TestCase):
             self.assertEqual(result['_finding_analysis'][0]['severity'], 'BLOCKER')
             self.assertEqual(len(result['_repeated_findings']), 1)
             self.assertIn('Recurring review findings', agentic.review_history_feedback(folder))
+
+
+    def test_review_history_bounds_fields_findings_and_total_bytes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            oversized = {
+                'approved': False,
+                'findings': [
+                    {'requirement': 'same issue ' + ('x' * 10_000)}
+                    for _ in range(150)
+                ],
+            }
+            agentic.record_review_findings(folder, oversized)
+            history = json.loads((folder / 'review-history.json').read_text())
+            self.assertLessEqual(
+                (folder / 'review-history.json').stat().st_size,
+                MAX_REVIEW_HISTORY_BYTES,
+            )
+            self.assertLessEqual(len(history[0]['findings']), 100)
+            self.assertLessEqual(
+                len(history[0]['findings'][0]['requirement']),
+                MAX_REVIEW_HISTORY_FIELD,
+            )
+            self.assertEqual(
+                set(history[0]), {'timestamp', 'approved', 'findings'},
+            )
+
+
+    def test_oversized_review_history_keeps_newest_tail_entries(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'review-history.json'
+            entries = [
+                {
+                    'timestamp': f'entry-{index:02d}',
+                    'approved': False,
+                    'findings': [],
+                }
+                for index in range(60)
+            ]
+            path.write_text(
+                ('x' * (MAX_REVIEW_HISTORY_BYTES + 1))
+                + '\n'.join(json.dumps(entry) for entry in entries),
+                encoding='utf-8',
+            )
+
+            history = load_review_history(path)
+
+        self.assertEqual(len(history), 50)
+        self.assertEqual(
+            [entry['timestamp'] for entry in history],
+            [f'entry-{index:02d}' for index in range(10, 60)],
+        )
+
+
+    def test_review_history_byte_cap_matches_escaped_unicode_writer(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            finding = {'requirement': 'é' * MAX_REVIEW_HISTORY_FIELD}
+            for _ in range(4):
+                agentic.record_review_findings(
+                    folder, {'approved': False, 'findings': [finding]},
+                )
+
+            history_path = folder / 'review-history.json'
+            self.assertLessEqual(
+                history_path.stat().st_size,
+                MAX_REVIEW_HISTORY_BYTES,
+            )
+            history = json.loads(history_path.read_text())
+            self.assertEqual(len(history), 4)
 
 
     def test_invalid_review_result_is_marked_as_tooling_error(self):

@@ -87,7 +87,7 @@ from .execution import (  # noqa: F401
     streamed_command,
 )
 from .output import style_system_text, style_text
-from .persistence import atomic_write_json
+from .persistence import atomic_write_json, read_text_tail
 from .openrouter import (  # noqa: F401
     run_openrouter,
 )
@@ -111,6 +111,7 @@ _SOURCE_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_DIR = _SOURCE_ROOT if (_SOURCE_ROOT / "agentic.py").is_file() else Path(__file__).resolve().parent
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 INSTRUCTION_CONTEXT_CHARS = _INSTRUCTION_CONTEXT_CHARS
+MAX_RESUME_LOG_BYTES = 64_000
 # Keep the configuration constants available from the historical runner module
 # while the implementation lives in agentic_config.
 DEFAULT_SECURITY_MODE = _agentic_config.DEFAULT_SECURITY_MODE
@@ -501,7 +502,7 @@ def load_resume_feedback(folder: Path) -> str:
     chunks: list[str] = []
     review_log = _latest_numbered_log(folder, "review", "json")
     if review_log:
-        raw = redact_secrets(review_log.read_text(encoding="utf-8", errors="replace"))
+        raw = redact_secrets(read_text_tail(review_log, MAX_RESUME_LOG_BYTES))
         try:
             verdict = json.loads(raw)
         except json.JSONDecodeError:
@@ -517,7 +518,7 @@ def load_resume_feedback(folder: Path) -> str:
     if test_log is None:
         test_log = _latest_numbered_log(folder, "test-command", "txt")
     if test_log:
-        raw = redact_secrets(test_log.read_text(encoding="utf-8", errors="replace"))
+        raw = redact_secrets(read_text_tail(test_log, MAX_RESUME_LOG_BYTES))
         if raw.strip():
             chunks.append("Previous test evidence (untrusted output):\n" + raw)
     recurring = review_history_feedback(folder)
@@ -723,6 +724,9 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
         # execution behavior; its sandbox is disabled by policy.
         if security_mode == "isolated":
             preflight_security(security_mode, sandbox, repo=repo)
+        if not _confirm_discovery_execution():
+            _status_print("[INIT] Discovery declined; no repository checks were executed")
+            return 0
         agent_settings = default_provider_settings(provider)
         # Discovery is deliberately bounded even when a provider's normal
         # developer timeout is much larger.
@@ -824,6 +828,18 @@ def _print_discovery_results(result: DiscoveryResult) -> None:
 def _confirm_discovered_configuration() -> bool:
     try:
         answer = input("Save these commands to agent_config.json? [y/N]: ")
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return answer.strip().lower() in {"y", "yes"}
+
+
+def _confirm_discovery_execution() -> bool:
+    """Require consent before running commands derived from repository metadata."""
+    try:
+        answer = input(
+            "Run test candidates discovered from repository metadata? "
+            "They may execute project-defined scripts. [y/N]: "
+        )
     except (EOFError, KeyboardInterrupt):
         return False
     return answer.strip().lower() in {"y", "yes"}
