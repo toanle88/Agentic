@@ -581,6 +581,11 @@ _HELP_SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         "Run",
         (
             (
+                '/audit [--profile fast|slow] [--instruction "text"] '
+                '[--review|--publish|--new|--offline|--verbose]',
+                "audit the current repository in an isolated worktree",
+            ),
+            (
                 '/run ISSUE [--profile fast|slow] [--instruction "text"] '
                 '[--review|--publish|--mark-done|--new|--verbose] [--reason "why"] '
                 "with --mark-done",
@@ -655,8 +660,10 @@ SHELL_COMMANDS = (
     "/quit",
     "/exit",
     "/?",
+    "/audit",
 )
 SHELL_OPTIONS = {
+    "/audit": ("--profile", "--instruction", "--review", "--publish", "--new", "--offline", "--verbose"),
     "/run": ("--profile", "--instruction", "--review", "--publish", "--mark-done", "--reason", "--new", "--verbose", "--task-file"),
     "/logs": ("--verbose",),
     "/ps": ("--all",),
@@ -668,6 +675,7 @@ SHELL_OPTIONS = {
     "/init": ("--provider", "--reviewer-provider", "--security-mode", "--sandbox-image", "--agents", "--force"),
 }
 COMMAND_DESCRIPTIONS: dict[str, str] = {
+    "/audit": "audit the current repository and propose focused fixes",
     "/run": "start a background job or local task",
     "/ps": "show running or persisted background jobs",
     "/logs": "follow or show captured terminal output",
@@ -740,7 +748,7 @@ def _completion_candidates(line: str, cursor: int | None = None,
 
     current = "" if trailing_space else tokens[-1]
     previous = tokens[-1] if trailing_space else (tokens[-2] if len(tokens) > 1 else "")
-    if command in {"/run", "/doctor"} and previous == "--profile":
+    if command in {"/audit", "/run", "/doctor"} and previous == "--profile":
         values = ("fast", "slow")
         return [value for value in values if value.startswith(current)]
 

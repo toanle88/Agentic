@@ -197,7 +197,9 @@ Add architecture, testing, generated-file, and local-development notes here.
 
 
 from .worktrees import (  # noqa: E402, F401
+    AUDIT_KEY,
     choose_existing,
+    create_audit_worktree,
     create_local_worktree,
     create_worktree,
     default_base_branch,
@@ -215,6 +217,7 @@ from .worktrees import (  # noqa: E402, F401
     repository_lock,
     repository_state_key,
     runs_for_issue,
+    runs_for_audit,
     runs_for_task,
     run_for_branch,
     get_pull_request,
@@ -595,6 +598,21 @@ def print_investigation_summary(*args, **kwargs):
 def _run_investigation(*args, **kwargs):
     return _workflow_call("_run_investigation", *args, **kwargs)
 
+def audit_repository(*args, **kwargs):
+    return _workflow_call("audit_repository", *args, **kwargs)
+
+def _run_audit(*args, **kwargs):
+    return _workflow_call("_run_audit", *args, **kwargs)
+
+def audit_feedback(*args, **kwargs):
+    return _workflow_call("audit_feedback", *args, **kwargs)
+
+def load_audit_report(*args, **kwargs):
+    return _workflow_call("load_audit_report", *args, **kwargs)
+
+def print_audit_summary(*args, **kwargs):
+    return _workflow_call("print_audit_summary", *args, **kwargs)
+
 def investigation_feedback(*args, **kwargs):
     return _workflow_call("investigation_feedback", *args, **kwargs)
 
@@ -887,6 +905,7 @@ def run_status_record(repo: Path, run: Run) -> dict[str, Any]:
     return {
         "issue": run.issue_number,
         "task_key": run.task_key,
+        "audit_key": run.audit_key,
         "branch": run.branch,
         "worktree": str(run.worktree),
         "status": "changed" if dirty else "clean",
@@ -904,8 +923,11 @@ def show_runs(repo: Path, *, json_output: bool = False) -> None:
         return
     for run in runs:
         record = run_status_record(repo, run)
-        label = (f"#{run.issue_number}" if run.issue_number is not None
-                 else f"local:{(run.task_key or 'unknown')[:8]}")
+        label = (
+            f"#{run.issue_number}" if run.issue_number is not None
+            else f"audit:{run.audit_key[:8]}" if run.audit_key
+            else f"local:{(run.task_key or 'unknown')[:8]}"
+        )
         _status_print(f"{label:<16} {run.branch:<44} [{record['status']}] {run.worktree}")
 
 
@@ -932,7 +954,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
-        "command", nargs="?", choices=("help", "shell", "dashboard", "init", "doctor", "cleanup", "status", "runs"),
+        "command", nargs="?", choices=("help", "shell", "dashboard", "audit", "init", "doctor", "cleanup", "status", "runs"),
         help="Show help or route to a built-in subcommand",
     )
     parser.add_argument("--repo", default=str(Path.cwd()), help="Project root (default: current directory)")
@@ -1100,7 +1122,23 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
 
     task_source = config["task_source"]
     offline_run: Run | None = None
-    if task_source == "local":
+    is_audit = args.command == "audit"
+    if is_audit:
+        if any(value is not None for value in (args.issue, args.task, args.task_file)):
+            raise RuntimeError("audit does not accept --issue, --task, or --task-file")
+        github_repo = github_repo_from_remote(repo, github_host)
+        base = default_base_branch(repo)
+        issue = Issue.for_audit(
+            AUDIT_KEY,
+            "Audit the current repository for code quality, security, reliability, and performance. "
+            "Prioritize concrete critical and high-severity findings, then address focused low-risk findings.",
+        )
+        previous = runs_for_audit(repo, AUDIT_KEY)
+        if args.offline:
+            if not previous:
+                raise RuntimeError("No existing audit worktree found; offline audit resume cannot start a run")
+            offline_run = choose_existing(previous, prompt_prefix="RESUME")
+    elif task_source == "local":
         if args.offline:
             raise RuntimeError("--offline is only available for GitHub issue runs")
         if args.issue is not None:
@@ -1161,7 +1199,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
                 "Publishing requires a GitHub origin remote and GitHub CLI access"
             ) from exc
     issue_number = issue.number
-    if not issue.is_local and issue_number is None:
+    if not issue.is_local and not issue.is_audit and issue_number is None:
         raise RuntimeError("GitHub issue data did not include an issue number")
     if offline_run is not None:
         run = offline_run
@@ -1169,7 +1207,9 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
     elif args.new:
         if not eligible(issue):
             raise RuntimeError("Only open issues can start a new worktree")
-        if issue.is_local:
+        if issue.is_audit:
+            run = create_audit_worktree(repo, base, issue, state_dir, separate=True)
+        elif issue.is_local:
             run = create_local_worktree(repo, base, issue, state_dir, separate=True)
         else:
             assert issue_number is not None
@@ -1192,7 +1232,9 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
             )
         if not eligible(issue):
             raise RuntimeError("Only open issues can start a new worktree")
-        if issue.is_local:
+        if issue.is_audit:
+            run = create_audit_worktree(repo, base, issue, state_dir)
+        elif issue.is_local:
             run = create_local_worktree(repo, base, issue, state_dir)
         else:
             assert issue_number is not None
@@ -1207,6 +1249,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
     record_issue_metadata(
         folder, number=issue.number, title=issue.title,
         state=issue.state, source=issue.source, body=issue.body,
+        audit_key=issue.audit_key,
     )
     record_security_policy(folder, config)
     manual_approval = load_publication_approval(folder)
@@ -1228,13 +1271,20 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
             )
         if not passed:
             raise RuntimeError("Review or tests did not approve current changes")
-        next_action = (f"python agentic.py --issue {issue.number} --publish"
-                       if not issue.is_local else "rerun with --publish to create a GitHub draft PR")
+        next_action = (
+            "python agentic.py audit --publish" if issue.is_audit
+            else f"python agentic.py --issue {issue.number} --publish"
+            if not issue.is_local else "rerun with --publish to create a GitHub draft PR"
+        )
         print_run_summary(run, "VALIDATED", next_action)
         return 0
     if args.publish:
         if not github_repo:
             raise RuntimeError("Publishing requires a GitHub origin remote and GitHub CLI access")
+        if issue.is_audit:
+            audit_report = load_audit_report(folder, issue.audit_key or AUDIT_KEY)
+            if audit_report is not None:
+                print_audit_summary(audit_report)
         with worktree_lock(repo, run, state_dir):
             publish(
                 run, issue, github_repo, base, config, folder,
@@ -1251,16 +1301,22 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
                 (args.reason or "Manually marked done by user").strip()
                 or "Manually marked done by user",
             )
-        next_action = (f"python agentic.py --issue {issue.number} --publish"
-                       if not issue.is_local else "rerun with --publish to create a GitHub draft PR")
+        next_action = (
+            "python agentic.py audit --publish" if issue.is_audit
+            else f"python agentic.py --issue {issue.number} --publish"
+            if not issue.is_local else "rerun with --publish to create a GitHub draft PR"
+        )
         print_run_summary(run, "MANUALLY APPROVED", next_action)
         return 0
     if not eligible(issue):
         raise RuntimeError("Issue is closed; development blocked")
     with worktree_lock(repo, run, state_dir):
-        investigation = _run_investigation(
-            run, issue, config, folder, deadline=task_deadline,
-            verbose=args.verbose,
+        investigation = (
+            _run_audit(run, issue, config, folder, deadline=task_deadline, verbose=args.verbose)
+            if issue.is_audit else _run_investigation(
+                run, issue, config, folder, deadline=task_deadline,
+                verbose=args.verbose,
+            )
         )
     if not fresh and github_repo:
         existing = check_existing_pr(run.worktree, github_repo, run.branch, github_host)
@@ -1278,7 +1334,9 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
             )
         if not passed:
             raise RuntimeError(f"Base tests are failing; retained worktree.\n{report[-2500:]}")
-    feedback_parts = [investigation_feedback(investigation)]
+    feedback_parts = [
+        audit_feedback(investigation) if issue.is_audit else investigation_feedback(investigation)
+    ]
     resume_feedback = load_resume_feedback(folder) if not fresh else ""
     if resume_feedback:
         _status_print("[RESUME] Loaded previous review/test feedback for the developer")
@@ -1369,14 +1427,18 @@ def main(argv: list[str] | None = None) -> int:
                     confirm=args.yes, remove_logs=args.remove_logs,
                     state_dir=cleanup_state_dir,
                 )
-        if args.profile != "fast" and args.issue is None and args.task is None and args.task_file is None:
-            parser.error("--profile requires --issue or --task; use /run ISSUE --profile slow in the interactive shell")
+        if (
+            args.profile != "fast" and args.command != "audit"
+            and args.issue is None and args.task is None and args.task_file is None
+        ):
+            parser.error("--profile requires --issue, --task, --task-file, or audit; use /run ISSUE --profile slow in the interactive shell")
         # The interactive supervisor is the natural entry point when no
         # runner action was requested.  Keep explicit issue/list/run modes
         # unchanged, while making `agentic` and `agentic --repo ...` useful
         # without requiring a special flag.
         default_interactive = (
-            args.issue is None
+            args.command != "audit"
+            and args.issue is None
             and not args.list
             and not args.runs
             and args.task is None
@@ -1386,7 +1448,7 @@ def main(argv: list[str] | None = None) -> int:
             and not args.publish
         )
         if args.interactive or default_interactive:
-            if any((args.issue is not None, args.task is not None, args.task_file is not None,
+            if any((args.command == "audit", args.issue is not None, args.task is not None, args.task_file is not None,
                     args.list, args.runs, args.new, args.review, args.publish)):
                 parser.error("--interactive cannot be combined with a task, issue, list, runs, new, review, or publish option")
             from .shell import run_shell
