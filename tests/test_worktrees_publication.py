@@ -284,7 +284,7 @@ class PublicationTests(_GitRepositoryTestCase):
         self.assertIn('main', pr_command)
         self.assertIn('Independent Gemini review', pr_command[-1])
         self.assertIn(
-            f'- <code>{sys.executable} -c print(&quot;ok&quot;)</code> — passed',
+            '- <code>&lt;configured test command: 3 argv values&gt;</code> — passed',
             pr_command[-1],
         )
         self.assertIn('Tests 4 passed &lt;img src=x&gt; &#96;[details]&#96;', pr_command[-1])

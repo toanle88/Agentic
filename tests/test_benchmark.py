@@ -1,8 +1,10 @@
 import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.agent_benchmark import (
     aggregate_metrics,
@@ -13,7 +15,9 @@ from scripts.agent_benchmark import (
     validate_benchmark_files,
 )
 from scripts.agent_benchmark_config import load_benchmark as load_benchmark_config
-from scripts.agent_benchmark_scenarios import run_scenario
+from scripts.agent_benchmark_scenarios import (
+    _process_group_kwargs, _run_checks, run_scenario,
+)
 from scripts.benchmark import run_case
 
 
@@ -37,6 +41,30 @@ class BenchmarkTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["returncode"], 127)
+
+    def test_benchmark_checks_terminate_process_group_on_timeout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            marker = Path(temp) / "descendant-alive"
+            child = (
+                "import pathlib,time; time.sleep(0.5); "
+                f"pathlib.Path({str(marker)!r}).write_text('alive')"
+            )
+            parent = (
+                "import subprocess,sys,time; "
+                f"subprocess.Popen([sys.executable, '-c', {child!r}]); time.sleep(10)"
+            )
+            passed, records = _run_checks(
+                Path(temp), [[sys.executable, '-c', parent]], timeout=1,
+            )
+            time.sleep(0.8)
+        self.assertFalse(passed)
+        self.assertEqual(records[0]["status"], "timeout")
+        self.assertFalse(marker.exists())
+
+    def test_benchmark_process_group_uses_windows_creation_flag_fallback(self):
+        with patch('scripts.agent_benchmark_scenarios.os.name', 'nt'), \
+             patch('subprocess.CREATE_NEW_PROCESS_GROUP', 512, create=True):
+            self.assertEqual(_process_group_kwargs(), {"creationflags": 512})
 
     def test_quality_benchmark_requires_both_scenarios_and_safe_paths(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -29,6 +29,11 @@ from .sandbox import sandbox_command
 from .security import redact_secrets
 from .telemetry import record_operation, record_usage
 
+
+MAX_STREAM_QUEUE = 256
+MAX_RAW_LOG_BYTES = 2_000_000
+MAX_RAW_TRUNCATION_MARKER_BYTES = 256
+
 def _short(value: Any, limit: int = 180) -> str:
     """Display single-line progress without flooding the terminal."""
     text = str(value).replace("\r", " ").replace("\n", " ⏎ ").strip()
@@ -393,15 +398,25 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
             invocation_temp.cleanup()
         raise
 
-    lines: queue.Queue[str | None] = queue.Queue()
+    lines: queue.Queue[str | None] = queue.Queue(maxsize=MAX_STREAM_QUEUE)
+    dropped_lines = 0
 
     def reader() -> None:
+        nonlocal dropped_lines
         assert proc.stdout is not None
         try:
             for raw in proc.stdout:
-                lines.put(raw)
+                try:
+                    lines.put_nowait(raw)
+                except queue.Full:
+                    dropped_lines += 1
         finally:
-            lines.put(None)
+            while True:
+                try:
+                    lines.put(None, timeout=0.1)
+                    break
+                except queue.Full:
+                    continue
 
     threading.Thread(target=reader, daemon=True).start()
     started = time.monotonic()
@@ -411,6 +426,8 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
     timed_out = False
     raw_path = log_file.with_suffix(".jsonl") if codex_json else None
     raw_file = raw_path.open("w", encoding="utf-8") if raw_path else None
+    raw_bytes = 0
+    raw_log_truncated = False
     try:
         with log_file.open("w", encoding="utf-8", buffering=1) as human_log:
             live_status = False
@@ -452,6 +469,18 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                     human_log.write(formatted + "\n")
                 last_notice = time.monotonic()
 
+            def write_raw(line: str) -> None:
+                nonlocal raw_bytes, raw_log_truncated
+                if raw_file is None or raw_log_truncated:
+                    return
+                encoded = line.encode("utf-8")
+                if raw_bytes + len(encoded) > MAX_RAW_LOG_BYTES - MAX_RAW_TRUNCATION_MARKER_BYTES:
+                    raw_log_truncated = True
+                    return
+                raw_file.write(line)
+                raw_file.flush()
+                raw_bytes += len(encoded)
+
             display(f"Started (PID {proc.pid}); progress log: {log_file}", style_status_tokens=True)
             while True:
                 now = time.monotonic()
@@ -477,9 +506,7 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                 if line is None:
                     break
                 safe_line = strip_ansi(redact_secrets(line, extra_values=redaction_values or ()))
-                if raw_file:
-                    raw_file.write(safe_line)
-                    raw_file.flush()
+                write_raw(safe_line)
                 tail = (tail + safe_line)[-10000:]
                 if codex_json:
                     shown = (progress_parser or _codex_progress)(safe_line)
@@ -518,6 +545,24 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                         persist=persist,
                     )
             proc.wait()
+            if dropped_lines or raw_log_truncated:
+                marker = json.dumps({
+                    "type": "agentic_stream_truncated",
+                    "dropped_lines": dropped_lines,
+                    "raw_log_truncated": raw_log_truncated,
+                }) + "\n"
+                if raw_file:
+                    encoded = marker.encode("utf-8")
+                    if raw_bytes + len(encoded) <= MAX_RAW_LOG_BYTES:
+                        raw_file.write(marker)
+                        raw_file.flush()
+                        raw_bytes += len(encoded)
+                display(
+                    "Output truncated: "
+                    f"{dropped_lines} queued line(s) dropped"
+                    + ("; raw JSONL log limit reached" if raw_log_truncated else "."),
+                    style_status_tokens=True,
+                )
             seconds = int(time.monotonic() - started)
             code = proc.returncode
             if modified_paths and not verbose:

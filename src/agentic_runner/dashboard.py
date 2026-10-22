@@ -48,6 +48,13 @@ def _json_for_script(value: Any) -> str:
     return base64.b64encode(encoded).decode("ascii")
 
 
+def _required_replace(value: str, marker: str, replacement: str, *, count: int = 1) -> str:
+    """Replace a generated-template marker and fail closed if it moved."""
+    if (count < 0 and marker not in value) or (count >= 0 and value.count(marker) < count):
+        raise ValueError(f"Dashboard template marker is missing: {marker[:80]!r}")
+    return value.replace(marker, replacement, count)
+
+
 def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str, *,
                      settings: dict[str, Any] | None = None) -> str:
     """Render a read-only dashboard; browser actions never write repository state."""
@@ -215,7 +222,7 @@ run.blocked && run.status !== \"no_changes\" && run.result?.status !== \"NO_CHAN
   setView("dashboard");renderAll();
 })();
 </script>'''
-    template = template.replace('<script>\nconst decodeDashboardData=', '<script type="text/plain">\nconst decodeDashboardData=', 1)
+    template = _required_replace(template, '<script>\nconst decodeDashboardData=', '<script type="text/plain">\nconst decodeDashboardData=')
     detail_script = r'''<script>
 Object.assign(labels,{"investigation-invalid":"Investigation invalid","audit-complete":"Audit complete","awaiting-development":"Awaiting development"});
 function suggestedCommand(run){
@@ -291,75 +298,85 @@ document.querySelector("#token-sort").addEventListener("change",event=>{state.to
 renderAll();
 renderDetail();
 </script>'''
-    detail_script = detail_script.replace('<script>\n', '<script type="text/plain">\n', 1)
-    template = template.replace('["needs-fix","tests-failed","blocked"]',
-                                '["needs-fix","blocked"]')
-    template = template.replace('<span>Tests: ${esc(run.tests.status)}</span>', '')
-    template = template.replace('<h3>Tests · ${esc(run.tests.status)}</h3>', '<h3>Tests</h3>')
-    detail_script = detail_script.replace(
+    detail_script = _required_replace(detail_script, '<script>\n', '<script type="text/plain">\n')
+    template = _required_replace(template, '["needs-fix","tests-failed","blocked"]',
+                                 '["needs-fix","blocked"]')
+    template = _required_replace(template, '<span>Tests: ${esc(run.tests.status)}</span>', '', count=-1)
+    template = _required_replace(template, '<h3>Tests · ${esc(run.tests.status)}</h3>', '<h3>Tests</h3>', count=-1)
+    detail_script = _required_replace(
+        detail_script,
         '<h3>Tests · ${esc(run.tests.status)}</h3>', '<h3>Tests</h3>',
     )
     # Audits have no issue number; preserve their distinct dashboard filter and
     # grouping identity in the generated client scripts.
-    template = template.replace(
+    template = _required_replace(
+        template,
         'const issue=run.issue==null?"local":String(run.issue);return',
         'const issue=run.audit?"audit":run.issue==null?"local":String(run.issue);return',
     )
-    template = template.replace(
+    template = _required_replace(
+        template,
         'return investigationSummary||run.review.summary||run.developer.summary||"No summary recorded."',
         'return investigationSummary||run.audit_report?.summary||run.review.summary||run.developer.summary||"No summary recorded."',
+        count=-1,
     )
-    template = template.replace(
-        'const runSummary=run=>{const investigationSummary=run.investigation.state==="not-run"?"":run.investigation.summary;return investigationSummary||run.review.summary||run.developer.summary||"No summary recorded."}',
-        'const runSummary=run=>{const investigationSummary=run.investigation.state==="not-run"?"":run.investigation.summary;return investigationSummary||run.audit_report?.summary||run.review.summary||run.developer.summary||"No summary recorded."}',
-    )
-    template = template.replace(
+    template = _required_replace(
+        template,
         'options("#issue",[...new Set(DATA.runs.map(run=>run.issue==null?"local":String(run.issue)))],"issues");',
         'options("#issue",[...new Set(DATA.runs.map(run=>run.audit?"audit":run.issue==null?"local":String(run.issue)))],"issues");',
     )
-    template = template.replace(
+    template = _required_replace(
+        template,
         'value="investigation-invalid">Investigation invalid</option>',
         'value="investigation-invalid">Investigation invalid</option><option value="audit-invalid">Audit invalid</option>',
     )
-    template = template.replace(
+    template = _required_replace(
+        template,
         '"investigation-invalid":"Investigation invalid","awaiting-development":"Awaiting development"',
         '"investigation-invalid":"Investigation invalid","audit-complete":"Audit complete","awaiting-development":"Awaiting development"',
     )
-    template = template.replace(
+    template = _required_replace(
+        template,
         '.awaiting-development,.awaiting-review,.no_changes{',
         '.audit-complete,.awaiting-development,.awaiting-review,.no_changes{',
     )
-    template = template.replace(
+    template = _required_replace(
+        template,
         'value="investigation">Investigation</option>',
         'value="investigation">Investigation</option><option value="audit">Audit</option>',
     )
-    template = template.replace('class="panel chart-panel"', 'class="panel token-panel"')
-    template = template.replace('<h2>Token usage by run</h2>', '<h2>Token usage</h2>')
-    template = template.replace(
+    template = _required_replace(template, 'class="panel chart-panel"', 'class="panel token-panel"')
+    template = _required_replace(template, '<h2>Token usage by run</h2>', '<h2>Token usage</h2>')
+    template = _required_replace(
+        template,
         'Known totals for each provider invocation, ordered from oldest to newest. The highest run number is the latest.',
         'Recorded provider usage by run.',
     )
-    template = template.replace(
+    template = _required_replace(
+        template,
         '<label>Time period <select id="period"><option value="all">All time</option><option value="24h">Last 24 hours</option><option value="7d">Last 7 days</option><option value="30d">Last 30 days</option></select></label>',
         '',
     )
-    template = template.replace(
+    template = _required_replace(
+        template,
         '<div class="token-controls"><span class="token-sort-slot"></span><span class="token-legend">Striped bars = usage unavailable</span></div><div class="token-chart" id="token-chart" role="img" aria-label="Token usage chart"></div>',
         '',
     )
-    template = template.replace(
+    template = _required_replace(
+        template,
         '<div class="panel table-wrap" id="issues-table"></div>',
         '<div class="panel table-wrap" id="issues-table">__FALLBACK_ISSUES__</div>',
     )
-    return template.replace("__DASHBOARD_DATA__", data).replace(
-        "__REPO_NAME__", escape(repo_name)).replace(
-        "__SOURCE__", escape(f"Logs: {logs_name} · Generated: {generated}")).replace(
-        "__FALLBACK_METRICS__", fallback_metrics).replace(
-        "__FALLBACK_RECENT__", fallback_recent).replace(
-        "__FALLBACK_ISSUES__", fallback_issues).replace(
-        "<title>Agentic dashboard</title>", compatibility_markers,
-    ).replace("</script><script>", "</script>\n<script>").replace(
-        "</script></body></html>", "</script>\n" + navigation_fallback_script + "\n" + interactive_script + "\n" + detail_script + "</body></html>",
+    template = _required_replace(template, "__DASHBOARD_DATA__", data)
+    template = _required_replace(template, "__REPO_NAME__", escape(repo_name))
+    template = _required_replace(template, "__SOURCE__", escape(f"Logs: {logs_name} · Generated: {generated}"))
+    template = _required_replace(template, "__FALLBACK_METRICS__", fallback_metrics)
+    template = _required_replace(template, "__FALLBACK_RECENT__", fallback_recent)
+    template = _required_replace(template, "__FALLBACK_ISSUES__", fallback_issues)
+    template = _required_replace(template, "<title>Agentic dashboard</title>", compatibility_markers)
+    return _required_replace(
+        template, "</script></body></html>",
+        "</script>\n" + navigation_fallback_script + "\n" + interactive_script + "\n" + detail_script + "</body></html>",
     )
 
 

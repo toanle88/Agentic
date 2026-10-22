@@ -29,6 +29,10 @@ RUN_NAME = re.compile(
 NUMBERED_FILE = re.compile(r"^(?P<prefix>.+)-(?P<number>\d+)(?P<suffix>\.[^.]+)$")
 MAX_TEXT = 5_000
 MAX_FILES_PER_RUN = 24
+MAX_REVIEW_HISTORY_BYTES = 256_000
+MAX_REVIEW_HISTORY_ENTRIES = 50
+MAX_REVIEW_HISTORY_FINDINGS = 100
+MAX_REVIEW_HISTORY_FIELD = 4_000
 SEVERITY_RANK = {
     "BLOCKER": 7,
     "CRITICAL": 6,
@@ -230,6 +234,43 @@ def _parse_json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _bounded_review_history(path: Path) -> list[Any]:
+    """Read review history without allowing an unbounded JSON parse.
+
+    History written by Agentic is limited to 50 entries, so complete legacy
+    files under the byte budget retain their existing behavior.  For an
+    oversized or partially written file, decode complete leading array items
+    only; recurring findings are useful evidence, but are never approval
+    state.
+    """
+    try:
+        with path.open("rb") as stream:
+            payload = stream.read(MAX_REVIEW_HISTORY_BYTES + 1)
+    except OSError:
+        return []
+    text = payload[:MAX_REVIEW_HISTORY_BYTES].decode("utf-8", errors="replace")
+    decoder = json.JSONDecoder()
+    index = 0
+    while index < len(text) and text[index].isspace():
+        index += 1
+    if index >= len(text) or text[index] != "[":
+        return []
+    index += 1
+    entries: list[Any] = []
+    while len(entries) < MAX_REVIEW_HISTORY_ENTRIES:
+        while index < len(text) and (text[index].isspace() or text[index] == ","):
+            index += 1
+        if index >= len(text) or text[index] == "]":
+            break
+        try:
+            value, end = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            break
+        entries.append(value)
+        index = end
+    return entries
+
+
 def _finding_severity(value: Any, finding_text: str) -> str:
     severity = str(value).strip().upper()
     if severity in SEVERITY_RANK:
@@ -270,24 +311,23 @@ def _review(folder: Path, index: dict[str, list[Path]] | None = None) -> tuple[d
         path for path in _indexed_files(index, folder, ["review"])
         if path.suffix == ".json"
     )
-    history_path = folder / "review-history.json"
-    try:
-        history = json.loads(history_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        history = []
+    history = _bounded_review_history(folder / "review-history.json")
     counts: dict[str, dict[str, Any]] = {}
     if isinstance(history, list):
         for entry in history:
             if not isinstance(entry, dict):
                 continue
-            for item in entry.get("findings", []):
+            findings = entry.get("findings", [])
+            if not isinstance(findings, list):
+                continue
+            for item in findings[:MAX_REVIEW_HISTORY_FINDINGS]:
                 if not isinstance(item, dict) or not isinstance(item.get("fingerprint"), str):
                     continue
-                key = item["fingerprint"]
+                key = item["fingerprint"][:256]
                 current = counts.setdefault(key, {
                     "fingerprint": key, "count": 0,
                     "severity": str(item.get("severity", "UNSPECIFIED")),
-                    "text": str(item.get("text", "")),
+                    "text": str(item.get("text", ""))[:MAX_REVIEW_HISTORY_FIELD],
                 })
                 current["count"] += 1
     recurring = sorted(

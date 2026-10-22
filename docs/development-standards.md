@@ -56,6 +56,15 @@ temporary file until it has been redacted and atomically replaced. This is
 bounded protection for common bearer, key/value, JSON, multiline, and
 configured-environment credential forms; it is not arbitrary secret discovery.
 
+Structured provider JSONL logs are additionally capped at 2,000,000 bytes and
+their in-memory line queue is bounded; dropped or oversized output receives an
+explicit `agentic_stream_truncated` marker. Test command progress and reports
+describe configured argv values without persisting literal arguments, so
+credentials belong in environment variables rather than test argv.
+Dashboard review-history parsing reads at most 256,000 bytes, 50 entries, and
+100 findings per entry, with finding text capped at 4,000 characters. Older
+complete histories remain readable within those limits.
+
 JSON and complete text state uses same-directory temporary files, `fsync`, and
 replacement. If a process stops before replacement, the previous complete
 artifact remains authoritative; if there is no previous artifact, readers
