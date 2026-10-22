@@ -15,7 +15,10 @@ from .persistence import atomic_write_json
 from .security import redact_secrets
 
 
-USAGE_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens")
+USAGE_KEYS = (
+    "prompt_tokens", "completion_tokens", "total_tokens",
+    "cache_read_tokens", "cache_write_tokens", "reasoning_tokens",
+)
 
 
 def _timestamp(value: datetime | None = None) -> str:
@@ -68,6 +71,16 @@ def normalize_usage(raw: Any, *, provider: str | None = None) -> dict[str, Any]:
     prompt = _number(usage.get("prompt_tokens", usage.get("input_tokens")))
     completion = _number(usage.get("completion_tokens", usage.get("output_tokens")))
     total = _number(usage.get("total_tokens"))
+    prompt_details = usage.get("prompt_tokens_details")
+    completion_details = usage.get("completion_tokens_details")
+    prompt_details = prompt_details if isinstance(prompt_details, dict) else {}
+    completion_details = completion_details if isinstance(completion_details, dict) else {}
+    cache_read = _number(usage.get("cache_read_tokens", usage.get("cache_read_input_tokens")))
+    cache_read = cache_read if cache_read is not None else _number(prompt_details.get("cached_tokens"))
+    cache_write = _number(usage.get("cache_write_tokens", usage.get("cache_creation_input_tokens")))
+    cache_write = cache_write if cache_write is not None else _number(prompt_details.get("cache_write_tokens"))
+    reasoning = _number(usage.get("reasoning_tokens"))
+    reasoning = reasoning if reasoning is not None else _number(completion_details.get("reasoning_tokens"))
     if total is None and prompt is not None and completion is not None:
         total = prompt + completion
     cost = _cost(usage.get(
@@ -79,6 +92,9 @@ def normalize_usage(raw: Any, *, provider: str | None = None) -> dict[str, Any]:
         "completion_tokens": completion,
         "total_tokens": total,
         "estimated_cost_usd": cost,
+        "cache_read_tokens": cache_read,
+        "cache_write_tokens": cache_write,
+        "reasoning_tokens": reasoning,
     }
 
 
@@ -102,7 +118,9 @@ def extract_jsonl_usage(text: str, *, provider: str | None = None) -> dict[str, 
                 "usage" in candidate
                 or any(key in candidate for key in (
                     "prompt_tokens", "completion_tokens", "input_tokens",
-                    "output_tokens", "total_tokens",
+                    "output_tokens", "total_tokens", "cache_read_tokens",
+                    "cache_write_tokens", "reasoning_tokens", "cache_read_input_tokens",
+                    "cache_creation_input_tokens",
                 ))
             ):
                 continue
@@ -114,8 +132,18 @@ def extract_jsonl_usage(text: str, *, provider: str | None = None) -> dict[str, 
                 if merged.get(key) is None and normalized.get(key) is not None:
                     merged[key] = normalized[key]
         if merged is not None:
-            records.append(normalize_usage(merged, provider=provider))
-    return combine_usage(records, provider=provider)
+            scope = value.get("usage_scope")
+            usage_value = value.get("usage")
+            if isinstance(usage_value, dict):
+                scope = usage_value.get("scope", usage_value.get("usage_scope", scope))
+            records.append((normalize_usage(merged, provider=provider), scope == "cumulative"))
+    cumulative = [record for record, is_cumulative in records if is_cumulative]
+    if cumulative:
+        # Providers that expose cumulative JSONL usage are counted from their
+        # final snapshot, not once per event. Per-event records remain additive.
+        per_event = [record for record, is_cumulative in records if not is_cumulative]
+        records = per_event + [(cumulative[-1], False)]
+    return combine_usage([record for record, _ in records], provider=provider)
 
 
 def combine_usage(records: Iterable[dict[str, Any]], *, provider: str | None = None) -> dict[str, Any]:
@@ -124,6 +152,9 @@ def combine_usage(records: Iterable[dict[str, Any]], *, provider: str | None = N
         "prompt_tokens": 0,
         "completion_tokens": 0,
         "total_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "reasoning_tokens": 0,
         "estimated_cost_usd": 0.0,
     }
     seen_tokens = {key: False for key in USAGE_KEYS}
@@ -162,6 +193,16 @@ def record_usage(folder: Path, role: str, usage: dict[str, Any], *,
         data["usage_by_role"] = by_role
     existing = by_role.get(role)
     by_role[role] = combine_usage([existing or {}, usage], provider=usage.get("provider"))
+    by_stage = data.setdefault("usage_by_stage", {})
+    if not isinstance(by_stage, dict):
+        by_stage = {}
+        data["usage_by_stage"] = by_stage
+    stage = role
+    if invocation and isinstance(invocation.get("stage"), str):
+        stage = invocation["stage"]
+    by_stage[stage] = combine_usage(
+        [by_stage.get(stage) or {}, usage], provider=usage.get("provider"),
+    )
     records = [value for value in by_role.values() if isinstance(value, dict)]
     data["usage"] = combine_usage(records)
     if invocation is not None:
@@ -334,7 +375,9 @@ def record_operation(folder: Path, role: str, name: str, *,
     _write_run_record(path, data)
 
 
-def record_guidance_loads(folder: Path, loads: list[dict[str, Any]]) -> None:
+def record_guidance_loads(folder: Path, loads: list[dict[str, Any]], *,
+                          prompt_chars: int | None = None,
+                          prompt_chars_with_guidance: int | None = None) -> None:
     """Record sanitized repository-guidance inventory without its contents."""
     if not loads:
         return
@@ -361,13 +404,59 @@ def record_guidance_loads(folder: Path, loads: list[dict[str, Any]]) -> None:
             size = max(0, int(load.get("size", 0)))
         except (TypeError, ValueError):
             size = 0
-        records.append({
+        entry = {
             "path": relative.replace("\\", "/"),
             "role": role,
             "phase": phase,
             "size": size,
             "sha256": digest,
-        })
+        }
+        content_chars = load.get("content_chars")
+        if isinstance(content_chars, int) and content_chars >= 0:
+            entry["content_chars"] = content_chars
+        records.append(entry)
+    stats = data.setdefault("guidance_stats", [])
+    if not isinstance(stats, list):
+        stats = []
+        data["guidance_stats"] = stats
+    total_chars = sum(
+        int(item.get("content_chars", 0))
+        for item in loads
+        if isinstance(item, dict) and isinstance(item.get("content_chars"), int)
+    )
+    stat: dict[str, Any] = {
+        "role": next((item.get("role") for item in loads if isinstance(item, dict)), "unknown"),
+        "phase": next((item.get("phase") for item in loads if isinstance(item, dict)), "unknown"),
+        "file_count": len(loads),
+        "content_chars": max(0, total_chars),
+    }
+    if prompt_chars is not None:
+        stat["prompt_chars_without_guidance"] = max(0, int(prompt_chars))
+        stat["prompt_chars_with_guidance"] = max(
+            0,
+            int(prompt_chars_with_guidance)
+            if prompt_chars_with_guidance is not None
+            else int(prompt_chars) + total_chars,
+        )
+    stats.append(stat)
+    _write_run_record(path, data)
+
+
+def record_workflow_outcome(folder: Path, *, approved: bool, attempts: int,
+                            first_pass: bool, review_findings: int = 0) -> None:
+    """Persist bounded outcome metrics used to compare workflow efficiency."""
+    path, data = _load_run_record(folder)
+    metrics = data.setdefault("workflow_metrics", {})
+    if not isinstance(metrics, dict):
+        metrics = {}
+        data["workflow_metrics"] = metrics
+    metrics.update({
+        "approved": bool(approved),
+        "attempts": max(0, int(attempts)),
+        "retries": max(0, int(attempts) - 1),
+        "first_pass_approval": bool(approved and first_pass),
+        "review_findings": max(0, int(review_findings)),
+    })
     _write_run_record(path, data)
 
 
@@ -384,6 +473,8 @@ def read_run_usage(folder: Path) -> dict[str, Any]:
     result = dict(usage)
     if isinstance(data.get("usage_by_role"), dict):
         result["by_role"] = data["usage_by_role"]
+    if isinstance(data.get("usage_by_stage"), dict):
+        result["by_stage"] = data["usage_by_stage"]
     if isinstance(data.get("usage_by_invocation"), list):
         result["by_invocation"] = data["usage_by_invocation"]
     if isinstance(data.get("metrics"), dict):
@@ -394,6 +485,15 @@ def read_run_usage(folder: Path) -> dict[str, Any]:
         result["security_policy_history"] = data["security_policy_history"]
     if isinstance(data.get("guidance_loads"), list):
         result["guidance_loads"] = data["guidance_loads"]
+    if isinstance(data.get("guidance_stats"), list):
+        result["guidance_stats"] = data["guidance_stats"]
+    if isinstance(data.get("workflow_metrics"), dict):
+        result["workflow_metrics"] = data["workflow_metrics"]
+        if (
+            data["workflow_metrics"].get("approved") is True
+            and isinstance(result.get("total_tokens"), int)
+        ):
+            result["tokens_per_approved_task"] = result["total_tokens"]
     if isinstance(data.get("issue_metadata"), dict):
         result["issue_metadata"] = data["issue_metadata"]
     instruction = data.get("instruction")

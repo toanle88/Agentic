@@ -175,6 +175,66 @@ class GuidanceTests(unittest.TestCase):
             self.assertEqual(record["role"], "investigator")
             self.assertEqual(record["phase"], "investigation")
 
+    def test_phase_selection_keeps_safety_rules_and_reduces_development_guidance(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "docs").mkdir()
+            (root / "docs" / "decisions").mkdir()
+            for relative, text in (
+                ("AGENTS.md", "safety"),
+                ("docs/architecture.md", "architecture"),
+                ("docs/development-standards.md", "standards"),
+                ("docs/development.md", "developer-only"),
+                ("docs/agent-instructions.md", "agent-only"),
+                ("docs/decisions/0001-choice.md", "decision"),
+            ):
+                path = root / relative
+                path.write_text(text, encoding="utf-8")
+            investigation = guidance_prompt(
+                root, "prompt", readonly=True, phase="investigation",
+            )
+            review = guidance_prompt(root, "prompt", readonly=True, phase="review")
+            default_review = guidance_prompt(root, "prompt", readonly=True)
+            development = guidance_prompt(root, "prompt", readonly=False, phase="development")
+            self.assertIn("safety", investigation)
+            self.assertNotIn("developer-only", investigation)
+            self.assertNotIn("agent-only", review)
+            self.assertNotIn("developer-only", default_review)
+            self.assertIn("developer-only", development)
+            self.assertIn("agent-only", development)
+
+    def test_guidance_audit_records_prompt_size_without_content(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "AGENTS.md").write_text("private safety text", encoding="utf-8")
+            audit = root / "run"
+            guidance_prompt(root, "prompt", readonly=False, audit_folder=audit, phase="development")
+            raw = json.loads((audit / "run.json").read_text())
+            self.assertEqual(raw["guidance_stats"][0]["content_chars"], len("private safety text"))
+            self.assertGreater(raw["guidance_stats"][0]["prompt_chars_with_guidance"], 0)
+            self.assertNotIn("private safety text", json.dumps(raw["guidance_stats"]))
+
+    def test_phase_selection_applies_before_global_guidance_cap(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "docs" / "decisions").mkdir(parents=True)
+            (root / "AGENTS.md").write_text("safety", encoding="utf-8")
+            (root / "docs" / "development.md").write_text(
+                "developer-only" * 4_000, encoding="utf-8",
+            )
+            (root / "docs" / "architecture.md").write_text(
+                "architecture", encoding="utf-8",
+            )
+            (root / "docs" / "decisions" / "0001.md").write_text(
+                "decision", encoding="utf-8",
+            )
+            prompt = guidance_prompt(
+                root, "prompt", readonly=True, phase="review",
+            )
+            self.assertIn("architecture", prompt)
+            self.assertIn("decision", prompt)
+            self.assertNotIn("developer-only", prompt)
+
     def test_provider_dispatch_injects_guidance_for_readonly_role(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

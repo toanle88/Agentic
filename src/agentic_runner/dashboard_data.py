@@ -214,13 +214,19 @@ def _finding_records(values: Any) -> tuple[list[str], list[dict[str, str]]]:
     records: list[dict[str, str]] = []
     for value in values:
         if isinstance(value, dict):
-            finding_text = str(value.get("text", value.get("message", "")))
+            finding_text = str(value.get("requirement", value.get("text", value.get("message", ""))))
             severity = _finding_severity(value.get("severity", "UNSPECIFIED"), finding_text)
+            record = {
+                "id": str(value.get("id", "")),
+                "text": finding_text,
+                "severity": severity,
+            }
         else:
             finding_text = str(value)
             severity = _finding_severity("UNSPECIFIED", finding_text)
+            record = {"text": finding_text, "severity": severity}
         text.append(finding_text)
-        records.append({"text": finding_text, "severity": severity})
+        records.append(record)
     return text, records
 
 

@@ -106,6 +106,7 @@ Use commands that are actually supported by the target repository. Agentic does 
 | `codex_timeout_seconds` | integer or `null` | `null` | Legacy developer/reviewer timeout. `null` uses the safe provider default. |
 | `test_timeout_seconds` | integer or `null` | `300` when omitted | Per-test-command timeout. Explicit `null` disables the per-test-command limit. |
 | `task_timeout_seconds` | integer | `1800` | Maximum wall-clock time for one task invocation, including checks and review. |
+| `workflow_mode` | `quick`, `standard`, or `strict` | `standard` | `quick` skips automatic investigation only for conservatively classified low-risk tasks; `standard` preserves the normal flow; `strict` always performs independent investigation. High-risk tasks always require investigation. The CLI `--workflow-mode` overrides this setting for one run. |
 | `github_host` | hostname | `github.com` | Host used explicitly for GitHub CLI repository, issue, and publication operations. This is independent of provider hosts. |
 | `system_prompt` | nonempty string or `null` | `null` | Optional persistent project guidance included as bounded, untrusted context in developer and reviewer prompts. |
 | `permission_policy` | object | safe role defaults | Provider-independent capabilities for `developer` and `reviewer`; legacy configurations are normalized to these defaults. |

@@ -78,8 +78,12 @@ def _record_provider_usage(output: Path, readonly: bool, usage: dict[str, Any], 
                            duration_seconds: float | None = None,
                            status: str | None = None,
                            exit_code: int | None = None) -> None:
-    role = "reviewer" if readonly else "developer"
+    role = (
+        "investigator" if output.stem.casefold().startswith("investigation")
+        else "reviewer" if readonly else "developer"
+    )
     invocation: dict[str, Any] = {"name": output.stem}
+    invocation["stage"] = role
     if model:
         invocation["model"] = model
     if prompt_chars is not None:

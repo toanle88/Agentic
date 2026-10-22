@@ -33,6 +33,26 @@ GUIDANCE_FILES = (
     "docs/agent-instructions.md",
 )
 
+# AGENTS.md is the safety boundary and is intentionally present in every
+# phase. Architecture is useful when understanding or reviewing a change;
+# development guidance is most useful while making one. Legacy documents are
+# retained as fallbacks for repositories that have not adopted the standard
+# pair yet.
+PHASE_GUIDANCE = {
+    "investigation": {
+        "AGENTS.md", "docs/architecture.md", "docs/development-standards.md",
+        "docs/decisions",
+    },
+    "development": {
+        "AGENTS.md", "docs/architecture.md", "docs/development-standards.md",
+        "docs/development.md", "docs/agent-instructions.md", "docs/decisions",
+    },
+    "review": {
+        "AGENTS.md", "docs/architecture.md", "docs/development-standards.md",
+        "docs/decisions",
+    },
+}
+
 
 class GuidanceFile:
     """A bounded, safe-to-display repository guidance file."""
@@ -115,7 +135,7 @@ def _read_guidance(root: Path, relative: str) -> GuidanceFile | None:
     )
 
 
-def discover_guidance(worktree: Path) -> list[GuidanceFile]:
+def discover_guidance(worktree: Path, *, phase: str | None = None) -> list[GuidanceFile]:
     """Discover standardized and compatible legacy guidance files.
 
     Discovery is deterministic and bounded.  Unknown files, directories,
@@ -142,6 +162,8 @@ def discover_guidance(worktree: Path) -> list[GuidanceFile]:
         str(path.relative_to(root)).replace(os.sep, "/")
         for path in decision_paths[:MAX_DECISION_RECORDS]
     )
+    if phase is not None:
+        paths = [relative for relative in paths if _guidance_selected(relative, phase)]
 
     found: list[GuidanceFile] = []
     total = 0
@@ -170,6 +192,13 @@ def guidance_phase(output: Path, *, readonly: bool) -> str:
     return "development"
 
 
+def _guidance_selected(relative: str, phase: str) -> bool:
+    allowed = PHASE_GUIDANCE.get(phase, PHASE_GUIDANCE["development"])
+    return relative in allowed or any(
+        relative.startswith(prefix.rstrip("/") + "/") for prefix in allowed
+    )
+
+
 def guidance_prompt(
     worktree: Path,
     prompt: str,
@@ -179,16 +208,11 @@ def guidance_prompt(
     phase: str | None = None,
 ) -> str:
     """Prefix a provider prompt with bounded, clearly untrusted guidance."""
-    effective_phase = phase or "provider_prompt"
+    effective_phase = phase or ("review" if readonly else "development")
     role = "investigator" if effective_phase == "investigation" else (
         "reviewer" if readonly else "developer"
     )
-    selected = discover_guidance(worktree)
-    if audit_folder is not None:
-        record_guidance_loads(
-            audit_folder,
-            [item.audit_record(role=role, phase=effective_phase) for item in selected],
-        )
+    selected = discover_guidance(worktree, phase=effective_phase)
     if not selected:
         return prompt
 
@@ -204,4 +228,18 @@ def guidance_prompt(
             "</guidance_file>",
         ])
     rendered.extend(["</repository_guidance>", "", prompt])
-    return "\n".join(rendered)
+    result = "\n".join(rendered)
+    if audit_folder is not None:
+        record_guidance_loads(
+            audit_folder,
+            [
+                {
+                    **item.audit_record(role=role, phase=effective_phase),
+                    "content_chars": len(item.content),
+                }
+                for item in selected
+            ],
+            prompt_chars=len(prompt),
+            prompt_chars_with_guidance=len(result),
+        )
+    return result

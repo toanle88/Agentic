@@ -15,6 +15,8 @@ from agentic_runner.telemetry import (
     record_run_instruction,
     record_security_policy,
     record_usage,
+    normalize_usage,
+    record_workflow_outcome,
 )
 
 
@@ -90,6 +92,27 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(usage["total_tokens"], 14)
         self.assertIsNone(usage["estimated_cost_usd"])
 
+    def test_preserves_cache_and_reasoning_usage_details(self):
+        usage = normalize_usage({
+            "usage": {
+                "prompt_tokens": 10, "completion_tokens": 4,
+                "prompt_tokens_details": {"cached_tokens": 3},
+                "completion_tokens_details": {"reasoning_tokens": 2},
+                "cache_write_tokens": 1,
+            },
+        })
+        self.assertEqual(usage["cache_read_tokens"], 3)
+        self.assertEqual(usage["cache_write_tokens"], 1)
+        self.assertEqual(usage["reasoning_tokens"], 2)
+
+    def test_cumulative_jsonl_usage_uses_final_snapshot(self):
+        text = "\n".join([
+            json.dumps({"usage_scope": "cumulative", "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}}),
+            json.dumps({"usage_scope": "cumulative", "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}}),
+        ])
+        usage = extract_jsonl_usage(text, provider="codex")
+        self.assertEqual(usage["total_tokens"], 7)
+
     def test_merges_partial_outer_and_nested_provider_usage(self):
         usage = extract_jsonl_usage(
             json.dumps({
@@ -139,6 +162,31 @@ class TelemetryTests(unittest.TestCase):
             self.assertRegex(raw["usage_by_invocation"][0]["recorded_at"], r"^202[0-9]-")
             self.assertNotIn("full prompt", json.dumps(raw["usage_by_invocation"][0]))
             self.assertEqual(read_run_usage(folder)["by_invocation"][0]["name"], "developer-001")
+
+    def test_usage_is_exposed_by_stage_and_outcome(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            record_usage(
+                folder, "investigator",
+                {"provider": "codex", "prompt_tokens": 4, "completion_tokens": 1},
+                invocation={"name": "investigation-001", "stage": "investigator"},
+            )
+            record_workflow_outcome(folder, approved=True, attempts=2, first_pass=False, review_findings=1)
+            usage = read_run_usage(folder)
+            self.assertEqual(usage["by_stage"]["investigator"]["total_tokens"], 5)
+            self.assertEqual(usage["workflow_metrics"]["retries"], 1)
+            self.assertFalse(usage["workflow_metrics"]["first_pass_approval"])
+
+    def test_workflow_outcome_can_record_review_value_across_retries(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            record_workflow_outcome(
+                folder, approved=True, attempts=2, first_pass=False,
+                review_findings=3,
+            )
+            metrics = read_run_usage(folder)["workflow_metrics"]
+            self.assertEqual(metrics["review_findings"], 3)
+            self.assertEqual(metrics["retries"], 1)
 
     def test_record_operation_persists_duration_and_status_without_command_text(self):
         with tempfile.TemporaryDirectory() as temp:

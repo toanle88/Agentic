@@ -949,6 +949,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile", choices=("fast", "slow"), default="fast",
         help="Test profile: fast checks by default, or fast plus slow_test_commands",
     )
+    parser.add_argument(
+        "--workflow-mode", choices=("quick", "standard", "strict"), default=None,
+        help="Workflow depth: quick skips low-risk investigation; standard is the default; strict always investigates",
+    )
     parser.add_argument("--issue", type=int, help="GitHub issue number")
     parser.add_argument(
         "--instruction", default=None,
@@ -1075,6 +1079,8 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
             "agent_config.json or pass --config explicitly"
         )
     config = load_config(config_path)
+    if args.workflow_mode is not None:
+        config["workflow_mode"] = args.workflow_mode
     github_host = config.get("github_host", DEFAULT_GITHUB_HOST)
     test_commands = (
         config["test_commands"] if args.publish

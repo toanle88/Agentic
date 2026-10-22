@@ -15,6 +15,7 @@ import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner import cli as agentic
 from agentic_runner import execution as agentic_execution
 from agentic_runner.sandbox import sandbox_command
+from agentic_runner import workflow as agentic_workflow
 
 
 def sh(*args, cwd):
@@ -24,6 +25,14 @@ def sh(*args, cwd):
 
 
 class PureTests(unittest.TestCase):
+    def test_quick_mode_never_skips_high_risk_investigation(self):
+        low = agentic.Issue(1, 'Fix a typo', 'Correct the spelling in the README.')
+        high = agentic.Issue(2, 'Rotate credentials', 'Update the API token handling.')
+        self.assertEqual(agentic_workflow.investigation_policy(low, 'quick'), (False, 'low'))
+        required, risk = agentic_workflow.investigation_policy(high, 'quick')
+        self.assertTrue(required)
+        self.assertEqual(risk, 'high')
+        self.assertEqual(agentic_workflow.investigation_policy(low, 'strict')[0], True)
     def test_relative_worktree_paths_require_both_wsl_and_windows_git(self):
         with (patch.object(agentic, 'installed_git_version',
                            side_effect=[(2, 48, 0), (2, 48, 0)]),
