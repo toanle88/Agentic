@@ -1099,6 +1099,20 @@ class InteractiveInputTests(unittest.TestCase):
         self.assertEqual(result, '/run ')
 
 
+    def test_interactive_input_filters_candidates_before_rendering(self):
+        keys = [
+            ('CHAR', '/'), ('CHAR', 'l'), ('CHAR', 'o'), ('CHAR', 'g'),
+            ('TAB', '\t'), ('ENTER', '\n'),
+        ]
+        reader = _create_mock_reader(keys)
+        unfiltered = lambda _line, _cursor: [('/run', ''), ('/logs', '')]
+        with patch('sys.stdout', new_callable=StringIO):
+            result = agentic_shell._interactive_input(
+                'agentic> ', unfiltered, key_reader_factory=reader,
+            )
+        self.assertEqual(result, '/logs ')
+
+
     def test_interactive_input_enter_completes_partial_candidate(self):
         keys = [('CHAR', '/'), ('CHAR', 'r'), ('ENTER', '\n'), ('ENTER', '\n')]
         reader = _create_mock_reader(keys)

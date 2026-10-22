@@ -1203,6 +1203,13 @@ def _interactive_input(
             if not dismissed and line.lstrip().startswith("/"):
                 try:
                     candidates = completer(line, cursor_pos)
+                    current_token = line[_token_start(line, cursor_pos):cursor_pos]
+                    if current_token:
+                        prefix = current_token.lower()
+                        candidates = [
+                            item for item in candidates
+                            if item[0].lower().startswith(prefix)
+                        ]
                 except Exception:
                     candidates = []
             else:
