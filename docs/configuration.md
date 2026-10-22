@@ -127,7 +127,8 @@ Each provider object supports these fields:
 | `host` | hostname or `null` | Copilot only: host used for Copilot authentication and model access. Agentic sets the per-process `COPILOT_GH_HOST` environment variable and never changes global `GH_HOST`. |
 | `auth` | `native_cli`, `api_key`, or `both` | Authentication mode. Omitted values preserve native CLI authentication unless `api_key_env` is present; OpenRouter always uses `api_key`. |
 | `api_key_env` | string | Environment-variable name for the selected provider credential. Defaults to `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `GH_TOKEN`, or `OPENROUTER_API_KEY` when API-key mode is selected. The value is never stored in configuration. |
-| `base_url` | URL | OpenRouter only: API base URL, defaulting to the public OpenRouter endpoint. |
+| `base_url` | URL | OpenRouter only: HTTPS API base URL, defaulting to the public OpenRouter endpoint. |
+| `allow_custom_endpoint` | boolean | OpenRouter only: allow an arbitrary HTTPS host for a self-hosted or compatible endpoint. HTTP and embedded URL credentials are never permitted. |
 | `max_tool_turns` | integer or `null` | OpenRouter only: maximum number of model/tool rounds; default `40`. |
 | `command_timeout_seconds` | integer or `null` | OpenRouter only: maximum duration of one tool command; `null` uses 300 seconds. |
 | `allow_network` | boolean | OpenRouter only: allow explicitly network-capable commands. Defaults to `false`. This is not an OS-level network sandbox. |
@@ -263,16 +264,23 @@ secret itself:
     "reasoning_effort": "max",
     "timeout_seconds": null,
     "api_key_env": "OPENROUTER_API_KEY",
-    "base_url": "https://openrouter.ai/api/v1"
+    "base_url": "https://openrouter.ai/api/v1",
+    "allow_custom_endpoint": false
   },
   "reviewer": {
     "provider": "openrouter",
     "model": "anthropic/claude-sonnet-4.5",
     "api_key_env": "OPENROUTER_API_KEY",
-    "base_url": "https://openrouter.ai/api/v1"
+    "base_url": "https://openrouter.ai/api/v1",
+    "allow_custom_endpoint": false
   }
 }
 ```
+
+The public `openrouter.ai` endpoint is allowed by default. A compatible
+self-hosted HTTPS endpoint requires `allow_custom_endpoint: true`; Agentic
+rejects HTTP endpoints and disables HTTP redirects so the API key cannot be
+sent to a different host.
 
 Then export the key in the shell that runs Agentic:
 
@@ -362,8 +370,8 @@ only a hint; it does not install tools or make a sandbox mandatory.
 The image must contain the selected provider CLI and all tools needed by the
 configured checks. When `sandbox.dockerfile` is configured, Agentic builds the
 image first. Agentic mounts the task worktree writable for
-developer processes, linked-worktree Git metadata read-only for both developer
-and reviewer processes, and the run-output directory. It makes the container
+developer processes, the worktree `.git` entry and Git metadata read-only for
+both developer and reviewer processes, and the run-output directory. It makes the container
 root filesystem read-only, drops Linux capabilities, applies process/resource
 limits, and disables networking unless explicitly enabled. Agentic invokes the
 requested argv directly and overrides any image entrypoint. If the engine or

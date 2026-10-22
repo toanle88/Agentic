@@ -15,9 +15,12 @@ from pathlib import Path
 from typing import Any
 
 from .execution import _short
+from .config import validate_openrouter_base_url
 from .sandbox import sandbox_command
 from .security import redact_secrets
 from .policy import default_permission_policy, forbidden, sensitive_read
+
+_DEFAULT_URL_OPEN = urllib.request.urlopen
 
 OPENROUTER_READ_FILE_CHARS = 12_000
 OPENROUTER_READ_CHUNK_CHARS = 8_192
@@ -918,9 +921,20 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
         return f"ERROR: {redact_secrets(str(exc), extra_values=redaction_values or ())}"
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Never forward an Authorization header to a redirected endpoint."""
+
+    def redirect_request(self, req, fp, code, msg, headers, new_url):
+        return None
+
+
 def _openrouter_request(url: str, api_key: str, body: dict[str, Any],
                         timeout: int | None,
-                        redaction_values: list[str] | None = None) -> dict[str, Any]:
+                        redaction_values: list[str] | None = None,
+                        *, allow_custom_endpoint: bool = False) -> dict[str, Any]:
+    validate_openrouter_base_url(
+        url, "OpenRouter request URL", allow_custom_endpoint=allow_custom_endpoint,
+    )
     redaction_values = [api_key, *(redaction_values or [])]
     request = urllib.request.Request(
         url,
@@ -933,7 +947,17 @@ def _openrouter_request(url: str, api_key: str, body: dict[str, Any],
         method="POST",
     )
     try:
-        response_context = urllib.request.urlopen(request, timeout=timeout) if timeout else urllib.request.urlopen(request)
+        # Preserve the historical module-level transport seam for integrations
+        # that inject a test/local transport. The real urllib transport uses a
+        # no-redirect opener so Authorization cannot cross endpoint boundaries.
+        if urllib.request.urlopen is not _DEFAULT_URL_OPEN:
+            response_context = (
+                urllib.request.urlopen(request, timeout=timeout)
+                if timeout else urllib.request.urlopen(request)
+            )
+        else:
+            opener = urllib.request.build_opener(_NoRedirectHandler())
+            response_context = opener.open(request, timeout=timeout) if timeout else opener.open(request)
         with response_context as response:
             value = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:

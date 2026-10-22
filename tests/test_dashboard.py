@@ -122,6 +122,33 @@ class DashboardTests(unittest.TestCase):
                     latest = second.result(timeout=2)
             self.assertEqual(latest[0]["developer"]["summary"], "new\n")
 
+    def test_dashboard_discards_snapshot_when_folder_changes_during_build(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            run = root / "agent-issue-123-ab12cd34"
+            run.mkdir(parents=True)
+            marker = run / "developer-001.txt"
+            marker.write_text("old\n", encoding="utf-8")
+            calls = 0
+
+            def snapshot(folder):
+                nonlocal calls
+                calls += 1
+                value = marker.read_text(encoding="utf-8")
+                if calls == 1:
+                    marker.write_text("new\n", encoding="utf-8")
+                return {
+                    "id": folder.name,
+                    "last_activity": "2026-01-01T00:00:00+00:00",
+                    "developer": {"summary": value},
+                }
+
+            with patch.object(agentic_dashboard_data, "_run_snapshot", side_effect=snapshot):
+                snapshots = agentic_dashboard_data.collect_runs(root)
+
+            self.assertEqual(calls, 2)
+            self.assertEqual(snapshots[0]["developer"]["summary"], "new\n")
+
     def test_dashboard_exposes_run_metrics(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / ".demo-agent-runs"

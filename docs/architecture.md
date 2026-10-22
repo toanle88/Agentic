@@ -161,7 +161,7 @@ Set `AGENTIC_STATE_DIR` or pass `--state-dir PATH` to choose another root. A sha
 ## Safety boundaries
 
 - Test commands run under the host account by default. When `security_mode` is `isolated`, provider and test processes run in the configured container instead; use explicit `sandbox.pass_env` names for credentials.
-- The developer receives write access to its worktree; the reviewer is invoked in the provider's read-only or restricted review mode.
+- The developer receives write access to its worktree while isolated containers overlay the worktree `.git` entry and Git metadata read-only; the reviewer is invoked in the provider's read-only or restricted review mode.
 - Native provider CLIs receive provider-specific non-interactive permissions. Gemini and Claude use their read-only review modes; Copilot review turns expose only file-inspection tools and no shell. Agentic captures the staged Git diff with its argv-only runner and supplies it as bounded, untrusted evidence, so native reviewers do not need provider-specific shell permissions. OpenRouter uses an Agentic-owned scoped tool loop.
 - The runner refuses protected changes including Agentic configuration, agent instructions, secrets, private keys, and `.codex/`. GitHub workflows are also protected for ordinary repositories; only a checkout sharing Agentic's Git common root may update its own CI workflows.
 - Issue text, repository files, and test output are untrusted input to the selected provider.
@@ -180,7 +180,7 @@ Set `AGENTIC_STATE_DIR` or pass `--state-dir PATH` to choose another root. A sha
   operation timing/status metadata for provider and test commands. It never
   stores full prompts or command arguments.
 - `security_mode: "isolated"` requires the optional container mode and fails closed when its engine is unavailable.
-- Container mode mounts the task worktree, required linked-worktree Git metadata, and a fresh per-invocation provider output directory, uses a read-only container root, and disables networking by default. Durable run state is never the provider's writable output mount: provider results and schemas are staged in the disposable directory and copied or validated by the host. Read-only filesystem access does not implicitly disable networking: when `sandbox.allow_network` is enabled, both developer and reviewer processes can use outbound networking while the reviewer worktree mount remains read-only. OpenRouter file inspection remains host-side but its command tools use the same container boundary.
+- Container mode mounts the task worktree, overlays its `.git` entry and required Git metadata read-only, and mounts a fresh per-invocation provider output directory. It uses a read-only container root and disables networking by default. Durable run state is never the provider's writable output mount: provider results and schemas are staged in the disposable directory and copied or validated by the host. Read-only filesystem access does not implicitly disable networking: when `sandbox.allow_network` is enabled, both developer and reviewer processes can use outbound networking while the reviewer worktree mount remains read-only. OpenRouter file inspection remains host-side but its command tools use the same container boundary.
 - `agentic status --json` exposes stable worktree records for scripts without parsing terminal output.
 
 ## WSL and Windows Git compatibility

@@ -40,6 +40,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                    reasoning_effort: str | None = None,
                    api_key_env: str = "OPENROUTER_API_KEY",
                    base_url: str = DEFAULT_OPENROUTER_BASE_URL,
+                   allow_custom_endpoint: bool = False,
                    max_tool_turns: int | None = None,
                    command_timeout: int | None = None,
                    allow_network: bool = False,
@@ -173,9 +174,16 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
             if reasoning_effort:
                 body["reasoning_effort"] = reasoning_effort
             remaining = None if deadline is None else max(1, int(deadline - time.monotonic()))
-            response = _openrouter_request(
-                base_url.rstrip("/") + "/chat/completions", api_key, body, remaining,
-            )
+            request_url = base_url.rstrip("/") + "/chat/completions"
+            if allow_custom_endpoint:
+                response = _openrouter_request(
+                    request_url, api_key, body, remaining,
+                    allow_custom_endpoint=True,
+                )
+            else:
+                # Keep the historical call shape for integrations that patch
+                # the request seam without the newer opt-in keyword.
+                response = _openrouter_request(request_url, api_key, body, remaining)
             usage_records.append(normalize_usage(response, provider="openrouter"))
             record_raw({"event": "response", "turn": turn + 1, "response": response})
             choices = response.get("choices")

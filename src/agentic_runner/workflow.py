@@ -367,6 +367,8 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
             "api_key_env": selected.get("api_key_env") or "OPENROUTER_API_KEY",
             "base_url": selected.get("base_url") or DEFAULT_OPENROUTER_BASE_URL,
         }
+        if selected.get("allow_custom_endpoint"):
+            router_kwargs["allow_custom_endpoint"] = True
         if "max_tool_turns" in selected:
             router_kwargs["max_tool_turns"] = selected.get("max_tool_turns") or OPENROUTER_MAX_TURNS
         if "command_timeout_seconds" in selected:
