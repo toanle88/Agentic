@@ -16,9 +16,10 @@ from scripts.agent_benchmark import (
 )
 from scripts.agent_benchmark_config import load_benchmark as load_benchmark_config
 from scripts.agent_benchmark_scenarios import (
-    _process_group_kwargs, _run_checks, run_scenario,
+    _run_checks, run_scenario,
 )
 from scripts.benchmark import run_case
+from scripts.benchmark_execution import process_group_kwargs
 
 
 class BenchmarkTests(unittest.TestCase):
@@ -42,6 +43,41 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["returncode"], 127)
 
+    def test_legacy_benchmark_redacts_argv_and_output(self):
+        secret = "benchmark-secret-canary-123456"
+        result = run_case(
+            Path.cwd(),
+            {
+                "name": "secret",
+                "command": [sys.executable, "-c", f"print({secret!r})", secret],
+            },
+            timeout=5,
+        )
+        serialized = json.dumps(result)
+        self.assertEqual(result["status"], "passed")
+        self.assertNotIn(secret, serialized)
+        self.assertEqual(result["command"]["argv_count"], 4)
+        self.assertEqual(result["command"]["executable"], Path(sys.executable).name)
+
+    def test_legacy_benchmark_timeout_terminates_descendants(self):
+        with tempfile.TemporaryDirectory() as temp:
+            marker = Path(temp) / "descendant-alive"
+            child = (
+                "import pathlib,time; time.sleep(0.5); "
+                f"pathlib.Path({str(marker)!r}).write_text('alive')"
+            )
+            parent = (
+                "import subprocess,sys,time; "
+                f"subprocess.Popen([sys.executable, '-c', {child!r}]); time.sleep(10)"
+            )
+            result = run_case(
+                Path(temp), {"name": "timeout", "command": [sys.executable, "-c", parent]},
+                timeout=1,
+            )
+            time.sleep(0.8)
+        self.assertEqual(result["status"], "timeout")
+        self.assertFalse(marker.exists())
+
     def test_benchmark_checks_terminate_process_group_on_timeout(self):
         with tempfile.TemporaryDirectory() as temp:
             marker = Path(temp) / "descendant-alive"
@@ -62,9 +98,9 @@ class BenchmarkTests(unittest.TestCase):
         self.assertFalse(marker.exists())
 
     def test_benchmark_process_group_uses_windows_creation_flag_fallback(self):
-        with patch('scripts.agent_benchmark_scenarios.os.name', 'nt'), \
+        with patch('scripts.benchmark_execution.os.name', 'nt'), \
              patch('subprocess.CREATE_NEW_PROCESS_GROUP', 512, create=True):
-            self.assertEqual(_process_group_kwargs(), {"creationflags": 512})
+            self.assertEqual(process_group_kwargs(), {"creationflags": 512})
 
     def test_quality_benchmark_requires_both_scenarios_and_safe_paths(self):
         with tempfile.TemporaryDirectory() as temp:

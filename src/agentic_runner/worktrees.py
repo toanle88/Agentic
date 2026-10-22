@@ -363,7 +363,14 @@ def github_repo_from_remote(
     """Extract owner/repository from a GitHub origin without contacting GitHub."""
     remote = git(repo, "remote", "get-url", "origin", check=False).strip()
     escaped_host = re.escape(github_host)
-    match = re.search(rf"(?:{escaped_host})[:/]([^/]+)/([^/]+?)(?:\.git)?$", remote)
+    # Require a hostname boundary so ``evilgithub.com`` cannot be treated as
+    # the configured ``github.com`` host. The lookahead preserves URL, SSH,
+    # and scp-style remotes, whose host is followed by either '/' or ':'.
+    match = re.search(
+        rf"(?<![A-Za-z0-9.-]){escaped_host}(?=[:/])[:/]([^/]+)/([^/]+?)(?:\.git)?$",
+        remote,
+        re.IGNORECASE,
+    )
     return f"{match.group(1)}/{match.group(2)}" if match else None
 
 

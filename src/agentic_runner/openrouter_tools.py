@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import codecs
+from collections import OrderedDict
 import json
 import os
 import queue
@@ -28,6 +29,7 @@ OPENROUTER_COMMAND_OUTPUT_CHARS = 6_000
 OPENROUTER_COMMAND_READ_CHUNK_BYTES = 4_096
 OPENROUTER_COMMAND_DRAIN_TIMEOUT_SECONDS = 1.0
 OPENROUTER_LIST_FILES_PAGE_SIZE = 300
+OPENROUTER_LIST_FILES_CACHE_ENTRIES = 8
 OPENROUTER_GIT_OBJECT_CHECK_TIMEOUT_SECONDS = 1.0
 OPENROUTER_HTTP_RESPONSE_BYTES = 2_000_000
 NETWORK_COMMANDS = {"curl", "wget", "ssh", "scp", "sftp", "ftp", "nc", "netcat", "telnet", "gh"}
@@ -631,12 +633,36 @@ def _bounded_file_text(path: Path, *, start_line: int | None = None,
     return text
 
 
-def _list_files_page(target: Path, root: Path, page: int) -> tuple[list[str], bool]:
-    """Return one deterministic file-list page and whether another exists."""
-    offset = (page - 1) * OPENROUTER_LIST_FILES_PAGE_SIZE
+_FILE_LIST_CACHE: OrderedDict[
+    tuple[str, str], tuple[tuple[str, ...], tuple[tuple[str, int, int], ...]]
+] = OrderedDict()
+
+
+def _directory_metadata(
+    target: Path, root: Path,
+) -> tuple[tuple[str, int, int], ...]:
+    """Return bounded metadata for directories participating in a file index."""
+    metadata: list[tuple[str, int, int]] = []
+    for current, directories, _filenames in os.walk(target, topdown=True, followlinks=False):
+        directories[:] = [directory for directory in directories if not sensitive_read(
+            (Path(current) / directory).relative_to(root).as_posix()
+        )]
+        directories.sort()
+        current_path = Path(current)
+        try:
+            stat = current_path.stat()
+            relative = current_path.relative_to(root).as_posix()
+        except (OSError, ValueError):
+            continue
+        metadata.append((relative, stat.st_mtime_ns, stat.st_size))
+    return tuple(metadata)
+
+
+def _build_file_list_index(
+    target: Path, root: Path,
+) -> tuple[tuple[str, ...], tuple[tuple[str, int, int], ...]]:
+    """Build one sorted, protected-path-filtered file index."""
     paths: list[str] = []
-    seen = 0
-    has_more = False
     for current, directories, filenames in os.walk(target, topdown=True, followlinks=False):
         directories[:] = [directory for directory in directories if not sensitive_read(
             (Path(current) / directory).relative_to(root).as_posix()
@@ -653,17 +679,27 @@ def _list_files_page(target: Path, root: Path, page: int) -> tuple[list[str], bo
                 continue
             if sensitive_read(relative_item) or not resolved_item.is_file():
                 continue
-            if seen < offset:
-                seen += 1
-                continue
-            if len(paths) == OPENROUTER_LIST_FILES_PAGE_SIZE:
-                has_more = True
-                break
             paths.append(relative_item)
-            seen += 1
-        if has_more:
-            break
-    return paths, has_more
+    return tuple(paths), _directory_metadata(target, root)
+
+
+def _list_files_page(target: Path, root: Path, page: int) -> tuple[list[str], bool]:
+    """Return one deterministic page using a bounded metadata-aware index cache."""
+    key = (str(root), str(target))
+    cached = _FILE_LIST_CACHE.get(key)
+    metadata = _directory_metadata(target, root) if cached is not None else None
+    if cached is None or metadata != cached[1]:
+        cached = _build_file_list_index(target, root)
+        _FILE_LIST_CACHE[key] = cached
+        _FILE_LIST_CACHE.move_to_end(key)
+        while len(_FILE_LIST_CACHE) > OPENROUTER_LIST_FILES_CACHE_ENTRIES:
+            _FILE_LIST_CACHE.popitem(last=False)
+    else:
+        _FILE_LIST_CACHE.move_to_end(key)
+    indexed_paths = cached[0]
+    offset = (page - 1) * OPENROUTER_LIST_FILES_PAGE_SIZE
+    end = offset + OPENROUTER_LIST_FILES_PAGE_SIZE
+    return list(indexed_paths[offset:end]), end < len(indexed_paths)
 
 
 def _stop_command_process(process: subprocess.Popen[Any]) -> None:

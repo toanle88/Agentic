@@ -39,6 +39,36 @@ HUMAN_LOG_TRUNCATION_MARKER = (
 )
 
 
+def _process_group_kwargs() -> dict[str, Any]:
+    """Start a provider in a process group so timeout cleanup includes children."""
+    if os.name != "nt":
+        return {"start_new_session": True}
+    return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+
+
+def _stop_process_tree(process: subprocess.Popen[Any]) -> None:
+    """Stop a provider and its descendants without leaving output pipes open."""
+    if os.name != "nt":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            pass
+    else:
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, check=False,
+            )
+        except OSError:
+            pass
+    try:
+        if process.poll() is None:
+            process.kill()
+    except OSError:
+        pass
+
+
 def _append_bounded_human_log(path: Path, text: str) -> bool:
     """Append one human-log entry without exceeding the durable byte budget."""
     encoded = text.encode("utf-8")
@@ -413,7 +443,7 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
         proc = subprocess.Popen(
             process_argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace",
-            bufsize=1, start_new_session=(os.name != "nt"), env=env,
+            bufsize=1, env=env, **_process_group_kwargs(),
         )
     except OSError as exc:
         if invocation_temp is not None:
@@ -524,10 +554,7 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                 if timeout is not None and now - started > timeout:
                     timed_out = True
                     display(f"Time limit reached ({timeout}s). Stopping process.", style_status_tokens=True)
-                    if os.name != "nt":
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    else:
-                        proc.kill()
+                    _stop_process_tree(proc)
                     proc.wait()
                     break
                 try:
@@ -630,10 +657,7 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
             f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
             f"[{label}] Cancelled by user.\n",
         )
-        if os.name != "nt":
-            os.killpg(proc.pid, signal.SIGKILL)
-        else:
-            proc.kill()
+        _stop_process_tree(proc)
         proc.wait()
         raise
     finally:

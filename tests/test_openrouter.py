@@ -833,6 +833,24 @@ class OpenRouterTests(unittest.TestCase):
             )
             self.assertIn('use start_line/end_line', ranged_bounded)
 
+    def test_openrouter_file_list_pages_reuse_bounded_index(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for index in range(350):
+                path = root / "tree" / f"file-{index:03d}.txt"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("file\n")
+            with patch.object(
+                agentic_openrouter_tools,
+                '_build_file_list_index',
+                wraps=agentic_openrouter_tools._build_file_list_index,
+            ) as build:
+                first = agentic_openrouter_tools._list_files_page(root / 'tree', root, 1)
+                second = agentic_openrouter_tools._list_files_page(root / 'tree', root, 2)
+            self.assertEqual(len(first[0]), 300)
+            self.assertEqual(len(second[0]), 50)
+            build.assert_called_once()
+
     def test_openrouter_ranged_reader_uses_bounded_chunks(self):
         class HugeLineReader:
             def __init__(self):

@@ -41,6 +41,25 @@ class GitTest(_GitRepositoryTestCase):
             )
             self.assertIsNone(agentic_worktrees.github_repo_from_remote(Path('/repo'), 'github.com'))
 
+        for remote in (
+            'https://evilgithub.com/owner/repo.git',
+            'ssh://git@evilgithub.com/owner/repo.git',
+            'git@evilgithub.com:owner/repo.git',
+        ):
+            with self.subTest(remote=remote), patch('agentic_worktrees.git', return_value=remote):
+                self.assertIsNone(agentic_worktrees.github_repo_from_remote(Path('/repo'), 'github.com'))
+
+        for remote in (
+            'https://github.com/owner/repo.git',
+            'ssh://git@github.com/owner/repo.git',
+            'git@github.com:owner/repo.git',
+        ):
+            with self.subTest(remote=remote), patch('agentic_worktrees.git', return_value=remote):
+                self.assertEqual(
+                    agentic_worktrees.github_repo_from_remote(Path('/repo'), 'github.com'),
+                    'owner/repo',
+                )
+
     def test_create_discover_reuse_worktree_without_state_file(self):
         run = agentic.create_worktree(self.repo, 'main', 42)
         found = agentic.runs_for_issue(self.repo, 42)

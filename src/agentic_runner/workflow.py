@@ -1491,6 +1491,19 @@ def validate_publication_approval(run: Run, issue: Issue, base: str,
     return base_sha, digest, summary
 
 
+def _commit_publication_and_revalidate(
+    run: Run, base: str, max_files: int | None, expected_base_sha: str,
+    expected_digest: str, message: str,
+) -> None:
+    """Commit without hooks, then recheck the exact approved patch."""
+    git(run.worktree, "-c", "core.hooksPath=/dev/null", "commit", "-m", message)
+    current_base_sha, current_digest, _ = prepare_patch(
+        run.worktree, base, max_files,
+    )
+    if current_base_sha != expected_base_sha or current_digest != expected_digest:
+        raise RuntimeError("Patch changed during publication commit; not publishing")
+
+
 def _github_environment(host: str) -> dict[str, str]:
     environment = os.environ.copy()
     environment["GH_HOST"] = host
@@ -1558,7 +1571,16 @@ def push_existing_pr(run: Run, issue: Issue, github_repo: str, base: str,
     current = lookup()
     _validate_pull_request_identity(pull_request, current)
     if command(["git", "diff", "--cached", "--quiet"], run.worktree, check=False).returncode:
-        git(run.worktree, "commit", "-m", f"fix: repair PR #{pull_request.number}")
+        _commit_publication_and_revalidate(
+            run, base, config["max_files"], _new_base_sha, new_digest,
+            f"fix: repair PR #{pull_request.number}",
+        )
+    else:
+        current_base_sha, current_digest, _ = prepare_patch(
+            run.worktree, base, config["max_files"],
+        )
+        if current_base_sha != _new_base_sha or current_digest != new_digest:
+            raise RuntimeError("Patch changed before publication push; not publishing")
     current = lookup()
     _validate_pull_request_identity(pull_request, current)
     git(run.worktree, "push", "-u", "origin", run.branch)
@@ -1643,7 +1665,7 @@ def _publish(run: Run, issue: Issue, github_repo: str, base: str,
         raise RuntimeError(
             "No approval recorded for the current patch; run --review or complete development first"
         )
-    _base_sha, digest, _summary = validate_publication_approval(
+    base_sha, digest, _summary = validate_publication_approval(
         run, issue, base, config, approval,
     )
     # Use the same escape-sequence-aware editor as the interactive shell when
@@ -1684,7 +1706,15 @@ def _publish(run: Run, issue: Issue, github_repo: str, base: str,
             f"fix: complete local task - {issue.title[:72]}"
             if issue.is_local else f"fix: resolve issue #{issue.number}"
         )
-        git(run.worktree, "commit", "-m", message)
+        _commit_publication_and_revalidate(
+            run, base, config["max_files"], base_sha, digest, message,
+        )
+    else:
+        current_base_sha, current_digest, _ = prepare_patch(
+            run.worktree, base, config["max_files"],
+        )
+        if current_base_sha != base_sha or current_digest != digest:
+            raise RuntimeError("Patch changed before publication push; not publishing")
     git(run.worktree, "push", "-u", "origin", run.branch)
     if issue.is_audit:
         audit = load_audit_report(folder, issue.audit_key or AUDIT_KEY) or {}

@@ -276,7 +276,10 @@ class PublicationTests(_GitRepositoryTestCase):
             message.startswith('[PUBLISH] Completed: Draft PR:')
             for message in (call.args[0] for call in status.call_args_list)
         ))
-        self.assertIn(call(run.worktree, 'commit', '-m', 'fix: resolve issue #30'), git_mock.call_args_list)
+        self.assertIn(call(
+            run.worktree, '-c', 'core.hooksPath=/dev/null', 'commit',
+            '-m', 'fix: resolve issue #30',
+        ), git_mock.call_args_list)
         self.assertIn(call(run.worktree, 'push', '-u', 'origin', run.branch), git_mock.call_args_list)
         pr_command = next(argv for argv in commands if argv[:3] == ['gh', 'pr', 'create'])
         self.assertIn('--draft', pr_command)
@@ -290,6 +293,53 @@ class PublicationTests(_GitRepositoryTestCase):
         self.assertIn('Tests 4 passed &lt;img src=x&gt; &#96;[details]&#96;', pr_command[-1])
         self.assertNotIn('\x1b', pr_command[-1])
         self.assertNotIn('```text', pr_command[-1])
+
+
+    def test_publish_disables_mutating_hooks_and_revalidates_before_push(self):
+        run = agentic.create_worktree(self.repo, 'main', 38)
+        (run.worktree / 'fix.py').write_text('approved\n')
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(38, 'Hook safety', 'Keep the approved patch')
+        config = {'test_commands': [[sys.executable, '-c', 'pass']], 'max_files': 10}
+        base_sha, digest, _ = agentic.prepare_patch(run.worktree, 'main', 10)
+        agentic.record_review_approval(
+            run, issue, 'main', base_sha, digest,
+            {'approved': True, 'summary': 'Good', 'findings': [], 'skipped': []},
+            config, folder,
+        )
+        marker = self.repo / 'hook-ran'
+        hook = self.repo / '.git' / 'hooks' / 'pre-commit'
+        hook.write_text(
+            '#!/bin/sh\n'
+            f'printf hook-ran > {marker}\n'
+            f'printf mutated > {run.worktree / "fix.py"}\n',
+            encoding='utf-8',
+        )
+        hook.chmod(0o755)
+
+        real_command = agentic.command
+        real_git = agentic.git
+
+        def command_without_github(argv, cwd, **kwargs):
+            if argv[:3] == ['gh', 'pr', 'create']:
+                return CompletedProcess(argv, 0, stdout='https://github.test/pr/38')
+            return real_command(argv, cwd, **kwargs)
+
+        def git_without_push(repo, *args, **kwargs):
+            if args[:2] == ('push', '-u'):
+                return ''
+            return real_git(repo, *args, **kwargs)
+
+        with (
+            patch('agentic.check_existing_pr', return_value=[]),
+            patch('agentic_shell_input._interactive_line', return_value='y'),
+            patch('agentic.command', side_effect=command_without_github),
+            patch('agentic.git', side_effect=git_without_push),
+        ):
+            agentic.publish(run, issue, 'owner/repo', 'main', config, folder)
+
+        self.assertFalse(marker.exists())
+        self.assertEqual((run.worktree / 'fix.py').read_text(encoding='utf-8'), 'approved\n')
 
 
     def test_publish_reports_failure_when_publication_command_raises(self):
