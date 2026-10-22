@@ -59,9 +59,11 @@ The audit stops after the report is recorded: it does not run baseline checks,
 start a developer, review a patch, commit, push, or modify repository code.
 The dashboard and `/logs` can inspect the durable report and provider logs.
 `audit --publish` asks for `y`, `yes`, or `publish`, then creates a GitHub issue
-from the saved report without creating a commit or pull request. Cancellation
-retains the worktree and report for resume. `audit --offline` can resume an
-existing audit worktree without GitHub issue intake.
+from the saved report without creating a commit or pull request. The issue title
+includes the audit worktree's UTC timestamp so repeated audit publications are
+easy to distinguish. Cancellation retains the worktree and report for resume.
+`audit --offline` can resume an existing audit worktree without GitHub issue
+intake.
 
 ## Issue investigation
 

@@ -59,7 +59,16 @@ from .review import (
     record_review_findings,
 )
 from .telemetry import read_run_instruction, record_workflow_outcome
-from .worktrees import AUDIT_KEY, command, eligible, get_pull_request, git, issue_fingerprint, probe
+from .worktrees import (
+    AUDIT_BRANCH_RE,
+    AUDIT_KEY,
+    command,
+    eligible,
+    get_pull_request,
+    git,
+    issue_fingerprint,
+    probe,
+)
 from .workflow_state import (
     clear_blocked,
     clear_result,
@@ -858,6 +867,26 @@ def audit_issue_path(folder: Path) -> Path:
     return folder / AUDIT_ISSUE_FILENAME
 
 
+def _audit_issue_title(run: Run) -> str:
+    """Return a readable, stable title for one audit publication."""
+    timestamp = None
+    match = AUDIT_BRANCH_RE.fullmatch(run.branch)
+    if match:
+        timestamp = match.group("timestamp")
+    if timestamp:
+        format_string = "%Y%m%dT%H%M%S%fZ" if len(timestamp) == 22 else "%Y%m%dT%H%M%SZ"
+        try:
+            parsed = datetime.datetime.strptime(timestamp, format_string)
+            rendered = parsed.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        except ValueError:
+            rendered = timestamp
+    else:
+        rendered = datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
+    return f"Repository audit findings — {rendered}"
+
+
 def _audit_issue_body(report: dict[str, Any]) -> str:
     lines = [
         "## Repository audit",
@@ -930,7 +959,7 @@ def publish_audit_issue(run: Run, issue: Issue, github_repo: str,
         return ""
     result = command([
         "gh", "issue", "create", "--repo", github_repo,
-        "--title", "Repository audit findings",
+        "--title", _audit_issue_title(run),
         "--body", _audit_issue_body(report),
     ], run.worktree, env=_github_environment(github_host))
     url = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""

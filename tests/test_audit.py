@@ -221,7 +221,11 @@ class AuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
             (folder / "audit-report.json").write_text(json.dumps(report))
-            run = Run(None, "agent/audit-0123456789ab", Path(temp))
+            run = Run(
+                None,
+                "agent/audit-0123456789ab-20261022T123456789012Z",
+                Path(temp),
+            )
             with (
                 patch.object(audit_workflow, "command", return_value=CompletedProcess(
                     ["gh"], 0, stdout="https://github.test/issues/7\n", stderr="",
@@ -235,6 +239,10 @@ class AuditTests(unittest.TestCase):
             argv = command.call_args.args[0]
             self.assertEqual(argv[:4], ["gh", "issue", "create", "--repo"])
             self.assertIn("owner/repo", argv)
+            self.assertIn(
+                "Repository audit findings — 2026-10-22T12:34:56.789012Z",
+                argv,
+            )
             self.assertIn("Unsafe boundary", argv[-1])
             self.assertTrue((folder / "audit-issue.json").is_file())
 
