@@ -45,6 +45,10 @@ READONLY_GIT_COMMANDS = {"status", "diff", "grep", "log", "show"}
 # inspection is intentionally no longer part of the permission allowlist.
 READONLY_BRANCH_OPTIONS: set[str] = set()
 READONLY_INSPECTION_COMMANDS = {"rg", "grep", "ls", "pwd", "file"}
+# Read-only command policy accepts only bare executable names for allowlisted
+# inspection commands. This keeps the name authorized by the policy equal to
+# the executable selected by the argv-only process runner.
+READONLY_ALLOWLISTED_EXECUTABLES = READONLY_INSPECTION_COMMANDS | {"git"}
 INTERPRETER_EXECUTABLES = {
     "node", "nodejs", "perl", "php", "python", "python3", "py", "ruby",
 }
@@ -514,12 +518,22 @@ def _openrouter_command_allowed(
     if not isinstance(argv, list) or not argv or not all(isinstance(part, str) and part for part in argv):
         return False, "argv must be a non-empty array of strings"
     executable = Path(argv[0]).name.lower()
+    path_qualified_executable = (
+        Path(argv[0]).name != argv[0]
+        or "/" in argv[0]
+        or "\\" in argv[0]
+    )
     policy = default_permission_policy("reviewer" if readonly else "developer")
     if permission_policy is None:
         policy["network"] = bool(allow_network)
     else:
         policy.update(permission_policy)
         allow_network = bool(policy.get("network"))
+    if path_qualified_executable and executable in READONLY_ALLOWLISTED_EXECUTABLES:
+        return False, (
+            "path-qualified inspection executables are not allowed; "
+            "provide a bare trusted command name"
+        )
     if executable in LAUNCHER_EXECUTABLES:
         return False, f"launcher executable {executable} is not allowed from an OpenRouter tool call"
     if executable in {"bash", "sh", "zsh", "fish", "cmd", "powershell", "pwsh"}:
