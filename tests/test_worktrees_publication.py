@@ -89,6 +89,34 @@ class PublicationTests(_GitRepositoryTestCase):
             agentic.prepare_patch(run.worktree, 'main', 10)
 
 
+    def test_publication_rejects_untracked_symlink_regardless_of_target(self):
+        run = agentic.create_worktree(self.repo, 'main', 131)
+        outside = self.repo.parent / 'publication-secret.txt'
+        outside.write_text('do not publish\n', encoding='utf-8')
+        try:
+            (run.worktree / 'safe-name.txt').symlink_to(outside)
+            (run.worktree / 'other-name.txt').symlink_to(run.worktree / 'AGENTS.md')
+        except OSError as exc:
+            self.skipTest(f'symlinks unavailable: {exc}')
+        with self.assertRaisesRegex(RuntimeError, 'Non-regular files'):
+            agentic.prepare_patch(run.worktree, 'main', 10)
+
+
+    def test_publication_rejects_tracked_symlink_mode(self):
+        run = agentic.create_worktree(self.repo, 'main', 132)
+        target = run.worktree / 'target.txt'
+        target.write_text('target\n', encoding='utf-8')
+        link = run.worktree / 'tracked-name.txt'
+        try:
+            link.symlink_to(target)
+        except OSError as exc:
+            self.skipTest(f'symlinks unavailable: {exc}')
+        sh('git', 'add', 'target.txt', 'tracked-name.txt', cwd=run.worktree)
+        sh('git', 'commit', '-m', 'add symlink', cwd=run.worktree)
+        with self.assertRaisesRegex(RuntimeError, 'Non-regular files'):
+            agentic.prepare_patch(run.worktree, 'main', 10)
+
+
     def test_publish_uses_existing_approval_and_confirmation(self):
         run = agentic.create_worktree(self.repo, 'main', 15)
         (run.worktree / 'fix.py').write_text('fixed=True\n')

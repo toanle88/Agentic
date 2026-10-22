@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import re
+import subprocess
 from typing import Any
 
 
@@ -108,6 +109,31 @@ def sandbox_build_command(settings: dict[str, Any], repo: Path) -> list[str] | N
     ]
 
 
+def _authoritative_git_common_dir(root: Path) -> Path | None:
+    """Ask Git which common directory belongs to this checkout."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--git-common-dir"],
+            cwd=root,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    if not value:
+        return None
+    path = Path(value)
+    if not path.is_absolute():
+        path = root / path
+    return path.resolve()
+
+
 def _git_metadata(root: Path) -> tuple[Path, Path | None] | None:
     """Locate safe Git metadata mounts for a normal or linked worktree."""
     marker = root / ".git"
@@ -150,6 +176,9 @@ def _git_metadata(root: Path) -> tuple[Path, Path | None] | None:
         if not linked_path.is_absolute():
             linked_path = linked_marker.parent / linked_path
         if linked_path.resolve() != marker.resolve():
+            return None
+        authoritative_common_dir = _authoritative_git_common_dir(root)
+        if authoritative_common_dir != common_dir:
             return None
         return git_dir, common_dir
     except (OSError, UnicodeError, IndexError, ValueError):

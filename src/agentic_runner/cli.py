@@ -57,6 +57,15 @@ from .context import (  # noqa: F401
     _compact_feedback,
     _issue_context,
 )
+from .workflow_state import (  # noqa: F401
+    clear_blocked,
+    latest_numbered_log as _latest_numbered_log,
+    load_blocked,
+    load_latest_developer_report,
+    next_log,
+    record_blocked,
+    record_no_code_changes_blocked,
+)
 from .prompts import (  # noqa: F401
     _developer_prompt_context,
     _developer_run_instruction_context,
@@ -313,15 +322,6 @@ def logs_path(repo: Path, run: Run, state_dir: Path | None = None) -> Path:
     return folder
 
 
-def next_log(folder: Path, kind: str, ext: str = "txt") -> Path:
-    nums = []
-    for p in folder.glob(f"{kind}-*.{ext}"):
-        suffix = p.stem.removeprefix(f"{kind}-")
-        if suffix.isdigit():
-            nums.append(int(suffix))
-    return folder / f"{kind}-{max(nums, default=0) + 1:03d}.{ext}"
-
-
 MANUAL_APPROVAL_FILENAME = "manual-approval.json"
 REVIEW_APPROVAL_FILENAME = "review-approval.json"
 BLOCKED_FILENAME = "blocked.json"
@@ -340,59 +340,6 @@ def review_approval_path(folder: Path) -> Path:
 def blocked_path(folder: Path) -> Path:
     """Return the durable deferred-run marker path."""
     return folder / BLOCKED_FILENAME
-
-
-def load_blocked(folder: Path) -> dict[str, Any] | None:
-    """Load a blocked marker, ignoring incomplete or corrupt markers."""
-    path = blocked_path(folder)
-    try:
-        value = json.loads(redact_secrets(path.read_text(encoding="utf-8")))
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(value, dict) or value.get("status") != "blocked":
-        return None
-    if not isinstance(value.get("patch_digest"), str):
-        return None
-    return value
-
-
-def record_blocked(folder: Path, patch_digest: str, findings: list[str], *,
-                   issue_digest: str = "") -> None:
-    """Persist a repeated unchanged review blocker for future invocations."""
-    atomic_write_json(blocked_path(folder), {
-        "status": "blocked",
-        "reason": "Repeated review blocker with no patch change",
-        "patch_digest": patch_digest,
-        "issue_digest": issue_digest,
-        "findings": findings,
-        "blocked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    })
-
-
-def record_no_code_changes_blocked(folder: Path, developer_report: str, *,
-                                   issue_digest: str = "") -> None:
-    """Persist a developer blocker for a passing run with no proposed patch."""
-    developer_log = _latest_numbered_log(folder, "developer", "txt")
-    summary = _bounded_text(developer_report, 2_000).strip()
-    atomic_write_json(blocked_path(folder), {
-        "status": "blocked",
-        "kind": "no-code-changes",
-        "reason": "Developer reported a blocker without producing code changes",
-        "patch_digest": "",
-        "issue_digest": issue_digest,
-        "developer_summary": summary or "No developer blocker summary was provided.",
-        "developer_log": developer_log.name if developer_log else "",
-        "logs_path": str(folder),
-        "blocked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    })
-
-
-def clear_blocked(folder: Path) -> None:
-    """Clear a deferred marker after the proposed patch changes."""
-    try:
-        blocked_path(folder).unlink()
-    except FileNotFoundError:
-        pass
 
 
 def load_manual_approval(folder: Path) -> dict[str, Any] | None:
@@ -488,15 +435,6 @@ def load_publication_approval(folder: Path) -> dict[str, Any] | None:
     return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
 
-def _latest_numbered_log(folder: Path, kind: str, ext: str) -> Path | None:
-    candidates: list[tuple[int, Path]] = []
-    for path in folder.glob(f"{kind}-*.{ext}"):
-        suffix = path.stem.removeprefix(f"{kind}-")
-        if suffix.isdigit():
-            candidates.append((int(suffix), path))
-    return max(candidates, default=(0, None))[1]
-
-
 def load_resume_feedback(folder: Path) -> str:
     """Load the latest failed review and test evidence for a resumed run."""
     chunks: list[str] = []
@@ -525,20 +463,6 @@ def load_resume_feedback(folder: Path) -> str:
     if recurring:
         chunks.append(recurring)
     return redact_secrets("\n\n".join(chunks)[-9000:])
-
-
-def load_latest_developer_report(folder: Path, limit: int = 6000) -> str:
-    """Load the latest developer handoff for standalone review or publication."""
-    path = _latest_numbered_log(folder, "developer", "txt")
-    if path is None:
-        return ""
-    try:
-        return path.read_text(encoding="utf-8", errors="replace")[-limit:]
-    except OSError:
-        return ""
-
-
-
 
 
 

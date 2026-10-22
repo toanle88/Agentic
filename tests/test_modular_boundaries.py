@@ -9,6 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
+from agentic_runner import cli as agentic
 from agentic_runner import shell as agentic_shell
 from agentic_runner import shell_completion as agentic_shell_completion
 from agentic_runner import shell_jobs as agentic_shell_jobs
@@ -43,6 +44,21 @@ class ModularBoundaryTests(unittest.TestCase):
         self.assertIs(
             agentic_workflow.record_review_approval,
             agentic_workflow_state.record_review_approval,
+        )
+
+    def test_legacy_cli_state_helpers_delegate_to_workflow_state(self):
+        self.assertIs(agentic.next_log, agentic_workflow_state.next_log)
+        self.assertIs(agentic.load_blocked, agentic_workflow_state.load_blocked)
+        self.assertIs(agentic.record_blocked, agentic_workflow_state.record_blocked)
+        self.assertIs(
+            agentic.record_no_code_changes_blocked,
+            agentic_workflow_state.record_no_code_changes_blocked,
+        )
+        self.assertIs(agentic.clear_blocked, agentic_workflow_state.clear_blocked)
+        self.assertIs(agentic._latest_numbered_log, agentic_workflow_state.latest_numbered_log)
+        self.assertIs(
+            agentic.load_latest_developer_report,
+            agentic_workflow_state.load_latest_developer_report,
         )
 
     def test_workflow_facade_reexports_developer_orchestration_boundary(self):

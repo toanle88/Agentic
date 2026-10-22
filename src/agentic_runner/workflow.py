@@ -600,6 +600,39 @@ def pending_files(worktree: Path) -> list[str]:
     return names
 
 
+def _staged_non_regular_files(worktree: Path, base_sha: str) -> list[str]:
+    """Return proposed paths whose staged Git mode is not a regular file."""
+    raw = command(
+        ["git", "diff", "--cached", "--raw", "-z", "--no-renames", base_sha],
+        worktree,
+    ).stdout
+    fields = raw.split("\x00")
+    unsafe: list[str] = []
+    index = 0
+    allowed_modes = {"100644", "100755"}
+    while index < len(fields):
+        record = fields[index]
+        index += 1
+        if not record:
+            continue
+        if not record.startswith(":"):
+            raise RuntimeError("Could not inspect staged Git modes; publication blocked")
+        parts = record[1:].split()
+        if len(parts) < 5:
+            raise RuntimeError("Could not inspect staged Git modes; publication blocked")
+        new_mode = parts[1]
+        if index >= len(fields) or not fields[index]:
+            raise RuntimeError("Could not inspect staged Git paths; publication blocked")
+        filename = fields[index]
+        index += 1
+        # A deletion has no proposed filesystem entry. Every other mode must
+        # describe a regular blob; in particular, reject symlinks (120000),
+        # submodules (160000), and any future special Git mode.
+        if new_mode != "000000" and new_mode not in allowed_modes:
+            unsafe.append(filename)
+    return unsafe
+
+
 def _common_repository_root(path: Path) -> Path | None:
     """Return the shared checkout root for a normal checkout or worktree."""
     ok, common_dir = probe(["git", "rev-parse", "--git-common-dir"], path)
@@ -646,6 +679,9 @@ def prepare_patch(worktree: Path, base: str, max_files: int | None) -> tuple[str
         raise RuntimeError(f"Sensitive files changed, publication blocked: {disallowed}")
     git(worktree, "add", "-A")
     base_sha = base_revision(worktree, base)
+    non_regular = _staged_non_regular_files(worktree, base_sha)
+    if non_regular:
+        raise RuntimeError(f"Non-regular files changed, publication blocked: {non_regular}")
     raw_names = command(["git", "diff", "--cached", "--name-only", "-z", base_sha], worktree).stdout
     names = [p for p in raw_names.split("\x00") if p]
     disallowed = [p for p in names if _publication_forbidden(worktree, p)]

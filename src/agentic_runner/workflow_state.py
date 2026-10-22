@@ -150,7 +150,7 @@ def clear_result(folder: Path) -> None:
 
 def load_blocked(folder: Path) -> dict[str, Any] | None:
     try:
-        value = json.loads(_blocked_path(folder).read_text(encoding="utf-8"))
+        value = json.loads(redact_secrets(_blocked_path(folder).read_text(encoding="utf-8")))
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         return None
     if not isinstance(value, dict) or value.get("status") != "blocked":
@@ -161,6 +161,10 @@ def load_blocked(folder: Path) -> dict[str, Any] | None:
 def record_blocked(folder: Path, patch_digest: str, findings: list[str], *,
                    attempts: int | None = None, max_retries: int | None = None,
                    summary: str = "", issue_digest: str = "") -> None:
+    safe_findings = [
+        bounded for item in findings
+        if (bounded := result_text(item, 1_000))
+    ]
     atomic_write_json(_blocked_path(folder), {
         "status": "blocked",
         "result_status": "BLOCKED",
@@ -168,7 +172,7 @@ def record_blocked(folder: Path, patch_digest: str, findings: list[str], *,
         "summary": result_text(summary or (findings[0] if findings else "")),
         "patch_digest": patch_digest,
         "issue_digest": issue_digest,
-        "findings": findings,
+        "findings": safe_findings,
         "attempts": attempts,
         "max_retries": max_retries,
         "logs_path": str(folder),
@@ -246,8 +250,11 @@ def record_review_approval(run: Run, issue: Issue, base: str, base_sha: str,
         "base": base,
         "base_sha": base_sha,
         "patch_digest": patch_digest,
-        "summary": str(verdict.get("summary", "")),
-        "skipped": [item for item in verdict.get("skipped", []) if isinstance(item, str)],
+        "summary": result_text(verdict.get("summary", ""), 2_000),
+        "skipped": [
+            bounded for item in verdict.get("skipped", [])
+            if isinstance(item, str) and (bounded := result_text(item, 1_000))
+        ],
         "reviewer_provider": config.get("reviewer_agent", {}).get("provider", "codex"),
         "approved_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }

@@ -41,6 +41,44 @@ OPENROUTER_LOG_BYTES = 200_000
 OPENROUTER_FINAL_MESSAGE_CHARS = 50_000
 _TRUNCATION_MARKER = "\n[agentic_stream_truncated: size limit reached]\n"
 
+
+def _normalized_assistant_message(message: dict[str, Any]) -> dict[str, Any]:
+    """Keep only chat-protocol fields needed for later tool turns.
+
+    Provider-specific metadata is external input and is not useful to the
+    next request. Dropping it here prevents large unknown fields from
+    surviving history compaction and consuming the request budget.
+    """
+    content = message.get("content")
+    if content is not None and not isinstance(content, str):
+        content = _message_text(content)
+    normalized: dict[str, Any] = {"role": "assistant", "content": content}
+    calls: list[dict[str, Any]] = []
+    raw_calls = message.get("tool_calls")
+    if isinstance(raw_calls, list):
+        for raw_call in raw_calls:
+            if not isinstance(raw_call, dict):
+                continue
+            function = raw_call.get("function")
+            if not isinstance(function, dict) or not isinstance(function.get("name"), str):
+                continue
+            arguments = function.get("arguments", "{}")
+            if isinstance(arguments, dict):
+                arguments = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+            if not isinstance(arguments, str):
+                arguments = "{}"
+            call: dict[str, Any] = {
+                "id": raw_call.get("id", "call"),
+                "type": "function",
+                "function": {"name": function["name"], "arguments": arguments},
+            }
+            if not isinstance(call["id"], str) or not call["id"]:
+                call["id"] = "call"
+            calls.append(call)
+    if calls:
+        normalized["tool_calls"] = calls
+    return normalized
+
 def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                    readonly: bool = False, schema: Path | None = None,
                    timeout: int | None = None, model: str | None = None,
@@ -253,9 +291,10 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
             message = choices[0].get("message")
             if not isinstance(message, dict):
                 raise RuntimeError("OpenRouter response did not contain a message")
-            messages.append(message)
-            tool_calls = message.get("tool_calls") or []
-            content = _message_text(message.get("content"))
+            normalized_message = _normalized_assistant_message(message)
+            messages.append(normalized_message)
+            tool_calls = normalized_message.get("tool_calls") or []
+            content = _message_text(normalized_message.get("content"))
             if content:
                 last_message = bounded_final_message(content)
                 emit("Agent: " + _short(
