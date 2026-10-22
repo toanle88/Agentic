@@ -274,7 +274,7 @@ def record_run_instruction(folder: Path, instruction: str) -> None:
 
 def record_issue_metadata(folder: Path, *, number: int | None, title: str,
                           state: str, source: str = "github",
-                          body: str = "") -> None:
+                          body: str = "", audit_key: str | None = None) -> None:
     """Persist bounded issue identity for read-only dashboards and resumes."""
     path, data = _load_run_record(folder)
     data["issue_metadata"] = {
@@ -283,6 +283,8 @@ def record_issue_metadata(folder: Path, *, number: int | None, title: str,
         "state": _bounded_text(state, 40).upper() or "UNKNOWN",
         "source": _bounded_text(source, 40) or "github",
     }
+    if audit_key:
+        data["issue_metadata"]["audit_key"] = _bounded_text(audit_key, 32)
     # Keep a bounded, redacted task snapshot so an existing run can be resumed
     # during a GitHub outage.  It is intentionally separate from run.json and
     # excluded from dashboard log listings.
@@ -292,6 +294,7 @@ def record_issue_metadata(folder: Path, *, number: int | None, title: str,
         "body": _bounded_text(redact_secrets(body), 12_000),
         "state": _bounded_text(state, 40).upper() or "UNKNOWN",
         "source": _bounded_text(source, 40) or "github",
+        **({"audit_key": _bounded_text(audit_key, 32)} if audit_key else {}),
     })
     _write_run_record(path, data)
 

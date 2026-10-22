@@ -116,7 +116,9 @@ def local_resume_task_file(issue: Issue, folder: Path) -> Path:
 
 
 def resume_action(issue: Issue, folder: Path) -> str:
-    if issue.is_local:
+    if issue.is_audit:
+        target = shlex.join(["python", "agentic.py", "audit"])
+    elif issue.is_local:
         task_path = local_resume_task_file(issue, folder)
         target = shlex.join([
             "python", "agentic.py", "--task-file", str(task_path.resolve()),

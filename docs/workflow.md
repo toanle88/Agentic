@@ -2,7 +2,7 @@
 
 ## Run lifecycle
 
-Each issue or local-task run follows this sequence:
+Each issue, local-task, or audit run follows this sequence:
 
 1. Resolve the repository's base branch; GitHub mode also loads the GitHub issue.
 2. Create or reuse an isolated worktree for the issue or deterministic local task.
@@ -15,6 +15,44 @@ Each issue or local-task run follows this sequence:
 7. Stage and inspect the proposed patch.
 8. Ask an independent read-only configured reviewer for a structured verdict.
 9. Approve, retry with evidence, or preserve the worktree for resume.
+
+## Repository audits
+
+Run a reusable repository audit without creating a GitHub issue or task file:
+
+```bash
+agentic audit
+```
+
+The audit gets a distinct `AUDIT` identity and `agent/audit-*` branch. A normal
+invocation reuses the existing audit worktree for this repository; pass
+`--new` when a separate audit attempt is intentional. `/audit` in the
+interactive shell has the same behavior and runs in the background unless
+`--publish` is selected.
+
+The audit provider is an independent read-only invocation using the configured
+reviewer boundary. It does not edit files, run project code or tests, access the
+network, or receive extra permissions. It examines four required categories:
+code quality/architecture, security boundaries and secret handling, reliability
+and error handling, and performance risks/measurements/benchmarks. Its bounded
+structured report is stored outside the worktree as `audit-report.json` and is
+also visible in the read-only dashboard.
+
+The report schema is version 1 and contains `summary`, up to 40 findings,
+`measurements`, and `skipped`. Findings have an id, one of `code_quality`,
+`security`, `reliability`, or `performance`, a severity from `CRITICAL`,
+`HIGH`, `MEDIUM`, `LOW`, or `INFO`, plus bounded description, evidence, and
+recommendation fields. Findings are ordered with critical/high risks first.
+Concrete critical and high security/correctness findings are prioritized by
+the developer; focused low-risk medium findings may be included, while large
+refactors and uncertain performance hypotheses remain documented evidence.
+
+After the audit report, the ordinary baseline checks, developer retries,
+read-only review, patch digest approval, and human-approved draft publication
+flow apply unchanged. `audit --publish` shows the current patch and audit
+summary, then accepts `y`, `yes`, or `publish`; cancellation retains the
+worktree and report for resume. `audit --offline` can resume an existing audit
+worktree without GitHub issue intake.
 
 ## Issue investigation
 

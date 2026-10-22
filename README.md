@@ -202,6 +202,9 @@ agentic --issue 119 --mark-done                     # optional reason is recorde
 agentic --issue 119 --mark-done --reason "Human reviewed; remaining finding is out of scope"
 agentic --issue 119 --publish             # offer draft-PR publication for the approved patch
 agentic --issue 119 --new                 # explicitly create a second worktree
+agentic audit                              # audit and improve the current repository
+agentic audit --review                     # validate/review an existing audit worktree
+agentic audit --publish                    # confirm and publish an approved audit patch
 ```
 
 GitHub issues are the default task source. To use manually pasted requirements,
@@ -209,6 +212,13 @@ set `"task_source": "local"` in the target's ignored `agent_config.json`, then
 run `/run` in the interactive shell and finish the pasted task with `/done`.
 Local tasks use the same review and resume flow and can still be published as
 GitHub draft pull requests.
+
+`agentic audit` is independent of GitHub issue and local-task mode. It creates
+or reuses a first-class `agent/audit-*` worktree, runs a read-only audit across
+code quality, security, reliability, and performance, and passes a bounded
+report to the developer. The normal configured checks, independent read-only
+review, and safe default-no draft-PR confirmation still apply. Use `/audit` for
+the equivalent interactive command.
 
 Before development, an independent read-only investigator analyzes the issue and
 records feedback about relevant code, tests, ambiguity, risks, and recommended
@@ -277,7 +287,7 @@ agentic --issue 119
 
 Running the same issue again resumes its existing worktree. Use `--new` only when you intentionally want a separate worktree.
 
-Interactive shell commands include `/run`, `/ps`, `/logs`, `/list`, `/runs`,
+Interactive shell commands include `/audit`, `/run`, `/ps`, `/logs`, `/list`, `/runs`,
 `/status`, `/dashboard`, `/init`, `/doctor`, `/cleanup`, `/version`, `/help`,
 `/stop`, and `/quit`. Use `/run --task-file PATH` for a local task already saved
 in a file. `/runs` lists Agentic worktrees; `/ps --all` lists persisted shell
@@ -299,6 +309,10 @@ jobs. Use `/stop --all` to request termination for every running Agentic job.
 | `agentic --task-file PATH` | Start or resume a local task from a file. |
 | `agentic --task-file task.md --publish` | Publish a reviewed local task as a draft PR. |
 | `agentic --issue N --new` | Create a separate worktree for the issue. |
+| `agentic audit` | Audit and improve the current repository without an issue or task file. |
+| `agentic audit --new` | Create a separate audit worktree instead of reusing the current one. |
+| `agentic audit --review` | Re-run checks and the independent read-only review for an audit patch. |
+| `agentic audit --publish` | Show the patch/audit summary, ask for confirmation, and create a draft PR. |
 | `agentic --list` | List open GitHub issues. |
 | `agentic --runs` | List existing Agentic worktrees. |
 | `agentic status --json` | Emit machine-readable worktree status. |

@@ -25,6 +25,10 @@ BRANCH_RE = re.compile(r"^agent/issue-(\d+)-([a-f0-9]{8})$")
 LOCAL_BRANCH_RE = re.compile(
     r"^agent/task-(?P<slug>[a-z0-9-]+)-(?P<key>[a-f0-9]{12})(?:-(?P<ident>[a-f0-9]{8}))?$"
 )
+AUDIT_BRANCH_RE = re.compile(
+    r"^agent/audit-(?P<key>[a-f0-9]{12})(?:-(?P<ident>[a-f0-9]{8}))?$"
+)
+AUDIT_KEY = hashlib.sha256(b"agentic-repository-audit-v1").hexdigest()[:12]
 RELATIVE_WORKTREE_GIT = (2, 48, 0)
 
 
@@ -90,14 +94,14 @@ def legacy_runs_dir(repo: Path) -> Path:
 
 
 def eligible(issue: Issue) -> bool:
-    """Local tasks are always eligible; GitHub tasks use the issue state."""
-    return issue.is_local or issue.state.upper() == "OPEN"
+    """Local tasks and audits are always eligible; GitHub uses issue state."""
+    return issue.is_local or issue.is_audit or issue.state.upper() == "OPEN"
 
 
 def issue_fingerprint(issue: Issue) -> str:
     """Identify the issue content used by a cached investigation result."""
     payload = json.dumps(
-        [issue.reference, issue.title, issue.body, issue.state, issue.source],
+        [issue.reference, issue.title, issue.body, issue.state, issue.source, issue.audit_key],
         ensure_ascii=False,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -385,6 +389,15 @@ def discover_runs(repo: Path) -> list[Run]:
             worktree = Path(data["worktree"])
             if worktree.is_dir():
                 runs.append(Run(None, branch, worktree.resolve(), local_match.group("key")))
+                continue
+        audit_match = AUDIT_BRANCH_RE.fullmatch(branch)
+        if audit_match and "worktree" in data:
+            worktree = Path(data["worktree"])
+            if worktree.is_dir():
+                runs.append(Run(
+                    None, branch, worktree.resolve(),
+                    audit_key=audit_match.group("key"),
+                ))
     return sorted(runs, key=lambda r: (r.issue_number is None, r.issue_number or 0, r.branch))
 
 
@@ -394,6 +407,10 @@ def runs_for_issue(repo: Path, number: int) -> list[Run]:
 
 def runs_for_task(repo: Path, task_key: str) -> list[Run]:
     return [run for run in discover_runs(repo) if run.task_key == task_key]
+
+
+def runs_for_audit(repo: Path, audit_key: str = AUDIT_KEY) -> list[Run]:
+    return [run for run in discover_runs(repo) if run.audit_key == audit_key]
 
 
 def run_for_branch(repo: Path, branch: str) -> Run | None:
@@ -496,3 +513,25 @@ def create_local_worktree(repo: Path, base: str, issue: Issue,
     else:
         _status_print("[GIT] Relative worktree paths unavailable; using absolute paths")
     return Run(None, branch, worktree.resolve(), issue.task_key)
+
+
+def create_audit_worktree(repo: Path, base: str, issue: Issue,
+                          state_dir: Path | None = None,
+                          separate: bool = False) -> Run:
+    """Create an isolated worktree for the repository-wide audit workflow."""
+    if not issue.is_audit or not issue.audit_key:
+        raise ValueError("create_audit_worktree requires an audit work item")
+    with repository_lock(repo, state_dir):
+        refresh_base(repo, base)
+        relative_paths = configure_relative_worktree_paths(repo)
+        ident = f"-{uuid.uuid4().hex[:8]}" if separate else ""
+        branch = f"agent/audit-{issue.audit_key}{ident}"
+        parent = state_paths(repo, state_dir).worktrees if state_dir else legacy_worktrees_dir(repo)
+        parent.mkdir(parents=True, exist_ok=True)
+        worktree = parent / f"audit-{issue.audit_key}{ident}"
+        git(repo, "worktree", "add", "-b", branch, str(worktree), f"origin/{base}")
+    if relative_paths:
+        _status_print("[GIT] Using relative worktree paths for WSL/Windows compatibility")
+    else:
+        _status_print("[GIT] Relative worktree paths unavailable; using absolute paths")
+    return Run(None, branch, worktree.resolve(), audit_key=issue.audit_key)

@@ -19,7 +19,8 @@ from .telemetry import read_run_usage
 
 RUN_NAME = re.compile(
     r"^(?:agent-issue-(?P<issue>\d+)-(?P<issue_token>[A-Za-z0-9_-]+)"
-    r"|agent-task-(?P<task>.+)-(?P<task_token>[a-f0-9]{12}(?:-[a-f0-9]{8})?))$"
+    r"|agent-task-(?P<task>.+)-(?P<task_token>[a-f0-9]{12}(?:-[a-f0-9]{8})?)"
+    r"|agent-audit-(?P<audit_token>[a-f0-9]{12})(?P<audit_ident>-[a-f0-9]{8})?)$"
 )
 NUMBERED_FILE = re.compile(r"^(?P<prefix>.+)-(?P<number>\d+)(?P<suffix>\.[^.]+)$")
 MAX_TEXT = 5_000
@@ -45,7 +46,10 @@ def filter_runs(runs: Iterable[dict[str, Any]], *, query: str = "",
     needle = str(query).casefold()
     visible: list[dict[str, Any]] = []
     for run in runs:
-        issue_value = "local" if run.get("issue") is None else str(run.get("issue"))
+        issue_value = (
+            "audit" if run.get("audit") else
+            "local" if run.get("issue") is None else str(run.get("issue"))
+        )
         searchable = json.dumps(run, ensure_ascii=False, sort_keys=True).casefold()
         if needle and needle not in searchable:
             continue
@@ -343,6 +347,25 @@ def _investigation(folder: Path, index: dict[str, list[Path]] | None = None) -> 
     }, path
 
 
+def _audit(folder: Path) -> tuple[dict[str, Any], Path | None]:
+    path = folder / "audit-report.json"
+    if not path.is_file():
+        return {"state": "not-run", "summary": "No repository audit recorded.", "findings": [], "measurements": [], "skipped": []}, None
+    raw = _parse_json_object(_read(path, 100_000))
+    if raw is None or not isinstance(raw.get("summary"), str) or not isinstance(raw.get("findings"), list):
+        return {"state": "invalid", "summary": "Audit report is not valid JSON.", "findings": [], "measurements": [], "skipped": [], "file": path.name, "updated": _timestamp(path)}, path
+    findings = [item for item in raw["findings"] if isinstance(item, dict)][:40]
+    return {
+        "state": "recorded",
+        "summary": str(raw.get("summary", ""))[:2_000],
+        "findings": findings,
+        "measurements": [item for item in raw.get("measurements", []) if isinstance(item, dict)][:20],
+        "skipped": [str(item) for item in raw.get("skipped", []) if isinstance(item, str)][:20],
+        "file": path.name,
+        "updated": _timestamp(path),
+    }, path
+
+
 def _tests(folder: Path, index: dict[str, list[Path]] | None = None) -> tuple[dict[str, Any], Path | None]:
     path = _latest(_indexed_files(index, folder, ["test-command", "tests"]))
     if path is None:
@@ -380,7 +403,7 @@ def _all_log_files(folder: Path) -> list[Path]:
 
 
 def _process_running(folder: Path, index: dict[str, list[Path]] | None = None) -> bool:
-    progress = _latest(_indexed_files(index, folder, ["developer", "review", "investigation", "test-command"]))
+    progress = _latest(_indexed_files(index, folder, ["developer", "review", "investigation", "audit", "test-command"]))
     if progress is None:
         return False
     content = _read(progress, 20_000)
@@ -394,6 +417,7 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
     all_files = _all_log_files(folder)
     index = _numbered_file_index(all_files)
     investigation, investigation_path = _investigation(folder, index)
+    audit, audit_path = _audit(folder)
     review, review_path = _review(folder, index)
     blocked = _blocked(folder)
     result = _result(folder)
@@ -418,6 +442,10 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
     last_activity = _latest(all_files)
     if _process_running(folder, index):
         status = "in-progress"
+    elif audit["state"] == "invalid" and not developer_paths and review["status"] == "not-run":
+        status = "audit-invalid"
+    elif audit["state"] == "recorded" and not developer_paths and review["status"] == "not-run":
+        status = "awaiting-development"
     elif investigation["state"] == "invalid" and not developer_paths and review["status"] == "not-run":
         status = "investigation-invalid"
     elif investigation["state"] == "recorded" and not developer_paths and review["status"] == "not-run":
@@ -461,6 +489,10 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
         for item in review.get("recurring", [])
         if isinstance(item, dict)
     ]
+    severity_values += [
+        item.get("severity", "INFO")
+        for item in audit.get("findings", []) if isinstance(item, dict)
+    ]
     severity = max(
         (str(value).upper() for value in severity_values),
         key=lambda value: SEVERITY_RANK.get(value, 0),
@@ -476,11 +508,19 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
         stage = "tests"
     elif developer_paths or status == "in-progress":
         stage = "development"
+    elif audit["state"] != "not-run":
+        stage = "audit"
     elif investigation["state"] != "not-run":
         stage = "investigation"
     else:
         stage = "idle"
-    if issue is not None:
+    audit_key = match.group("audit_token")
+    audit_ident = match.group("audit_ident") or ""
+    if audit_key is not None:
+        label = "Repository audit"
+        branch = f"agent/audit-{audit_key}{audit_ident}"
+        issue_value: int | None = None
+    elif issue is not None:
         label = f"Issue #{issue}"
         branch = f"agent/issue-{issue}-{match.group('issue_token')}"
         issue_value: int | None = int(issue)
@@ -496,6 +536,11 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
             "state": str(raw_issue_metadata.get("state") or "UNKNOWN").upper(),
             "source": str(raw_issue_metadata.get("source") or "github"),
         }
+    elif audit_key is not None:
+        issue_metadata = {
+            "number": None, "title": "Repository audit", "state": "AUDIT",
+            "source": "audit", "audit_key": audit_key,
+        }
     elif issue_value is None:
         issue_metadata = {
             "number": None, "title": task, "state": "LOCAL", "source": "local",
@@ -507,14 +552,17 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
         }
     snapshot: dict[str, Any] = {
         "id": folder.name, "issue": issue_value, "label": label, "branch": branch,
+        "audit": audit_key is not None, "audit_key": audit_key,
         "status": status, "investigation": investigation, "attempts": developer["attempts"],
         "stage": stage, "severity": severity, "providers": providers, "models": models,
         "issue_metadata": issue_metadata,
         "last_activity": _timestamp(last_activity) if last_activity else "unknown",
         "review": review, "blocked": blocked, "result": result, "tests": tests,
+        "audit_report": audit,
         "developer": developer,
         "files": file_records, "file_count": len(all_files),
         "has_review": review_path is not None, "has_investigation": investigation_path is not None,
+        "has_audit": audit_path is not None,
         "has_tests": tests_path is not None, "has_developer": bool(developer_paths),
         "usage": usage,
     }

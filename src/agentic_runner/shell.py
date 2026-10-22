@@ -73,6 +73,7 @@ from .shell_input import (  # noqa: F401
 )
 from .shell_commands import (
     has_job_flag as _has_job_flag,
+    parse_audit_command as _parse_audit_command,
     option_value as _option_value,
     parse_job_command as _parse_job_command,
     parse_log_command as _parse_log_command,
@@ -787,6 +788,17 @@ class AgenticShell:
         else:
             self._launch(argv)
 
+    def run_audit(self, parts: list[str]) -> None:
+        flags = _parse_audit_command(parts)
+        argv = self._runner_args(None, flags)
+        argv.insert(len(self._runner_prefix()), "audit")
+        self.active_task = "repository audit"
+        if _has_job_flag(flags, "--publish"):
+            _shell_print("[PUBLISH] Running in the foreground so publication confirmation can be entered")
+            self._run_foreground(argv)
+        else:
+            self._launch(argv)
+
     def run_dashboard(self, parts: list[str]) -> None:
         dashboard = self.runner.with_name("agentic_dashboard.py")
         if dashboard.is_file():
@@ -1051,6 +1063,8 @@ class AgenticShell:
         try:
             if command in {"/help", "/?"}:
                 _print_help()
+            elif command == "/audit":
+                self.run_audit(parts)
             elif command == "/run":
                 self.run_issue(parts)
             elif command == "/ps":

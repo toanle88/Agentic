@@ -20,14 +20,18 @@ class Issue:
     source: str = "github"
     task_key: str | None = None
     source_path: Path | None = None
+    audit_key: str | None = None
 
     @classmethod
     def parse(cls, raw: dict[str, Any]) -> "Issue":
+        raw_number = raw.get("number")
         return cls(
-            number=int(raw["number"]),
+            number=int(raw_number) if raw_number is not None else None,
             title=str(raw["title"]),
             body=str(raw.get("body") or ""),
             state=str(raw.get("state", "OPEN")),
+            source=str(raw.get("source", "github")),
+            audit_key=(str(raw["audit_key"]) if raw.get("audit_key") else None),
         )
 
     @classmethod
@@ -41,12 +45,31 @@ class Issue:
         task_key = hashlib.sha256(body.encode("utf-8")).hexdigest()[:12]
         return cls(None, title, body, source="local", task_key=task_key, source_path=source_path)
 
+    @classmethod
+    def for_audit(cls, audit_key: str, body: str) -> "Issue":
+        """Create the stable work item identity used by a repository audit."""
+        if not audit_key or not re.fullmatch(r"[a-f0-9]{12}", audit_key):
+            raise ValueError("audit_key must be a 12-character hexadecimal value")
+        return cls(
+            None,
+            "Repository audit",
+            body.strip(),
+            source="audit",
+            audit_key=audit_key,
+        )
+
     @property
     def is_local(self) -> bool:
         return self.source == "local"
 
     @property
+    def is_audit(self) -> bool:
+        return self.source == "audit"
+
+    @property
     def reference(self) -> str:
+        if self.is_audit:
+            return f"AUDIT {self.audit_key[:8] if self.audit_key else 'unknown'}"
         if self.is_local:
             return f"LOCAL TASK {self.task_key[:8] if self.task_key else 'unknown'}"
         return f"ISSUE #{self.number}"
@@ -58,6 +81,7 @@ class Run:
     branch: str
     worktree: Path
     task_key: str | None = None
+    audit_key: str | None = None
 
 
 @dataclass(frozen=True)

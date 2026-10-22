@@ -39,7 +39,7 @@ Agentic is intentionally small and uses the Python standard library at runtime.
 | `scripts/agent_benchmark_scenarios.py` | Disposable fixture preparation, argv-only adapter execution, checks, and result normalization. |
 | `scripts/agent_benchmark_reporting.py` | Provider-neutral aggregation of normalized benchmark scenario metrics. |
 | `agent_config.json` | Target-repository checks and per-run policy settings. |
-| Git worktrees | Isolate issue or local-task changes from the base checkout and preserve unfinished work. |
+| Git worktrees | Isolate issue, local-task, or repository-audit changes from the base checkout and preserve unfinished work. |
 | GitHub CLI | Read issues and publish an explicitly approved branch/PR. |
 | Provider adapters | Run Codex, Gemini, Claude Code, GitHub Copilot, or OpenRouter for developer/reviewer turns. |
 
@@ -102,8 +102,10 @@ write-capable workflow operations.
 
 ## Data flow
 
-An issue or local task becomes a run and isolated worktree. The workflow builds
-bounded prompts, the provider adapter executes in the configured security
+An issue, local task, or audit becomes a run and isolated worktree. An audit
+has a stable first-class branch identity and a bounded `audit-report.json`
+artifact; it does not require issue intake. The workflow builds bounded prompts,
+the provider adapter executes in the configured security
 boundary, and streamed output is redacted into run artifacts. Tests and the
 read-only reviewer consume the worktree and recorded evidence; publication
 consumes only an approved, revalidated patch. Repository guidance follows the

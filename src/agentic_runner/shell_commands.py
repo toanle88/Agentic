@@ -13,6 +13,8 @@ _RUN_VALUE_OPTIONS = {"--profile", "--instruction", "--reason", "--task-file"}
 _RUN_BOOLEAN_OPTIONS = {
     "--review", "--publish", "--mark-done", "--new", "--offline", "--verbose",
 }
+_AUDIT_VALUE_OPTIONS = {"--profile", "--instruction"}
+_AUDIT_BOOLEAN_OPTIONS = {"--review", "--publish", "--new", "--offline", "--verbose"}
 _LOG_BOOLEAN_OPTIONS = {"--verbose"}
 
 
@@ -85,6 +87,32 @@ def parse_job_command(parts: list[str]) -> tuple[str | None, list[str]]:
     if not has_job_flag(flags, "--mark-done") and "--reason" in seen_values:
         raise ValueError("/run --reason requires --mark-done")
     return issue, flags
+
+
+def parse_audit_command(parts: list[str]) -> list[str]:
+    """Validate ``/audit`` options and return an argv-safe option fragment."""
+    flags = parts[1:]
+    seen: set[str] = set()
+    index = 0
+    while index < len(flags):
+        flag = flags[index]
+        if flag in _AUDIT_VALUE_OPTIONS:
+            if flag in seen or index + 1 >= len(flags):
+                raise ValueError(f"{flag} requires one value")
+            value = flags[index + 1]
+            if flag == "--profile" and value not in {"fast", "slow"}:
+                raise ValueError("--profile must be fast or slow")
+            if flag == "--profile" and value.startswith("--"):
+                raise ValueError("--profile requires a value")
+            seen.add(flag)
+            index += 2
+            continue
+        if flag not in _AUDIT_BOOLEAN_OPTIONS:
+            raise ValueError("usage: /audit [--profile fast|slow] [--instruction \"text\"] [--review|--publish|--new|--offline|--verbose]")
+        index += 1
+    if "--review" in flags and "--publish" in flags:
+        raise ValueError("/audit cannot combine --review and --publish")
+    return flags
 
 
 def parse_log_command(parts: list[str]) -> tuple[int, int, bool]:
