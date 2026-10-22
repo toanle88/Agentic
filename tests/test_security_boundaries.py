@@ -279,6 +279,33 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertIn("configured checks", reason)
 
+    def test_openrouter_rejects_launcher_commands_before_check_allowlisting(self):
+        policy = {
+            "read_files": True, "search_files": True,
+            "edit_files": True, "create_files": True,
+            "git_read": True, "run_checks": True,
+            "network": True, "allow_dangerous": False,
+        }
+        blocked = (
+            ["env", "bash", "-c", "echo unsafe"],
+            ["/usr/bin/env", "python", "-c", "print(unsafe)"],
+            ["env", "curl", "https://example.test"],
+            ["busybox", "sh", "-c", "echo unsafe"],
+        )
+        for argv in blocked:
+            allowed, reason = agentic_openrouter._openrouter_command_allowed(
+                argv, readonly=False, permission_policy=policy,
+                check_commands=[argv],
+            )
+            self.assertFalse(allowed, argv)
+            self.assertIn("launcher", reason)
+        allowed, reason = agentic_openrouter._openrouter_command_allowed(
+            ["python", "-m", "unittest"], readonly=False,
+            permission_policy={**policy, "network": False},
+            check_commands=[["python", "-m", "unittest"]],
+        )
+        self.assertTrue(allowed, reason)
+
     def test_openrouter_permission_policy_network_is_effective_without_legacy_flag(self):
         policy = {
             "read_files": True, "search_files": True, "edit_files": True,

@@ -28,6 +28,14 @@ OPENROUTER_LIST_FILES_PAGE_SIZE = 300
 OPENROUTER_GIT_OBJECT_CHECK_TIMEOUT_SECONDS = 1.0
 NETWORK_COMMANDS = {"curl", "wget", "ssh", "scp", "sftp", "ftp", "nc", "netcat", "telnet", "gh"}
 ALWAYS_BLOCKED_COMMANDS = {"gh", "ssh", "scp", "sftp"}
+# These programs do not perform a useful check or inspection themselves. They
+# can launch another executable with a different policy, so treating their
+# argv[0] as the command being authorized is a security-boundary bypass.
+LAUNCHER_EXECUTABLES = {
+    "busybox", "chrt", "command", "doas", "docker", "env", "exec", "flock",
+    "flatpak", "ionice", "nice", "nohup", "nsenter", "podman", "runuser",
+    "setsid", "stdbuf", "sudo", "su", "taskset", "timeout", "unshare", "xargs",
+}
 READONLY_GIT_COMMANDS = {"status", "diff", "grep", "log", "show"}
 # Retained as a compatibility-facing import for older integrations. Branch
 # inspection is intentionally no longer part of the permission allowlist.
@@ -78,6 +86,12 @@ def _safe_worktree_path(worktree: Path, relative: str, *, write: bool = False) -
     target = (root / candidate).resolve()
     if not target.is_relative_to(root):
         raise ValueError("path escapes the worktree")
+    if write:
+        current = root
+        for part in candidate.parts:
+            current /= part
+            if current.is_symlink():
+                raise ValueError("symbolic links are not allowed for worktree writes")
     if write and (target == root / ".git" or ".git" in target.relative_to(root).parts):
         raise ValueError("writes inside .git are not allowed")
     return target
@@ -502,6 +516,8 @@ def _openrouter_command_allowed(
     else:
         policy.update(permission_policy)
         allow_network = bool(policy.get("network"))
+    if executable in LAUNCHER_EXECUTABLES:
+        return False, f"launcher executable {executable} is not allowed from an OpenRouter tool call"
     if executable in {"bash", "sh", "zsh", "fish", "cmd", "powershell", "pwsh"}:
         return False, "shell commands are not allowed; provide argv directly"
     if executable in INTERPRETER_EXECUTABLES and any(
@@ -856,8 +872,23 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                 allow_runner_source and (relative == "agentic.py" or self_hosted_ci)
             ):
                 return f"ERROR: protected file {relative!r} cannot be changed"
+            content = arguments.get("content", "")
+            if not isinstance(content, str):
+                return "ERROR: file content must be a string"
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(arguments.get("content", ""), encoding="utf-8")
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+            nofollow = getattr(os, "O_NOFOLLOW", 0)
+            try:
+                descriptor = os.open(target, flags | nofollow, 0o644)
+            except OSError as exc:
+                return f"ERROR: could not open {relative!r} for writing: {exc}"
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                    descriptor = -1
+                    stream.write(content)
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
             return f"Wrote {relative}"
         if name == "run_command":
             argv = arguments.get("argv")
@@ -869,7 +900,8 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
             if not allowed:
                 return "ERROR: " + reason
             process_argv = sandbox_command(
-                _safe_readonly_git_argv(argv), worktree, sandbox, read_only=readonly, pass_env=[],
+                _safe_readonly_git_argv(argv), worktree, sandbox, read_only=readonly,
+                pass_env=[], restricted=not allow_network,
             )
             returncode, output, truncated, timed_out = _bounded_command_capture(
                 process_argv, worktree, command_timeout,

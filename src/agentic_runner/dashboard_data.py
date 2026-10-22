@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import re
+import threading
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
@@ -38,6 +40,7 @@ SEVERITY_RANK = {
 }
 _RUN_CACHE_LIMIT = 512
 _RUN_SNAPSHOT_CACHE: dict[tuple[str, str], tuple[tuple[tuple[str, int, int], ...], dict[str, Any] | None]] = {}
+_RUN_SNAPSHOT_CACHE_LOCK = threading.RLock()
 
 
 def filter_runs(runs: Iterable[dict[str, Any]], *, query: str = "",
@@ -395,13 +398,49 @@ def _latest_developer(folder: Path, index: dict[str, list[Path]] | None = None) 
 
 
 def _all_log_files(folder: Path) -> list[Path]:
-    files = [
-        path for path in folder.iterdir()
-        if path.is_file() and path.name not in {
-            "review-schema.json", "investigation-schema.json", "issue-snapshot.json",
-        }
-    ] if folder.is_dir() else []
-    return sorted(files, key=lambda path: (path.stat().st_mtime, path.name), reverse=True)
+    if not folder.is_dir():
+        return []
+    excluded = {"review-schema.json", "investigation-schema.json", "issue-snapshot.json"}
+    files: list[tuple[float, str, Path]] = []
+    try:
+        entries = os.scandir(folder)
+        with entries:
+            for entry in entries:
+                try:
+                    if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                        continue
+                    if entry.name in excluded:
+                        continue
+                    modified = entry.stat(follow_symlinks=False).st_mtime
+                except OSError:
+                    continue
+                files.append((modified, entry.name, Path(entry.path)))
+    except OSError:
+        return []
+    return [
+        path for _, _, path in sorted(files, key=lambda item: (item[0], item[1]), reverse=True)
+    ]
+
+
+def _folder_signature(folder: Path) -> tuple[tuple[str, int, int], ...]:
+    """Return cache metadata for regular artifacts with one directory scan."""
+    if not folder.is_dir():
+        return ()
+    signature: list[tuple[str, int, int]] = []
+    try:
+        entries = os.scandir(folder)
+        with entries:
+            for entry in entries:
+                try:
+                    if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                        continue
+                    stat = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                signature.append((entry.name, stat.st_size, stat.st_mtime_ns))
+    except OSError:
+        return ()
+    return tuple(sorted(signature))
 
 
 def _process_running(folder: Path, index: dict[str, list[Path]] | None = None) -> bool:
@@ -585,27 +624,28 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
 def collect_runs(logs_root: Path) -> list[dict[str, Any]]:
     if not logs_root.is_dir():
         return []
-    root_key = str(logs_root.resolve())
-    runs: list[dict[str, Any]] = []
-    for folder in logs_root.iterdir():
-        if not folder.is_dir():
-            continue
-        signature: list[tuple[str, int, int]] = []
-        try:
-            for path in folder.iterdir():
-                if not path.is_file() or path.is_symlink():
-                    continue
-                stat = path.stat()
-                signature.append((path.name, stat.st_size, stat.st_mtime_ns))
-        except OSError:
-            signature = []
-        cache_key = (root_key, folder.name)
-        cached = _RUN_SNAPSHOT_CACHE.get(cache_key)
-        snapshot = cached[1] if cached and cached[0] == tuple(sorted(signature)) else _run_snapshot(folder)
-        if snapshot is not None:
-            runs.append(snapshot)
-            _RUN_SNAPSHOT_CACHE[cache_key] = (tuple(sorted(signature)), snapshot)
-    if len(_RUN_SNAPSHOT_CACHE) > _RUN_CACHE_LIMIT:
-        for key in list(_RUN_SNAPSHOT_CACHE)[:len(_RUN_SNAPSHOT_CACHE) - _RUN_CACHE_LIMIT]:
-            _RUN_SNAPSHOT_CACHE.pop(key, None)
-    return sorted(runs, key=lambda run: (run["last_activity"], run["id"]), reverse=True)
+    # Serialize the complete cache transaction, including snapshot creation.
+    # A lock only around get/put is insufficient: two HTTP refresh handlers can
+    # otherwise compute old/new snapshots concurrently and let the old result
+    # overwrite the newer cache entry.
+    with _RUN_SNAPSHOT_CACHE_LOCK:
+        root_key = str(logs_root.resolve())
+        runs: list[dict[str, Any]] = []
+        for folder in logs_root.iterdir():
+            if not folder.is_dir():
+                continue
+            normalized_signature = _folder_signature(folder)
+            cache_key = (root_key, folder.name)
+            cached = _RUN_SNAPSHOT_CACHE.get(cache_key)
+            snapshot = (
+                cached[1]
+                if cached and cached[0] == normalized_signature
+                else _run_snapshot(folder)
+            )
+            if snapshot is not None:
+                runs.append(snapshot)
+                _RUN_SNAPSHOT_CACHE[cache_key] = (normalized_signature, snapshot)
+        if len(_RUN_SNAPSHOT_CACHE) > _RUN_CACHE_LIMIT:
+            for key in list(_RUN_SNAPSHOT_CACHE)[:len(_RUN_SNAPSHOT_CACHE) - _RUN_CACHE_LIMIT]:
+                _RUN_SNAPSHOT_CACHE.pop(key, None)
+        return sorted(runs, key=lambda run: (run["last_activity"], run["id"]), reverse=True)

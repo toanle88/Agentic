@@ -1,4 +1,5 @@
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import json
 import math
 import os
@@ -7,6 +8,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+from threading import Event
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -87,6 +89,38 @@ class DashboardTests(unittest.TestCase):
                 (run / "developer-001.txt").write_text("second\n")
                 agentic_dashboard_data.collect_runs(root)
                 self.assertEqual(snapshot.call_count, 2)
+
+    def test_dashboard_cache_serializes_concurrent_refreshes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            run = root / "agent-issue-122-ab12cd34"
+            run.mkdir(parents=True)
+            marker = run / "developer-001.txt"
+            marker.write_text("old\n", encoding="utf-8")
+            entered = Event()
+            release = Event()
+
+            def snapshot(folder):
+                value = marker.read_text(encoding="utf-8")
+                entered.set()
+                release.wait(timeout=2)
+                return {
+                    "id": folder.name,
+                    "last_activity": "2026-01-01T00:00:00+00:00",
+                    "developer": {"summary": value},
+                }
+
+            with patch.object(agentic_dashboard_data, "_run_snapshot", side_effect=snapshot):
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    first = executor.submit(agentic_dashboard_data.collect_runs, root)
+                    self.assertTrue(entered.wait(timeout=2))
+                    marker.write_text("new\n", encoding="utf-8")
+                    second = executor.submit(agentic_dashboard_data.collect_runs, root)
+                    self.assertFalse(second.done())
+                    release.set()
+                    first.result(timeout=2)
+                    latest = second.result(timeout=2)
+            self.assertEqual(latest[0]["developer"]["summary"], "new\n")
 
     def test_dashboard_exposes_run_metrics(self):
         with tempfile.TemporaryDirectory() as temp:

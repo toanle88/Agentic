@@ -9,6 +9,7 @@ Agentic is intentionally small and uses the Python standard library at runtime.
 | `src/agentic_runner/cli.py` | Canonical CLI entry point and workflow orchestration. |
 | `src/agentic_runner/worktrees.py` | Repository identity, locks, Git worktree creation, discovery, and issue intake. |
 | `src/agentic_runner/workflow.py` | Developer execution, validation, investigation, review, and publication workflow. |
+| `src/agentic_runner/workflow_orchestration.py` | Stateful developer retry loop, review feedback handoff, and bounded retry outcomes. |
 | `src/agentic_runner/workflow_state.py` | Bounded workflow run markers, approvals, resume task materialization, and durable evidence helpers. |
 | `src/agentic_runner/context.py` | Bounded issue, feedback, and provider-history context formatting. |
 | `src/agentic_runner/prompts.py` | Bounded, delimited developer/reviewer prompt construction. |
@@ -80,8 +81,12 @@ and worktree publication/workflow coverage is in
 The interactive-shell facade delegates job/process primitives to
 `src/agentic_runner/shell_jobs.py` while retaining command dispatch and terminal-mode
 ownership. The workflow facade delegates durable run-state helpers to
-`src/agentic_runner/workflow_state.py` while retaining provider, validation, review, and
-publication transitions. Both extracted modules are directly importable and
+`src/agentic_runner/workflow_state.py` and the stateful developer retry loop to
+`src/agentic_runner/workflow_orchestration.py`, while retaining provider, validation,
+investigation, review, and publication transitions. The orchestration module receives
+a runtime adapter assembled from the facade's current globals, so historical patch
+points remain compatible without moving workflow policy into the compatibility layer.
+Both extracted modules are directly importable and
 covered by import-boundary characterization tests; the historical
 the three root command wrappers remain the compatibility surface.
 Benchmark corpus validation, scenario execution, and reporting are split across

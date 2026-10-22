@@ -2,6 +2,7 @@
 import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -9,13 +10,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner import shell as agentic_shell
+from agentic_runner import shell_completion as agentic_shell_completion
 from agentic_runner import shell_jobs as agentic_shell_jobs
 from agentic_runner import workflow as agentic_workflow
+from agentic_runner import workflow_orchestration as agentic_workflow_orchestration
 from agentic_runner import workflow_state as agentic_workflow_state
 from agentic_runner.models import Issue
 
 
 class ModularBoundaryTests(unittest.TestCase):
+    def test_shell_completion_facade_reexports_focused_model(self):
+        self.assertIs(agentic_shell._completion_candidates, agentic_shell_completion.completion_candidates)
+        self.assertIs(agentic_shell._completion_items, agentic_shell_completion.completion_items)
+        self.assertIs(agentic_shell._apply_completion, agentic_shell_completion.apply_completion)
+
     def test_shell_facade_reexports_job_and_foreground_boundaries(self):
         self.assertIs(agentic_shell.Job, agentic_shell_jobs.Job)
         self.assertIs(
@@ -36,6 +44,31 @@ class ModularBoundaryTests(unittest.TestCase):
             agentic_workflow.record_review_approval,
             agentic_workflow_state.record_review_approval,
         )
+
+    def test_workflow_facade_reexports_developer_orchestration_boundary(self):
+        self.assertIs(
+            agentic_workflow._orchestrated_develop,
+            agentic_workflow_orchestration.develop,
+        )
+        runtime = agentic_workflow._orchestration_runtime()
+        self.assertIs(runtime.run_agent, agentic_workflow.run_agent)
+        self.assertIs(runtime.verify_and_review, agentic_workflow.verify_and_review)
+
+    def test_extracted_developer_orchestration_preserves_deadline_behavior(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            run = agentic_workflow.Run(None, "agent/task-export-aabbccddeeff", folder)
+            issue = Issue.from_local_text("Implement export")
+            result = agentic_workflow_orchestration.develop(
+                run,
+                issue,
+                "main",
+                {"max_retries": 0},
+                folder,
+                deadline=time.monotonic() - 1,
+                runtime=agentic_workflow._orchestration_runtime(),
+            )
+        self.assertFalse(result)
 
     def test_workflow_state_preserves_bounded_resume_and_blocked_records(self):
         with tempfile.TemporaryDirectory() as temp:
