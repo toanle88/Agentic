@@ -635,6 +635,12 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("function scheduleSearchRender()", html)
         self.assertIn("searchTimer=window.setTimeout", html)
         self.assertIn("function renderCurrentView()", html)
+        self.assertIn("function renderAll(){renderCurrentView()}", html)
+        self.assertIn("data-log-file=", html)
+        self.assertIn("data-detail-log-file=", html)
+        self.assertIn("details.dataset.loaded", html)
+        self.assertIn('var searchableText=state.query===""?"":searchable(run)', html)
+        self.assertNotIn("MutationObserver", html)
         self.assertNotIn("var searchable=JSON.stringify(run).toLowerCase()", html)
         self.assertIn("window.setInterval(refreshDashboard,30000)", html)
         self.assertIn(
@@ -649,6 +655,9 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("Latest recorded run activity, newest first.", html)
         self.assertIn("Issue status", html)
         self.assertIn("data-issue-row", html)
+        self.assertIn("const runTimestamp=run=>", html)
+        self.assertIn("runTimestamp(right.runs[0])-runTimestamp(left.runs[0])", html)
+        self.assertIn("function issueTimestamp(run)", html)
         self.assertIn("Next action", html)
         self.assertIn("suggestedCommand", html)
 
