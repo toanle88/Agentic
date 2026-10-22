@@ -1105,7 +1105,8 @@ class InteractiveInputTests(unittest.TestCase):
             ('TAB', '\t'), ('ENTER', '\n'),
         ]
         reader = _create_mock_reader(keys)
-        unfiltered = lambda _line, _cursor: [('/run', ''), ('/logs', '')]
+        def unfiltered(_line, _cursor):
+            return [('/run', ''), ('/logs', '')]
         with patch('sys.stdout', new_callable=StringIO):
             result = agentic_shell._interactive_input(
                 'agentic> ', unfiltered, key_reader_factory=reader,
