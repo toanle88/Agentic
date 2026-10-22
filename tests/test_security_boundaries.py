@@ -472,6 +472,25 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
             )
             self.assertIn("/agentic-output/developer-001.txt", command)
 
+    def test_sandbox_output_mount_is_separate_from_durable_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp)
+            worktree = parent / "worktree"
+            durable = parent / "runs" / "run-001"
+            invocation = parent / "invocation-001"
+            worktree.mkdir()
+            durable.mkdir(parents=True)
+            invocation.mkdir()
+            settings = validate_sandbox({"enabled": True, "engine": "docker", "image": "test-image"})
+            command = sandbox_command(
+                ["codex", "--output-last-message", str(invocation / "result.txt")],
+                worktree, settings, output_root=invocation, read_only=True,
+            )
+            mounts = [value for index, value in enumerate(command) if command[index - 1] == "-v"]
+            self.assertIn(f"{invocation}:/agentic-output:rw", mounts)
+            self.assertNotIn(f"{durable}:/agentic-output:rw", mounts)
+            self.assertNotIn(f"{durable}:/workspace:rw", mounts)
+
 
 if __name__ == "__main__":
     unittest.main()

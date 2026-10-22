@@ -16,6 +16,7 @@ from agentic_runner import cli as agentic
 from agentic_runner import execution as agentic_execution
 from agentic_runner.sandbox import sandbox_command
 from agentic_runner import workflow as agentic_workflow
+from agentic_runner.execution_providers import _read_provider_result
 
 
 def sh(*args, cwd):
@@ -391,6 +392,29 @@ class PureTests(unittest.TestCase):
             self.assertIn('model_reasoning_effort="max"', argv)
             self.assertEqual(streamed.call_args.kwargs['timeout'], 7)
 
+    def test_codex_schema_is_staged_with_provider_output(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            output = root / 'message.txt'
+            schema = root / 'review-schema.json'
+            schema.write_text('{"type": "object"}', encoding='utf-8')
+
+            def fake_stream(argv, cwd, **kwargs):
+                output_path = Path(argv[argv.index('--output-last-message') + 1])
+                schema_path = Path(argv[argv.index('--output-schema') + 1])
+                self.assertNotEqual(output_path.parent, output.parent)
+                self.assertEqual(output_path.parent, schema_path.parent)
+                self.assertEqual(schema_path.read_text(encoding='utf-8'), schema.read_text(encoding='utf-8'))
+                output_path.write_text('done', encoding='utf-8')
+                return CompletedProcess(argv, 0, stdout='')
+
+            with patch('agentic_execution.streamed_command', side_effect=fake_stream):
+                ok, message = agentic.run_codex(
+                    root, 'prompt', output=output, schema=schema,
+                )
+            self.assertTrue(ok)
+            self.assertEqual(message, 'done')
+
 
     def test_codex_provider_output_is_staged_until_redaction_completes(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -401,7 +425,7 @@ class PureTests(unittest.TestCase):
             def interrupted_stream(argv, cwd, **kwargs):
                 provider_output = Path(argv[argv.index('--output-last-message') + 1])
                 self.assertNotEqual(provider_output, output)
-                self.assertEqual(provider_output.parent, output.parent)
+                self.assertNotEqual(provider_output.parent, output.parent)
                 provider_output.write_text('partial unredacted provider output', encoding='utf-8')
                 raise KeyboardInterrupt
 
@@ -411,6 +435,27 @@ class PureTests(unittest.TestCase):
 
             self.assertEqual(output.read_text(encoding='utf-8'), 'previous complete message')
             self.assertEqual(list(root.glob('.*.provider.tmp')), [])
+
+    def test_provider_result_reader_rejects_links_and_oversized_results(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'result.txt').write_text('safe', encoding='utf-8')
+            self.assertEqual(_read_provider_result(root, 'result.txt'), 'safe')
+
+            (root / 'result.txt').write_text('x' * (4 * 1024 * 1024 + 1), encoding='utf-8')
+            self.assertIsNone(_read_provider_result(root, 'result.txt'))
+
+            if hasattr(os, 'symlink'):
+                target = root / 'outside.txt'
+                target.write_text('not permitted', encoding='utf-8')
+                result = root / 'result.txt'
+                result.unlink()
+                try:
+                    result.symlink_to(target)
+                except (OSError, NotImplementedError):
+                    pass
+                else:
+                    self.assertIsNone(_read_provider_result(root, 'result.txt'))
 
 
     def test_cli_provider_uses_headless_structured_mode(self):
