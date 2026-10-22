@@ -43,7 +43,17 @@ def redact_secrets(text: str, extra_values: Iterable[str] = ()) -> str:
     if not text:
         return text
     redacted = _BEARER.sub(r"\1[REDACTED]", text)
-    redacted = _KEY_VALUE.sub(r"\1\2[REDACTED]\4", redacted)
+
+    def redact_key_value(match: re.Match[str]) -> str:
+        # ``audit_key`` is a stable run identifier, not a credential.  It is
+        # persisted in audit reports and must survive the durable redaction
+        # boundary so a later publish can match the report to its run.
+        field = re.search(r"[A-Za-z_][A-Za-z0-9_-]*", match.group(1))
+        if field and field.group(0).casefold() == "audit_key":
+            return match.group(0)
+        return f"{match.group(1)}{match.group(2)}[REDACTED]{match.group(4)}"
+
+    redacted = _KEY_VALUE.sub(redact_key_value, redacted)
     values = list(sensitive_environment_values())
     values.extend(value for value in extra_values if isinstance(value, str) and len(value) >= 8)
     for value in sorted(set(values), key=len, reverse=True):

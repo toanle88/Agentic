@@ -2,7 +2,13 @@
 
 ## Run lifecycle
 
-Each issue, local-task, or audit run follows this sequence:
+Each issue or local-task run follows this sequence:
+
+New issue and local-task worktrees use timestamped branches such as
+`agent/issue-119-20261022T043125123456Z-a1b2c3d4` and
+`agent/task-add-export-<task-key>-20261022T043125123456Z`. When multiple runs
+exist for the same issue or task, resume and publication selection lists the
+newest timestamp first. Legacy branch names remain supported.
 
 1. Resolve the repository's base branch; GitHub mode also loads the GitHub issue.
 2. Create or reuse an isolated worktree for the issue or deterministic local task.
@@ -24,11 +30,13 @@ Run a reusable repository audit without creating a GitHub issue or task file:
 agentic audit
 ```
 
-The audit gets a distinct `AUDIT` identity and `agent/audit-*` branch. A normal
-invocation reuses the existing audit worktree for this repository; pass
-`--new` when a separate audit attempt is intentional. `/audit` in the
-interactive shell has the same behavior and runs in the background unless
-`--publish` is selected.
+The audit gets a distinct `AUDIT` identity and timestamped
+`agent/audit-<key>-<UTC timestamp>` branch. When multiple audit worktrees
+exist, publish/resume selection lists the newest audit first. Every
+plain invocation starts a fresh audit attempt. Use `--resume` to reuse an
+existing audit worktree and cached report, or `--new` to force a separate
+worktree even for the first attempt. `/audit` in the interactive shell has the
+same behavior and runs in the background unless `--publish` is selected.
 
 The audit provider is an independent read-only invocation using the configured
 reviewer boundary. It does not edit files, run project code or tests, access the
@@ -43,16 +51,17 @@ The report schema is version 1 and contains `summary`, up to 40 findings,
 `security`, `reliability`, or `performance`, a severity from `CRITICAL`,
 `HIGH`, `MEDIUM`, `LOW`, or `INFO`, plus bounded description, evidence, and
 recommendation fields. Findings are ordered with critical/high risks first.
-Concrete critical and high security/correctness findings are prioritized by
-the developer; focused low-risk medium findings may be included, while large
-refactors and uncertain performance hypotheses remain documented evidence.
+Concrete critical and high security/correctness findings are highlighted first;
+focused low-risk medium findings may be included, while large refactors and
+uncertain performance hypotheses remain documented evidence.
 
-After the audit report, the ordinary baseline checks, developer retries,
-read-only review, patch digest approval, and human-approved draft publication
-flow apply unchanged. `audit --publish` shows the current patch and audit
-summary, then accepts `y`, `yes`, or `publish`; cancellation retains the
-worktree and report for resume. `audit --offline` can resume an existing audit
-worktree without GitHub issue intake.
+The audit stops after the report is recorded: it does not run baseline checks,
+start a developer, review a patch, commit, push, or modify repository code.
+The dashboard and `/logs` can inspect the durable report and provider logs.
+`audit --publish` asks for `y`, `yes`, or `publish`, then creates a GitHub issue
+from the saved report without creating a commit or pull request. Cancellation
+retains the worktree and report for resume. `audit --offline` can resume an
+existing audit worktree without GitHub issue intake.
 
 ## Issue investigation
 
@@ -406,8 +415,8 @@ remains active for every other repository and still blocks `agent_config.json`,
 Durable artifacts are stored in the centralized Agentic state directory:
 
 ```text
-~/.local/state/agentic/my-project-<identity>/worktrees/issue-119-XXXXXXXX/
-~/.local/state/agentic/my-project-<identity>/runs/agent-issue-119-XXXXXXXX/
+~/.local/state/agentic/my-project-<identity>/worktrees/issue-119-<timestamp>-XXXXXXXX/
+~/.local/state/agentic/my-project-<identity>/runs/agent-issue-119-<timestamp>-XXXXXXXX/
 ~/.local/state/agentic/my-project-<identity>/shell/job-001.log
 ```
 

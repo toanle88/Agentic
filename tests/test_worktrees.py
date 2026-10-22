@@ -52,6 +52,80 @@ class GitTest(_GitRepositoryTestCase):
         self.assertFalse((self.repo / 'new.py').exists())
         self.assertEqual(agentic.pending_files(run.worktree), ['new.py'])
 
+    def test_issue_worktree_branch_contains_sortable_timestamp(self):
+        run = agentic.create_worktree(self.repo, 'main', 42)
+        self.assertRegex(
+            run.branch,
+            r'^agent/issue-42-\d{8}T\d{12}Z-[a-f0-9]{8}$',
+        )
+        self.assertIn(run.branch.removeprefix('agent/'), run.worktree.name)
+
+    def test_local_task_worktree_branch_contains_sortable_timestamp(self):
+        task = agentic.Issue.from_local_text('Add CSV export')
+        run = agentic.create_local_worktree(self.repo, 'main', task)
+        self.assertRegex(
+            run.branch,
+            rf'^agent/task-add-csv-export-{task.task_key}-\d{{8}}T\d{{12}}Z$',
+        )
+        self.assertIn(run.branch.removeprefix('agent/'), run.worktree.name)
+
+    def test_issue_runs_are_sorted_newest_first(self):
+        older = agentic.Run(
+            42, 'agent/issue-42-20261021T120000000000Z-aaaabbbb', self.repo / 'older',
+        )
+        newer = agentic.Run(
+            42, 'agent/issue-42-20261022T120000000000Z-ccccdddd', self.repo / 'newer',
+        )
+        with patch.object(agentic_worktrees, 'discover_runs', return_value=[older, newer]):
+            self.assertEqual(agentic_worktrees.runs_for_issue(self.repo, 42), [newer, older])
+
+    def test_local_task_runs_are_sorted_newest_first(self):
+        older = agentic.Run(
+            None, 'agent/task-add-csv-export-0123456789ab-20261021T120000000000Z',
+            self.repo / 'older', '0123456789ab',
+        )
+        newer = agentic.Run(
+            None, 'agent/task-add-csv-export-0123456789ab-20261022T120000000000Z',
+            self.repo / 'newer', '0123456789ab',
+        )
+        with patch.object(agentic_worktrees, 'discover_runs', return_value=[older, newer]):
+            self.assertEqual(
+                agentic_worktrees.runs_for_task(self.repo, '0123456789ab'),
+                [newer, older],
+            )
+
+    def test_audit_worktree_branch_contains_sortable_timestamp(self):
+        issue = agentic.Issue.for_audit(
+            agentic_worktrees.AUDIT_KEY,
+            'Audit the repository.',
+        )
+        run = agentic.create_audit_worktree(self.repo, 'main', issue)
+        self.assertRegex(
+            run.branch,
+            rf'^agent/audit-{agentic_worktrees.AUDIT_KEY}-'
+            r'\d{8}T\d{12}Z$',
+        )
+        self.assertIn(run.branch.removeprefix('agent/'), run.worktree.name)
+
+    def test_audit_runs_are_sorted_newest_first(self):
+        older = agentic.Run(
+            None,
+            'agent/audit-0123456789ab-20261021T120000Z',
+            self.repo / 'older',
+            audit_key='0123456789ab',
+        )
+        newer = agentic.Run(
+            None,
+            'agent/audit-0123456789ab-20261022T120000Z',
+            self.repo / 'newer',
+            audit_key='0123456789ab',
+        )
+        with patch.object(agentic_worktrees, 'discover_runs', return_value=[older, newer]):
+            self.assertEqual(
+                agentic_worktrees.runs_for_audit(self.repo, '0123456789ab'),
+                [newer, older],
+            )
+
     def test_choose_existing_retries_invalid_input_and_confirms_selection(self):
         runs = [
             agentic.Run(42, 'agent/issue-42-aaaabbbb', self.repo / 'one'),

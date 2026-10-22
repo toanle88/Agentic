@@ -610,6 +610,9 @@ def audit_feedback(*args, **kwargs):
 def load_audit_report(*args, **kwargs):
     return _workflow_call("load_audit_report", *args, **kwargs)
 
+def publish_audit_issue(*args, **kwargs):
+    return _workflow_call("publish_audit_issue", *args, **kwargs)
+
 def print_audit_summary(*args, **kwargs):
     return _workflow_call("print_audit_summary", *args, **kwargs)
 
@@ -1002,6 +1005,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="With doctor --commands, run checks from this worktree (default: --repo)",
     )
     parser.add_argument("--new", action="store_true", help="Make another worktree even if one already exists")
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="With audit, reuse an existing audit worktree and report",
+    )
     parser.add_argument("--force", action="store_true", help="Allow init to replace generated setup files")
     parser.add_argument(
         "--discover-tests", action="store_true",
@@ -1049,7 +1056,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--all", dest="all_runs", action="store_true", help="With cleanup, select all clean Agentic worktrees")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--review", action="store_true", help="Rerun tests + fresh review; do not code")
-    mode.add_argument("--publish", action="store_true", help="Publish the existing approved patch as a draft PR")
+    mode.add_argument(
+        "--publish", action="store_true",
+        help="Publish the existing run (draft PR for tasks; GitHub issue for audits)",
+    )
     mode.add_argument(
         "--mark-done", action="store_true",
         help="Record explicit human completion for the current patch",
@@ -1074,8 +1084,10 @@ def execute(args: argparse.Namespace) -> int:
 
 
 def execute_locked(args: argparse.Namespace, repo: Path) -> int:
-    if args.new and (args.review or args.publish or args.mark_done):
-        raise RuntimeError("--new cannot be combined with --review, --publish, or --mark-done")
+    if args.new and (args.review or args.publish or args.mark_done or args.resume):
+        raise RuntimeError("--new cannot be combined with --review, --publish, --mark-done, or --resume")
+    if args.resume and args.command != "audit":
+        raise RuntimeError("--resume is only available with audit")
     if args.reason and not args.mark_done:
         raise RuntimeError("--reason can only be used with --mark-done")
     if args.offline and (args.new or args.publish or args.list or args.runs):
@@ -1131,13 +1143,24 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
         issue = Issue.for_audit(
             AUDIT_KEY,
             "Audit the current repository for code quality, security, reliability, and performance. "
-            "Prioritize concrete critical and high-severity findings, then address focused low-risk findings.",
+            "Record bounded findings for dashboard review and optional GitHub issue publication.",
         )
         previous = runs_for_audit(repo, AUDIT_KEY)
+        if args.publish:
+            previous = [
+                run for run in previous
+                if load_audit_report(logs_path(repo, run, state_dir), AUDIT_KEY) is not None
+            ]
+            if not previous:
+                raise RuntimeError(
+                    "No completed audit report found; run `agentic audit` before publishing"
+                )
         if args.offline:
             if not previous:
                 raise RuntimeError("No existing audit worktree found; offline audit resume cannot start a run")
             offline_run = choose_existing(previous, prompt_prefix="RESUME")
+        elif args.resume and not previous:
+            raise RuntimeError("No existing audit worktree found; run audit first without --resume")
     elif task_source == "local":
         if args.offline:
             raise RuntimeError("--offline is only available for GitHub issue runs")
@@ -1204,11 +1227,14 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
     if offline_run is not None:
         run = offline_run
         fresh = False
-    elif args.new:
+    elif args.new or (is_audit and not (args.resume or args.publish)):
         if not eligible(issue):
             raise RuntimeError("Only open issues can start a new worktree")
         if issue.is_audit:
-            run = create_audit_worktree(repo, base, issue, state_dir, separate=True)
+            run = create_audit_worktree(
+                repo, base, issue, state_dir,
+                separate=args.new or bool(previous),
+            )
         elif issue.is_local:
             run = create_local_worktree(repo, base, issue, state_dir, separate=True)
         else:
@@ -1261,6 +1287,8 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
         flush=True,
     )
     if args.review:
+        if issue.is_audit:
+            raise RuntimeError("Audit reports are read-only; use --publish to create a GitHub issue")
         with worktree_lock(repo, run, state_dir):
             passed, *_ = verify_and_review(
                 run, issue, base, config, folder, test_commands=test_commands,
@@ -1282,15 +1310,15 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
         if not github_repo:
             raise RuntimeError("Publishing requires a GitHub origin remote and GitHub CLI access")
         if issue.is_audit:
-            audit_report = load_audit_report(folder, issue.audit_key or AUDIT_KEY)
-            if audit_report is not None:
-                print_audit_summary(audit_report)
-        with worktree_lock(repo, run, state_dir):
-            publish(
-                run, issue, github_repo, base, config, folder,
-                test_commands=test_commands, deadline=task_deadline,
-                manual_approval=manual_approval,
-            )
+            with worktree_lock(repo, run, state_dir):
+                publish_audit_issue(run, issue, github_repo, github_host, folder)
+        else:
+            with worktree_lock(repo, run, state_dir):
+                publish(
+                    run, issue, github_repo, base, config, folder,
+                    test_commands=test_commands, deadline=task_deadline,
+                    manual_approval=manual_approval,
+                )
         return 0
     if args.mark_done:
         if not eligible(issue):
@@ -1318,6 +1346,11 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
                 verbose=args.verbose,
             )
         )
+    if issue.is_audit:
+        _status_print("[AUDIT] Read-only audit complete; no code changes were made")
+        _status_print(f"[AUDIT] Report and logs: {folder}")
+        _status_print("[AUDIT] Next: run `agentic audit --publish` to create a GitHub issue")
+        return 0
     if not fresh and github_repo:
         existing = check_existing_pr(run.worktree, github_repo, run.branch, github_host)
         if existing:

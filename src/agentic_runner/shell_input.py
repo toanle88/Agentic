@@ -582,8 +582,8 @@ _HELP_SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         (
             (
                 '/audit [--profile fast|slow] [--instruction "text"] '
-                '[--review|--publish|--new|--offline|--verbose]',
-                "audit the current repository in an isolated worktree",
+                '[--publish|--new|--resume|--offline|--verbose]',
+                "run a fresh read-only audit; use --resume for an existing report",
             ),
             (
                 '/run ISSUE [--profile fast|slow] [--instruction "text"] '
@@ -663,7 +663,7 @@ SHELL_COMMANDS = (
     "/audit",
 )
 SHELL_OPTIONS = {
-    "/audit": ("--profile", "--instruction", "--review", "--publish", "--new", "--offline", "--verbose"),
+    "/audit": ("--profile", "--instruction", "--publish", "--new", "--resume", "--offline", "--verbose"),
     "/run": ("--profile", "--instruction", "--review", "--publish", "--mark-done", "--reason", "--new", "--verbose", "--task-file"),
     "/logs": ("--verbose",),
     "/ps": ("--all",),
@@ -675,7 +675,7 @@ SHELL_OPTIONS = {
     "/init": ("--provider", "--reviewer-provider", "--security-mode", "--sandbox-image", "--agents", "--force"),
 }
 COMMAND_DESCRIPTIONS: dict[str, str] = {
-    "/audit": "audit the current repository and propose focused fixes",
+    "/audit": "run a fresh read-only repository audit",
     "/run": "start a background job or local task",
     "/ps": "show running or persisted background jobs",
     "/logs": "follow or show captured terminal output",

@@ -14,7 +14,7 @@ _RUN_BOOLEAN_OPTIONS = {
     "--review", "--publish", "--mark-done", "--new", "--offline", "--verbose",
 }
 _AUDIT_VALUE_OPTIONS = {"--profile", "--instruction"}
-_AUDIT_BOOLEAN_OPTIONS = {"--review", "--publish", "--new", "--offline", "--verbose"}
+_AUDIT_BOOLEAN_OPTIONS = {"--publish", "--new", "--resume", "--offline", "--verbose"}
 _LOG_BOOLEAN_OPTIONS = {"--verbose"}
 
 
@@ -108,10 +108,8 @@ def parse_audit_command(parts: list[str]) -> list[str]:
             index += 2
             continue
         if flag not in _AUDIT_BOOLEAN_OPTIONS:
-            raise ValueError("usage: /audit [--profile fast|slow] [--instruction \"text\"] [--review|--publish|--new|--offline|--verbose]")
+            raise ValueError("usage: /audit [--profile fast|slow] [--instruction \"text\"] [--publish|--new|--resume|--offline|--verbose]")
         index += 1
-    if "--review" in flags and "--publish" in flags:
-        raise ValueError("/audit cannot combine --review and --publish")
     return flags
 
 

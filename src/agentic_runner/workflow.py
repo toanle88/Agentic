@@ -232,6 +232,17 @@ INVESTIGATION_SCHEMA = {
 AUDIT_CATEGORIES = ("code_quality", "security", "reliability", "performance")
 AUDIT_SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
 AUDIT_REPORT_FILENAME = "audit-report.json"
+AUDIT_ISSUE_FILENAME = "audit-issue.json"
+AUDIT_MEASUREMENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {"type": ["string", "null"]},
+        "value": {"type": ["string", "null"]},
+        "method": {"type": ["string", "null"]},
+    },
+    "required": ["name", "value", "method"],
+    "additionalProperties": False,
+}
 AUDIT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -242,7 +253,7 @@ AUDIT_SCHEMA = {
                 "type": "object",
                 "required": [
                     "id", "category", "severity", "title", "description",
-                    "evidence", "recommendation",
+                    "evidence", "recommendation", "confidence", "measurement",
                 ],
                 "properties": {
                     "id": {"type": "string"},
@@ -252,13 +263,15 @@ AUDIT_SCHEMA = {
                     "description": {"type": "string"},
                     "evidence": {"type": "array", "items": {"type": "string"}},
                     "recommendation": {"type": "string"},
-                    "confidence": {"type": "string"},
-                    "measurement": {"type": "object"},
+                    "confidence": {"type": ["string", "null"]},
+                    "measurement": {
+                        "anyOf": [AUDIT_MEASUREMENT_SCHEMA, {"type": "null"}],
+                    },
                 },
                 "additionalProperties": False,
             },
         },
-        "measurements": {"type": "array", "items": {"type": "object"}},
+        "measurements": {"type": "array", "items": AUDIT_MEASUREMENT_SCHEMA},
         "skipped": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["summary", "findings", "measurements", "skipped"],
@@ -828,9 +841,109 @@ def load_audit_report(folder: Path, audit_key: str = AUDIT_KEY) -> dict[str, Any
         value = json.loads(audit_report_path(folder).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if not isinstance(value, dict) or value.get("audit_key") != audit_key:
+    if not isinstance(value, dict):
+        return None
+    # Older persistence redaction treated this run identifier as a secret
+    # because its field name ends in ``key``.  Accept those reports so users
+    # can publish existing audits after upgrading; new writes preserve it.
+    stored_audit_key = value.get("audit_key")
+    if stored_audit_key == "[REDACTED]":
+        stored_audit_key = audit_key
+    if stored_audit_key != audit_key:
         return None
     return _normalize_audit_report(value, audit_key)
+
+
+def audit_issue_path(folder: Path) -> Path:
+    return folder / AUDIT_ISSUE_FILENAME
+
+
+def _audit_issue_body(report: dict[str, Any]) -> str:
+    lines = [
+        "## Repository audit",
+        "",
+        _bounded_text(str(report.get("summary", "")), 2_000),
+    ]
+    findings = report.get("findings", [])
+    if isinstance(findings, list) and findings:
+        lines.extend(["", "## Findings"])
+        for finding in findings[:40]:
+            if not isinstance(finding, dict):
+                continue
+            severity = _bounded_text(str(finding.get("severity", "MEDIUM")), 20)
+            category = _bounded_text(str(finding.get("category", "unknown")), 40)
+            title = _bounded_text(str(finding.get("title", "")), 240)
+            lines.extend([
+                "",
+                f"### [{severity}] {category}: {title}",
+                _bounded_text(str(finding.get("description", "")), 1_200),
+                f"Recommendation: {_bounded_text(str(finding.get('recommendation', '')), 1_000)}",
+            ])
+            evidence = finding.get("evidence", [])
+            if isinstance(evidence, list) and evidence:
+                lines.append("Evidence:")
+                lines.extend(f"- {_bounded_text(str(item), 600)}" for item in evidence[:6])
+    measurements = report.get("measurements", [])
+    if isinstance(measurements, list) and measurements:
+        lines.extend(["", "## Measurements"])
+        for measurement in measurements[:20]:
+            if isinstance(measurement, dict):
+                name = _bounded_text(str(measurement.get("name", "measurement")), 120)
+                value = _bounded_text(str(measurement.get("value", "")), 300)
+                method = _bounded_text(str(measurement.get("method", "")), 300)
+                lines.append(f"- **{name}**: {value} ({method})")
+    skipped = report.get("skipped", [])
+    if isinstance(skipped, list) and skipped:
+        lines.extend(["", "## Skipped checks"])
+        lines.extend(f"- {_bounded_text(str(item), 500)}" for item in skipped[:20])
+    return _bounded_text("\n".join(lines), 12_000).strip()
+
+
+def publish_audit_issue(run: Run, issue: Issue, github_repo: str,
+                        github_host: str, folder: Path) -> str:
+    """Create one GitHub issue from a saved audit report after confirmation."""
+    if not issue.is_audit or not issue.audit_key:
+        raise ValueError("publish_audit_issue requires an audit work item")
+    try:
+        existing = json.loads(audit_issue_path(folder).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        existing = None
+    if isinstance(existing, dict) and isinstance(existing.get("url"), str) and existing["url"].strip():
+        url = existing["url"].strip()
+        _status_print(f"[PUBLISH] Audit GitHub issue already exists: {url}")
+        return url
+    report = load_audit_report(folder, issue.audit_key)
+    if report is None:
+        raise RuntimeError("No saved audit report; run /audit before publishing")
+    from .shell_input import _interactive_line
+
+    try:
+        confirm = _interactive_line(
+            "\n[PUBLISH] Create a GitHub issue from this audit report? [y/N]: ",
+            system_prefix="PUBLISH",
+        ).strip().casefold()
+    except KeyboardInterrupt:
+        _status_print("[PUBLISH] Issue creation cancelled by Ctrl-C")
+        return ""
+    if confirm not in {"y", "yes", "publish"}:
+        _status_print("[PUBLISH] Issue creation cancelled; audit report retained")
+        return ""
+    result = command([
+        "gh", "issue", "create", "--repo", github_repo,
+        "--title", "Repository audit findings",
+        "--body", _audit_issue_body(report),
+    ], run.worktree, env=_github_environment(github_host))
+    url = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
+    if not url:
+        raise RuntimeError("GitHub issue creation returned no URL")
+    atomic_write_json(audit_issue_path(folder), {
+        "status": "published",
+        "audit_key": issue.audit_key,
+        "url": url,
+        "published_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    })
+    _status_print(f"[PUBLISH] Created GitHub issue: {url}")
+    return url
 
 
 def audit_repository(worktree: Path, issue: Issue, folder: Path, *,
@@ -863,8 +976,10 @@ Return only JSON matching the supplied schema: summary, findings, measurements,
 and skipped. Use CRITICAL or HIGH only for concrete security/correctness risks;
 use MEDIUM, LOW, or INFO for focused improvements and uncertain hypotheses.
 Each finding needs id, category, severity, title, description, evidence (a short
-array), and recommendation. Do not propose a large refactor unless evidence makes
-it necessary. Do not make a pass/fail decision about a patch.
+array), recommendation, confidence, and measurement. Use null for confidence or
+measurement when it is not applicable; measurements use name, value, and method.
+Do not propose a large refactor unless evidence makes it necessary. Do not make a
+pass/fail decision about a patch.
 """
     _status_print(f"[AUDIT] Launching independent read-only {provider} process")
     run_kwargs: dict[str, Any] = {
