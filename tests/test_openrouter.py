@@ -330,7 +330,10 @@ class OpenRouterTests(unittest.TestCase):
             ['curl', 'https://example.test'], readonly=False, allow_network=True
         )
         self.assertTrue(allowed, reason)
-        for argv in (['git', 'status'], ['git', 'diff'], ['rg', 'needle', '.']):
+        for argv in (
+            ['git', 'status'], ['git', 'diff', '--', 'tracked.txt'],
+            ['git', 'grep', 'needle', '--', 'tracked.txt'], ['rg', 'needle', 'README.md'],
+        ):
             allowed, reason = agentic_openrouter._openrouter_command_allowed(argv, readonly=True)
             self.assertTrue(allowed, reason)
         for argv in (['python', '-c', 'print(1)'], ['git', 'fetch']):
@@ -346,10 +349,18 @@ class OpenRouterTests(unittest.TestCase):
     def test_openrouter_developer_inspection_stays_inside_worktree(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            outside = root.parent / 'outside-secret.txt'
+            outside.write_text('outside\n', encoding='utf-8')
+            outside_link = root / 'outside-link'
+            try:
+                outside_link.symlink_to(outside)
+            except OSError as exc:
+                self.skipTest(f'symlinks unavailable: {exc}')
             for argv in (
                 ['rg', 'needle', '/etc'],
                 ['ls', '../outside'],
                 ['file', str(root.parent / 'outside')],
+                ['rg', 'needle', 'outside-link'],
             ):
                 allowed, reason = agentic_openrouter._openrouter_command_allowed(
                     argv, readonly=False, worktree=root,
@@ -357,9 +368,105 @@ class OpenRouterTests(unittest.TestCase):
                 self.assertFalse(allowed, (argv, reason))
                 self.assertIn('worktree', reason)
             allowed, reason = agentic_openrouter._openrouter_command_allowed(
-                ['rg', 'needle', '.'], readonly=False, worktree=root,
+                ['rg', 'needle', 'README.md'], readonly=False, worktree=root,
             )
             self.assertTrue(allowed, reason)
+
+    def test_openrouter_readonly_commands_resolve_and_protect_path_operands(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'worktree'
+            outside = Path(temp) / 'outside-secret.txt'
+            root.mkdir()
+            outside.write_text('outside\n', encoding='utf-8')
+            (root / '.env').write_text('TOKEN=private\n', encoding='utf-8')
+            (root / 'private.pem').write_text('PRIVATE=do-not-scan\n', encoding='utf-8')
+            (root / 'public.txt').write_text('public\n', encoding='utf-8')
+            outside_link = root / 'outside-link'
+            env_link = root / 'env-link'
+            dash_env_link = root / '-env-link'
+            try:
+                outside_link.symlink_to(outside)
+                env_link.symlink_to(root / '.env')
+                dash_env_link.symlink_to(root / '.env')
+            except OSError as exc:
+                self.skipTest(f'symlinks unavailable: {exc}')
+
+            blocked = (
+                ['rg', 'needle', 'outside-link'],
+                ['ls', 'env-link'],
+                ['rg', '--hidden', 'TOKEN', '.'],
+                ['rg', '--follow', 'needle', '.'],
+                ['rg', '-uu', 'TOKEN', '.'],
+                ['rg', '-f', '.env', 'public.txt'],
+                ['rg', '--file=private.pem', 'public.txt'],
+                ['rg', '--ignore-file=.env', 'needle', 'public.txt'],
+                ['rg', '--files-from', 'public.txt', 'needle'],
+                ['rg', 'needle', '.'],
+                ['rg', '--type', 'py', 'needle'],
+                ['rg', 'TOKEN'],
+                ['grep', '-r', 'TOKEN', '.'],
+                ['grep', '-R', 'TOKEN', '.'],
+                ['grep', '--file=.env', 'public.txt'],
+                ['grep', '-f.env', 'public.txt'],
+                ['grep', '--exclude-from=.env', 'public.txt'],
+                ['grep', 'TOKEN', '--', 'env-link'],
+                ['grep', 'TOKEN', '--', '-env-link'],
+                ['ls', '-R', '.'],
+                ['git', 'diff'],
+                ['git', 'grep', 'TOKEN'],
+                ['git', 'grep', 'TOKEN', '--', '.'],
+                ['git', 'grep', 'TOKEN', '--', 'outside-link'],
+                ['git', 'grep', 'TOKEN', '--', 'env-link'],
+                ['git', 'status', '--', '-env-link'],
+                ['git', 'show', 'HEAD'],
+                ['git', 'log', '-p'],
+                ['git', 'log', '-p', 'HEAD'],
+                ['git', 'log', '-p', '--', '.'],
+                ['git', 'log', '-p', '--', 'deleted-dir'],
+                ['git', 'log', '--patch-with-stat'],
+                ['git', 'log', '--patch-with-raw', 'HEAD'],
+                ['git', 'log', '-pu'],
+                ['git', 'diff', '--', 'outside-link'],
+                ['git', 'show', 'HEAD:.env'],
+                ['git', 'show', 'HEAD:.env', '--'],
+                ['git', 'show', 'HEAD:deleted-dir'],
+                ['git', 'show', 'HEAD:deleted-dir', '--'],
+                ['git', 'diff', '--', ':(top).env'],
+                ['git', 'diff', '--', '*.env'],
+                ['git', 'diff', '--', '.'],
+            )
+            with patch(
+                'agentic_openrouter_tools._bounded_command_capture',
+                side_effect=AssertionError('blocked command must not be captured'),
+            ) as capture:
+                for argv in blocked:
+                    result = agentic_openrouter._openrouter_tool_call(
+                        root, 'run_command', {'argv': argv}, readonly=True,
+                    )
+                    self.assertIn('ERROR:', result, argv)
+            capture.assert_not_called()
+
+            with patch(
+                'agentic_openrouter_tools._bounded_command_capture',
+                return_value=(0, 'public\n', False, False),
+            ) as capture:
+                result = agentic_openrouter._openrouter_tool_call(
+                    root, 'run_command', {'argv': ['rg', 'needle', 'public.txt']}, readonly=True,
+                )
+            self.assertIn('exit 0', result)
+            capture.assert_called_once()
+
+            with patch(
+                'agentic_openrouter_tools._bounded_command_capture',
+                return_value=(0, 'public\n', False, False),
+            ) as capture:
+                result = agentic_openrouter._openrouter_tool_call(
+                    root, 'run_command',
+                    {'argv': ['git', 'grep', 'needle', '--', 'public.txt']},
+                    readonly=True,
+                )
+            self.assertIn('exit 0', result)
+            capture.assert_called_once()
 
     def test_openrouter_git_diff_disables_malicious_external_diff_config(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -381,10 +488,43 @@ class OpenRouterTests(unittest.TestCase):
             run('add', 'tracked.txt')
             (root / 'tracked.txt').write_text('after\n', encoding='utf-8')
             result = agentic_openrouter._openrouter_tool_call(
-                root, 'run_command', {'argv': ['git', 'diff']}, readonly=True,
+                root, 'run_command', {'argv': ['git', 'diff', '--', 'tracked.txt']}, readonly=True,
             )
             self.assertNotIn('ERROR:', result)
             self.assertFalse(marker.exists(), result)
+
+    def test_openrouter_git_show_rejects_historical_directories(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+
+            def run(*argv):
+                return subprocess.run(
+                    ['git', *argv], cwd=root, check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+
+            run('init', '-q')
+            run('-c', 'user.email=test@example.com', '-c', 'user.name=Test',
+                'config', 'core.autocrlf', 'false')
+            old_directory = root / 'history-transition'
+            old_directory.mkdir()
+            (old_directory / 'private.pem').write_text('historical\n', encoding='utf-8')
+            run('add', '.')
+            run('-c', 'user.email=test@example.com', '-c', 'user.name=Test',
+                'commit', '-qm', 'directory')
+            (old_directory / 'private.pem').unlink()
+            old_directory.rmdir()
+            old_directory.write_text('current regular file\n', encoding='utf-8')
+            run('add', '.')
+            run('-c', 'user.email=test@example.com', '-c', 'user.name=Test',
+                'commit', '-qm', 'file')
+
+            for argv in (['git', 'show', 'HEAD~1:history-transition'],):
+                allowed, reason = agentic_openrouter._openrouter_command_allowed(
+                    argv, readonly=True, worktree=root,
+                )
+                self.assertFalse(allowed, (argv, reason))
+                self.assertIn('historical director', reason)
 
     def test_openrouter_commands_use_configured_sandbox(self):
         with tempfile.TemporaryDirectory() as temp:

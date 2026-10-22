@@ -189,17 +189,31 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
             self.assertTrue(reason, argv)
 
     def test_readonly_allows_bounded_inspection(self):
-        for argv in (["git", "status"], ["git", "diff"], ["rg", "needle", "."]):
+        for argv in (
+            ["git", "status"], ["git", "diff", "--", "README.md"],
+            ["git", "grep", "needle", "--", "README.md"], ["rg", "needle", "README.md"],
+        ):
             allowed, reason = agentic_openrouter._openrouter_command_allowed(argv, readonly=True)
             self.assertTrue(allowed, reason)
+
+        allowed, reason = agentic_openrouter._openrouter_command_allowed(
+            ["rg", "needle", "."], readonly=True,
+        )
+        self.assertFalse(allowed)
+        self.assertIn("directory scopes", reason)
 
     def test_git_read_is_an_explicit_allowlist_for_developer_and_reviewer(self):
         allowed_git = ("status", "diff", "log", "show")
         blocked_git = ("add", "config", "merge", "rebase", "commit", "push")
         for readonly in (False, True):
             for subcommand in allowed_git:
+                argv = ["git", subcommand]
+                if subcommand == "diff":
+                    argv.extend(["--", "README.md"])
+                elif subcommand == "show":
+                    argv.append("HEAD:README.md")
                 allowed, reason = agentic_openrouter._openrouter_command_allowed(
-                    ["git", subcommand], readonly=readonly,
+                    argv, readonly=readonly,
                 )
                 self.assertTrue(allowed, (readonly, subcommand, reason))
             for subcommand in blocked_git:

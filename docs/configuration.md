@@ -391,7 +391,10 @@ running argv commands, and (for the developer only) writing files. Commits,
 pushes, shell wrappers, interpreter code-evaluation flags, unsafe Git options,
 and path escapes are blocked by the adapter; command execution is routed
 through the configured sandbox when enabled. File-tool paths stay inside the
-worktree. Native developer CLIs run in the isolated Agentic worktree; their
+worktree, and command-based inspection applies the same resolved-path and
+protected-file checks. Recursive `rg` directory scans and content-producing
+Git commands without explicit regular-file paths are rejected. Native
+developer CLIs run in the isolated Agentic worktree; their
 provider approval modes are set to allow autonomous edits, while reviewer
 modes are read-only where the provider supports that capability.
 

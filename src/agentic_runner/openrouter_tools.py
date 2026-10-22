@@ -25,9 +25,10 @@ OPENROUTER_COMMAND_OUTPUT_CHARS = 6_000
 OPENROUTER_COMMAND_READ_CHUNK_BYTES = 4_096
 OPENROUTER_COMMAND_DRAIN_TIMEOUT_SECONDS = 1.0
 OPENROUTER_LIST_FILES_PAGE_SIZE = 300
+OPENROUTER_GIT_OBJECT_CHECK_TIMEOUT_SECONDS = 1.0
 NETWORK_COMMANDS = {"curl", "wget", "ssh", "scp", "sftp", "ftp", "nc", "netcat", "telnet", "gh"}
 ALWAYS_BLOCKED_COMMANDS = {"gh", "ssh", "scp", "sftp"}
-READONLY_GIT_COMMANDS = {"status", "diff", "log", "show"}
+READONLY_GIT_COMMANDS = {"status", "diff", "grep", "log", "show"}
 # Retained as a compatibility-facing import for older integrations. Branch
 # inspection is intentionally no longer part of the permission allowlist.
 READONLY_BRANCH_OPTIONS: set[str] = set()
@@ -39,6 +40,31 @@ INTERPRETER_EVAL_OPTIONS = {"-c", "--command", "-e", "--eval", "-exec"}
 GIT_UNSAFE_OPTIONS = {
     "-c", "--config-env", "--exec-path", "--git-dir", "--work-tree", "-C",
     "--output", "-o", "--ext-diff", "--textconv", "--no-index",
+}
+READONLY_RG_TRAVERSAL_OPTIONS = {
+    "--hidden", "--follow", "--no-ignore", "--no-ignore-vcs",
+    "--no-ignore-parent", "--no-ignore-dot", "--no-ignore-global",
+    "--no-ignore-files", "--glob", "--iglob", "--files-from",
+}
+READONLY_RECURSIVE_OPTIONS = {
+    "-r", "-R", "--recursive", "--dereference-recursive",
+}
+RG_OPTIONS_WITH_VALUES = {
+    "-A", "-B", "-C", "-e", "-f", "-j", "-m", "-M", "-t", "-T",
+    "--after-context", "--before-context", "--colors", "--context",
+    "--encoding", "--engine", "--file", "--files-from", "--glob", "--iglob",
+    "--ignore-file",
+    "--max-columns", "--max-count", "--max-depth", "--max-filesize",
+    "--path-separator", "--pre", "--pre-glob", "--regexp", "--replace",
+    "--sort", "--sortr", "--threads", "--type", "--type-add",
+    "--type-clear", "--type-not",
+}
+RG_PATTERN_OPTIONS = {"-e", "-f", "--regexp", "--file"}
+RG_FILE_OPTIONS = {"-f", "--file", "--ignore-file", "--files-from"}
+GREP_FILE_OPTIONS = {"-f", "--file", "--exclude-from"}
+GIT_PATCH_OPTIONS = {
+    "-p", "-u", "--patch", "--full-diff", "-c", "--cc",
+    "--patch-with-stat", "--patch-with-raw",
 }
 
 def _safe_worktree_path(worktree: Path, relative: str, *, write: bool = False) -> Path:
@@ -57,7 +83,250 @@ def _safe_worktree_path(worktree: Path, relative: str, *, write: bool = False) -
     return target
 
 
-def _readonly_git_command_allowed(argv: list[str]) -> tuple[bool, str]:
+def _safe_read_worktree_path(
+    worktree: Path, relative: str, *, protected_error: str,
+) -> Path:
+    """Resolve a readable path and apply the API protected-file boundary."""
+    target = _safe_worktree_path(worktree, relative)
+    normalized = target.relative_to(worktree.resolve()).as_posix()
+    if sensitive_read(normalized):
+        raise ValueError(protected_error)
+    return target
+
+
+def _inspection_path_operands(argv: list[str]) -> list[str]:
+    """Return non-option operands that an inspection command may read."""
+    executable = Path(argv[0]).name.lower()
+    if executable != "git":
+        operands: list[str] = []
+        after_separator = False
+        for part in argv[1:]:
+            if part == "--":
+                after_separator = True
+                continue
+            if after_separator or not part.startswith("-"):
+                operands.append(part)
+        return operands
+
+    subcommand = argv[1] if len(argv) > 1 else ""
+    separator = next((index for index, part in enumerate(argv[2:], 2) if part == "--"), None)
+    if separator is not None and subcommand in READONLY_GIT_COMMANDS:
+        # These commands treat everything after ``--`` as a pathspec.  Keep
+        # the operands intact so path resolution also covers names beginning
+        # with a dash.  ``git show`` and other Git commands can also receive
+        # revision:path expressions before the separator; preserve those
+        # expressions for the same protected-file and regular-file checks.
+        operands = list(argv[separator + 1:])
+        operands.extend(
+            part.split(":", 1)[1]
+            for part in argv[2:separator]
+            if ":" in part and not part.startswith(":") and not part.startswith("-")
+        )
+        return operands
+
+    # Git's first argument after the executable is its inspection subcommand.
+    # A revision:path expression names a tree path rather than a filesystem
+    # path, but it can still expose a protected path through ``git show``.
+    operands: list[str] = []
+    for part in argv[2:]:
+        if part.startswith("-"):
+            continue
+        if part.startswith(":"):
+            # Preserve Git pathspec syntax for the authorization layer.  It
+            # must not be reduced to a filesystem-looking literal by the
+            # revision:path handling below.
+            operands.append(part)
+            continue
+        operands.append(part.split(":", 1)[1] if ":" in part else part)
+    return operands
+
+
+def _rg_path_operands(argv: list[str]) -> list[str] | None:
+    """Parse rg paths without mistaking option values for a path operand."""
+    operands: list[str] = []
+    pattern_seen = False
+    files_mode = "--files" in argv[1:]
+    index = 1
+    after_separator = False
+    while index < len(argv):
+        part = argv[index]
+        if after_separator:
+            if not pattern_seen:
+                if files_mode:
+                    operands.append(part)
+                else:
+                    pattern_seen = True
+            else:
+                operands.append(part)
+            index += 1
+            continue
+        if part == "--":
+            after_separator = True
+            index += 1
+            continue
+        if part.startswith("-"):
+            option = part.split("=", 1)[0]
+            if option in RG_OPTIONS_WITH_VALUES:
+                if option in RG_PATTERN_OPTIONS:
+                    pattern_seen = True
+                if "=" not in part:
+                    if index + 1 >= len(argv):
+                        return None
+                    index += 2
+                else:
+                    index += 1
+                continue
+            if (part.startswith("-e") and len(part) > 2) or (
+                part.startswith("-f") and len(part) > 2
+            ):
+                pattern_seen = True
+            index += 1
+            continue
+        if files_mode or pattern_seen:
+            operands.append(part)
+        else:
+            pattern_seen = True
+        index += 1
+    return operands if pattern_seen or files_mode else None
+
+
+def _option_file_operands(
+    argv: list[str], options: set[str], attached_short_options: set[str],
+) -> list[str] | None:
+    """Return file paths supplied as option values, including short forms."""
+    operands: list[str] = []
+    index = 1
+    while index < len(argv):
+        part = argv[index]
+        option = part.split("=", 1)[0]
+        if option in options:
+            if "=" in part:
+                value = part.split("=", 1)[1]
+            elif index + 1 < len(argv):
+                value = argv[index + 1]
+                index += 1
+            else:
+                return None
+            if not value:
+                return None
+            operands.append(value)
+        elif any(
+            part.startswith(short_option) and len(part) > len(short_option)
+            for short_option in attached_short_options
+        ):
+            operands.append(part[2:])
+        index += 1
+    return operands
+
+
+def _git_patch_option(part: str) -> bool:
+    """Identify Git options that can make a log command emit file contents."""
+    option = part.split("=", 1)[0]
+    if option in GIT_PATCH_OPTIONS:
+        return True
+    # Git accepts combined short options such as ``-pu``.  Keep the check
+    # limited to lowercase patch flags so unrelated options are not treated
+    # as content-producing forms.
+    return option.startswith("-") and not option.startswith("--") and any(
+        flag in option[1:] for flag in "puc"
+    )
+
+
+def _git_show_path_is_directory(worktree: Path, argv: list[str], relative: str) -> bool:
+    """Reject ``git show REV:path`` when Git resolves the path to a tree."""
+    if len(argv) < 3 or argv[1] != "show":
+        return False
+    specs = [
+        part for part in argv[2:]
+        if ":" in part and not part.startswith(":") and not part.startswith("-")
+    ]
+    if not any(spec.split(":", 1)[1] == relative for spec in specs):
+        return False
+    try:
+        for spec in specs:
+            if spec.split(":", 1)[1] != relative:
+                continue
+            object_type = subprocess.run(
+                ["git", "cat-file", "-t", spec],
+                cwd=worktree,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=False,
+                timeout=OPENROUTER_GIT_OBJECT_CHECK_TIMEOUT_SECONDS,
+            )
+            if object_type.returncode != 0:
+                return True
+            if object_type.stdout.strip() != "blob":
+                return True
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    return False
+
+
+def _readonly_command_paths(
+    argv: list[str], worktree: Path | None,
+) -> tuple[bool, str]:
+    """Apply resolved worktree and protected-read checks to command operands."""
+    executable = Path(argv[0]).name.lower()
+    operands = _rg_path_operands(argv) if executable == "rg" else _inspection_path_operands(argv)
+    if executable == "rg" and (operands is None or not operands):
+        return False, "rg must name an explicit file path during read-only review"
+    file_options = RG_FILE_OPTIONS if executable == "rg" else GREP_FILE_OPTIONS if executable == "grep" else set()
+    option_operands = _option_file_operands(argv, file_options, {"-f"})
+    if option_operands is None:
+        return False, "inspection command file options must name a path"
+    operands = [*(operands or []), *option_operands]
+    for part in operands or []:
+        # Git pathspec magic (for example ``:(top).env`` or ``:!secret``)
+        # changes the meaning of the operand before Git resolves it.  The
+        # filesystem resolver cannot safely authorize those expressions, so
+        # reject Git's colon-prefixed pathspec syntax rather than treating it
+        # as a literal worktree-relative filename.
+        if Path(argv[0]).name.lower() == "git" and part.startswith(":"):
+            return False, "Git pathspec syntax is not allowed during read-only review"
+        if Path(argv[0]).name.lower() == "git" and any(
+            marker in part for marker in ("*", "?", "[")
+        ):
+            return False, "Git wildcard pathspecs are not allowed during read-only review"
+        if worktree is None:
+            candidate = Path(part)
+            if candidate.is_absolute() or ".." in candidate.parts:
+                return False, "inspection paths must stay inside the worktree"
+            if executable == "rg" and candidate in {Path("."), Path("./")}:
+                return False, "rg directory scopes are not allowed during read-only review"
+            if sensitive_read(candidate.as_posix()):
+                return False, "protected files cannot be inspected"
+            continue
+        try:
+            target = _safe_read_worktree_path(
+                worktree, part, protected_error="protected files cannot be inspected",
+            )
+        except ValueError as exc:
+            return False, str(exc)
+        git_content_output = (
+            executable == "git"
+            and (
+                argv[1] in {"diff", "grep", "show"}
+                or (
+                    argv[1] == "log"
+                    and any(_git_patch_option(part) for part in argv[2:])
+                )
+            )
+        )
+        if executable == "rg" and target.is_dir():
+            return False, "rg directory scopes are not allowed during read-only review"
+        if git_content_output and not target.is_file():
+            return False, "Git pathspecs must resolve to a regular file during read-only review"
+        if git_content_output and _git_show_path_is_directory(worktree, argv, part):
+            return False, "Git pathspecs may not name historical directories during read-only review"
+    return True, ""
+
+
+def _readonly_git_command_allowed(
+    argv: list[str], worktree: Path | None = None,
+) -> tuple[bool, str]:
     """Allow only inspection-oriented Git commands in a worktree.
 
     The command is run with ``cwd=worktree``.  Options that can redirect Git
@@ -69,6 +338,21 @@ def _readonly_git_command_allowed(argv: list[str]) -> tuple[bool, str]:
     subcommand = argv[1]
     if subcommand not in READONLY_GIT_COMMANDS:
         return False, f"git {subcommand} is not allowed during read-only review"
+    separator = next((index for index, part in enumerate(argv[2:], 2) if part == "--"), None)
+    if subcommand == "diff" and (separator is None or not argv[separator + 1:]):
+        return False, "git diff must name explicit paths during read-only review"
+    if subcommand == "grep" and (separator is None or not argv[separator + 1:]):
+        return False, "git grep must name explicit paths during read-only review"
+    if subcommand == "show":
+        explicit_show_path = any(
+            ":" in part and not part.startswith(":")
+            for part in argv[2:] if not part.startswith("-")
+        ) or bool(separator is not None and argv[separator + 1:])
+        if not explicit_show_path:
+            return False, "git show must name an explicit path during read-only review"
+    if subcommand == "log" and any(_git_patch_option(part) for part in argv[2:]) \
+            and (separator is None or not argv[separator + 1:]):
+        return False, "git log patch output must name explicit paths during read-only review"
     for index, part in enumerate(argv[2:], 2):
         option = part.split("=", 1)[0]
         if option in GIT_UNSAFE_OPTIONS or option.startswith(("--git-dir", "--work-tree", "--output")):
@@ -79,10 +363,12 @@ def _readonly_git_command_allowed(argv: list[str]) -> tuple[bool, str]:
             "--short", "--porcelain", "--branch", "--untracked-files=no",
         }:
             return False, f"git option {part} is not allowed during read-only review"
-    return True, ""
+    return _readonly_command_paths(argv, worktree)
 
 
-def _readonly_inspection_command_allowed(argv: list[str]) -> tuple[bool, str]:
+def _readonly_inspection_command_allowed(
+    argv: list[str], worktree: Path | None = None,
+) -> tuple[bool, str]:
     """Allow bounded, non-mutating text inspection without path escapes."""
     executable = Path(argv[0]).name.lower()
     if executable not in READONLY_INSPECTION_COMMANDS:
@@ -94,11 +380,36 @@ def _readonly_inspection_command_allowed(argv: list[str]) -> tuple[bool, str]:
     ):
         return False, f"{executable} execution hooks are not allowed during read-only review"
     for part in argv[1:]:
-        if part.startswith("-"):
-            continue
-        candidate = Path(part)
-        if candidate.is_absolute() or ".." in candidate.parts:
-            return False, "inspection paths must stay inside the worktree"
+        option = part.split("=", 1)[0]
+        if executable == "rg":
+            short_flags = option[1:] if option.startswith("-") and not option.startswith("--") else ""
+            if (
+                option in READONLY_RG_TRAVERSAL_OPTIONS
+                or option.startswith(("--hidden=", "--follow=", "--no-ignore-"))
+                or any(flag in short_flags for flag in ("u", "L"))
+                or short_flags.startswith("g")
+            ):
+                return False, f"{executable} traversal options are not allowed during read-only review"
+        elif executable == "grep":
+            short_flags = option[1:] if option.startswith("-") and not option.startswith("--") else ""
+            if (
+                option in READONLY_RECURSIVE_OPTIONS
+                or option in {"-d", "--directories", "--include", "--exclude", "--exclude-dir"}
+                or option.startswith(("--directories=", "--include=", "--exclude=", "--exclude-dir="))
+                or "r" in short_flags.lower()
+            ):
+                return False, f"{executable} recursive options are not allowed during read-only review"
+        elif executable == "ls":
+            short_flags = option[1:] if option.startswith("-") and not option.startswith("--") else ""
+            if option == "--recursive" or "R" in short_flags or any(
+                flag in short_flags for flag in ("H", "L")
+            ):
+                return False, f"{executable} traversal options are not allowed during read-only review"
+        elif executable == "file" and option in {"-L", "--dereference", "-f", "--files-from"}:
+            return False, f"{executable} traversal options are not allowed during read-only review"
+    allowed, reason = _readonly_command_paths(argv, worktree)
+    if not allowed:
+        return False, reason
     return True, ""
 
 
@@ -106,18 +417,9 @@ def _developer_inspection_command_allowed(
     argv: list[str], worktree: Path | None,
 ) -> tuple[bool, str]:
     """Apply the same worktree operand boundary to developer inspection."""
-    allowed, reason = _readonly_inspection_command_allowed(argv)
+    allowed, reason = _readonly_inspection_command_allowed(argv, worktree)
     if not allowed:
         return False, reason
-    if worktree is None:
-        return True, ""
-    for part in argv[1:]:
-        if part.startswith("-"):
-            continue
-        try:
-            _safe_worktree_path(worktree, part)
-        except ValueError:
-            return False, "inspection paths must stay inside the worktree"
     return True, ""
 
 
@@ -216,11 +518,11 @@ def _openrouter_command_allowed(
         # ``git_read`` is intentionally an allowlist, not a denylist. A
         # denylist would leave mutating commands such as ``git add`` and
         # ``git config`` executable as soon as a new subcommand is added.
-        return _readonly_git_command_allowed(argv)
+        return _readonly_git_command_allowed(argv, worktree)
     if readonly:
         if executable in READONLY_INSPECTION_COMMANDS and not policy.get("search_files"):
             return False, "file search is disabled by the permission policy"
-        return _readonly_inspection_command_allowed(argv)
+        return _readonly_inspection_command_allowed(argv, worktree)
     if executable in READONLY_INSPECTION_COMMANDS:
         if not policy.get("search_files"):
             return False, "file search is disabled by the permission policy"
@@ -517,10 +819,14 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
             if not policy.get("read_files"):
                 return "ERROR: file reading is disabled by the permission policy"
             relative = arguments.get("path", "")
-            target = _safe_worktree_path(worktree, relative)
-            normalized = target.relative_to(worktree.resolve()).as_posix()
-            if sensitive_read(normalized):
-                return f"ERROR: protected file {relative!r} cannot be read"
+            try:
+                target = _safe_read_worktree_path(
+                    worktree, relative, protected_error="protected file cannot be read",
+                )
+            except ValueError as exc:
+                if str(exc) == "protected file cannot be read":
+                    return f"ERROR: protected file {relative!r} cannot be read"
+                raise
             start_line = arguments.get("start_line")
             end_line = arguments.get("end_line")
             if start_line is not None or end_line is not None:
