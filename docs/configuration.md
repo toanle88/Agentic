@@ -23,8 +23,10 @@ project's real checks before running an issue.
 
 For a new repository, `agentic init --discover-tests` inspects common project
 metadata such as `pyproject.toml`, `package.json`, `Makefile`, `go.mod`, and
-`Cargo.toml`. It proposes direct argv-array checks, runs each candidate from
-the repository with a bounded per-candidate timeout, and labels missing tools
+`Cargo.toml`. Before running any candidate derived from that metadata, it asks
+for explicit confirmation because project-defined scripts can have side
+effects. After confirmation it proposes direct argv-array checks, runs each
+candidate from the repository with a bounded per-candidate timeout, and labels missing tools
 or external dependencies as skipped rather than code failures. Passing checks
 are classified as fast or slow using explicit metadata evidence and measured
 duration: a check taking at least 30 seconds is slow, as is a check whose
@@ -42,9 +44,10 @@ discovery fail.
 Only candidates that start successfully and exit zero are eligible to be
 saved. Missing executables, unavailable modules, dependency-related exit
 statuses, failed checks, and timeouts are never saved. The proposed
-configuration is printed and requires an explicit `y` confirmation before
+configuration is printed and requires a second explicit `y` confirmation before
 `agent_config.json` is written; any other response leaves the repository
-unchanged. An existing config is preserved without running discovery unless
+unchanged. Use isolated mode when candidate execution should run inside the
+configured sandbox. An existing config is preserved without running discovery unless
 `--force` is supplied. Fast candidates become `test_commands`; slow candidates
 become `slow_test_commands` and run only with the slow test profile. Use
 `--discovery-timeout SECONDS` to change the per-candidate limit (1 through

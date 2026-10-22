@@ -66,3 +66,24 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8",
 def atomic_write_json(path: Path, value: Any, *, indent: int = 2) -> None:
     """Serialize JSON and persist it atomically with a trailing newline."""
     atomic_write_text(path, json.dumps(value, indent=indent) + "\n")
+
+
+def read_text_tail(path: Path, max_bytes: int, *, encoding: str = "utf-8") -> str:
+    """Read at most the final *max_bytes* of a text artifact.
+
+    Durable provider and test logs are untrusted evidence.  Reading their tail
+    keeps resume and diagnostic paths bounded even when an older writer created
+    an oversized artifact.  ``errors='replace'`` also makes a byte-window cut
+    at a UTF-8 boundary harmless to callers.
+    """
+    if max_bytes <= 0:
+        return ""
+    try:
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(max(0, size - max_bytes))
+            payload = stream.read(max_bytes)
+    except OSError:
+        return ""
+    return payload.decode(encoding, errors="replace")

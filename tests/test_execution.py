@@ -21,6 +21,7 @@ from agentic_runner.output import (
     style_text,
 )
 from agentic_runner.execution_stream import MAX_RAW_LOG_BYTES
+import agentic_runner.execution_stream as execution_stream
 
 
 def sh(*args, cwd):
@@ -542,6 +543,24 @@ class StreamingTests(unittest.TestCase):
             )
             self.assertIn('agentic_stream_truncated', raw)
             self.assertIn('Output truncated', log.read_text(encoding='utf-8'))
+
+    def test_streamed_human_log_is_bounded_and_marks_truncation(self):
+        from io import StringIO
+        with tempfile.TemporaryDirectory() as dirname, patch.object(
+            execution_stream, 'MAX_HUMAN_LOG_BYTES', 1024
+        ):
+            root = Path(dirname)
+            log = root / 'developer-human-oversized.log'
+            script = 'for _ in range(20): print("x" * 500, flush=True)'
+            with patch('sys.stdout', new_callable=StringIO):
+                result = agentic.streamed_command(
+                    [sys.executable, '-c', script], root, label='DEVELOPER',
+                    log_file=log, timeout=10,
+                )
+            self.assertEqual(result.returncode, 0)
+            human = log.read_text(encoding='utf-8')
+            self.assertLessEqual(log.stat().st_size, 1024)
+            self.assertIn('agentic_stream_truncated', human)
 
     def test_test_runner_does_not_persist_literal_argv_tokens(self):
         from io import StringIO

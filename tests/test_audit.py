@@ -61,6 +61,8 @@ class AuditTests(unittest.TestCase):
             persisted = json.loads((folder / "audit-report.json").read_text())
             self.assertEqual(persisted["schema_version"], 1)
             self.assertEqual(persisted["audit_key"], issue.audit_key)
+            self.assertIsNone(persisted["findings"][0]["confidence"])
+            self.assertIsNone(persisted["findings"][0]["measurement"])
             self.assertIsNotNone(audit_workflow.load_audit_report(folder, issue.audit_key))
             self.assertLess(len(json.dumps(persisted)), 20_000)
 
@@ -69,6 +71,36 @@ class AuditTests(unittest.TestCase):
             persisted["audit_key"] = "[REDACTED]"
             (folder / "audit-report.json").write_text(json.dumps(persisted))
             self.assertIsNotNone(audit_workflow.load_audit_report(folder, issue.audit_key))
+
+    def test_audit_normalization_emits_exact_nullable_schema_shapes(self):
+        report = audit_workflow._normalize_audit_report({
+            "summary": "summary",
+            "findings": [{
+                "category": "security",
+                "severity": "HIGH",
+                "title": "title",
+                "description": "description",
+                "evidence": [],
+                "recommendation": "recommendation",
+                "measurement": {"name": "latency", "extra": "ignored"},
+            }],
+            "measurements": [{"value": 12, "extra": "ignored"}],
+            "skipped": [],
+        }, "audit-key")
+        self.assertEqual(
+            set(report["findings"][0]),
+            set(audit_workflow.AUDIT_SCHEMA["properties"]["findings"]["items"]["properties"]),
+        )
+        self.assertIsNone(report["findings"][0]["confidence"])
+        self.assertEqual(
+            set(report["findings"][0]["measurement"]),
+            {"name", "value", "method"},
+        )
+        self.assertEqual(report["findings"][0]["measurement"]["name"], "latency")
+        self.assertEqual(
+            report["measurements"],
+            [{"name": None, "value": "12", "method": None}],
+        )
 
     def test_audit_schema_requires_declared_finding_properties_for_strict_providers(self):
         finding_schema = audit_workflow.AUDIT_SCHEMA["properties"]["findings"]["items"]
