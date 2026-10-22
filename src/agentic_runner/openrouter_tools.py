@@ -7,6 +7,7 @@ import json
 import os
 import queue
 import signal
+import stat
 import subprocess
 import threading
 import time
@@ -111,8 +112,15 @@ def _safe_read_worktree_path(
     worktree: Path, relative: str, *, protected_error: str,
 ) -> Path:
     """Resolve a readable path and apply the API protected-file boundary."""
+    root = worktree.resolve()
+    if isinstance(relative, str):
+        current = root
+        for part in Path(relative).parts:
+            current /= part
+            if current.is_symlink():
+                raise ValueError("symbolic links are not allowed for worktree reads")
     target = _safe_worktree_path(worktree, relative)
-    normalized = target.relative_to(worktree.resolve()).as_posix()
+    normalized = target.relative_to(root).as_posix()
     if sensitive_read(normalized):
         raise ValueError(protected_error)
     return target
@@ -583,6 +591,29 @@ def _openrouter_command_allowed(
     return True, ""
 
 
+def _open_regular_text_stream(path: Path):
+    """Open a regular file without following a raced final symlink."""
+    try:
+        if not stat.S_ISREG(path.stat(follow_symlinks=False).st_mode):
+            raise ValueError("read_file only supports regular files")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        # A nonblocking open prevents a FIFO from hanging before fstat can
+        # reject it if the path changes between the lstat and open calls.
+        flags |= getattr(os, "O_NONBLOCK", 0)
+        descriptor = os.open(path, flags)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ValueError("read_file only supports regular files")
+            stream = os.fdopen(descriptor, "r", encoding="utf-8", errors="replace")
+            descriptor = -1
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+    except OSError as exc:
+        raise ValueError(f"read_file could not open a regular file: {exc}") from exc
+    return stream
+
+
 def _bounded_file_text(path: Path, *, start_line: int | None = None,
                        end_line: int | None = None) -> str:
     """Read only the requested lines and output budget from a text file."""
@@ -590,7 +621,7 @@ def _bounded_file_text(path: Path, *, start_line: int | None = None,
     chunks: list[str] = []
     used = 0
     truncated = False
-    with path.open("r", encoding="utf-8", errors="replace") as stream:
+    with _open_regular_text_stream(path) as stream:
         if start_line is None and end_line is None:
             value = stream.read(OPENROUTER_READ_FILE_CHARS + 1)
             truncated = len(value) > OPENROUTER_READ_FILE_CHARS

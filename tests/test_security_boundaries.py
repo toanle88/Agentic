@@ -10,6 +10,7 @@ from agentic_runner import cli as agentic
 from agentic_runner import execution as agentic_execution
 from agentic_runner import dashboard_data as agentic_dashboard_data
 from agentic_runner import openrouter as agentic_openrouter
+import agentic_runner.sandbox as agentic_sandbox
 from agentic_runner.openrouter_tools import _openrouter_tool_call
 from agentic_runner.config import PROVIDER_API_KEY_ENV, provider_process_environment
 from agentic_runner.sandbox import sandbox_command, validate_sandbox
@@ -405,13 +406,37 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
             settings = validate_sandbox({
                 "enabled": True, "engine": "docker", "image": "test-image",
             })
-            command = sandbox_command(["git", "status"], worktree, settings)
+            with patch.object(agentic_sandbox, '_authoritative_git_common_dir', return_value=common.resolve()):
+                command = sandbox_command(["git", "status"], worktree, settings)
         self.assertIn(f"{common.resolve()}:/agentic-git-common:ro", command)
         self.assertIn(f"{git_dir.resolve()}:/agentic-git-worktree:ro", command)
         self.assertNotIn(f"{git_dir.resolve()}:/agentic-git-worktree:rw", command)
         self.assertIn("GIT_DIR=/agentic-git-worktree", command)
         self.assertIn("GIT_COMMON_DIR=/agentic-git-common", command)
         self.assertIn("GIT_WORK_TREE=/workspace", command)
+
+    def test_sandbox_rejects_structurally_valid_pointer_to_unrelated_repository(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp)
+            worktree = parent / "worktree"
+            expected_common = parent / "repo" / ".git"
+            unrelated_common = parent / "unrelated" / ".git"
+            git_dir = unrelated_common / "worktrees" / "task"
+            worktree.mkdir()
+            git_dir.mkdir(parents=True)
+            expected_common.mkdir(parents=True)
+            (git_dir / "commondir").write_text("../../../../unrelated/.git\n", encoding="utf-8")
+            (git_dir / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+            (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+            settings = validate_sandbox({
+                "enabled": True, "engine": "docker", "image": "test-image",
+            })
+            with patch.object(
+                agentic_sandbox, '_authoritative_git_common_dir',
+                return_value=expected_common.resolve(),
+            ):
+                command = sandbox_command(["git", "status"], worktree, settings)
+        self.assertNotIn("/agentic-git", " ".join(command))
 
     def test_sandbox_rejects_symlinked_git_directory_without_host_mount(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -456,9 +481,10 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
             settings = validate_sandbox({
                 "enabled": True, "engine": "docker", "image": "test-image",
             })
-            command = sandbox_command(
-                ["git", "status"], worktree, settings, restricted=True,
-            )
+            with patch.object(agentic_sandbox, '_authoritative_git_common_dir', return_value=common.resolve()):
+                command = sandbox_command(
+                    ["git", "status"], worktree, settings, restricted=True,
+                )
         self.assertIn(f"{(worktree / '.git').resolve()}:/workspace/.git:ro", command)
 
     def test_sandbox_ignores_unrelated_git_pointer(self):

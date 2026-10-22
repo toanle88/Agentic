@@ -732,6 +732,43 @@ class OpenRouterTests(unittest.TestCase):
             self.assertIn('exceeded 2 tool turns', message)
             self.assertIn('exceeded 2 tool turns', output.read_text())
 
+    def test_openrouter_drops_unknown_assistant_metadata_between_tool_turns(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bodies = []
+            responses = iter([
+                {'choices': [{'message': {
+                    'role': 'assistant', 'content': None,
+                    'unknown_provider_metadata': 'x' * 200_000,
+                    'tool_calls': [{'id': 'call-1', 'type': 'function',
+                                    'unknown_call_metadata': 'y' * 100_000,
+                                    'function': {'name': 'read_file', 'arguments': '{"path":"notes.txt"}'}}],
+                }}]},
+                {'choices': [{'message': {
+                    'role': 'assistant', 'content': 'done',
+                    'unknown_provider_metadata': 'z' * 200_000,
+                }}]},
+            ])
+
+            def fake_request(url, api_key, body, timeout):
+                bodies.append(json.loads(json.dumps(body)))
+                return next(responses)
+
+            (root / 'notes.txt').write_text('notes\n', encoding='utf-8')
+            with (patch.dict(agentic.os.environ, {'ROUTER_KEY': 'secret'}, clear=False),
+                  patch('agentic_openrouter._openrouter_request', side_effect=fake_request)):
+                ok, message = agentic.run_openrouter(
+                    root, 'prompt', output=root / 'developer.txt', model='openai/test',
+                    api_key_env='ROUTER_KEY', max_tool_turns=2,
+                )
+        self.assertTrue(ok)
+        self.assertEqual(message, 'done')
+        assistant = bodies[1]['messages'][2]
+        self.assertEqual(set(assistant), {'role', 'content', 'tool_calls'})
+        self.assertEqual(set(assistant['tool_calls'][0]), {'id', 'type', 'function'})
+        self.assertNotIn('unknown_provider_metadata', json.dumps(bodies[1]))
+        self.assertNotIn('unknown_call_metadata', json.dumps(bodies[1]))
+
     def test_openrouter_json_mode_is_opt_in(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -793,6 +830,29 @@ class OpenRouterTests(unittest.TestCase):
             )
             self.assertLessEqual(len(bounded), agentic_openrouter.OPENROUTER_READ_FILE_CHARS)
             self.assertIn('use start_line/end_line', bounded)
+
+    def test_openrouter_read_file_rejects_symlinks_and_special_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'regular.txt').write_text('safe\n', encoding='utf-8')
+            try:
+                (root / 'link.txt').symlink_to(root / 'regular.txt')
+            except OSError as exc:
+                self.skipTest(f'symlinks unavailable: {exc}')
+            self.assertIn('symbolic links', agentic_openrouter._openrouter_tool_call(
+                root, 'read_file', {'path': 'link.txt'}, readonly=True,
+            ))
+            if not hasattr(os, 'mkfifo'):
+                self.skipTest('FIFO creation unavailable')
+            fifo = root / 'pipe'
+            try:
+                os.mkfifo(fifo)
+            except OSError as exc:
+                self.skipTest(f'FIFO unavailable: {exc}')
+            result = agentic_openrouter._openrouter_tool_call(
+                root, 'read_file', {'path': 'pipe'}, readonly=True,
+            )
+        self.assertIn('regular files', result)
 
     def test_openrouter_file_tools_bound_large_tree_and_file_reads(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -875,7 +935,7 @@ class OpenRouterTests(unittest.TestCase):
                 return 'z' * count
 
         reader = HugeLineReader()
-        with patch.object(Path, 'open', return_value=reader):
+        with patch.object(agentic_openrouter_tools, '_open_regular_text_stream', return_value=reader):
             bounded = agentic_openrouter._openrouter_tool_call(
                 Path('synthetic-worktree'), 'read_file', {
                     'path': 'synthetic-large-file', 'start_line': 1, 'end_line': 1,
