@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import time
 from typing import Any
@@ -18,6 +19,52 @@ except ModuleNotFoundError:  # Direct ``python scripts/agent_benchmark.py`` use.
 SUCCESS_STATUSES = {"success", "completed", "passed", "approved"}
 REPORTED_STATUSES = SUCCESS_STATUSES | {"failed", "timeout", "runner-error"}
 MAX_ERROR = 500
+
+
+def _process_group_kwargs() -> dict[str, Any]:
+    """Start benchmark commands in a group that can be terminated together."""
+    if os.name != "nt":
+        return {"start_new_session": True}
+    return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+
+
+def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
+    """Terminate a timed-out command and descendants on both host platforms."""
+    if os.name != "nt":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    else:
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, check=False,
+            )
+        except OSError:
+            process.kill()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+def _run_benchmark_command(
+    command: list[str], *, cwd: Path, env: dict[str, str] | None = None,
+    timeout: int,
+) -> tuple[int, bool]:
+    """Run one argv command and return (exit code, timed out)."""
+    process = subprocess.Popen(
+        command, cwd=cwd, env=env, stdout=subprocess.DEVNULL,
+        stderr=subprocess.STDOUT, **_process_group_kwargs(),
+    )
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _terminate_process_tree(process)
+        return 124, True
+    return process.returncode, False
 
 
 def _run_git(repo: Path, *args: str) -> None:
@@ -52,17 +99,16 @@ def _run_checks(repo: Path, checks: list[list[str]], timeout: int) -> tuple[bool
     for command in checks:
         started = time.monotonic()
         try:
-            result = subprocess.run(
-                command, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, encoding="utf-8", errors="replace", timeout=timeout, check=False,
+            returncode, timed_out = _run_benchmark_command(
+                command, cwd=repo, timeout=timeout,
             )
-            status = "passed" if result.returncode == 0 else "failed"
+            status = "timeout" if timed_out else "passed" if returncode == 0 else "failed"
             records.append({
                 "status": status,
-                "returncode": result.returncode,
+                "returncode": returncode,
                 "duration_seconds": round(time.monotonic() - started, 3),
             })
-            all_passed = all_passed and result.returncode == 0
+            all_passed = all_passed and returncode == 0 and not timed_out
         except subprocess.TimeoutExpired:
             records.append({
                 "status": "timeout",
@@ -192,16 +238,13 @@ def run_scenario(
     command_exit = 127
     raw: dict[str, Any]
     try:
-        completed = subprocess.run(
-            rendered, cwd=repo, env=environment, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout, check=False,
+        command_exit, timed_out = _run_benchmark_command(
+            rendered, cwd=repo, env=environment, timeout=timeout,
         )
-        command_exit = completed.returncode
-        raw = _read_result(result_file)
-    except subprocess.TimeoutExpired:
-        raw = {"status": "timeout", "error": "scenario exceeded its timeout"}
-        command_exit = 124
+        if timed_out:
+            raw = {"status": "timeout", "error": "scenario exceeded its timeout"}
+        else:
+            raw = _read_result(result_file)
     except OSError as exc:
         raw = {"status": "runner-error", "error": str(exc)}
     checks_passed, checks = _run_checks(repo, task["checks"], timeout)

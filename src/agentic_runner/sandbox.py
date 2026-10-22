@@ -112,6 +112,11 @@ def _git_metadata(root: Path) -> tuple[Path, Path | None] | None:
     """Locate safe Git metadata mounts for a normal or linked worktree."""
     marker = root / ".git"
     try:
+        # Resolving a symlink here would turn an arbitrary host path into a
+        # container mount.  A linked-worktree marker is a regular file and is
+        # handled below; directory-style metadata must never be a symlink.
+        if marker.is_symlink():
+            return None
         if marker.is_dir():
             return marker, None
         if not marker.is_file():

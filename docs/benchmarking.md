@@ -85,6 +85,11 @@ placeholders plus the same values as `AGENTIC_BENCHMARK_*` environment
 variables. It must leave the candidate patch in `{repo}` and
 write a normalized result such as:
 
+Each scenario and configured check runs in its own process group/session. A
+timeout terminates the complete group (using the Windows `taskkill /T`
+fallback on Windows) before the disposable repository is removed, preventing
+descendants from writing into a cleaned-up fixture.
+
 ```json
 {
   "status": "success",

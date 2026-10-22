@@ -413,6 +413,25 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
         self.assertIn("GIT_COMMON_DIR=/agentic-git-common", command)
         self.assertIn("GIT_WORK_TREE=/workspace", command)
 
+    def test_sandbox_rejects_symlinked_git_directory_without_host_mount(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp)
+            worktree = parent / "worktree"
+            host_target = parent / "host-target"
+            worktree.mkdir()
+            host_target.mkdir()
+            try:
+                (worktree / ".git").symlink_to(host_target, target_is_directory=True)
+            except OSError:
+                self.skipTest("directory symlinks are unavailable")
+            settings = validate_sandbox({
+                "enabled": True, "engine": "docker", "image": "test-image",
+            })
+            command = sandbox_command(["git", "status"], worktree, settings)
+        self.assertNotIn(f"{host_target.resolve()}:/agentic-git:ro", command)
+        self.assertNotIn("/agentic-git", " ".join(command))
+        self.assertNotIn("/workspace/.git:ro", " ".join(command))
+
     def test_sandbox_overlays_normal_checkout_git_directory_read_only(self):
         with tempfile.TemporaryDirectory() as temp:
             worktree = Path(temp)

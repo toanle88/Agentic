@@ -505,6 +505,31 @@ class DashboardTests(unittest.TestCase):
                 json.dumps(json.loads(base64.b64decode(payload).decode("utf-8"))),
             )
 
+    def test_dashboard_bounds_oversized_review_history(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            run = root / "agent-issue-8-deadbeef"
+            run.mkdir(parents=True)
+            (run / "review-001.json").write_text(json.dumps({
+                "approved": False, "summary": "Needs work", "findings": [],
+            }))
+            huge = "x" * (agentic_dashboard_data.MAX_REVIEW_HISTORY_BYTES * 2)
+            (run / "review-history.json").write_text(json.dumps([
+                {"findings": [{"fingerprint": "same", "severity": "HIGH", "text": "head"}]},
+                {"findings": [{"fingerprint": "same", "severity": "HIGH", "text": "tail"}]},
+                {"findings": [{"fingerprint": "large", "severity": "MEDIUM", "text": huge}]},
+            ]))
+            snapshot = agentic_dashboard.collect_runs(root)[0]
+        self.assertLess(len(json.dumps(snapshot)), 50_000)
+        self.assertLessEqual(
+            len(snapshot["review"]["recurring"][0]["text"]),
+            agentic_dashboard_data.MAX_REVIEW_HISTORY_FIELD,
+        )
+
+    def test_dashboard_template_replacement_requires_marker(self):
+        with self.assertRaises(ValueError):
+            agentic_dashboard._required_replace("<main></main>", "missing", "replacement")
+
     def test_dashboard_renders_skipped_review_validation(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / ".demo-agent-runs"

@@ -20,6 +20,7 @@ from agentic_runner.output import (
     style_system_text,
     style_text,
 )
+from agentic_runner.execution_stream import MAX_RAW_LOG_BYTES
 
 
 def sh(*args, cwd):
@@ -517,6 +518,45 @@ class StreamingTests(unittest.TestCase):
             self.assertEqual(metrics['operations'][0]['role'], 'developer')
             self.assertEqual(metrics['operations'][0]['status'], 'completed')
             self.assertGreaterEqual(metrics['operations'][0]['duration_seconds'], 0)
+
+    def test_streamed_codex_json_bounds_raw_log_and_marks_dropped_output(self):
+        from io import StringIO
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            log = root / 'developer-oversized.log'
+            script = (
+                'import json; '
+                '[(print(json.dumps({"type":"item.completed","item":{"type":"command_execution",'
+                '"command":"' + ('x' * 120) + '"}}), flush=True)) for _ in range(20000)]'
+            )
+            with patch('sys.stdout', new_callable=StringIO):
+                result = agentic.streamed_command(
+                    [sys.executable, '-c', script], root, label='DEVELOPER',
+                    log_file=log, timeout=20, codex_json=True,
+                )
+            self.assertEqual(result.returncode, 0)
+            raw = log.with_suffix('.jsonl').read_text(encoding='utf-8')
+            self.assertLessEqual(
+                len(raw.encode('utf-8')),
+                MAX_RAW_LOG_BYTES,
+            )
+            self.assertIn('agentic_stream_truncated', raw)
+            self.assertIn('Output truncated', log.read_text(encoding='utf-8'))
+
+    def test_test_runner_does_not_persist_literal_argv_tokens(self):
+        from io import StringIO
+        token = 'literal-credential-that-is-not-patterned-123456'
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            sh('git', 'init', cwd=root)
+            command = [sys.executable, '-c', 'pass', token]
+            with patch('sys.stdout', new_callable=StringIO) as output:
+                passed, report = agentic.run_tests(root, [command], folder=root)
+            self.assertTrue(passed)
+            self.assertNotIn(token, output.getvalue())
+            self.assertNotIn(token, report)
+            for path in root.glob('test-command-*'):
+                self.assertNotIn(token, path.read_text(encoding='utf-8'))
 
     def test_verbose_streamed_codex_log_keeps_routine_progress(self):
         from io import StringIO

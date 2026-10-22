@@ -486,13 +486,17 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
               sandbox: dict[str, Any] | None = None,
               deadline: float | None = None,
               verbose: bool = False) -> tuple[bool, str]:
+    def safe_command_label(argv: list[str]) -> str:
+        """Describe configured checks without persisting literal arguments."""
+        return f"<configured test command: {len(argv)} argv values>"
+
     results: list[str] = []
     for argv in test_commands:
         if deadline is not None and time.monotonic() >= deadline:
             report = "\n\n".join(results) + "\nTask deadline reached before the next test command"
             _status_print("[TESTS] Overall task deadline reached", flush=True)
             return False, report.strip()
-        display_command = " ".join(argv)
+        display_command = safe_command_label(argv)
         _status_print(f"[TESTS] Running: {display_command}", flush=True)
         log = next_log(folder, "test-command") if folder else (Path(tempfile.gettempdir()) / f"agentic-tests-{os.getpid()}.log")
         result = streamed_command(argv, worktree, label="TESTS", log_file=log,
@@ -1581,9 +1585,9 @@ def _validation_summary(report: str, test_commands: list[list[str]], *, checks_r
         )
     lines = ["All configured checks passed.", ""]
     for argv in test_commands:
-        display_command = html.escape(" ".join(str(value) for value in argv)).replace(
-            "`", "&#96;"
-        )
+        display_command = html.escape(
+            f"<configured test command: {len(argv)} argv values>"
+        ).replace("`", "&#96;")
         lines.append(f"- <code>{display_command}</code> — passed")
     lines.append("- `git diff --check` — passed")
 
