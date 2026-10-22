@@ -549,6 +549,24 @@ class OpenRouterTests(unittest.TestCase):
             self.assertNotIn('OPENAI_API_KEY', process_argv)
             self.assertNotIn('secret', process_argv)
 
+    def test_openrouter_network_denial_overrides_sandbox_network_setting(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            settings = {
+                'enabled': True, 'engine': 'docker', 'image': 'test-image',
+                'allow_network': True,
+            }
+            with patch('agentic_openrouter_tools._bounded_command_capture', return_value=(
+                0, 'sandboxed\n', False, False,
+            )) as run:
+                result = agentic_openrouter._openrouter_tool_call(
+                    root, 'run_command', {'argv': ['python', '-m', 'unittest']},
+                    readonly=False, sandbox=settings, allow_network=False,
+                )
+            self.assertIn('sandboxed', result)
+            process_argv = run.call_args.args[0]
+            self.assertEqual(process_argv[process_argv.index('--network') + 1], 'none')
+
 
     def test_openrouter_request_translates_http_network_and_payload_errors(self):
         from io import BytesIO
@@ -767,6 +785,23 @@ class OpenRouterTests(unittest.TestCase):
                 agentic_openrouter._safe_worktree_path(root, '')
             with self.assertRaisesRegex(ValueError, '\\.git'):
                 agentic_openrouter._safe_worktree_path(root, '.git/config', write=True)
+
+    def test_openrouter_write_rejects_symlinked_targets(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / 'target.txt'
+            target.write_text('original\n', encoding='utf-8')
+            link = root / 'link.txt'
+            try:
+                link.symlink_to(target)
+            except OSError as exc:
+                self.skipTest(f'symlinks unavailable: {exc}')
+            result = agentic_openrouter._openrouter_tool_call(
+                root, 'write_file', {'path': 'link.txt', 'content': 'changed\n'},
+                readonly=False,
+            )
+            self.assertIn('symbolic links', result)
+            self.assertEqual(target.read_text(encoding='utf-8'), 'original\n')
 
     def test_openrouter_command_output_is_bounded_and_process_is_stopped(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -139,6 +139,19 @@ class PromptTests(unittest.TestCase):
             ),
         )
 
+    def test_developer_report_must_cover_each_stable_finding_id(self):
+        findings = [
+            {'id': 'F-2e66776f9f80', 'requirement': 'Continue workflow extraction'},
+            {'id': 'F-1', 'requirement': 'Add characterization coverage'},
+        ]
+        report = (
+            'Finding: F-1\n'
+            'Action: fixed\n'
+            'Evidence: added the coverage\n'
+        )
+        error = agentic.validate_developer_review_actions(report, findings)
+        self.assertIn('F-2e66776f9f80', error)
+
     def test_review_finding_ids_are_derived_from_normalized_requirements(self):
         findings = normalize_findings([
             {'requirement': ' Fix   the contract\n', 'id': 'provider-one'},

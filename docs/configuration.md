@@ -399,10 +399,13 @@ provider approval modes are set to allow autonomous edits, while reviewer
 modes are read-only where the provider supports that capability.
 
 OpenRouter tool commands have a per-command timeout and network-command deny
-list by default. Set `allow_network` only for a trusted repository and model;
-the setting permits selected network-capable executables but cannot prevent a
-programming language runtime from opening a socket when host execution is in
-use. In isolated mode, the container network policy is the enforcement point.
+list by default. When a sandbox is enabled, the tool boundary also forces the
+command container onto `--network none` unless the OpenRouter permission is
+enabled; a broader sandbox network setting cannot override a narrower tool
+policy. Set `allow_network` only for a trusted repository and model; in
+trusted host mode the setting permits selected network-capable executables but
+cannot prevent an arbitrary programming language runtime from opening a
+socket. Use isolated mode when OS-level network denial is required.
 
 The legacy `codex_*` settings remain supported for existing configurations.
 When a `developer` or `reviewer` object supplies the same setting, the nested
