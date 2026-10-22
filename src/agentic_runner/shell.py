@@ -88,7 +88,8 @@ from .shell_jobs import (
     is_foreground_prompt as _is_foreground_prompt,
     job_for_issue as _job_for_issue,
     normalize_foreground_output as _normalize_foreground_output,
-    pid_running as _pid_running,
+    process_identity as _process_identity,
+    process_identity_matches as _process_identity_matches,
     signal_process_tree as _signal_process_tree,
     tail as _tail,
     tail_from_text as _tail_from_text,
@@ -263,6 +264,8 @@ class AgenticShell:
         return self.session_dir / f"job-{number:03d}.json"
 
     def _write_record(self, job: Job) -> None:
+        if job.finished is None and job.identity is None:
+            job.identity = _process_identity(job.pid)
         record = {
             "number": job.number,
             "argv": job.argv,
@@ -275,6 +278,7 @@ class AgenticShell:
             "cwd": str(self.repo),
             "session_id": job.session_id,
             "stop_requested": job.stop_requested,
+            "identity": job.identity,
         }
         atomic_write_text(job.record_path, json.dumps(record, indent=2) + "\n")
 
@@ -288,13 +292,15 @@ class AgenticShell:
                 started = float(record["started"])
                 log_path = Path(record["log_path"])
                 state = record.get("state", "finished")
+                identity = record.get("identity")
             except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
                 continue
-            if state == "running" and _pid_running(pid):
+            if state == "running" and _process_identity_matches(pid, identity):
                 job = Job(number, argv, log_path, None, started, None,
                           record_path, str(record.get("session_id", "unknown")),
                           persisted_pid=pid, notified=False,
-                          stop_requested=bool(record.get("stop_requested", False)))
+                          stop_requested=bool(record.get("stop_requested", False)),
+                          identity=identity)
                 self.jobs[number] = job
                 continue
             finished = record.get("finished")
@@ -305,6 +311,7 @@ class AgenticShell:
                 exit_code=record.get("exit_code") if state != "running" else -1,
                 notified=True,
                 stop_requested=bool(record.get("stop_requested", False)),
+                identity=identity if isinstance(identity, dict) else None,
             )
             self.jobs[number] = job
             if state == "running":
@@ -944,13 +951,26 @@ class AgenticShell:
             return False
         if job.process is not None:
             _signal_process_tree(job.process, signal.SIGTERM)
-        elif os.name != "nt":
-            try:
-                os.killpg(os.getpgid(job.pid), signal.SIGTERM)
-            except ProcessLookupError:
-                pass
         else:
-            os.kill(job.pid, signal.SIGTERM)
+            # A persisted PID is never sufficient on its own: it may have
+            # been reused since the originating shell exited. Re-read the
+            # identity immediately before signalling and use the recorded
+            # process group rather than looking up an unverified PID group.
+            identity = _process_identity(job.pid)
+            if not _process_identity_matches(job.pid, job.identity):
+                return False
+            if identity is None:
+                return False
+            try:
+                if os.name != "nt":
+                    process_group = int(identity.get("process_group", 0))
+                    if process_group <= 0 or process_group == os.getpgrp():
+                        return False
+                    os.killpg(process_group, signal.SIGTERM)
+                else:
+                    os.kill(job.pid, signal.SIGTERM)
+            except (OSError, ProcessLookupError, TypeError, ValueError):
+                return False
         job.stop_requested = True
         self._write_record(job)
         _shell_print(f"[JOB {job.number}] stop requested")

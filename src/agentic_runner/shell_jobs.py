@@ -7,6 +7,7 @@ bounded log observation, and foreground input forwarding boundary.
 from __future__ import annotations
 
 from collections.abc import Iterable
+import hashlib
 import os
 import signal
 import subprocess
@@ -36,6 +37,7 @@ class Job:
     notified: bool = False
     completion_callback: Callable[[int], None] | None = None
     stop_requested: bool = False
+    identity: dict[str, Any] | None = None
 
     @property
     def running(self) -> bool:
@@ -43,11 +45,7 @@ class Job:
             return False
         if self.process is not None:
             return self.process.poll() is None
-        try:
-            os.kill(self.pid, 0)
-        except (OSError, ProcessLookupError):
-            return False
-        return True
+        return process_identity_matches(self.pid, self.identity)
 
     @property
     def pid(self) -> int:
@@ -102,6 +100,83 @@ def pid_running(pid: int) -> bool:
         os.kill(pid, 0)
     except (OSError, ProcessLookupError):
         return False
+    return True
+
+
+def process_identity(pid: int) -> dict[str, Any] | None:
+    """Return verifiable identity data for a live child process.
+
+    Linux and other procfs systems provide both the process start tick and the
+    exact argv bytes.  Windows has no portable stdlib argv API, so the native
+    creation timestamp is the identity boundary there.  If the platform does
+    not expose a stable start identity, return ``None`` and fail closed when a
+    persisted job is considered for cancellation.
+    """
+    if pid <= 0:
+        return None
+    if os.name == "nt":
+        return _windows_process_identity(pid)
+    proc = Path("/proc") / str(pid)
+    try:
+        stat = (proc / "stat").read_text(encoding="utf-8")
+        command_line = (proc / "cmdline").read_bytes()
+        closing = stat.rfind(")")
+        if closing < 0:
+            return None
+        fields = stat[closing + 2:].split()
+        # The fields after the comm field start at field 3; starttime is 22.
+        start_time = fields[19]
+        process_group = os.getpgid(pid)
+    except (OSError, IndexError, ValueError, UnicodeError):
+        return None
+    return {
+        "start_time": start_time,
+        "command_hash": hashlib.sha256(command_line).hexdigest(),
+        "process_group": process_group,
+    }
+
+
+def _windows_process_identity(pid: int) -> dict[str, Any] | None:
+    """Read a Windows process creation timestamp without third-party modules."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        windll: Any = getattr(ctypes, "windll", None)
+        kernel32: Any = getattr(windll, "kernel32", None)
+        if kernel32 is None:
+            return None
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return None
+        try:
+            creation = wintypes.FILETIME()
+            exit_time = wintypes.FILETIME()
+            kernel_time = wintypes.FILETIME()
+            user_time = wintypes.FILETIME()
+            if not kernel32.GetProcessTimes(
+                handle, ctypes.byref(creation), ctypes.byref(exit_time),
+                ctypes.byref(kernel_time), ctypes.byref(user_time),
+            ):
+                return None
+            start_time = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+            return {"start_time": str(start_time)}
+        finally:
+            kernel32.CloseHandle(handle)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
+def process_identity_matches(pid: int, expected: dict[str, Any] | None) -> bool:
+    """Check a persisted PID against its recorded process identity."""
+    if not isinstance(expected, dict) or not expected.get("start_time"):
+        return False
+    current = process_identity(pid)
+    if current is None or str(current.get("start_time")) != str(expected.get("start_time")):
+        return False
+    for key in ("command_hash", "process_group"):
+        if key in expected and current.get(key) != expected.get(key):
+            return False
     return True
 
 
@@ -337,5 +412,6 @@ __all__ = [
     "FOREGROUND_PROMPT_PREFIXES", "ForegroundInputForwarder", "Job",
     "display_escape", "foreground_prompt_prefix", "is_foreground_prompt",
     "job_for_issue", "normalize_foreground_output", "pid_running",
+    "process_identity", "process_identity_matches",
     "signal_process_tree", "tail", "tail_from_text",
 ]

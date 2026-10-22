@@ -1,4 +1,5 @@
 import os
+import json
 import subprocess
 import sys
 import tempfile
@@ -1087,6 +1088,42 @@ class ShellTests(unittest.TestCase):
             job.process.wait(timeout=5)
             first.refresh()
             self.assertIn('persisted', job.log_path.read_text())
+
+    @unittest.skipUnless(os.name != 'nt', 'procfs process identity behavior only')
+    def test_persisted_job_identity_mismatch_is_not_cancellable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            session_dir = root / 'logs'
+            first = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=session_dir)
+            job = first._launch([sys.executable, '-u', '-c', 'import time; time.sleep(5)'])
+            record = json.loads(job.record_path.read_text(encoding='utf-8'))
+            record['identity']['start_time'] = 'not-the-live-process'
+            job.record_path.write_text(json.dumps(record), encoding='utf-8')
+            second = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=session_dir)
+            restored = second.jobs[job.number]
+            self.assertFalse(restored.running)
+            with patch.object(agentic_shell.os, 'killpg') as killpg:
+                self.assertFalse(second._request_stop(restored))
+            killpg.assert_not_called()
+            job.process.terminate()
+            job.process.wait(timeout=5)
+
+    @unittest.skipUnless(os.name != 'nt', 'procfs process identity behavior only')
+    def test_legacy_persisted_job_is_visible_but_not_cancellable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            session_dir = root / 'logs'
+            first = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=session_dir)
+            job = first._launch([sys.executable, '-u', '-c', 'import time; time.sleep(5)'])
+            record = json.loads(job.record_path.read_text(encoding='utf-8'))
+            record.pop('identity', None)
+            job.record_path.write_text(json.dumps(record), encoding='utf-8')
+            second = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=session_dir)
+            restored = second.jobs[job.number]
+            self.assertFalse(restored.running)
+            self.assertFalse(second._request_stop(restored))
+            job.process.terminate()
+            job.process.wait(timeout=5)
 
 
     def test_shell_preserves_local_task_file_in_runner_arguments(self):
