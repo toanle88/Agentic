@@ -74,12 +74,24 @@ def developer_attempts(folder: Path) -> int:
     return len(list(folder.glob("developer-*.txt")))
 
 
+def _finding_requirement(value: Any) -> str:
+    """Return the concise requirement from a legacy or structured finding."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("requirement", "text"):
+            candidate = value.get(key)
+            if isinstance(candidate, str):
+                return candidate
+    return ""
+
+
 def review_reason(verdict: dict[str, Any]) -> str:
     summary = result_text(verdict.get("summary", "Reviewer rejected the patch."), 700)
     findings = [
-        result_text(item, 240)
+        result_text(_finding_requirement(item), 240)
         for item in verdict.get("findings", [])
-        if isinstance(item, str) and item.strip()
+        if _finding_requirement(item).strip()
     ]
     if findings:
         summary += " Findings: " + "; ".join(findings[:3])

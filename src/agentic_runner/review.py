@@ -52,7 +52,7 @@ def finding_severity(finding: str) -> str:
 
 def finding_fingerprint(finding: str) -> str:
     """Create a stable short key for the same review finding across attempts."""
-    normalized = finding.lower()
+    normalized = re.sub(r"\s+", " ", str(finding or "")).strip().lower()
     normalized = re.sub(r"\[[^\]]+\]", " ", normalized)
     normalized = re.sub(r"\b(?:blocker|critical|major|high|medium|minor|low|p[0-3])\b", " ", normalized)
     normalized = re.sub(r"(?:/|\\)[^\s,:;()]+", " path ", normalized)
@@ -61,15 +61,73 @@ def finding_fingerprint(finding: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
 
 
-def analyze_findings(findings: list[str]) -> list[dict[str, str]]:
-    return [
-        {
-            "severity": finding_severity(finding),
-            "fingerprint": finding_fingerprint(finding),
-            "text": redact_secrets(finding),
-        }
-        for finding in findings
-    ]
+def _finding_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        for key in ("requirement", "text", "description", "action_target"):
+            if isinstance(value.get(key), str) and value[key].strip():
+                return value[key].strip()
+    return ""
+
+
+def _normalize_requirement(value: Any) -> str:
+    """Canonicalize requirement text before deriving a durable finding ID."""
+    return re.sub(r"\s+", " ", redact_secrets(str(value or ""))).strip()
+
+
+def _finding_field(value: Any, key: str, default: str = "") -> str:
+    """Read a string field from provider-shaped data without leaking ``Any``."""
+    if isinstance(value, dict):
+        candidate = value.get(key)
+        if isinstance(candidate, str):
+            return candidate
+    return default
+
+
+def normalize_findings(findings: list[Any]) -> list[dict[str, str]]:
+    """Give every finding a stable ID while accepting legacy string output.
+
+    Reviewer-supplied IDs are intentionally ignored. They are untrusted model
+    output and can be missing, malformed, or unstable across attempts. IDs are
+    derived from the normalized requirement at this workflow boundary so every
+    downstream consumer receives the same canonical identity.
+    """
+    normalized: list[dict[str, str]] = []
+    seen: dict[str, int] = {}
+    for value in findings:
+        text = _normalize_requirement(_finding_text(value))
+        if not text:
+            continue
+        requirement = _normalize_requirement(
+            _finding_field(value, "requirement") or text,
+        )
+        if not requirement:
+            continue
+        fingerprint = finding_fingerprint(requirement)
+        seen[fingerprint] = seen.get(fingerprint, 0) + 1
+        suffix = f"-{seen[fingerprint]}" if seen[fingerprint] > 1 else ""
+        identifier = f"F-{fingerprint}{suffix}"
+        action_target = _normalize_requirement(
+            _finding_field(value, "action_target") or requirement,
+        )
+        normalized.append({
+            "id": identifier,
+            "severity": finding_severity(text),
+            "requirement": redact_secrets(requirement),
+            "action_target": redact_secrets(action_target),
+            "fingerprint": fingerprint,
+            "text": text,
+        })
+    return normalized
+
+
+def finding_texts(findings: list[Any]) -> list[str]:
+    return [item["text"] for item in normalize_findings(findings)]
+
+
+def analyze_findings(findings: list[Any]) -> list[dict[str, str]]:
+    return normalize_findings(findings)
 
 
 def record_review_findings(folder: Path, verdict: dict[str, Any]) -> dict[str, Any]:
@@ -82,7 +140,7 @@ def record_review_findings(folder: Path, verdict: dict[str, Any]) -> dict[str, A
     if not isinstance(history, list):
         history = []
     findings = verdict.get("findings", [])
-    details = analyze_findings([item for item in findings if isinstance(item, str)])
+    details = analyze_findings(findings if isinstance(findings, list) else [])
     previous_counts: dict[str, int] = {}
     for entry in history:
         if not isinstance(entry, dict):
@@ -100,6 +158,9 @@ def record_review_findings(folder: Path, verdict: dict[str, Any]) -> dict[str, A
     atomic_write_json(history_path, history[-50:])
     verdict["_finding_analysis"] = details
     verdict["_repeated_findings"] = repeated
+    # Keep the provider-facing result compact and preserve the canonical
+    # records separately for resumes, dashboards, and developer actions.
+    verdict["finding_records"] = details
     return verdict
 
 

@@ -11,6 +11,7 @@ Agentic is designed for human-supervised development. It does not silently commi
 
 - One isolated Git worktree per GitHub issue or local task.
 - Read-only issue investigation; findings are recorded before development continues automatically.
+- Configurable quick/standard/strict workflow depth, with high-risk investigation always retained.
 - Resume support for unfinished or rejected work.
 - Configurable project checks using safe argument arrays.
 - Independent read-only review before publication.

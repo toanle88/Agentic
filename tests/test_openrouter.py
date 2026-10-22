@@ -14,10 +14,73 @@ import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner import cli as agentic
 from agentic_runner import context as agentic_context
 from agentic_runner import openrouter as agentic_openrouter
+from agentic_runner.context import compact_openrouter_request
 from agentic_runner import openrouter_tools as agentic_openrouter_tools
 
 
 class OpenRouterTests(unittest.TestCase):
+    def test_request_budget_trims_large_system_and_task_without_breaking_pairing(self):
+        messages = [
+            {"role": "system", "content": "system-" + ("s" * 20_000)},
+            {"role": "user", "content": "task-" + ("u" * 50_000)},
+            {"role": "assistant", "content": "", "tool_calls": [{
+                "id": "call-1", "type": "function",
+                "function": {"name": "read_file", "arguments": json.dumps({"path": "x" * 20_000})},
+            }]},
+            {"role": "tool", "tool_call_id": "call-1", "content": "tool-" + ("t" * 50_000)},
+        ]
+        stats = compact_openrouter_request(messages, [{"type": "function", "function": {"name": "read_file"}}])
+        self.assertLessEqual(stats["request_chars"], stats["budget"])
+        self.assertEqual(
+            stats["request_chars"],
+            len(json.dumps(messages, ensure_ascii=False, separators=(",", ":")))
+            + len(json.dumps([{"type": "function", "function": {"name": "read_file"}}], ensure_ascii=False, separators=(",", ":"))),
+        )
+        self.assertEqual(messages[2]["tool_calls"][0]["id"], messages[3]["tool_call_id"])
+        self.assertEqual(messages[2]["tool_calls"][0]["function"]["arguments"], "{}")
+
+    def test_request_budget_compacts_oversized_tool_schemas(self):
+        messages = [{"role": "system", "content": "system"}, {"role": "user", "content": "task"}]
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "d" * 20_000,
+                "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+            },
+        }]
+
+        stats = compact_openrouter_request(messages, tools, budget=1_000)
+
+        self.assertLessEqual(stats["request_chars"], stats["budget"])
+        self.assertEqual(tools[0]["function"]["name"], "read_file")
+        self.assertLessEqual(stats["tool_schema_chars"], 1_000)
+
+    def test_request_budget_compacts_oversized_tool_call_metadata(self):
+        messages = [{
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "call-1",
+                "type": "function",
+                "provider_extension": "x" * 20_000,
+                "function": {
+                    "name": "read_file",
+                    "arguments": {"path": "x" * 20_000},
+                },
+            }],
+        }, {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "content": "result",
+        }]
+
+        stats = compact_openrouter_request(messages, [], budget=1_000)
+
+        self.assertLessEqual(stats["request_chars"], stats["budget"])
+        self.assertEqual(messages[0]["tool_calls"][0]["id"], messages[1]["tool_call_id"])
+        self.assertEqual(messages[0]["tool_calls"][0]["function"]["arguments"], "{}")
+
     def test_openrouter_permission_policy_network_overrides_legacy_flag(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

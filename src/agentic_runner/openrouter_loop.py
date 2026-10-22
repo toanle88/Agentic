@@ -15,7 +15,7 @@ from .config import (
     DEFAULT_OPENROUTER_COMMAND_TIMEOUT,
     OPENROUTER_MAX_TURNS,
 )
-from .context import _compact_openrouter_history
+from .context import compact_openrouter_request
 from .execution import (
     _console_print,
     _message_text,
@@ -158,13 +158,13 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
         for turn in range(max_tool_turns):
             if deadline is not None and time.monotonic() >= deadline:
                 raise RuntimeError(f"OpenRouter agent exceeded total timeout of {timeout}s")
-            _compact_openrouter_history(messages)
             body: dict[str, Any] = {
                 "model": model,
                 "messages": messages,
                 "tools": tools,
                 "tool_choice": "auto",
             }
+            compact_openrouter_request(messages, tools)
             if schema is not None and json_mode:
                 # Structured output support is provider-endpoint dependent on
                 # OpenRouter, so enable this only when the configured model is

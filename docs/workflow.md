@@ -6,7 +6,7 @@ Each issue or local-task run follows this sequence:
 
 1. Resolve the repository's base branch; GitHub mode also loads the GitHub issue.
 2. Create or reuse an isolated worktree for the issue or deterministic local task.
-3. Ask an independent read-only configured investigator to analyze the issue and repository.
+3. Ask an independent read-only configured investigator to analyze the issue and repository. The default `standard` mode does this for every task; `quick` may skip it only for conservatively classified low-risk tasks, while `strict` always retains it. Security, credential, data, migration, publication, and protected-workflow tasks are never eligible for the quick skip.
 4. Record the investigation feedback and pass it to the developer automatically.
 5. Give the task and repository instructions to the configured developer provider.
 6. Run every configured test command. Agentic removes extra final blank lines
@@ -101,6 +101,61 @@ configured checks in a specific worktree; this is opt-in because checks may
 install dependencies or modify generated files.
 
 The default `fast` profile runs the configured `test_commands`. Use `/run 119 --profile slow` to run those checks followed by the configured `slow_test_commands`. Profiles select which checks run; they do not select the provider model or reasoning setting.
+
+Workflow depth is independent of the test profile. Set `"workflow_mode"` in
+`agent_config.json` or pass `--workflow-mode quick|standard|strict` for one
+run. Quick mode is an explicitly conservative optimization, not a way to
+disable investigation for high-risk work.
+
+## Context and usage efficiency
+
+Guidance selection is phase-specific while `AGENTS.md` remains mandatory:
+investigation uses architecture, development standards, and ADRs;
+development additionally uses the development and agent-instructions guides;
+review uses architecture, development standards, and ADRs. Each load records
+only relative path, source size, digest, selected character count, phase, and
+prompt-size statistics.
+
+OpenRouter budgets are character-based because Agentic has no tokenizer. The
+request budget is 48,000 characters: reserve 8,000 for the response, reserve
+up to 8,000 for serialized tool schemas, cap system instructions at 6,000 and
+the issue/task context at 12,000, then compact history in this order: old tool
+results, oversized recent tool results, and older textual context. The final
+serialized messages plus tools are checked against the budget. Assistant tool
+calls and their matching results remain in the history.
+
+Large review patches are those over 24,000 characters. They include a bounded
+patch-stat section and changed-file name/status manifest, then try to select
+one representative file section per changed file and prioritize sections by
+changed-line count (ties are lexical) within the hunk budget. Omitted middle
+sections are called out so the read-only reviewer can inspect affected files.
+Smaller patches retain the complete diff.
+
+Review findings use `F-<12 lowercase hex>` IDs derived from the normalized
+requirement; duplicate fingerprints receive `-2`, `-3`, and so on. Each
+transmitted finding retains its ID, a concise requirement, and an action target.
+If their minimum representations cannot fit the normal feedback bound, the
+optional summary and skipped-validation text is omitted rather than dropping a
+finding.
+
+Provider usage is kept per invocation and by investigator, developer, and
+reviewer stage. Prompt, completion, total, cache-read, cache-write, and
+reasoning fields remain unknown when a provider does not report them.
+Explicitly cumulative JSONL usage is counted from its final snapshot; events
+without that provider declaration remain additive per event. Run metadata
+also exposes retries, first-pass approval, review findings, and tokens per
+approved task.
+
+For an A/B measurement, use the same 10–20 representative tasks, including
+low-, medium-, and high-risk examples, with `workflow_mode=standard` and
+`workflow_mode=quick`. Compare the durable `by_stage`, `workflow_metrics`,
+and `tokens_per_approved_task` fields together with first-pass approval,
+failed attempts, review findings, human intervention, and completion time.
+Treat the change as successful only when median tokens per approved task falls
+by at least 10% with no more than a five-point first-pass-approval decrease,
+no decrease in review-defect recall, and no increase in human intervention.
+Prompt size alone is not a success criterion; report the raw task-level data
+and any unavailable provider fields.
 
 GitHub issue mode is the default. If `task_source` is `local`, use `/run`
 without an issue number, paste the requirements, and finish with `/done`.

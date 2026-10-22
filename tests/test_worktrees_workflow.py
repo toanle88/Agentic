@@ -18,6 +18,31 @@ from test_worktrees import _GitRepositoryTestCase
 
 
 class WorkflowTests(_GitRepositoryTestCase):
+    def test_large_review_patch_includes_manifest_statistics_and_omission_notice(self):
+        sections = []
+        for index in range(1, 5):
+            sections.append(
+                f"diff --git a/file-{index}.py b/file-{index}.py\n"
+                + "\n".join(f"+line-{index}-{line}" for line in range(2_000))
+            )
+        diff = "\n".join(sections)
+
+        def fake_command(argv, cwd):
+            if "--stat" in argv:
+                output = "4 files changed, 8000 insertions(+)"
+            elif "--name-status" in argv:
+                output = "\n".join(f"A\tfile-{index}.py" for index in range(1, 5))
+            else:
+                output = diff
+            return CompletedProcess(argv, 0, stdout=output, stderr="")
+
+        with patch.object(agentic_workflow, "command", side_effect=fake_command):
+            context = agentic_workflow._review_diff_context(Path("/repo"), "base")
+        self.assertIn("Patch statistics:", context)
+        self.assertIn("Changed-file manifest:", context)
+        self.assertIn("file-4.py", context)
+        self.assertIn("middle file section(s) are omitted", context)
+
     def test_offline_resume_uses_cached_issue_without_github_metadata(self):
         config_path = self.repo / "agent-config.json"
         config_path.write_text(json.dumps({
@@ -431,14 +456,18 @@ class WorkflowTests(_GitRepositoryTestCase):
         agent_results = [
             (True, 'first'),
             (True, 'second\nReview finding actions:\n'
-                   '- Finding: Add a regression test\n'
+                   '- Finding: F-1\n'
                    '  Action: fixed\n'
                    '  Evidence: added regression coverage'),
         ]
         review_results = [
             (False, 'tests passed', {
                 'approved': False, 'summary': 'Missing regression test',
-                'findings': ['Add a regression test'],
+                'findings': [{
+                    'id': 'F-1',
+                    'requirement': 'Add a regression test',
+                    'action_target': 'Cover the retry path',
+                }],
             }, '', ''),
             (True, 'tests passed', {
                 'approved': True, 'summary': 'Good', 'findings': [],
@@ -454,11 +483,14 @@ class WorkflowTests(_GitRepositoryTestCase):
         self.assertIn('first', second_prompt)
         self.assertIn('Missing regression test', second_prompt)
         self.assertIn('Add a regression test', second_prompt)
+        self.assertIn('Cover the retry path', second_prompt)
         self.assertIn('one list entry for every finding', second_prompt)
         self.assertIn('prior\n  review', second_prompt)
         self.assertIn('Finding:', second_prompt)
         self.assertIn('Action:', second_prompt)
         self.assertIn('Evidence:', second_prompt)
+        usage = json.loads((folder / 'run.json').read_text(encoding='utf-8'))
+        self.assertEqual(usage['workflow_metrics']['review_findings'], 1)
 
 
     def test_develop_reports_attempts_and_stops_after_five_retries(self):

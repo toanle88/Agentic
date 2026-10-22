@@ -81,6 +81,7 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(config['test_commands'], [['go', 'test', './...']])
             self.assertEqual(config['security_mode'], 'trusted')
             self.assertFalse(config['sandbox']['enabled'])
+
             self.assertEqual(gitignore.read_bytes(), gitignore_before)
             self.assertEqual(
                 exclude.read_bytes(),
@@ -94,6 +95,21 @@ class ConfigurationTests(unittest.TestCase):
                 exclude.read_text(encoding='utf-8').splitlines().count('agent_config.json'),
                 1,
             )
+
+    def test_workflow_mode_defaults_and_validates(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'agent_config.json'
+            path.write_text(json.dumps({'test_commands': [['true']]}))
+            self.assertEqual(agentic.load_config(path)['workflow_mode'], 'standard')
+            path.write_text(json.dumps({
+                'test_commands': [['true']], 'workflow_mode': 'quick',
+            }))
+            self.assertEqual(agentic.load_config(path)['workflow_mode'], 'quick')
+            path.write_text(json.dumps({
+                'test_commands': [['true']], 'workflow_mode': 'unsafe',
+            }))
+            with self.assertRaisesRegex(ValueError, 'workflow_mode'):
+                agentic.load_config(path)
 
 
     def test_init_uses_resolved_exclude_for_linked_worktree(self):

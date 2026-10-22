@@ -28,6 +28,7 @@ from .sandbox import sandbox_build_command, validate_sandbox
 
 SUPPORTED_PROVIDERS = ("codex", "gemini", "claude", "copilot", "openrouter")
 SECURITY_MODES = ("trusted", "isolated")
+WORKFLOW_MODES = ("quick", "standard", "strict")
 DEFAULT_SECURITY_MODE = "trusted"
 DEFAULT_INIT_SECURITY_MODE = "trusted"
 PROVIDER_SANDBOX_ENV = {
@@ -304,6 +305,7 @@ def load_config(path: Path) -> dict[str, Any]:
     codex_timeout = data.get("codex_timeout_seconds")
     test_timeout = data.get("test_timeout_seconds")
     task_timeout = data.get("task_timeout_seconds", DEFAULT_TASK_TIMEOUT)
+    workflow_mode = data.get("workflow_mode", "standard")
     security_mode = data.get("security_mode", DEFAULT_SECURITY_MODE)
     codex_model = data.get("codex_model")
     reasoning_effort = data.get("codex_reasoning_effort")
@@ -321,6 +323,10 @@ def load_config(path: Path) -> dict[str, Any]:
     if security_mode not in SECURITY_MODES:
         raise ValueError(
             f"security_mode must be one of: {', '.join(SECURITY_MODES)}"
+        )
+    if workflow_mode not in WORKFLOW_MODES:
+        raise ValueError(
+            f"workflow_mode must be one of: {', '.join(WORKFLOW_MODES)}"
         )
     for name, value in (("codex_model", codex_model), ("codex_reasoning_effort", reasoning_effort)):
         if value is not None and (not isinstance(value, str) or not value.strip()):
@@ -352,6 +358,7 @@ def load_config(path: Path) -> dict[str, Any]:
         "codex_timeout_seconds": codex_timeout,
         "test_timeout_seconds": test_timeout,
         "task_timeout_seconds": task_timeout,
+        "workflow_mode": workflow_mode,
         # An omitted test timeout keeps the safe default; an explicit null
         # disables the per-test-command timeout.
         "effective_test_timeout_seconds": (
