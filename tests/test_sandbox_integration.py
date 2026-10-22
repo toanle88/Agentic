@@ -86,6 +86,39 @@ class DockerSandboxIntegrationTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse((git_dir / "blocked.txt").exists())
 
+    def test_read_only_provider_cannot_modify_durable_state_but_can_write_result(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp)
+            worktree = parent / "worktree"
+            output = parent / "invocation"
+            durable = parent / "run-state"
+            worktree.mkdir()
+            output.mkdir()
+            durable.mkdir()
+            approval = durable / "approval.json"
+            approval.write_text('{"approved": true}\n', encoding="utf-8")
+
+            settings = validate_sandbox({
+                "enabled": True, "engine": "docker", "image": self.image,
+            })
+            result = subprocess.run(
+                sandbox_command(
+                    ["python", "-c", (
+                        "from pathlib import Path\n"
+                        "for path in ('/workspace/approval.json', '/agentic-durable/approval.json'):\n"
+                        "    try:\n"
+                        "        Path(path).write_text('tampered')\n"
+                        "    except OSError:\n"
+                        "        pass\n"
+                        "Path('/agentic-output/result.txt').write_text('validated result')"
+                    )],
+                    worktree, settings, output_root=output, read_only=True,
+                ), text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(approval.read_text(encoding='utf-8'), '{"approved": true}\n')
+            self.assertEqual((output / "result.txt").read_text(encoding='utf-8'), "validated result")
+
     def test_network_is_disabled_by_default(self):
         with tempfile.TemporaryDirectory() as temp:
             result = self.run_sandbox(

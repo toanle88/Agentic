@@ -26,6 +26,49 @@ from .providers import (
 from .security import redact_secrets
 from .telemetry import extract_jsonl_usage
 
+
+MAX_PROVIDER_RESULT_BYTES = 4 * 1024 * 1024
+
+
+def _stage_provider_input(source: Path, destination: Path) -> None:
+    """Copy one trusted provider input without following a source symlink."""
+    if source.is_symlink() or not source.is_file():
+        raise RuntimeError(f"Provider input is not a regular file: {source}")
+    try:
+        size = source.stat().st_size
+    except OSError as exc:
+        raise RuntimeError(f"Could not inspect provider input: {source}") from exc
+    if size > MAX_PROVIDER_RESULT_BYTES:
+        raise RuntimeError(f"Provider input is too large: {source}")
+    destination.write_bytes(source.read_bytes())
+    try:
+        destination.chmod(0o444)
+    except OSError:
+        # The invocation directory is disposable; a platform that cannot set
+        # this mode still keeps the durable source outside the provider mount.
+        pass
+
+
+def _read_provider_result(root: Path, name: str) -> str | None:
+    """Read an exact, bounded result file without following provider links."""
+    candidate = root / name
+    root = root.resolve()
+    try:
+        if candidate.parent.resolve() != root or candidate.is_symlink() or not candidate.is_file():
+            return None
+        flags = os.O_RDONLY
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(candidate, flags | nofollow)
+        with os.fdopen(fd, "rb") as handle:
+            if os.fstat(handle.fileno()).st_size > MAX_PROVIDER_RESULT_BYTES:
+                return None
+            data = handle.read(MAX_PROVIDER_RESULT_BYTES + 1)
+        if len(data) > MAX_PROVIDER_RESULT_BYTES:
+            return None
+        return data.decode("utf-8")
+    except (OSError, UnicodeError):
+        return None
+
 def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = False,
               schema: Path | None = None, timeout: int | None = None,
               model: str | None = None,
@@ -40,21 +83,21 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
         phase=guidance_phase(output, readonly=readonly),
     )
     output.parent.mkdir(parents=True, exist_ok=True)
-    temporary_output: str | None = None
     credential_name = api_key_env or PROVIDER_API_KEY_ENV.get("codex")
     credential_value = os.environ.get(credential_name) if credential_name else None
     redaction_values = [credential_value] if credential_value else []
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=output.parent,
-            prefix=f".{output.name}.", suffix=".provider.tmp", delete=False,
-        ) as stream:
-            temporary_output = stream.name
+    with tempfile.TemporaryDirectory(prefix="agentic-provider-") as temporary_directory:
+        invocation_output = Path(temporary_directory)
+        temporary_output = invocation_output / "result.txt"
+        staged_schema: Path | None = None
+        if schema is not None:
+            staged_schema = invocation_output / "schema.json"
+            _stage_provider_input(schema, staged_schema)
         command_kwargs: dict[str, Any] = {}
         if permission_policy is not None:
             command_kwargs["permission_policy"] = permission_policy
         args = codex_command(
-            prompt, readonly=readonly, schema=schema, output=Path(temporary_output),
+            prompt, readonly=readonly, schema=staged_schema, output=temporary_output,
             model=model, reasoning_effort=reasoning_effort, **command_kwargs,
         )
         label = "REVIEW" if readonly else "DEVELOPER"
@@ -65,14 +108,13 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
             sandbox_read_only=readonly,
             sandbox_pass_env=(sandbox or {}).get("pass_env", []),
             metrics_folder=output.parent,
+            output_root=invocation_output,
             env=provider_process_environment("codex", api_key_env),
             redaction_values=redaction_values,
         )
-        provider_output = Path(temporary_output)
-        message = (
-            provider_output.read_text(encoding="utf-8")
-            if provider_output.exists() else result.stdout[-4000:]
-        )
+        message = _read_provider_result(invocation_output, "result.txt")
+        if message is None:
+            message = result.stdout[-4000:]
         message = redact_secrets(message, extra_values=redaction_values)
         atomic_write_text(output, message)
         usage_path = output.with_suffix(".jsonl")
@@ -88,12 +130,6 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
             exit_code=result.returncode,
         )
         return result.returncode == 0, message
-    finally:
-        if temporary_output is not None:
-            try:
-                Path(temporary_output).unlink()
-            except FileNotFoundError:
-                pass
 def _provider_progress(line: str, provider: str) -> str | None:
     """Turn Gemini/Claude JSON events into compact terminal progress."""
     try:
@@ -229,15 +265,17 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
     if provider == "copilot" and host:
         process_env = dict(process_env or os.environ)
         process_env["COPILOT_GH_HOST"] = host
-    result = streamed_command(
-        args, worktree, label=label, log_file=output.with_suffix(".log"),
-        timeout=timeout, codex_json=structured, verbose=verbose,
-        progress_parser=(lambda line: _provider_progress(line, provider)) if structured else None,
-        sandbox=effective_sandbox, sandbox_read_only=readonly,
-        sandbox_pass_env=sandbox_pass_env,
-        metrics_folder=output.parent, env=process_env,
-        redaction_values=redaction_values,
-    )
+    with tempfile.TemporaryDirectory(prefix="agentic-provider-") as temporary_directory:
+        result = streamed_command(
+            args, worktree, label=label, log_file=output.with_suffix(".log"),
+            timeout=timeout, codex_json=structured, verbose=verbose,
+            progress_parser=(lambda line: _provider_progress(line, provider)) if structured else None,
+            sandbox=effective_sandbox, sandbox_read_only=readonly,
+            sandbox_pass_env=sandbox_pass_env,
+            metrics_folder=output.parent, env=process_env,
+            redaction_values=redaction_values,
+            output_root=Path(temporary_directory),
+        )
     raw_path = output.with_suffix(".jsonl") if structured else None
     raw = raw_path.read_text(encoding="utf-8", errors="replace") if raw_path and raw_path.exists() else result.stdout
     message = redact_secrets(

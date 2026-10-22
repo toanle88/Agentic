@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -351,7 +352,8 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                      sandbox_pass_env: list[str] | None = None,
                      metrics_folder: Path | None = None,
                      env: dict[str, str] | None = None,
-                     redaction_values: list[str] | None = None) -> subprocess.CompletedProcess[str]:
+                     redaction_values: list[str] | None = None,
+                     output_root: Path | None = None) -> subprocess.CompletedProcess[str]:
     """Stream a subprocess to terminal + durable log; print heartbeats when quiet.
 
     Raw JSONL events are stored next to the human-readable log when a provider
@@ -359,18 +361,37 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
     Only a bounded output tail is retained in memory for error reporting.
     """
     log_file.parent.mkdir(parents=True, exist_ok=True)
-    process_argv = sandbox_command(
-        argv, cwd, sandbox, output_root=log_file.parent, read_only=sandbox_read_only,
-        pass_env=sandbox_pass_env, env=env,
-    )
+    invocation_temp: tempfile.TemporaryDirectory[str] | None = None
+    if sandbox is not None and sandbox.get("enabled") and output_root is None:
+        invocation_temp = tempfile.TemporaryDirectory(prefix="agentic-provider-")
+        output_root = Path(invocation_temp.name)
+    if output_root is not None:
+        output_path = output_root.resolve()
+        durable_path = log_file.parent.resolve()
+        try:
+            output_path.relative_to(durable_path)
+        except ValueError:
+            pass
+        else:
+            raise ValueError("provider output directory must be outside durable run state")
     try:
+        process_argv = sandbox_command(
+            argv, cwd, sandbox, output_root=output_root, read_only=sandbox_read_only,
+            pass_env=sandbox_pass_env, env=env,
+        )
         proc = subprocess.Popen(
             process_argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace",
             bufsize=1, start_new_session=(os.name != "nt"), env=env,
         )
     except OSError as exc:
+        if invocation_temp is not None:
+            invocation_temp.cleanup()
         raise RuntimeError(f"Could not start {argv[0]!r}: {exc}") from exc
+    except Exception:
+        if invocation_temp is not None:
+            invocation_temp.cleanup()
+        raise
 
     lines: queue.Queue[str | None] = queue.Queue()
 
@@ -539,4 +560,6 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
             proc.stdout.close()
         if raw_file:
             raw_file.close()
+        if invocation_temp is not None:
+            invocation_temp.cleanup()
     return subprocess.CompletedProcess(argv, proc.returncode if not timed_out else 124, stdout=tail)
