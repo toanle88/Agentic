@@ -400,8 +400,11 @@ pushes, shell wrappers, interpreter code-evaluation flags, unsafe Git options,
 and path escapes are blocked by the adapter; command execution is routed
 through the configured sandbox when enabled. File-tool paths stay inside the
 worktree, and command-based inspection applies the same resolved-path and
-protected-file checks. Recursive `rg` directory scans and content-producing
-Git commands without explicit regular-file paths are rejected. Native
+protected-file checks. Read-only allowlisted inspection commands must use a
+bare executable name; path-qualified lookalikes such as `./git` or an
+absolute worktree path are rejected before execution. Recursive `rg` directory
+scans and content-producing Git commands without explicit regular-file paths
+are rejected. Native
 developer CLIs run in the isolated Agentic worktree; their
 provider approval modes are set to allow autonomous edits, while reviewer
 modes are read-only where the provider supports that capability.

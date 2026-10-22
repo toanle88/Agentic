@@ -350,6 +350,46 @@ class OpenRouterTests(unittest.TestCase):
         )
         self.assertTrue(allowed, reason)
 
+    def test_openrouter_rejects_path_qualified_readonly_lookalikes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            lookalike = root / 'ls'
+            lookalike.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
+            lookalike.chmod(0o700)
+
+            blocked = (
+                ['../ls'],
+                ['./ls'],
+                ['./git', 'status'],
+                [str(lookalike)],
+                [str(root / 'git'), 'status'],
+            )
+            with patch(
+                'agentic_openrouter_tools._bounded_command_capture',
+                side_effect=AssertionError('path-qualified command must not run'),
+            ) as capture:
+                for argv in blocked:
+                    allowed, reason = agentic_openrouter._openrouter_command_allowed(
+                        argv, readonly=True, worktree=root,
+                    )
+                    self.assertFalse(allowed, (argv, reason))
+                    self.assertIn('path-qualified', reason)
+                    result = agentic_openrouter._openrouter_tool_call(
+                        root, 'run_command', {'argv': argv}, readonly=True,
+                    )
+                    self.assertIn('ERROR:', result, argv)
+            capture.assert_not_called()
+
+            with patch(
+                'agentic_openrouter_tools._bounded_command_capture',
+                return_value=(0, 'public\n', False, False),
+            ) as capture:
+                result = agentic_openrouter._openrouter_tool_call(
+                    root, 'run_command', {'argv': ['ls', 'public.txt']}, readonly=True,
+                )
+            self.assertIn('exit 0', result)
+            self.assertEqual(capture.call_args.args[0], ['ls', 'public.txt'])
+
     def test_openrouter_developer_inspection_stays_inside_worktree(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
