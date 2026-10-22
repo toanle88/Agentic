@@ -143,13 +143,17 @@ class OpenRouterTests(unittest.TestCase):
 
             class Response:
                 def __init__(self, value):
-                    self.value = value
+                    self.body = json.dumps(value).encode()
                 def __enter__(self):
                     return self
                 def __exit__(self, *args):
                     return False
-                def read(self):
-                    return json.dumps(self.value).encode()
+                def read(self, size=-1):
+                    if size < 0:
+                        body, self.body = self.body, b''
+                        return body
+                    body, self.body = self.body[:size], self.body[size:]
+                    return body
 
             def fake_urlopen(request, *args, **kwargs):
                 return Response(next(responses))
@@ -578,8 +582,11 @@ class OpenRouterTests(unittest.TestCase):
                 return self
             def __exit__(self, *args):
                 return False
-            def read(self):
-                return self.body
+            def read(self, size=-1):
+                if size < 0:
+                    return self.body
+                body, self.body = self.body[:size], self.body[size:]
+                return body
 
         cases = [
             (agentic_openrouter.urllib.error.HTTPError(
@@ -608,6 +615,61 @@ class OpenRouterTests(unittest.TestCase):
                         'https://router.test/chat/completions', 'secret', {}, timeout=None,
                         allow_custom_endpoint=True,
                     )
+
+    def test_openrouter_request_rejects_oversized_http_body(self):
+        class Response:
+            def __init__(self, body):
+                self.body = body
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self, size=-1):
+                body, self.body = self.body[:size], self.body[size:]
+                return body
+
+        body = b'{"choices":[]}' + b"x" * agentic_openrouter_tools.OPENROUTER_HTTP_RESPONSE_BYTES
+        with patch('agentic_openrouter.urllib.request.urlopen', return_value=Response(body)):
+            with self.assertRaisesRegex(RuntimeError, 'exceeded'):
+                agentic_openrouter._openrouter_request(
+                    'https://router.test/chat/completions', 'secret', {}, timeout=None,
+                    allow_custom_endpoint=True,
+                )
+
+    def test_openrouter_raw_events_and_final_message_are_bounded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            oversized = {
+                'choices': [{'message': {'role': 'assistant', 'content': 'done'}}],
+                'provider_trace': 'x' * (agentic_openrouter._loop.OPENROUTER_RAW_EVENT_BYTES + 1),
+            }
+            with (patch.dict(agentic.os.environ, {'ROUTER_KEY': 'secret'}, clear=False),
+                  patch('agentic_openrouter._openrouter_request', return_value=oversized)):
+                ok, message = agentic.run_openrouter(
+                    root, 'prompt', output=root / 'developer.txt', model='openai/test',
+                    api_key_env='ROUTER_KEY',
+                )
+            self.assertTrue(ok)
+            self.assertEqual(message, 'done')
+            raw_path = root / 'developer.jsonl'
+            self.assertLessEqual(raw_path.stat().st_size, agentic_openrouter._loop.OPENROUTER_RAW_LOG_BYTES)
+            self.assertIn('agentic_stream_truncated', raw_path.read_text(encoding='utf-8'))
+
+            huge_message = 'z' * (agentic_openrouter._loop.OPENROUTER_FINAL_MESSAGE_CHARS + 100)
+            with (patch.dict(agentic.os.environ, {'ROUTER_KEY': 'secret'}, clear=False),
+                  patch('agentic_openrouter._openrouter_request', return_value={
+                      'choices': [{'message': {'role': 'assistant', 'content': huge_message}}],
+                  })):
+                ok, message = agentic.run_openrouter(
+                    root, 'prompt', output=root / 'developer-2.txt', model='openai/test',
+                    api_key_env='ROUTER_KEY',
+                )
+            self.assertTrue(ok)
+            self.assertIn('agentic_stream_truncated', message)
+            self.assertLessEqual(
+                len((root / 'developer-2.txt').read_text(encoding='utf-8')),
+                agentic_openrouter._loop.OPENROUTER_FINAL_MESSAGE_CHARS,
+            )
 
     def test_openrouter_tool_turn_limit_is_reported(self):
         with tempfile.TemporaryDirectory() as temp:

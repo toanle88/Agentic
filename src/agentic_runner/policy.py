@@ -17,6 +17,33 @@ PERMISSION_FIELDS = (
 )
 PERMISSION_ROLES = ("developer", "reviewer")
 
+# These names are intentionally shared by publication and API-read policy.
+# Matching is case-insensitive because repository paths are not uniformly
+# case-sensitive across the supported platforms.
+_PROTECTED_BASENAMES = frozenset({
+    ".env", ".npmrc", ".pypirc", ".netrc", ".aws", ".docker",
+    "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
+    "credentials.json", "credential.json", "service-account.json",
+    "service_account.json", "google-credentials.json",
+    "application_default_credentials.json", "token.json", "tokens.json",
+    "agents.md", ".gitmodules",
+})
+_PROTECTED_SUFFIXES = (".pem", ".p12", ".pfx", ".key", ".ppk", ".der")
+
+
+def _protected_path(filename: str) -> tuple[list[str], str]:
+    path = PurePosixPath(filename)
+    return [item.lower() for item in path.parts], path.name.lower()
+
+
+def _protected_basename(parts: list[str], base: str) -> bool:
+    return (
+        base in _PROTECTED_BASENAMES
+        or base.startswith(".env.")
+        or base.endswith(_PROTECTED_SUFFIXES)
+        or (len(parts) >= 2 and parts[-2:] == [".docker", "config.json"])
+    )
+
 
 def default_permission_policy(role: str) -> dict[str, bool]:
     """Return the safe, provider-independent policy for one workflow role."""
@@ -87,13 +114,10 @@ def validate_permission_policy(
 
 def forbidden(filename: str) -> bool:
     """Identify paths that must never be included in a proposed patch."""
-    path = PurePosixPath(filename)
-    base = path.name.lower()
-    parts = [item.lower() for item in path.parts]
+    parts, base = _protected_path(filename)
     return (
-        filename in {"agentic.py", "agent_config.json", "AGENTS.md"}
-        or base in {".env", ".npmrc", ".pypirc", "id_rsa", "id_ed25519", "agents.md", ".gitmodules"}
-        or base.startswith(".env.") or base.endswith((".pem", ".p12", ".pfx", ".key"))
+        filename.lower() in {"agentic.py", "agent_config.json", "agents.md"}
+        or _protected_basename(parts, base)
         or "secrets" in parts or ".git" in parts
         or ".codex" in parts
         or (len(parts) >= 3 and parts[:2] == [".github", "workflows"])
@@ -104,13 +128,9 @@ def sensitive_read(filename: str) -> bool:
     """Identify files an API-backed agent should not exfiltrate to a model."""
     if not isinstance(filename, str):
         return False
-    path = PurePosixPath(filename)
-    base = path.name.lower()
-    parts = [item.lower() for item in path.parts]
+    parts, base = _protected_path(filename)
     return (
-        base in {".env", ".npmrc", ".pypirc", "id_rsa", "id_ed25519", ".aws", ".netrc"}
-        or base.startswith(".env.")
-        or base.endswith((".pem", ".p12", ".pfx", ".key"))
+        _protected_basename(parts, base)
         or "secrets" in parts
         or ".git" in parts
         or ".codex" in parts

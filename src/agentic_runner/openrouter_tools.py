@@ -29,6 +29,7 @@ OPENROUTER_COMMAND_READ_CHUNK_BYTES = 4_096
 OPENROUTER_COMMAND_DRAIN_TIMEOUT_SECONDS = 1.0
 OPENROUTER_LIST_FILES_PAGE_SIZE = 300
 OPENROUTER_GIT_OBJECT_CHECK_TIMEOUT_SECONDS = 1.0
+OPENROUTER_HTTP_RESPONSE_BYTES = 2_000_000
 NETWORK_COMMANDS = {"curl", "wget", "ssh", "scp", "sftp", "ftp", "nc", "netcat", "telnet", "gh"}
 ALWAYS_BLOCKED_COMMANDS = {"gh", "ssh", "scp", "sftp"}
 # These programs do not perform a useful check or inspection themselves. They
@@ -928,6 +929,32 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def _read_bounded_response(stream: Any, limit: int) -> tuple[bytes, bool]:
+    """Read at most ``limit`` bytes and report whether more were available."""
+    chunks: list[bytes] = []
+    total = 0
+    truncated = False
+    while total <= limit:
+        chunk = stream.read(min(65_536, limit + 1 - total))
+        if not chunk:
+            break
+        if not isinstance(chunk, (bytes, bytearray)):
+            raise ValueError("OpenRouter response was not a byte stream")
+        remaining = limit - total
+        if len(chunk) > remaining:
+            chunks.append(bytes(chunk[:remaining]))
+            truncated = True
+            break
+        chunks.append(bytes(chunk))
+        total += len(chunk)
+        if total == limit:
+            # One bounded probe distinguishes an exact-size body from an
+            # oversized one without ever asking the transport for an
+            # unbounded read.
+            continue
+    return b"".join(chunks), truncated
+
+
 def _openrouter_request(url: str, api_key: str, body: dict[str, Any],
                         timeout: int | None,
                         redaction_values: list[str] | None = None,
@@ -959,14 +986,28 @@ def _openrouter_request(url: str, api_key: str, body: dict[str, Any],
             opener = urllib.request.build_opener(_NoRedirectHandler())
             response_context = opener.open(request, timeout=timeout) if timeout else opener.open(request)
         with response_context as response:
-            value = json.loads(response.read().decode("utf-8"))
+            response_body, truncated = _read_bounded_response(
+                response, OPENROUTER_HTTP_RESPONSE_BYTES,
+            )
+            if truncated:
+                raise RuntimeError(
+                    f"OpenRouter response exceeded {OPENROUTER_HTTP_RESPONSE_BYTES} bytes"
+                )
+            value = json.loads(response_body.decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        detail = redact_secrets(
-            exc.read().decode("utf-8", errors="replace")[-1000:],
-            extra_values=redaction_values or (),
-        )
+        try:
+            error_body, truncated = _read_bounded_response(
+                exc, OPENROUTER_HTTP_RESPONSE_BYTES,
+            )
+            detail = error_body.decode("utf-8", errors="replace")[-1000:]
+        except (OSError, TypeError, ValueError):
+            detail = "(error body unavailable)"
+            truncated = False
+        detail = redact_secrets(detail, extra_values=redaction_values or ())
+        if truncated:
+            detail += " [response body truncated]"
         raise RuntimeError(f"OpenRouter request failed ({exc.code}): {detail}") from exc
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise RuntimeError(
             "OpenRouter request failed: "
             + redact_secrets(str(exc), extra_values=redaction_values or ())

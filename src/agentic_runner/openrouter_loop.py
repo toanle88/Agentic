@@ -34,6 +34,13 @@ from .output import is_transient_progress, strip_ansi, style_text
 from .security import redact_secrets
 from .telemetry import combine_usage, normalize_usage, record_operation
 
+
+OPENROUTER_RAW_LOG_BYTES = 2_000_000
+OPENROUTER_RAW_EVENT_BYTES = 256_000
+OPENROUTER_LOG_BYTES = 200_000
+OPENROUTER_FINAL_MESSAGE_CHARS = 50_000
+_TRUNCATION_MARKER = "\n[agentic_stream_truncated: size limit reached]\n"
+
 def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                    readonly: bool = False, schema: Path | None = None,
                    timeout: int | None = None, model: str | None = None,
@@ -95,17 +102,72 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
     usage_records: list[dict[str, Any]] = []
     atomic_write_text(log_file, "")
     atomic_write_text(raw_file, "")
+    raw_bytes = 0
+    raw_truncated = False
+    log_bytes = 0
+    log_truncated = False
     live_status = False
     live_status_enabled = bool(getattr(sys.stdout, "isatty", lambda: False)())
 
+    def bounded_final_message(value: str) -> str:
+        if len(value) <= OPENROUTER_FINAL_MESSAGE_CHARS:
+            return value
+        keep = max(0, OPENROUTER_FINAL_MESSAGE_CHARS - len(_TRUNCATION_MARKER))
+        return value[:keep] + _TRUNCATION_MARKER
+
     def record_raw(event: dict[str, Any]) -> None:
+        nonlocal raw_bytes, raw_truncated
+        if raw_truncated:
+            return
+        event_name = str(event.get("event", "unknown"))[:80]
+        try:
+            serialized = redact_secrets(
+                json.dumps(event, ensure_ascii=True, default=str),
+                extra_values=redaction_values,
+            ) + "\n"
+        except (TypeError, ValueError):
+            serialized = ""
+        if not serialized or len(serialized.encode("utf-8")) > OPENROUTER_RAW_EVENT_BYTES:
+            serialized = json.dumps({
+                "event": "agentic_stream_truncated",
+                "stream": "openrouter_event",
+                "reason": "event_size_limit",
+                "original_event": event_name,
+            }) + "\n"
+        encoded = serialized.encode("utf-8")
+        marker = json.dumps({
+            "event": "agentic_stream_truncated",
+            "stream": "openrouter_jsonl",
+            "reason": "artifact_size_limit",
+        }) + "\n"
+        marker_bytes = marker.encode("utf-8")
+        if raw_bytes + len(encoded) > OPENROUTER_RAW_LOG_BYTES - len(marker_bytes):
+            if raw_bytes + len(marker_bytes) <= OPENROUTER_RAW_LOG_BYTES:
+                with raw_file.open("a", encoding="utf-8") as handle:
+                    handle.write(marker)
+                raw_bytes += len(marker_bytes)
+            raw_truncated = True
+            return
         with raw_file.open("a", encoding="utf-8") as handle:
-            handle.write(
-                redact_secrets(
-                    json.dumps(event, ensure_ascii=False),
-                    extra_values=redaction_values,
-                ) + "\n"
-            )
+            handle.write(serialized)
+        raw_bytes += len(encoded)
+
+    def write_log(line: str) -> None:
+        nonlocal log_bytes, log_truncated
+        if log_truncated:
+            return
+        marker = _TRUNCATION_MARKER
+        encoded = (line + "\n").encode("utf-8")
+        marker_bytes = marker.encode("utf-8")
+        if log_bytes + len(encoded) > OPENROUTER_LOG_BYTES - len(marker_bytes):
+            with log_file.open("a", encoding="utf-8") as handle:
+                handle.write(marker)
+            log_bytes += len(marker_bytes)
+            log_truncated = True
+            return
+        with log_file.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+        log_bytes += len(encoded)
 
     def clear_live_status() -> None:
         nonlocal live_status
@@ -150,8 +212,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
             clear_live_status()
             _console_print(rendered, flush=True)
         if verbose or not transient:
-            with log_file.open("a", encoding="utf-8") as handle:
-                handle.write(line + "\n")
+            write_log(line)
 
     emit(f"Started (OpenRouter/{model})", style_status_tokens=True)
     try:
@@ -196,7 +257,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
             tool_calls = message.get("tool_calls") or []
             content = _message_text(message.get("content"))
             if content:
-                last_message = content
+                last_message = bounded_final_message(content)
                 emit("Agent: " + _short(
                     redact_secrets(content, extra_values=redaction_values), 350,
                 ))
@@ -246,7 +307,9 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
         else:
             raise RuntimeError(f"OpenRouter agent exceeded {max_tool_turns} tool turns")
     except RuntimeError as exc:
-        message = redact_secrets(last_message or str(exc), extra_values=redaction_values)
+        message = bounded_final_message(
+            redact_secrets(last_message or str(exc), extra_values=redaction_values)
+        )
         emit("ERROR: " + message, generated_status="ERROR")
         atomic_write_text(output, message)
         usage = combine_usage(usage_records, provider="openrouter")
@@ -268,7 +331,9 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
         return False, message
     seconds = int(time.monotonic() - started)
     emit(f"Finished in {seconds}s (exit 0)", style_status_tokens=True)
-    last_message = redact_secrets(last_message, extra_values=redaction_values)
+    last_message = bounded_final_message(
+        redact_secrets(last_message, extra_values=redaction_values)
+    )
     atomic_write_text(output, last_message)
     usage = combine_usage(usage_records, provider="openrouter")
     _record_provider_usage(

@@ -13,6 +13,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner import cli as agentic
+from agentic_runner.policy import sensitive_read
 from agentic_runner import config as agentic_config
 from agentic_runner import diagnostics as agentic_diagnostics
 
@@ -1578,6 +1579,15 @@ class ConfigurationTests(unittest.TestCase):
         self.assertIsNone(config['system_prompt'])
         self.assertTrue(agentic.forbidden('.env'))
         self.assertFalse(agentic.forbidden('src/main.py'))
+
+        for path in (
+            'credentials.json', 'config/service-account.json',
+            '.docker/config.json', 'keys/id_ecdsa', 'KEYS/ID_ED25519',
+            'nested/private.ppk',
+        ):
+            self.assertTrue(agentic.forbidden(path), path)
+            self.assertTrue(sensitive_read(path), path)
+        self.assertFalse(sensitive_read('src/credentials.txt'))
 
         with tempfile.TemporaryDirectory() as temp:
             unlimited = Path(temp) / 'agent_config.json'
