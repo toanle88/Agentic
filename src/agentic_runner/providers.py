@@ -386,7 +386,7 @@ def display_provider_path(path: str) -> str:
     candidate = Path(path)
     try:
         return "~" + str(candidate.expanduser().relative_to(Path.home()))
-    except ValueError:
+    except (ValueError, RuntimeError):
         return str(candidate)
 
 

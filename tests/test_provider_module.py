@@ -7,11 +7,16 @@ import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner.providers import (
     cli_provider_command,
     codex_command,
+    display_provider_path,
     resolve_provider_executable,
 )
 
 
 class ProviderCommandTests(unittest.TestCase):
+    def test_display_provider_path_falls_back_without_a_home_directory(self):
+        with patch("agentic_runner.providers.Path.home", side_effect=RuntimeError):
+            self.assertEqual(display_provider_path("/tmp/copilot"), "/tmp/copilot")
+
     def test_codex_command_uses_explicit_sandbox_and_output_schema(self):
         command = codex_command(
             "inspect the task; do not execute shell text",
