@@ -322,6 +322,17 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(snapshots[61]["status"], "retry_exhausted")
             self.assertEqual(snapshots[61]["result"]["attempts"], 4)
             self.assertEqual(snapshots[62]["status"], "no_changes")
+            approved = root / "agent-issue-60-deadbeef"
+            approved.mkdir(parents=True)
+            (approved / "result.json").write_text(json.dumps({
+                "status": "APPROVED", "next_action": "publish",
+            }))
+            approved_snapshot = next(
+                item for item in agentic_dashboard.collect_runs(root)
+                if item["issue"] == 60
+            )
+            self.assertEqual(approved_snapshot["status"], "approved")
+            self.assertEqual(approved_snapshot["result"]["status"], "APPROVED")
             rendered = agentic_dashboard.render_dashboard(list(snapshots.values()), "demo", root.name)
             self.assertIn("Retry exhausted", rendered)
             self.assertIn("No changes", rendered)

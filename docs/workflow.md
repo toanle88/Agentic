@@ -315,6 +315,21 @@ resume action uses a durable `resume-task.md` copy in the run log directory
 and emits a shell-safe `--task-file` invocation, so task text is not copied
 into terminal summaries or `result.json`.
 
+For an online GitHub issue run, Agentic automatically posts one concise final
+comment after a terminal `result.json` is recorded. The comment includes the
+result, test and review status, branch, next action, total duration and token
+usage, plus per-stage tokens and cost when the provider reports them. Missing
+metrics are shown as `unknown`; Agentic does not estimate them. The comment
+contains no provider transcript, issue text, local path, or credential. A
+deterministic marker and a local delivery record make retries idempotent, and a
+GitHub delivery failure leaves the terminal result intact for later retry.
+
+This behavior is enabled by default and needs no flag. It requires the
+authenticated GitHub CLI identity to have permission to read issue comments
+and write issue comments (the repository's Issues: write permission, or an
+equivalent token scope). `--offline`, local tasks, and read-only audits do not
+contact GitHub for completion comments.
+
 Use `--new` only when you intentionally want a second worktree:
 
 ```bash
