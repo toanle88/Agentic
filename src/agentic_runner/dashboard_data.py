@@ -7,6 +7,7 @@ preserving the optional fields used by older run records.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import os
 if os.name == "nt":
@@ -48,9 +49,25 @@ SEVERITY_RANK = {
 _RUN_CACHE_LIMIT = 512
 _MAX_SNAPSHOT_RETRIES = 4
 _RUN_SNAPSHOT_CACHE: dict[
-    tuple[str, str], tuple[tuple[tuple[str, int, int, int], ...], dict[str, Any] | None]
+    tuple[str, str], tuple[tuple[tuple[str, int, int, int | str], ...], dict[str, Any] | None]
 ] = {}
 _RUN_SNAPSHOT_CACHE_LOCK = threading.RLock()
+
+
+def _windows_file_content_signature(path: Path) -> str:
+    """Fingerprint a Windows artifact when filesystem timestamps are unstable."""
+    digest = hashlib.blake2b(digest_size=16)
+    descriptor = -1
+    try:
+        descriptor = os.open(str(path), os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+    except OSError:
+        return "unreadable"
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    return digest.hexdigest()
 
 
 if os.name == "nt":
@@ -533,7 +550,7 @@ def _all_log_files(folder: Path) -> list[Path]:
     ]
 
 
-def _folder_signature(folder: Path) -> tuple[tuple[str, int, int, int], ...]:
+def _folder_signature(folder: Path) -> tuple[tuple[str, int, int, int | str], ...]:
     """Return cache metadata for regular artifacts with one directory scan."""
     if not folder.is_dir():
         return ()
@@ -552,7 +569,8 @@ def _folder_signature(folder: Path) -> tuple[tuple[str, int, int, int], ...]:
                 # writes.  Its native ChangeTime is more reliable than
                 # Python's creation-time-compatible st_ctime on Windows.
                 change_time = (
-                    _windows_file_change_time(Path(entry.path), stat.st_ctime_ns)
+                    f"{_windows_file_change_time(Path(entry.path), stat.st_ctime_ns)}:"
+                    f"{_windows_file_content_signature(Path(entry.path))}"
                     if os.name == "nt" else stat.st_ctime_ns
                 )
                 signature.append((

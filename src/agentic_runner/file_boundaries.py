@@ -192,8 +192,14 @@ if os.name == "nt":
     def _windows_open_directory_at(
         descriptor: _WindowsDirectoryHandle | Path, name: str,
     ) -> _WindowsDirectoryHandle:
+        return _windows_open_directory(_windows_directory_path(descriptor, name))
+
+
+    def _windows_directory_path(
+        descriptor: _WindowsDirectoryHandle | Path, name: str,
+    ) -> Path:
         base = descriptor.path() if isinstance(descriptor, _WindowsDirectoryHandle) else descriptor
-        return _windows_open_directory(base / name)
+        return base / name
 
 
     def _windows_open_regular_at(
@@ -327,7 +333,13 @@ def _open_relative_regular_without_dir_fd(
         current = root_handle
         try:
             for part in parts[:-1]:
-                child = _open_directory_at(current, part)
+                try:
+                    child = _open_directory_at(current, part)
+                except FileNotFoundError:
+                    if not create_parents:
+                        raise
+                    _windows_directory_path(current, part).mkdir()
+                    child = _open_directory_at(current, part)
                 current.close()
                 current = child
             return _windows_open_regular_at(
