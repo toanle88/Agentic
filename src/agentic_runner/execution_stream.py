@@ -300,6 +300,11 @@ def _summary_token_text(value: Any) -> str:
     return f"{int(value):,} tokens"
 
 
+def _summary_stage_token_text(value: Any) -> str:
+    """Format a stage token count for the labelled summary column."""
+    return _summary_token_text(value).removesuffix(" tokens")
+
+
 def _summary_duration_text(value: Any) -> str:
     """Format bounded telemetry durations for a compact terminal row."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -366,12 +371,18 @@ def _summary_stage_usage(usage: dict[str, Any], stage: str, count: int) -> dict[
 
 
 def _summary_stage_line(stage: str, count: int, tokens: str, duration: str,
-                        suffix: str = "") -> str:
-    run_word = "run" if count == 1 else "runs"
+                        suffix: str = "", *, run_width: int = 2,
+                        token_width: int = 9, duration_width: int = 7) -> str:
+    """Render one stage row from widths calculated from unstyled values."""
     label = "REVIEW" if stage == "reviewer" else stage.upper()
-    prefix = style_text(f"[{label}]", style_status_tokens=False)
-    rendered_duration = _paint(duration, "36")
-    return f"{prefix} {count} {run_word} | {tokens:<16} | {rendered_duration}{suffix}"
+    plain_label = f"[{label}]".ljust(len("[DEVELOPER]") + 2)
+    plain_duration = duration.rjust(duration_width)
+    rendered_label = style_text(plain_label, style_status_tokens=False)
+    rendered_duration = _paint(plain_duration, "36")
+    return (
+        f"{rendered_label}Runs: {count:>{run_width}} | "
+        f"Tokens: {tokens:>{token_width}} | Time: {rendered_duration}{suffix}"
+    )
 
 
 def _print_execution_summary(folder: Path) -> None:
@@ -402,10 +413,11 @@ def _print_execution_summary(folder: Path) -> None:
         style_status_tokens=False,
     ))
 
+    stage_rows: list[tuple[str, int, str, str, str]] = []
     for stage in ("developer", "tests", "reviewer"):
         count, duration = _summary_stage_data(usage, stage)
         stage_usage = _summary_stage_usage(usage, stage, count)
-        tokens = _summary_token_text(stage_usage.get("total_tokens"))
+        tokens = _summary_stage_token_text(stage_usage.get("total_tokens"))
         suffix = ""
         if stage == "reviewer":
             workflow_metrics = usage.get("workflow_metrics")
@@ -419,8 +431,18 @@ def _print_execution_summary(folder: Path) -> None:
                 else "unknown"
             )
             suffix = f" | Findings: {findings_text}"
-        _console_print(_summary_stage_line(
+        stage_rows.append((
             stage, count, tokens, _summary_duration_text(duration), suffix,
+        ))
+
+    run_width = max(2, *(len(str(row[1])) for row in stage_rows))
+    token_width = max(1, *(len(row[2]) for row in stage_rows))
+    duration_width = max(1, *(len(row[3]) for row in stage_rows))
+    for stage, count, tokens, duration, suffix in stage_rows:
+        _console_print(_summary_stage_line(
+            stage, count, tokens, duration, suffix,
+            run_width=run_width, token_width=token_width,
+            duration_width=duration_width,
         ))
 
     workflow_metrics = usage.get("workflow_metrics")
