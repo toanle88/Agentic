@@ -545,6 +545,8 @@ def _repair_eof_blank_lines(worktree: Path, diagnostics: str) -> list[str]:
                     data = data[:-2]
                 while data.endswith(b"\n\n"):
                     data = data[:-1]
+                if os.name == "nt" and data.endswith(b"\r\n"):
+                    data = data[:-2] + b"\n"
                 if data == original:
                     continue
                 os.lseek(fd, 0, os.SEEK_SET)

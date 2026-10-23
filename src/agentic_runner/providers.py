@@ -336,10 +336,11 @@ def copilot_candidate_paths(environ: Mapping[str, str] | None = None) -> list[Pa
             # home-directory variables.  Provider discovery is optional and
             # must not make an otherwise valid invocation fail.
             return []
-    candidates = [data_home / "gh" / "copilot" / "copilot"]
-    if os.name == "nt":
-        candidates.append(data_home / "gh" / "copilot" / "copilot.exe")
-    return candidates
+    install_dir = data_home / "gh" / "copilot"
+    # GitHub CLI has used both names across platforms/releases. Check both so
+    # discovery remains stable when a Windows runner supplies a POSIX-style
+    # XDG_DATA_HOME or when a copied fixture has the other suffix.
+    return [install_dir / "copilot", install_dir / "copilot.exe"]
 
 
 def resolve_provider_executable(
