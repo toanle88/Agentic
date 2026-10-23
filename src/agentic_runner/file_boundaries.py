@@ -75,7 +75,19 @@ if os.name == "nt":
 
 
     def _windows_kernel32() -> Any:
-        return ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.GetFileInformationByHandle.argtypes = [
+            wintypes.HANDLE, ctypes.POINTER(_WindowsFileInformation),
+        ]
+        kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
+        kernel32.GetFinalPathNameByHandleW.argtypes = [
+            wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD,
+        ]
+        kernel32.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+        return kernel32
 
 
     def _windows_close_handle(handle: int) -> None:
@@ -352,6 +364,7 @@ def _iter_safe_regular_files_without_dir_fd(
     if os.name == "nt":
         root_handle = _windows_open_directory(root)
         current = root_handle
+        stack: list[tuple[_WindowsDirectoryHandle, str]] = []
         try:
             for part in parts:
                 child = _open_directory_at(current, part)

@@ -67,6 +67,9 @@ if os.name == "nt":
     def _windows_file_change_time(path: Path, fallback: int) -> int:
         """Read NTFS ChangeTime without reading the artifact contents."""
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
         handle = kernel32.CreateFileW(
             str(path),
             0x00000080,  # FILE_READ_ATTRIBUTES
