@@ -1,6 +1,8 @@
 """OpenRouter policy and tool-loop tests."""
+import http.client
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -667,6 +669,57 @@ class OpenRouterTests(unittest.TestCase):
                         allow_custom_endpoint=True,
                     )
 
+        for error in (
+            OSError('response read failed'),
+            socket.timeout('response timed out'),
+            http.client.IncompleteRead(b'partial'),
+            http.client.HTTPException('response protocol failed'),
+        ):
+            with self.subTest(response_error=type(error).__name__):
+                class FailingResponse:
+                    def __enter__(self):
+                        return self
+                    def __exit__(self, *args):
+                        return False
+                    def read(self, size=-1):
+                        raise error
+
+                with patch(
+                    'agentic_openrouter.urllib.request.urlopen',
+                    return_value=FailingResponse(),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, 'OpenRouter request failed'):
+                        agentic_openrouter._openrouter_request(
+                            'https://router.test/chat/completions', 'secret', {}, timeout=2,
+                            allow_custom_endpoint=True,
+                        )
+
+    def test_openrouter_response_read_failure_persists_failed_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+
+            class FailingResponse:
+                def __enter__(self):
+                    return self
+                def __exit__(self, *args):
+                    return False
+                def read(self, size=-1):
+                    raise http.client.IncompleteRead(b'partial')
+
+            with (patch.dict(agentic.os.environ, {'ROUTER_KEY': 'secret'}, clear=False),
+                  patch('agentic_openrouter.urllib.request.urlopen', return_value=FailingResponse())):
+                ok, message = agentic.run_openrouter(
+                    root, 'prompt', output=root / 'developer.txt', model='openai/test',
+                    api_key_env='ROUTER_KEY',
+                )
+
+            self.assertFalse(ok)
+            self.assertIn('OpenRouter request failed', message)
+            self.assertIn('OpenRouter request failed', (root / 'developer.txt').read_text())
+            record = json.loads((root / 'run.json').read_text(encoding='utf-8'))
+            self.assertEqual(record['metrics']['operations'][0]['status'], 'failed')
+            self.assertEqual(record['metrics']['operations'][0]['exit_code'], 1)
+
     def test_openrouter_request_rejects_oversized_http_body(self):
         class Response:
             def __init__(self, body):
@@ -995,6 +1048,34 @@ class OpenRouterTests(unittest.TestCase):
             )
             self.assertIn('symbolic links', result)
             self.assertEqual(target.read_text(encoding='utf-8'), 'original\n')
+
+    def test_openrouter_rejects_hardlinked_read_and_write_targets(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'worktree'
+            root.mkdir()
+            protected = Path(temp) / '.env'
+            protected.write_text('PRIVATE=do-not-send\n', encoding='utf-8')
+            writable = Path(temp) / 'external.txt'
+            writable.write_text('external-original\n', encoding='utf-8')
+            try:
+                os.link(protected, root / 'visible.txt')
+                os.link(writable, root / 'writable.txt')
+            except OSError as exc:
+                self.skipTest(f'hardlinks unavailable: {exc}')
+
+            read_result = agentic_openrouter._openrouter_tool_call(
+                root, 'read_file', {'path': 'visible.txt'}, readonly=True,
+            )
+            self.assertIn('hard-linked', read_result)
+            self.assertNotIn('PRIVATE=do-not-send', read_result)
+
+            write_result = agentic_openrouter._openrouter_tool_call(
+                root, 'write_file', {
+                    'path': 'writable.txt', 'content': 'must-not-truncate\n',
+                }, readonly=False,
+            )
+            self.assertIn('hard-linked', write_result)
+            self.assertEqual(writable.read_text(encoding='utf-8'), 'external-original\n')
 
     def test_openrouter_command_output_is_bounded_and_process_is_stopped(self):
         with tempfile.TemporaryDirectory() as temp:

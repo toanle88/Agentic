@@ -3,14 +3,15 @@ from __future__ import annotations
 
 import codecs
 from collections import OrderedDict
+import http.client
 import json
 import os
 import queue
 import signal
-import stat
 import subprocess
 import threading
 import time
+import socket
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -19,6 +20,7 @@ from typing import Any
 
 from .execution import _short
 from .config import validate_openrouter_base_url
+from .file_boundaries import open_single_link_regular, revalidate_single_link_regular
 from .sandbox import sandbox_command
 from .security import redact_secrets
 from .policy import default_permission_policy, forbidden, sensitive_read
@@ -593,18 +595,19 @@ def _openrouter_command_allowed(
 
 
 def _open_regular_text_stream(path: Path):
-    """Open a regular file without following a raced final symlink."""
+    """Open a single-link regular file without following a raced symlink."""
     try:
-        if not stat.S_ISREG(path.stat(follow_symlinks=False).st_mode):
-            raise ValueError("read_file only supports regular files")
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_RDONLY
         # A nonblocking open prevents a FIFO from hanging before fstat can
         # reject it if the path changes between the lstat and open calls.
         flags |= getattr(os, "O_NONBLOCK", 0)
-        descriptor = os.open(path, flags)
+        descriptor, expected_identity = open_single_link_regular(
+            path, flags, description="read_file target",
+        )
         try:
-            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                raise ValueError("read_file only supports regular files")
+            revalidate_single_link_regular(
+                descriptor, expected_identity, description="read_file target",
+            )
             stream = os.fdopen(descriptor, "r", encoding="utf-8", errors="replace")
             descriptor = -1
         finally:
@@ -1013,15 +1016,23 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
             if not isinstance(content, str):
                 return "ERROR: file content must be a string"
             target.parent.mkdir(parents=True, exist_ok=True)
-            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-            nofollow = getattr(os, "O_NOFOLLOW", 0)
+            flags = os.O_WRONLY | os.O_CREAT
             try:
-                descriptor = os.open(target, flags | nofollow, 0o644)
-            except OSError as exc:
+                descriptor, expected_identity = open_single_link_regular(
+                    target, flags, 0o644, description="write_file target",
+                )
+            except (OSError, ValueError) as exc:
                 return f"ERROR: could not open {relative!r} for writing: {exc}"
             try:
+                revalidate_single_link_regular(
+                    descriptor, expected_identity, description="write_file target",
+                )
+                os.ftruncate(descriptor, 0)
                 with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
                     descriptor = -1
+                    revalidate_single_link_regular(
+                        stream.fileno(), expected_identity, description="write_file target",
+                    )
                     stream.write(content)
             finally:
                 if descriptor >= 0:
@@ -1133,14 +1144,23 @@ def _openrouter_request(url: str, api_key: str, body: dict[str, Any],
                 exc, OPENROUTER_HTTP_RESPONSE_BYTES,
             )
             detail = error_body.decode("utf-8", errors="replace")[-1000:]
-        except (OSError, TypeError, ValueError):
+        except (OSError, TypeError, ValueError, http.client.HTTPException):
             detail = "(error body unavailable)"
             truncated = False
         detail = redact_secrets(detail, extra_values=redaction_values or ())
         if truncated:
             detail += " [response body truncated]"
         raise RuntimeError(f"OpenRouter request failed ({exc.code}): {detail}") from exc
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except (
+        urllib.error.URLError,
+        OSError,
+        socket.timeout,
+        TimeoutError,
+        http.client.HTTPException,
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+        ValueError,
+    ) as exc:
         raise RuntimeError(
             "OpenRouter request failed: "
             + redact_secrets(str(exc), extra_values=redaction_values or ())
