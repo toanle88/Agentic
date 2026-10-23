@@ -9,6 +9,7 @@ import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner import cli as agentic
 from agentic_runner import dashboard_data as agentic_dashboard_data
 from agentic_runner import workflow as agentic_workflow
+from agentic_runner import workflow_state as agentic_workflow_state
 from agentic_runner.models import Issue
 from agentic_runner.persistence import atomic_write_json, atomic_write_text
 from agentic_runner.review import record_review_findings
@@ -147,6 +148,57 @@ class PersistenceRecoveryTests(unittest.TestCase):
             self.assertIsNotNone(approval)
             self.assertNotIn(value, json.dumps(approval))
             self.assertIn("[REDACTED]", json.dumps(approval))
+
+    def test_cli_and_workflow_state_approval_writers_bound_review_evidence_identically(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run = agentic.Run(146, "agent/issue-146-approval123", root)
+            issue = Issue(146, "Approval parity", "description")
+            verdict = {
+                "summary": "\x1b[31m" + "s" * 2_500,
+                "skipped": ["\x1b[32m" + "k" * 1_500, "", 42],
+            }
+            cli_record = agentic.record_review_approval(
+                run, issue, "main", "base-sha", "patch-digest", verdict,
+                {"reviewer_agent": {"provider": "codex"}}, root / "cli",
+            )
+            state_record = agentic_workflow_state.record_review_approval(
+                run, issue, "main", "base-sha", "patch-digest", verdict,
+                {"reviewer_agent": {"provider": "codex"}}, root / "state",
+            )
+
+        self.assertEqual(cli_record["summary"], state_record["summary"])
+        self.assertEqual(cli_record["skipped"], state_record["skipped"])
+        self.assertEqual(len(cli_record["summary"]), 2_000)
+        self.assertEqual(len(cli_record["skipped"][0]), 1_000)
+        self.assertEqual(cli_record["skipped"][1:], [])
+
+    def test_cli_and_workflow_state_approval_loaders_bound_and_reject_the_same_records(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            record = {
+                "status": "approved",
+                "branch": "agent/issue-146-approval123",
+                "issue_digest": "issue-digest",
+                "base_sha": "base-sha",
+                "patch_digest": "patch-digest",
+                "summary": "\x1b[31m" + "s" * 2_500,
+                "skipped": ["\x1b[32m" + "k" * 1_500],
+            }
+            (root / "review-approval.json").write_text(json.dumps(record), encoding="utf-8")
+
+            cli_loaded = agentic.load_review_approval(root)
+            state_loaded = agentic_workflow_state.load_review_approval(root)
+            self.assertEqual(cli_loaded, state_loaded)
+            self.assertEqual(len(cli_loaded["summary"]), 2_000)
+            self.assertEqual(len(cli_loaded["skipped"][0]), 1_000)
+
+            for malformed in ("{", '{"status": "pending"}', '{"status": "approved"}'):
+                (root / "review-approval.json").write_text(malformed, encoding="utf-8")
+                for loader in (agentic.load_review_approval, agentic_workflow_state.load_review_approval):
+                    with self.subTest(malformed=malformed, loader=loader):
+                        with self.assertRaises(RuntimeError):
+                            loader(root)
 
     def test_resume_task_is_redacted_and_partial_streams_remain_untrusted(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(

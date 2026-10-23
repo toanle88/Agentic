@@ -5,6 +5,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -60,6 +61,16 @@ class ModularBoundaryTests(unittest.TestCase):
             agentic.load_latest_developer_report,
             agentic_workflow_state.load_latest_developer_report,
         )
+
+    def test_legacy_cli_approval_helpers_delegate_to_workflow_state(self):
+        self.assertIs(agentic.manual_approval_path, agentic_workflow_state.manual_approval_path)
+        self.assertIs(agentic.review_approval_path, agentic_workflow_state.review_approval_path)
+        with patch.object(agentic_workflow_state, "load_manual_approval", return_value=None) as load_manual:
+            self.assertIsNone(agentic.load_manual_approval(Path("run")))
+        load_manual.assert_called_once_with(Path("run"))
+        with patch.object(agentic_workflow_state, "load_review_approval", return_value=None) as load_review:
+            self.assertIsNone(agentic.load_review_approval(Path("run")))
+        load_review.assert_called_once_with(Path("run"))
 
     def test_workflow_facade_reexports_developer_orchestration_boundary(self):
         self.assertIs(

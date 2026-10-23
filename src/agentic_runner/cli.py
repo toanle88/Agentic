@@ -9,7 +9,6 @@ Python packages are required by the runner itself.
 from __future__ import annotations
 
 import argparse
-import datetime
 import os
 import time
 import json
@@ -23,6 +22,7 @@ from typing import Any
 
 from . import config as _agentic_config
 from . import context as _agentic_context
+from . import workflow_state as _agentic_workflow_state
 from . import worktrees as _agentic_worktrees
 from . import __version__
 from .config import (  # noqa: F401
@@ -97,7 +97,7 @@ from .execution import (  # noqa: F401
     streamed_command,
 )
 from .output import style_system_text, style_text
-from .persistence import atomic_write_json, read_text_tail
+from .persistence import read_text_tail
 from .openrouter import (  # noqa: F401
     run_openrouter,
 )
@@ -323,19 +323,13 @@ def logs_path(repo: Path, run: Run, state_dir: Path | None = None) -> Path:
     return folder
 
 
-MANUAL_APPROVAL_FILENAME = "manual-approval.json"
-REVIEW_APPROVAL_FILENAME = "review-approval.json"
+MANUAL_APPROVAL_FILENAME = _agentic_workflow_state.MANUAL_APPROVAL_FILENAME
+REVIEW_APPROVAL_FILENAME = _agentic_workflow_state.REVIEW_APPROVAL_FILENAME
 BLOCKED_FILENAME = "blocked.json"
 
 
-def manual_approval_path(folder: Path) -> Path:
-    """Return the durable human-completion record for a run."""
-    return folder / MANUAL_APPROVAL_FILENAME
-
-
-def review_approval_path(folder: Path) -> Path:
-    """Return the durable automated-review approval record for a run."""
-    return folder / REVIEW_APPROVAL_FILENAME
+manual_approval_path = _agentic_workflow_state.manual_approval_path
+review_approval_path = _agentic_workflow_state.review_approval_path
 
 
 def blocked_path(folder: Path) -> Path:
@@ -345,19 +339,7 @@ def blocked_path(folder: Path) -> Path:
 
 def load_manual_approval(folder: Path) -> dict[str, Any] | None:
     """Load a manual completion record, rejecting corrupt approval state."""
-    path = manual_approval_path(folder)
-    if not path.is_file():
-        return None
-    try:
-        value = json.loads(redact_secrets(path.read_text(encoding="utf-8")))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Manual completion record is unreadable: {path}") from exc
-    if not isinstance(value, dict) or value.get("status") != "approved":
-        raise RuntimeError(f"Manual completion record is invalid: {path}")
-    required = ("branch", "issue_digest", "base_sha", "patch_digest", "reason")
-    if any(not isinstance(value.get(key), str) or not value[key].strip() for key in required):
-        raise RuntimeError(f"Manual completion record is incomplete: {path}")
-    return value
+    return _agentic_workflow_state.load_manual_approval(folder)
 
 
 def record_manual_approval(run: Run, issue: Issue, base: str, config: dict[str, Any],
@@ -365,19 +347,10 @@ def record_manual_approval(run: Run, issue: Issue, base: str, config: dict[str, 
     """Record a human completion decision tied to the exact current patch."""
     reason = reason.strip() or "Manually marked done by user"
     base_sha, digest, summary = prepare_patch(run.worktree, base, config["max_files"])
-    approval = {
-        "status": "approved",
-        "issue": issue.reference,
-        "issue_digest": issue_fingerprint(issue),
-        "branch": run.branch,
-        "base": base,
-        "base_sha": base_sha,
-        "patch_digest": digest,
-        "reason": reason,
-        "marked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    }
+    approval = _agentic_workflow_state.record_manual_approval(
+        run, issue, base, base_sha, digest, folder, reason,
+    )
     path = manual_approval_path(folder)
-    atomic_write_json(path, approval)
     _status_print(f"[MANUAL] Marked complete: {summary.strip() or '(patch recorded)'}")
     _status_print(f"[MANUAL] Approval record: {path}")
     return approval
@@ -387,53 +360,23 @@ def record_review_approval(run: Run, issue: Issue, base: str, base_sha: str,
                            patch_digest: str, verdict: dict[str, Any],
                            config: dict[str, Any], folder: Path) -> dict[str, Any]:
     """Persist automated approval for the exact patch that was reviewed."""
-    approval = {
-        "status": "approved",
-        "kind": "automated",
-        "issue": issue.reference,
-        "issue_digest": issue_fingerprint(issue),
-        "branch": run.branch,
-        "base": base,
-        "base_sha": base_sha,
-        "patch_digest": patch_digest,
-        "summary": str(verdict.get("summary", "")),
-        "skipped": [item for item in verdict.get("skipped", []) if isinstance(item, str)],
-        "reviewer_provider": config.get("reviewer_agent", {}).get("provider", "codex"),
-        "approved_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    }
-    path = review_approval_path(folder)
-    atomic_write_json(path, approval)
-    return approval
+    return _agentic_workflow_state.record_review_approval(
+        run, issue, base, base_sha, patch_digest, verdict, config, folder,
+    )
 
 
 def load_review_approval(folder: Path) -> dict[str, Any] | None:
     """Load an automated approval, rejecting corrupt approval state."""
-    path = review_approval_path(folder)
-    if not path.is_file():
-        return None
-    try:
-        value = json.loads(redact_secrets(path.read_text(encoding="utf-8")))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Automated review approval is unreadable: {path}") from exc
-    if not isinstance(value, dict) or value.get("status") != "approved":
-        raise RuntimeError(f"Automated review approval is invalid: {path}")
-    required = ("branch", "issue_digest", "base_sha", "patch_digest")
-    if any(not isinstance(value.get(key), str) or not value[key].strip() for key in required):
-        raise RuntimeError(f"Automated review approval is incomplete: {path}")
-    return value
+    return _agentic_workflow_state.load_review_approval(folder)
 
 
 def load_publication_approval(folder: Path) -> dict[str, Any] | None:
     """Load the newest human or automated approval available for publication."""
-    candidates: list[tuple[float, dict[str, Any]]] = []
-    manual = load_manual_approval(folder)
-    if manual is not None:
-        manual["kind"] = "manual"
-        candidates.append((manual_approval_path(folder).stat().st_mtime, manual))
-    automated = load_review_approval(folder)
-    if automated is not None:
-        candidates.append((review_approval_path(folder).stat().st_mtime, automated))
-    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+    return _agentic_workflow_state.load_publication_approval(
+        folder,
+        manual_loader=load_manual_approval,
+        review_loader=load_review_approval,
+    )
 
 
 def load_resume_feedback(folder: Path) -> str:
