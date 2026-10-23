@@ -93,9 +93,11 @@ from .workflow_state import (
     review_reason as _review_reason,
     resume_action as _resume_action,
 )
+
 from .workflow_orchestration import WorkflowRuntime, develop as _orchestrated_develop
 
 
+_GIT_EXECUTABLE = shutil.which("git") or "git"
 SCRIPT_DIR = Path(__file__).resolve().parent
 REVIEW_DIFF_CONTEXT_CHARS = 24_000
 REVIEW_DIFF_LARGE_CHARS = REVIEW_DIFF_CONTEXT_CHARS
@@ -418,9 +420,10 @@ _EOF_BLANK_LINE_RE = re.compile(r"^(?P<path>.+):\d+: new blank line at EOF\.$")
 
 def _whitespace_check(worktree: Path, timeout: int) -> str:
     """Return Git whitespace diagnostics, including untracked files."""
+    git_executable = _GIT_EXECUTABLE or shutil.which("git") or "git"
     diff_check = command(
         [
-            "git", "-c", "core.whitespace=cr-at-eol", "-c", "diff.external=",
+            git_executable, "-c", "core.whitespace=cr-at-eol", "-c", "diff.external=",
             "diff", "--no-ext-diff", "--no-textconv", "--check",
         ], worktree,
         timeout=timeout, check=False,
@@ -429,7 +432,7 @@ def _whitespace_check(worktree: Path, timeout: int) -> str:
         return diff_check.stdout.strip()
 
     untracked = command(
-        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        [git_executable, "ls-files", "--others", "--exclude-standard", "-z"],
         worktree, timeout=timeout, check=False,
     )
     if untracked.returncode:
@@ -441,7 +444,7 @@ def _whitespace_check(worktree: Path, timeout: int) -> str:
         for path in filter(None, untracked.stdout.split("\x00")):
             candidate = command(
                 [
-                    "git", "-c", "core.whitespace=cr-at-eol", "-c", "diff.external=",
+                    git_executable, "-c", "core.whitespace=cr-at-eol", "-c", "diff.external=",
                     "diff", "--no-ext-diff", "--no-textconv", "--no-index", "--check",
                     "--", str(empty_path), path,
                 ],

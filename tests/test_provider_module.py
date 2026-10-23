@@ -102,7 +102,7 @@ class ProviderCommandTests(unittest.TestCase):
         command, _ = cli_provider_command(
             "copilot", "review", readonly=False,
             permission_policy={"run_checks": False},
-            worktree=Path("/tmp/agentic-worktree").resolve(),
+            worktree=Path("/tmp/agentic-worktree"),
         )
         available = command[command.index("--available-tools") + 1]
         self.assertNotIn("bash", available.split(","))
@@ -134,7 +134,7 @@ class ProviderCommandTests(unittest.TestCase):
         }
         claude, _ = cli_provider_command(
             "claude", "develop", permission_policy=policy,
-            worktree=Path("/tmp/agentic-worktree").resolve(),
+            worktree=Path("/tmp/agentic-worktree"),
             check_commands=[["python", "-m", "unittest", "discover", "-s", "tests"]],
         )
         self.assertIn("--allowedTools", claude)

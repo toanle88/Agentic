@@ -48,7 +48,10 @@ def _provider_worktree_scope(worktree: Path | None, *, sandbox_enabled: bool) ->
     # drive-qualified Windows path such as ``D:\\workspace``).
     if sandbox_enabled:
         return PurePosixPath("/workspace")
-    return (worktree or Path.cwd()).resolve()
+    # Native provider rules use slash-separated path patterns even when the
+    # host is Windows. Preserve a rooted POSIX-looking test path such as
+    # ``/tmp/worktree`` instead of resolving it to the current drive.
+    return PurePosixPath(str(worktree or Path.cwd()).replace("\\", "/"))
 
 
 def _network_shell_patterns(prefix: str) -> list[str]:
@@ -308,9 +311,10 @@ def _usable_executable(value: str) -> str | None:
         if not candidate.is_file():
             return None
         # Windows launchability is determined by the executable suffix and
-        # file association, not by POSIX execute permission bits.
+        # file association, not by POSIX execute permission bits. The
+        # downloaded Copilot binary is intentionally extensionless.
         if os.name == "nt":
-            return str(candidate) if candidate.suffix.lower() in {".exe", ".cmd", ".bat"} else None
+            return str(candidate)
         return str(candidate) if os.access(candidate, os.X_OK) else None
     found = shutil.which(value)
     if found:
