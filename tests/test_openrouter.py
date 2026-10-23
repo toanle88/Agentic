@@ -939,6 +939,15 @@ class OpenRouterTests(unittest.TestCase):
             self.assertIn('ERROR: page must be a positive integer', agentic_openrouter._openrouter_tool_call(
                 root, 'list_files', {'path': 'tree', 'page': 0}, readonly=True,
             ))
+            self.assertIn(
+                f"ERROR: page must be at most {agentic_openrouter_tools.OPENROUTER_LIST_FILES_MAX_PAGE}",
+                agentic_openrouter._openrouter_tool_call(
+                    root, 'list_files', {
+                        'path': 'tree',
+                        'page': agentic_openrouter_tools.OPENROUTER_LIST_FILES_MAX_PAGE + 1,
+                    }, readonly=True,
+                ),
+            )
 
             large = root / 'large-no-newline.txt'
             large.write_text('z' * (20 * 1024 * 1024))
@@ -974,6 +983,35 @@ class OpenRouterTests(unittest.TestCase):
             self.assertEqual(len(first[0]), 300)
             self.assertEqual(len(second[0]), 50)
             build.assert_called_once()
+
+    def test_openrouter_file_list_rejects_oversized_page_before_indexing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'tree').mkdir()
+            with patch.object(
+                agentic_openrouter_tools, '_list_files_page',
+                side_effect=AssertionError('oversized page must not traverse'),
+            ) as list_page:
+                result = agentic_openrouter._openrouter_tool_call(
+                    root, 'list_files', {
+                        'path': 'tree',
+                        'page': agentic_openrouter_tools.OPENROUTER_LIST_FILES_MAX_PAGE + 1,
+                    }, readonly=True,
+                )
+            self.assertEqual(
+                result,
+                f"ERROR: page must be at most {agentic_openrouter_tools.OPENROUTER_LIST_FILES_MAX_PAGE}",
+            )
+            list_page.assert_not_called()
+
+            schema = next(
+                item for item in agentic_openrouter._openrouter_tools(True)
+                if item['function']['name'] == 'list_files'
+            )
+            self.assertEqual(
+                schema['function']['parameters']['properties']['page']['maximum'],
+                agentic_openrouter_tools.OPENROUTER_LIST_FILES_MAX_PAGE,
+            )
 
     def test_openrouter_ranged_reader_uses_bounded_chunks(self):
         class HugeLineReader:

@@ -129,6 +129,8 @@ def _scenario_record(
     reported_status = status if isinstance(status, str) else "invalid"
     runner_ok = command_exit == 0 and reported_status in SUCCESS_STATUSES
     completed = raw.get("completed") if isinstance(raw.get("completed"), bool) else runner_ok
+    if completed is False:
+        runner_ok = False
     review = raw.get("review") if isinstance(raw.get("review"), dict) else {}
     approved = raw.get("approved")
     if not isinstance(approved, bool):
