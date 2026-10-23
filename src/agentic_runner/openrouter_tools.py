@@ -33,6 +33,8 @@ OPENROUTER_COMMAND_OUTPUT_CHARS = 6_000
 OPENROUTER_COMMAND_READ_CHUNK_BYTES = 4_096
 OPENROUTER_COMMAND_DRAIN_TIMEOUT_SECONDS = 1.0
 OPENROUTER_LIST_FILES_PAGE_SIZE = 300
+# Keep page-number traversal bounded while retaining the existing page API.
+OPENROUTER_LIST_FILES_MAX_PAGE = 100
 OPENROUTER_LIST_FILES_CACHE_ENTRIES = 8
 OPENROUTER_GIT_OBJECT_CHECK_TIMEOUT_SECONDS = 1.0
 OPENROUTER_HTTP_RESPONSE_BYTES = 2_000_000
@@ -479,7 +481,12 @@ def _openrouter_tools(
                     "path": {"type": "string", "description": "Relative directory, default '.'."},
                     "page": {
                         "type": "integer", "minimum": 1,
-                        "description": "1-based page number; request the next page when the result says more files exist.",
+                        "maximum": OPENROUTER_LIST_FILES_MAX_PAGE,
+                        "description": (
+                            "1-based page number, at most "
+                            f"{OPENROUTER_LIST_FILES_MAX_PAGE}; request the next page "
+                            "when the result says more files exist."
+                        ),
                     },
                 }},
             },
@@ -770,6 +777,10 @@ def _build_file_list_index(
 
 def _list_files_page(target: Path, root: Path, page: int) -> tuple[list[str], bool]:
     """Return one deterministic page using a bounded metadata-aware index cache."""
+    if page < 1 or page > OPENROUTER_LIST_FILES_MAX_PAGE:
+        raise ValueError(
+            f"page must be between 1 and {OPENROUTER_LIST_FILES_MAX_PAGE}"
+        )
     root = root.resolve()
     target = target.resolve()
     key = (str(root), str(target))
@@ -965,6 +976,11 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
             page = arguments.get("page", 1)
             if not isinstance(page, int) or isinstance(page, bool) or page < 1:
                 return "ERROR: page must be a positive integer"
+            if page > OPENROUTER_LIST_FILES_MAX_PAGE:
+                return (
+                    "ERROR: page must be at most "
+                    f"{OPENROUTER_LIST_FILES_MAX_PAGE}"
+                )
             root = worktree.resolve()
             paths, has_more = _list_files_page(target, root, page)
             result = "\n".join(paths) or "(no files)"

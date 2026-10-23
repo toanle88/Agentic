@@ -95,6 +95,7 @@ descendants from writing into a cleaned-up fixture.
 ```json
 {
   "status": "success",
+  "completed": true,
   "approved": true,
   "attempts": 1,
   "interventions": 0,
@@ -103,6 +104,13 @@ descendants from writing into a cleaned-up fixture.
   "usage": {"total_tokens": 1200, "estimated_cost_usd": 0.03}
 }
 ```
+
+The adapter's boolean `completed` field is authoritative when present. An
+explicit `completed: false` is normalized as a failed scenario even when the
+status, exit code, and configured checks otherwise indicate success. Adapters
+should always emit this field; older adapters that omit it retain the
+compatibility fallback that infers completion from a successful status and
+zero exit code.
 
 Validate a corpus without running providers:
 

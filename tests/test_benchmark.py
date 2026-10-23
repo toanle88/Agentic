@@ -16,7 +16,7 @@ from scripts.agent_benchmark import (
 )
 from scripts.agent_benchmark_config import load_benchmark as load_benchmark_config
 from scripts.agent_benchmark_scenarios import (
-    _run_checks, run_scenario,
+    _run_checks, _scenario_record, run_scenario,
 )
 from scripts.benchmark import run_case
 from scripts.benchmark_execution import process_group_kwargs
@@ -277,6 +277,51 @@ class BenchmarkTests(unittest.TestCase):
         }])
         self.assertIsNone(metrics["approval_rate"])
         self.assertIsNone(metrics["first_pass_approval_rate"])
+
+    def test_explicit_incomplete_scenario_cannot_be_reported_as_passed(self):
+        task = {
+            "id": "task-one", "name": "Incomplete task",
+            "defects": [],
+        }
+        record = _scenario_record(
+            task, "agentic", {"status": "success", "completed": False}, 0,
+            1.0, True, [], None, 1,
+        )
+
+        self.assertEqual(record["status"], "failed")
+        self.assertFalse(record["completed"])
+        self.assertEqual(aggregate_metrics([record])["completed"], 0)
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "fixture").mkdir()
+            (root / "fixture" / "README.md").write_text("fixture\n", encoding="utf-8")
+            (root / "task.md").write_text("task\n", encoding="utf-8")
+            adapter = root / "adapter.py"
+            adapter.write_text(
+                "import json, os\n"
+                "from pathlib import Path\n"
+                "Path(os.environ['AGENTIC_BENCHMARK_RESULT_FILE']).write_text("
+                "json.dumps({'status': 'success', 'completed': False}), "
+                "encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            benchmark = root / "benchmark.json"
+            benchmark.write_text(json.dumps({
+                "schema_version": 1,
+                "tasks": [{
+                    "id": "task-one", "repository": "fixture", "task_file": "task.md",
+                    "checks": [[sys.executable, "-c", "pass"]],
+                }],
+                "runners": {
+                    "agent-alone": [sys.executable, str(adapter)],
+                    "agentic": [sys.executable, str(adapter)],
+                },
+            }), encoding="utf-8")
+            payload = run_benchmark(benchmark, timeout=30)
+
+        self.assertEqual(payload["summary"], {"total": 2, "passed": 0, "failed": 2})
+        self.assertEqual(payload["scenarios"]["agentic"]["completed"], 0)
 
     def test_repeated_quality_scenarios_get_distinct_repetition_records(self):
         with tempfile.TemporaryDirectory() as temp:
