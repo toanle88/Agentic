@@ -7,7 +7,6 @@ preserving the optional fields used by older run records.
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
 import json
 import os
 import re
@@ -46,7 +45,7 @@ SEVERITY_RANK = {
 _RUN_CACHE_LIMIT = 512
 _MAX_SNAPSHOT_RETRIES = 4
 _RUN_SNAPSHOT_CACHE: dict[
-    tuple[str, str], tuple[tuple[tuple[str, int, int, int, str], ...], dict[str, Any] | None]
+    tuple[str, str], tuple[tuple[tuple[str, int, int, int], ...], dict[str, Any] | None]
 ] = {}
 _RUN_SNAPSHOT_CACHE_LOCK = threading.RLock()
 
@@ -491,22 +490,11 @@ def _all_log_files(folder: Path) -> list[Path]:
     ]
 
 
-def _file_content_signature(path: Path) -> str:
-    digest = hashlib.blake2b(digest_size=16)
-    try:
-        with path.open("rb") as stream:
-            while chunk := stream.read(1024 * 1024):
-                digest.update(chunk)
-    except OSError:
-        return "unreadable"
-    return digest.hexdigest()
-
-
-def _folder_signature(folder: Path) -> tuple[tuple[str, int, int, int, str], ...]:
+def _folder_signature(folder: Path) -> tuple[tuple[str, int, int, int], ...]:
     """Return cache metadata for regular artifacts with one directory scan."""
     if not folder.is_dir():
         return ()
-    signature: list[tuple[str, int, int, int, str]] = []
+    signature: list[tuple[str, int, int, int]] = []
     try:
         entries = os.scandir(folder)
         with entries:
@@ -522,7 +510,6 @@ def _folder_signature(folder: Path) -> tuple[tuple[str, int, int, int, str], ...
                 # strengthens cache invalidation on other filesystems.
                 signature.append((
                     entry.name, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns,
-                    _file_content_signature(Path(entry.path)),
                 ))
     except OSError:
         return ()

@@ -10,9 +10,9 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
-import stat
 from typing import Any
 
+from .file_boundaries import open_relative_regular, revalidate_single_link_regular
 from .telemetry import record_guidance_loads
 
 
@@ -73,41 +73,37 @@ class GuidanceFile:
         }
 
 
-def _safe_regular_file(root: Path, relative: str) -> tuple[Path, os.stat_result] | None:
-    """Return a non-symlink regular file strictly below ``root``."""
-    candidate = root.joinpath(*relative.split("/"))
+def _safe_regular_file(root: Path, relative: str) -> tuple[int, os.stat_result] | None:
+    """Open a guidance file with component-wise, no-follow traversal."""
+    descriptor = -1
     try:
-        # Reject symlinks before resolving them.  Guidance must not escape the
-        # checkout, even when a link happens to point back inside it.
-        current = root
-        for part in Path(relative).parts:
-            current = current / part
-            if current.is_symlink():
-                return None
-        resolved_root = root.resolve(strict=True)
-        resolved = candidate.resolve(strict=True)
-        if not resolved.is_relative_to(resolved_root):
-            return None
-        info = resolved.stat()
+        descriptor, expected_identity = open_relative_regular(
+            root, relative, os.O_RDONLY, description="guidance file",
+        )
+        info = revalidate_single_link_regular(
+            descriptor, expected_identity, description="guidance file",
+        )
     except (OSError, RuntimeError, ValueError):
+        if descriptor >= 0:
+            os.close(descriptor)
         return None
-    if not stat.S_ISREG(info.st_mode):
-        return None
-    return resolved, info
+    return descriptor, info
 
 
 def _read_guidance(root: Path, relative: str) -> GuidanceFile | None:
     safe = _safe_regular_file(root, relative)
     if safe is None:
         return None
-    path, info = safe
+    descriptor, info = safe
     if info.st_size > MAX_GUIDANCE_FILE_BYTES:
+        os.close(descriptor)
         return None
     digest = hashlib.sha256()
     prefix = bytearray()
     size = 0
     try:
-        with path.open("rb") as handle:
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
             while True:
                 # Read at most one byte beyond the cap so a file that grows
                 # after stat() is rejected without unbounded I/O.
@@ -123,6 +119,8 @@ def _read_guidance(root: Path, relative: str) -> GuidanceFile | None:
                     remaining = MAX_GUIDANCE_FILE_CHARS * 4 - len(prefix)
                     prefix.extend(chunk[:remaining])
     except OSError:
+        if descriptor >= 0:
+            os.close(descriptor)
         return None
     # Decode after hashing so the audit digest identifies the complete source
     # file even when a provider receives only a bounded representation.

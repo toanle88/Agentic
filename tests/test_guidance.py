@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,10 +17,78 @@ from agentic_runner.guidance import (
     guidance_phase,
     guidance_prompt,
 )
+from agentic_runner import file_boundaries
+from agentic_runner.guidance import _read_guidance
 from agentic_runner.telemetry import read_run_usage
 
 
 class GuidanceTests(unittest.TestCase):
+    @unittest.skipUnless(
+        hasattr(os, "mkfifo") and hasattr(os, "O_NONBLOCK"),
+        "FIFO and nonblocking open are unavailable",
+    )
+    def test_guidance_fifo_is_rejected_without_blocking(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            os.mkfifo(root / "AGENTS.md")
+            source_root = Path(__file__).resolve().parents[1] / "src"
+            environment = os.environ.copy()
+            environment["PYTHONPATH"] = os.pathsep.join(
+                item for item in (str(source_root), environment.get("PYTHONPATH", ""))
+                if item
+            )
+            probe = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "from pathlib import Path; "
+                        "from agentic_runner.guidance import _read_guidance; "
+                        "import sys; "
+                        "print(_read_guidance(Path(sys.argv[1]), 'AGENTS.md'))"
+                    ),
+                    str(root),
+                ],
+                capture_output=True,
+                text=True,
+                env=environment,
+                timeout=2,
+                check=False,
+            )
+        self.assertEqual(probe.returncode, 0, probe.stderr)
+        self.assertEqual(probe.stdout.strip(), "None")
+
+    def test_guidance_read_stays_on_open_parent_when_directory_is_replaced(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            root = base / "repo"
+            root.mkdir()
+            (root / "docs").mkdir()
+            (root / "docs" / "development-standards.md").write_text(
+                "safe guidance\n", encoding="utf-8"
+            )
+            outside = base / "outside"
+            outside.mkdir()
+            (outside / "development-standards.md").write_text(
+                "outside guidance\n", encoding="utf-8"
+            )
+            original = file_boundaries._open_directory_at
+
+            def replace_parent(descriptor, name):
+                opened = original(descriptor, name)
+                if name == "docs":
+                    (root / "docs").rename(root / "docs-original")
+                    try:
+                        (root / "docs").symlink_to(outside, target_is_directory=True)
+                    except OSError as exc:
+                        self.skipTest(f"directory symlinks unavailable: {exc}")
+                return opened
+
+            with patch.object(file_boundaries, "_open_directory_at", side_effect=replace_parent):
+                item = _read_guidance(root, "docs/development-standards.md")
+        self.assertIsNotNone(item)
+        self.assertEqual(item.content, "safe guidance\n")
+
     def test_guidance_module_is_in_the_src_package(self):
         root = Path(__file__).resolve().parents[1]
         self.assertTrue((root / "src" / "agentic_runner" / "guidance.py").is_file())

@@ -16,11 +16,15 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .execution import _short
 from .config import validate_openrouter_base_url
-from .file_boundaries import open_single_link_regular, revalidate_single_link_regular
+from .file_boundaries import (
+    iter_safe_regular_files,
+    open_relative_regular,
+    revalidate_single_link_regular,
+)
 from .sandbox import sandbox_command
 from .security import redact_secrets
 from .policy import default_permission_policy, forbidden, sensitive_read
@@ -99,16 +103,17 @@ def _safe_worktree_path(worktree: Path, relative: str, *, write: bool = False) -
     if candidate.is_absolute() or ".." in candidate.parts:
         raise ValueError("path must stay inside the worktree and may not be absolute")
     root = worktree.resolve()
-    target = (root / candidate).resolve()
-    if not target.is_relative_to(root):
-        raise ValueError("path escapes the worktree")
-    if write:
-        current = root
-        for part in candidate.parts:
-            current /= part
-            if current.is_symlink():
+    target = root / candidate
+    # The descriptor-based open below is the authoritative race-safe check.
+    # Keep this early check for a useful error on an already-visible link.
+    current = root
+    for part in candidate.parts:
+        current /= part
+        if current.is_symlink():
+            if write:
                 raise ValueError("symbolic links are not allowed for worktree writes")
-    if write and (target == root / ".git" or ".git" in target.relative_to(root).parts):
+            raise ValueError("path escapes the worktree")
+    if write and (target == root / ".git" or ".git" in candidate.parts):
         raise ValueError("writes inside .git are not allowed")
     return target
 
@@ -601,15 +606,15 @@ def _openrouter_command_allowed(
     return True, ""
 
 
-def _open_regular_text_stream(path: Path):
+def _open_regular_text_stream(root: Path, relative: str):
     """Open a single-link regular file without following a raced symlink."""
     try:
         flags = os.O_RDONLY
         # A nonblocking open prevents a FIFO from hanging before fstat can
         # reject it if the path changes between the lstat and open calls.
         flags |= getattr(os, "O_NONBLOCK", 0)
-        descriptor, expected_identity = open_single_link_regular(
-            path, flags, description="read_file target",
+        descriptor, expected_identity = open_relative_regular(
+            root, relative, flags, description="read_file target",
         )
         try:
             revalidate_single_link_regular(
@@ -625,14 +630,14 @@ def _open_regular_text_stream(path: Path):
     return stream
 
 
-def _bounded_file_text(path: Path, *, start_line: int | None = None,
+def _bounded_file_text(root: Path, relative: str, *, start_line: int | None = None,
                        end_line: int | None = None) -> str:
     """Read only the requested lines and output budget from a text file."""
     marker = "\n...[truncated; use start_line/end_line to read a smaller range]"
     chunks: list[str] = []
     used = 0
     truncated = False
-    with _open_regular_text_stream(path) as stream:
+    with _open_regular_text_stream(root, relative) as stream:
         if start_line is None and end_line is None:
             value = stream.read(OPENROUTER_READ_FILE_CHARS + 1)
             truncated = len(value) > OPENROUTER_READ_FILE_CHARS
@@ -683,10 +688,7 @@ class _FileListIndex:
     root: Path
     paths: list[str] = field(default_factory=list)
     metadata: list[tuple[str, int, int]] = field(default_factory=list)
-    walker: Any | None = None
-    pending_current: Path | None = None
-    pending_filenames: list[str] = field(default_factory=list)
-    pending_index: int = 0
+    walker: Iterator[tuple[str, str, os.stat_result]] | None = None
     complete: bool = False
 
     def __post_init__(self) -> None:
@@ -694,59 +696,25 @@ class _FileListIndex:
         # one caller and its long path in another.  Normalize both roots
         # before resolving children and computing relative paths.
         self.root = self.root.resolve()
-        self.target = self.target.resolve()
 
     def _advance(self, limit: int) -> None:
         while not self.complete and len(self.paths) < limit:
-            if self.pending_current is None:
-                if self.walker is None:
-                    self.walker = os.walk(self.target, topdown=True, followlinks=False)
-                try:
-                    current, directories, filenames = next(self.walker)
-                except StopIteration:
-                    self.complete = True
-                    return
-                directories[:] = [directory for directory in directories if not sensitive_read(
-                    (Path(current) / directory).relative_to(self.root).as_posix()
-                )]
-                directories.sort()
-                filenames.sort()
-                current_path = Path(current)
-                try:
-                    stat = current_path.stat()
-                    relative = current_path.relative_to(self.root).as_posix()
-                except (OSError, ValueError):
-                    continue
-                self.metadata.append((relative, stat.st_mtime_ns, stat.st_size))
-                self.pending_current = current_path
-                self.pending_filenames = filenames
-                self.pending_index = 0
-                if not filenames:
-                    self.pending_current = None
-                    continue
-            filename = self.pending_filenames[self.pending_index]
-            self.pending_index += 1
-            item = self.pending_current / filename
+            if self.walker is None:
+                relative = self.target.relative_to(self.root).as_posix() or "."
+                self.walker = iter_safe_regular_files(
+                    self.root, relative, skip=sensitive_read,
+                    max_entries=OPENROUTER_LIST_FILES_MAX_PAGE * OPENROUTER_LIST_FILES_PAGE_SIZE,
+                    max_directories=OPENROUTER_LIST_FILES_MAX_PAGE * OPENROUTER_LIST_FILES_PAGE_SIZE,
+                )
             try:
-                resolved_item = item.resolve()
-                relative_item = resolved_item.relative_to(self.root).as_posix()
-            except (OSError, ValueError):
-                if self.pending_index == len(self.pending_filenames):
-                    self.pending_current = None
-                    self.pending_filenames = []
-                    self.pending_index = 0
+                kind, relative, metadata = next(self.walker)
+            except StopIteration:
+                self.complete = True
+                return
+            if kind == "directory":
+                self.metadata.append((relative, metadata.st_mtime_ns, metadata.st_size))
                 continue
-            if sensitive_read(relative_item) or not resolved_item.is_file():
-                if self.pending_index == len(self.pending_filenames):
-                    self.pending_current = None
-                    self.pending_filenames = []
-                    self.pending_index = 0
-                continue
-            self.paths.append(relative_item)
-            if self.pending_index == len(self.pending_filenames):
-                self.pending_current = None
-                self.pending_filenames = []
-                self.pending_index = 0
+            self.paths.append(relative)
 
     def ensure(self, count: int) -> None:
         """Observe enough entries to answer a page and its continuation flag."""
@@ -782,7 +750,7 @@ def _list_files_page(target: Path, root: Path, page: int) -> tuple[list[str], bo
             f"page must be between 1 and {OPENROUTER_LIST_FILES_MAX_PAGE}"
         )
     root = root.resolve()
-    target = target.resolve()
+    target = root / target.relative_to(root)
     key = (str(root), str(target))
     cached = _FILE_LIST_CACHE.get(key)
     if cached is None or cached.is_stale():
@@ -971,8 +939,6 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                 return "ERROR: file listing is disabled by the permission policy"
             relative = arguments.get("path", ".")
             target = worktree.resolve() if relative == "." else _safe_worktree_path(worktree, relative)
-            if not target.is_dir():
-                return f"ERROR: {relative!r} is not a directory"
             page = arguments.get("page", 1)
             if not isinstance(page, int) or isinstance(page, bool) or page < 1:
                 return "ERROR: page must be a positive integer"
@@ -982,7 +948,10 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                     f"{OPENROUTER_LIST_FILES_MAX_PAGE}"
                 )
             root = worktree.resolve()
-            paths, has_more = _list_files_page(target, root, page)
+            try:
+                paths, has_more = _list_files_page(target, root, page)
+            except (OSError, RuntimeError, ValueError) as exc:
+                return f"ERROR: could not safely list {relative!r}: {exc}"
             result = "\n".join(paths) or "(no files)"
             if has_more:
                 result += f"\n...[more files; call list_files with page={page + 1}]"
@@ -1009,15 +978,18 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                     or end_line < start_line
                 ):
                     return "ERROR: start_line and end_line must be integers with 1 <= start_line <= end_line"
-            return _bounded_file_text(target, start_line=start_line, end_line=end_line)
+            relative_path = target.relative_to(worktree.resolve()).as_posix()
+            try:
+                return _bounded_file_text(
+                    worktree.resolve(), relative_path,
+                    start_line=start_line, end_line=end_line,
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                return f"ERROR: could not safely read {relative!r}: {exc}"
         if name == "write_file":
             if readonly:
                 return "ERROR: write_file is unavailable during review"
             target = _safe_worktree_path(worktree, arguments.get("path", ""), write=True)
-            if target.exists() and not policy.get("edit_files"):
-                return "ERROR: editing files is disabled by the permission policy"
-            if not target.exists() and not policy.get("create_files"):
-                return "ERROR: creating files is disabled by the permission policy"
             relative = target.relative_to(worktree.resolve()).as_posix()
             relative_parts = [part.lower() for part in Path(relative).parts]
             self_hosted_ci = (
@@ -1031,13 +1003,22 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
             content = arguments.get("content", "")
             if not isinstance(content, str):
                 return "ERROR: file content must be a string"
-            target.parent.mkdir(parents=True, exist_ok=True)
-            flags = os.O_WRONLY | os.O_CREAT
+            exists = target.exists()
+            if exists and not policy.get("edit_files"):
+                return "ERROR: editing files is disabled by the permission policy"
+            if not exists and not policy.get("create_files"):
+                return "ERROR: creating files is disabled by the permission policy"
+            flags = os.O_WRONLY
+            if policy.get("create_files"):
+                flags |= os.O_CREAT
+                if not policy.get("edit_files"):
+                    flags |= os.O_EXCL
             try:
-                descriptor, expected_identity = open_single_link_regular(
-                    target, flags, 0o644, description="write_file target",
+                descriptor, expected_identity = open_relative_regular(
+                    worktree.resolve(), relative, flags, 0o644,
+                    create_parents=True, description="write_file target",
                 )
-            except (OSError, ValueError) as exc:
+            except (OSError, RuntimeError, ValueError) as exc:
                 return f"ERROR: could not open {relative!r} for writing: {exc}"
             try:
                 revalidate_single_link_regular(

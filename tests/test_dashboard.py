@@ -90,6 +90,16 @@ class DashboardTests(unittest.TestCase):
                 agentic_dashboard_data.collect_runs(root)
                 self.assertEqual(snapshot.call_count, 2)
 
+    def test_dashboard_folder_signature_uses_metadata_without_reading_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            run = Path(temp) / "agent-issue-124-ab12cd34"
+            run.mkdir(parents=True)
+            (run / "developer-001.txt").write_bytes(b"x" * (2 * 1024 * 1024))
+            with patch.object(Path, "open", side_effect=AssertionError("artifact was read")):
+                signature = agentic_dashboard_data._folder_signature(run)
+        self.assertEqual(len(signature), 1)
+        self.assertEqual(len(signature[0]), 4)
+
     def test_dashboard_cache_serializes_concurrent_refreshes(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / ".demo-agent-runs"
