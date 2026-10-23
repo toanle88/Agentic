@@ -164,7 +164,7 @@ class DashboardTests(unittest.TestCase):
                 calls += 1
                 value = marker.read_text(encoding="utf-8")
                 if calls == 1:
-                    marker.write_text("new\n", encoding="utf-8")
+                    marker.write_text("new content\n", encoding="utf-8")
                 return {
                     "id": folder.name,
                     "last_activity": "2026-01-01T00:00:00+00:00",
@@ -175,7 +175,7 @@ class DashboardTests(unittest.TestCase):
                 snapshots = agentic_dashboard_data.collect_runs(root)
 
             self.assertEqual(calls, 2)
-            self.assertEqual(snapshots[0]["developer"]["summary"], "new\n")
+            self.assertEqual(snapshots[0]["developer"]["summary"], "new content\n")
 
     def test_dashboard_exposes_run_metrics(self):
         with tempfile.TemporaryDirectory() as temp:
