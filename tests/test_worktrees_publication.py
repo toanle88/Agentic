@@ -80,6 +80,47 @@ class PublicationTests(_GitRepositoryTestCase):
         self.assertNotIn('\033[', console.getvalue())
 
 
+    def test_change_summary_sanitizes_handoff_and_uses_approved_diff_stat(self):
+        summary = (
+            ' src/app.py | 4 +++-\n'
+            ' docs/guide.md | 2 ++\n'
+            ' 2 files changed, 5 insertions(+), 1 deletion(-)\n'
+        )
+        handoff = (
+            '\x1b[32mImplemented:\x1b[0m\n'
+            '- Added the user-visible summary. <script>alert(1)</script>\n'
+            '- Preserved validation and review evidence.\n'
+            'Validation: tests passed\n'
+            'api_key=supersecretvalue\n'
+        )
+        body = agentic._change_summary(summary, handoff)
+
+        self.assertIn('## What changed', body)
+        self.assertIn('Added the user-visible summary.', body)
+        self.assertIn('src/app.py', body)
+        self.assertIn('2 files changed', body)
+        self.assertIn('&lt;script&gt;alert(1)&lt;/script&gt;', body)
+        self.assertNotIn('<script>', body)
+        self.assertNotIn('supersecretvalue', body)
+        self.assertNotIn('\x1b', body)
+        self.assertLessEqual(len(body), 2_000)
+
+
+    def test_change_summary_continues_after_inline_implementation_status(self):
+        handoff = (
+            'Implemented Issue #187.\n\n'
+            '- Added a concise change summary before validation.\n'
+            '- Preserved the review and log sections.\n\n'
+            'Validation: all checks passed\n'
+        )
+
+        body = agentic._change_summary(' 1 file changed, 2 insertions(+)', handoff)
+
+        self.assertIn('Added a concise change summary before validation.', body)
+        self.assertIn('Preserved the review and log sections.', body)
+        self.assertNotIn('Issue #187.', body)
+
+
     def test_blocked_change_from_previous_commit_cannot_publish(self):
         run = agentic.create_worktree(self.repo, 'main', 13)
         (run.worktree / 'AGENTS.md').write_text('unexpected instructions\n')
@@ -285,6 +326,11 @@ class PublicationTests(_GitRepositoryTestCase):
             '\x1b[32mTests 4 passed <img src=x> `[details]`\x1b[0m',
             encoding='utf-8',
         )
+        agentic.next_log(folder, 'developer').write_text(
+            'Implemented:\n- Added a concise change summary.\n'
+            'Validation: all checks passed\n',
+            encoding='utf-8',
+        )
         commands = []
 
         def fake_command(argv, cwd, **kwargs):
@@ -313,6 +359,10 @@ class PublicationTests(_GitRepositoryTestCase):
         self.assertIn('--draft', pr_command)
         self.assertIn('--base', pr_command)
         self.assertIn('main', pr_command)
+        body = pr_command[-1]
+        self.assertLess(body.index('## What changed'), body.index('## Independent validation'))
+        self.assertIn('Added a concise change summary.', body)
+        self.assertIn('## Notes', body)
         self.assertIn('Independent Gemini review', pr_command[-1])
         self.assertIn(
             '- <code>&lt;configured test command: 3 argv values&gt;</code> — passed',
@@ -440,6 +490,8 @@ class PublicationTests(_GitRepositoryTestCase):
         self.assertIn('## Review status', pr_command[-1])
         self.assertIn('Automated review was not run during publication', pr_command[-1])
         self.assertIn('Configured checks were not run during publication', pr_command[-1])
+        self.assertIn('## What changed', pr_command[-1])
+        self.assertIn('## Notes', pr_command[-1])
         self.assertNotIn('All configured checks passed', pr_command[-1])
 
 

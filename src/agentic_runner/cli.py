@@ -571,6 +571,9 @@ def _clean_terminal_output(*args, **kwargs):
 def _validation_summary(*args, **kwargs):
     return _workflow_call("_validation_summary", *args, **kwargs)
 
+def _change_summary(*args, **kwargs):
+    return _workflow_call("_change_summary", *args, **kwargs)
+
 def publish(*args, **kwargs):
     return _workflow_call("publish", *args, **kwargs)
 
