@@ -15,7 +15,7 @@ from agentic_runner.providers import (
 class ProviderCommandTests(unittest.TestCase):
     def test_display_provider_path_falls_back_without_a_home_directory(self):
         with patch("agentic_runner.providers.Path.home", side_effect=RuntimeError):
-            self.assertEqual(display_provider_path("/tmp/copilot"), "/tmp/copilot")
+            self.assertEqual(display_provider_path("/tmp/copilot"), str(Path("/tmp/copilot")))
 
     def test_codex_command_uses_explicit_sandbox_and_output_schema(self):
         command = codex_command(
