@@ -1,5 +1,6 @@
 """Streaming and command-runner tests."""
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,7 @@ from unittest.mock import patch
 import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner import cli as agentic
 from agentic_runner import execution as agentic_execution
+from agentic_runner import workflow as agentic_workflow
 from agentic_runner.output import (
     PatchSummaryStream,
     is_transient_progress,
@@ -781,6 +783,46 @@ class StreamingTests(unittest.TestCase):
             self.assertTrue(passed)
             self.assertIn('ok', report)
             self.assertEqual((root / 'new.py').read_bytes(), b'value = 1\n')
+
+    @unittest.skipUnless(hasattr(os, 'O_NOFOLLOW'), 'no no-follow open primitive')
+    def test_eof_repair_rejects_final_symlink_replacement(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname) / 'worktree'
+            root.mkdir()
+            target = root / 'new.py'
+            outside = Path(dirname) / 'outside.py'
+            target.write_bytes(b'value = 1\n\n')
+            outside.write_bytes(b'outside\n')
+            original_open = agentic_workflow.os.open
+
+            def replace_before_final_open(path, flags, mode=0o777, *, dir_fd=None):
+                if dir_fd is not None and path == 'new.py':
+                    target.unlink()
+                    target.symlink_to(outside)
+                return original_open(path, flags, mode, dir_fd=dir_fd)
+
+            with patch.object(agentic_workflow.os, 'open', side_effect=replace_before_final_open):
+                repaired = agentic_workflow._repair_eof_blank_lines(
+                    root, 'new.py:2: new blank line at EOF.'
+                )
+
+            self.assertEqual(repaired, [])
+            self.assertEqual(outside.read_bytes(), b'outside\n')
+            self.assertTrue(target.is_symlink())
+
+    @unittest.skipUnless(hasattr(os, 'O_NOFOLLOW'), 'no no-follow open primitive')
+    def test_eof_repair_preserves_single_crlf_terminator(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            target = root / 'new.txt'
+            target.write_bytes(b'value\r\n\r\n')
+
+            repaired = agentic_workflow._repair_eof_blank_lines(
+                root, 'new.txt:2: new blank line at EOF.'
+            )
+
+            self.assertEqual(repaired, ['new.txt'])
+            self.assertEqual(target.read_bytes(), b'value\r\n')
 
     def test_test_runner_stops_when_deadline_expires_between_commands(self):
         with tempfile.TemporaryDirectory() as dirname:

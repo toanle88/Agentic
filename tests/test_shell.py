@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from io import StringIO
 from pathlib import Path
@@ -13,11 +14,177 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner import cli as agentic
 from agentic_runner import shell as agentic_shell
+from agentic_runner import shell_jobs as agentic_shell_jobs
 from agentic_runner import shell_input as agentic_shell_input
 from agentic_runner.cli import state_paths
 
 
+WINDOWS_TREE_CHILD = (
+    'import os, pathlib, sys, time\n'
+    'pid_path, ready_path, heartbeat_path = map(pathlib.Path, sys.argv[1:])\n'
+    'pid_path.write_text(str(os.getpid()), encoding="ascii")\n'
+    'ready_path.write_text("ready", encoding="ascii")\n'
+    'while True:\n'
+    '    heartbeat_path.write_text(str(time.monotonic()), encoding="ascii")\n'
+    '    time.sleep(0.05)\n'
+)
+
+WINDOWS_TREE_PARENT = (
+    'import pathlib, subprocess, sys, time\n'
+    'child = subprocess.Popen([\n'
+    '    sys.executable, "-u", "-c", sys.argv[1],\n'
+    '    sys.argv[2], sys.argv[3], sys.argv[4],\n'
+    '])\n'
+    'while not pathlib.Path(sys.argv[3]).exists():\n'
+    '    time.sleep(0.01)\n'
+    'while True:\n'
+    '    time.sleep(1)\n'
+)
+
+
 class ShellTests(unittest.TestCase):
+    def _windows_tree_argv(self, root):
+        return [
+            sys.executable, '-u', '-c', WINDOWS_TREE_PARENT,
+            WINDOWS_TREE_CHILD,
+            str(root / 'child.pid'),
+            str(root / 'ready'),
+            str(root / 'heartbeat'),
+        ]
+
+    def _wait_for_windows_tree_file(self, path, timeout=10):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if path.exists():
+                return
+            time.sleep(0.05)
+        self.fail(f'timed out waiting for {path}')
+
+    def _assert_windows_pid_stopped(self, pid, timeout=10):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            result = subprocess.run(
+                ['tasklist', '/FI', f'PID eq {pid}', '/FO', 'CSV', '/NH'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=False,
+            )
+            if f'"{pid}"' not in result.stdout:
+                return
+            time.sleep(0.05)
+        self.fail(f'Windows descendant process {pid} is still running')
+
+    def _cleanup_windows_tree(self, pid):
+        subprocess.run(
+            ['taskkill', '/PID', str(pid), '/T', '/F'],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows process-tree behavior only')
+    def test_active_windows_job_stop_terminates_descendant(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), session_dir=root / 'logs',
+                state_dir=root / 'state',
+            )
+            job = shell._launch(self._windows_tree_argv(root))
+            descendant_pid = 0
+            try:
+                self._wait_for_windows_tree_file(root / 'ready')
+                self._wait_for_windows_tree_file(root / 'child.pid')
+                descendant_pid = int((root / 'child.pid').read_text(encoding='ascii'))
+                self.assertTrue(shell._request_stop(job))
+                job.process.wait(timeout=10)
+                self._assert_windows_pid_stopped(descendant_pid)
+            finally:
+                if job.process is not None and job.process.poll() is None:
+                    self._cleanup_windows_tree(job.process.pid)
+                if descendant_pid:
+                    self._cleanup_windows_tree(descendant_pid)
+                if job.log_handle is not None:
+                    job.log_handle.close()
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows process-tree behavior only')
+    def test_restored_windows_job_stop_terminates_descendant(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            session_dir = root / 'logs'
+            first = agentic_shell.AgenticShell(
+                root, Path(sys.executable), session_dir=session_dir,
+                state_dir=root / 'state',
+            )
+            job = first._launch(self._windows_tree_argv(root))
+            descendant_pid = 0
+            try:
+                self._wait_for_windows_tree_file(root / 'ready')
+                self._wait_for_windows_tree_file(root / 'child.pid')
+                descendant_pid = int((root / 'child.pid').read_text(encoding='ascii'))
+                second = agentic_shell.AgenticShell(
+                    root, Path(sys.executable), session_dir=session_dir,
+                    state_dir=root / 'state',
+                )
+                restored = second.jobs[job.number]
+                self.assertIsNone(restored.process)
+                self.assertTrue(restored.running)
+                self.assertTrue(second._request_stop(restored))
+                self._assert_windows_pid_stopped(job.pid)
+                self._assert_windows_pid_stopped(descendant_pid)
+            finally:
+                if job.process is not None and job.process.poll() is None:
+                    self._cleanup_windows_tree(job.process.pid)
+                if descendant_pid:
+                    self._cleanup_windows_tree(descendant_pid)
+                if job.log_handle is not None:
+                    job.log_handle.close()
+
+    def test_windows_signal_process_tree_uses_verified_taskkill(self):
+        process = type('Process', (), {'pid': 1234})()
+        identity = {'start_time': '42'}
+        with patch.object(agentic_shell_jobs.os, 'name', 'nt'), \
+             patch.object(agentic_shell_jobs, 'process_identity', return_value=identity), \
+             patch.object(agentic_shell_jobs, 'process_identity_matches', return_value=True), \
+             patch.object(agentic_shell_jobs.subprocess, 'run') as run:
+            run.return_value.returncode = 0
+            agentic_shell_jobs.signal_process_tree(process, agentic_shell.signal.SIGTERM)
+
+        run.assert_called_once_with(
+            ['taskkill', '/PID', '1234', '/T', '/F'],
+            stdin=agentic_shell_jobs.subprocess.DEVNULL,
+            stdout=agentic_shell_jobs.subprocess.DEVNULL,
+            stderr=agentic_shell_jobs.subprocess.DEVNULL,
+            check=False,
+        )
+
+    def test_windows_signal_process_tree_fails_closed_on_identity_mismatch(self):
+        process = type('Process', (), {'pid': 1234})()
+        with patch.object(agentic_shell_jobs.os, 'name', 'nt'), \
+             patch.object(agentic_shell_jobs, 'process_identity', return_value={'start_time': '42'}), \
+             patch.object(agentic_shell_jobs, 'process_identity_matches', return_value=False), \
+             patch.object(agentic_shell_jobs.subprocess, 'run') as run:
+            agentic_shell_jobs.signal_process_tree(process, agentic_shell.signal.SIGTERM)
+        run.assert_not_called()
+
+    def test_restored_windows_job_uses_verified_tree_termination(self):
+        job = agentic_shell.Job(
+            1, ['runner'], Path('job.log'), None, 1.0, None,
+            Path('job.json'), 'session', persisted_pid=1234,
+            identity={'start_time': '42'},
+        )
+        shell = agentic_shell.AgenticShell.__new__(agentic_shell.AgenticShell)
+        shell._refresh = lambda _job: None
+        shell._write_record = lambda _job: None
+        with patch.object(agentic_shell.os, 'name', 'nt'), \
+             patch.object(agentic_shell_jobs, 'process_identity_matches', return_value=True), \
+             patch.object(agentic_shell, '_process_identity', return_value={'start_time': '42'}), \
+             patch.object(agentic_shell, '_process_identity_matches', return_value=True), \
+             patch.object(agentic_shell, '_terminate_windows_process_tree', return_value=True) as terminate:
+            self.assertTrue(shell._request_stop(job))
+        terminate.assert_called_once_with(1234, {'start_time': '42'})
     @unittest.skipUnless(os.name != 'nt', 'POSIX process-group behavior only')
     def test_foreground_ctrl_c_from_pty_reaches_child_without_interrupting_shell(self):
         import io

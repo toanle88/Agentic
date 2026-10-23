@@ -91,6 +91,7 @@ from .shell_jobs import (
     process_identity as _process_identity,
     process_identity_matches as _process_identity_matches,
     signal_process_tree as _signal_process_tree,
+    terminate_windows_process_tree as _terminate_windows_process_tree,
     tail as _tail,
     tail_from_text as _tail_from_text,
 )
@@ -968,7 +969,8 @@ class AgenticShell:
                         return False
                     os.killpg(process_group, signal.SIGTERM)
                 else:
-                    os.kill(job.pid, signal.SIGTERM)
+                    if not _terminate_windows_process_tree(job.pid, identity):
+                        return False
             except (OSError, ProcessLookupError, TypeError, ValueError):
                 return False
         job.stop_requested = True

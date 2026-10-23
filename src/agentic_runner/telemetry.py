@@ -20,26 +20,115 @@ USAGE_KEYS = (
     "cache_read_tokens", "cache_write_tokens", "reasoning_tokens",
 )
 
+# Run metadata is durable and may be appended to by repeated resumes.  Keep
+# the useful newest history while leaving aggregate fields available to old
+# readers.  The byte limit also bounds legacy reads before JSON parsing.
+MAX_RUN_RECORD_BYTES = 256_000
+MAX_OPERATION_RECORDS = 100
+MAX_INVOCATION_RECORDS = 100
+MAX_POLICY_HISTORY_RECORDS = 50
+MAX_GUIDANCE_RECORDS = 100
+MAX_GUIDANCE_STATS = 100
+
+_RETENTION_LIMITS = {
+    "usage_by_invocation": MAX_INVOCATION_RECORDS,
+    "security_policy_history": MAX_POLICY_HISTORY_RECORDS,
+    "guidance_loads": MAX_GUIDANCE_RECORDS,
+    "guidance_stats": MAX_GUIDANCE_STATS,
+}
+_KNOWN_RUN_FIELDS = {
+    "schema_version", "usage_by_role", "usage_by_stage", "usage",
+    "usage_by_invocation", "security_policy", "security_policy_history",
+    "instruction", "issue_metadata", "metrics", "guidance_loads",
+    "guidance_stats", "workflow_metrics",
+}
+
 
 def _timestamp(value: datetime | None = None) -> str:
     return (value or datetime.now(timezone.utc)).isoformat(timespec="milliseconds")
 
 
+def _read_run_record(path: Path) -> dict[str, Any]:
+    try:
+        if path.stat().st_size > MAX_RUN_RECORD_BYTES:
+            # An oversized legacy artifact is untrusted input.  Do not read
+            # it in full; the next write starts a bounded record instead.
+            return {}
+        data = json.loads(redact_secrets(path.read_text(encoding="utf-8")))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
 def _load_run_record(folder: Path) -> tuple[Path, dict[str, Any]]:
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / "run.json"
-    try:
-        data = json.loads(redact_secrets(path.read_text(encoding="utf-8")))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
+    data = _read_run_record(path)
     data.setdefault("schema_version", 1)
     return path, data
 
 
+def _json_size(value: dict[str, Any]) -> int:
+    return len((json.dumps(value, indent=2) + "\n").encode("utf-8"))
+
+
+def _compact_run_record(data: dict[str, Any]) -> dict[str, Any]:
+    """Retain newest history and enforce the complete record byte budget."""
+    unknown_fields = [field for field in data if field not in _KNOWN_RUN_FIELDS]
+    for field, limit in _RETENTION_LIMITS.items():
+        value = data.get(field)
+        if isinstance(value, list):
+            data[field] = value[-limit:]
+    metrics = data.get("metrics")
+    if isinstance(metrics, dict) and isinstance(metrics.get("operations"), list):
+        metrics["operations"] = metrics["operations"][-MAX_OPERATION_RECORDS:]
+        metrics["operation_count"] = len(metrics["operations"])
+
+    # Normal records fit comfortably after the per-array caps.  For oversized
+    # legacy values, progressively discard oldest optional history while
+    # preserving the newest entry and aggregate/scalar fields.
+    while _json_size(data) > MAX_RUN_RECORD_BYTES:
+        candidates: list[tuple[str, list[Any]]] = []
+        for field in _RETENTION_LIMITS:
+            value = data.get(field)
+            if isinstance(value, list) and len(value) > 1:
+                candidates.append((field, value))
+        if isinstance(metrics, dict) and isinstance(metrics.get("operations"), list):
+            operations = metrics["operations"]
+            if len(operations) > 1:
+                candidates.append(("metrics.operations", operations))
+        if not candidates:
+            break
+        _field, largest = max(candidates, key=lambda item: _json_size({"value": item[1]}))
+        retained = largest[-max(1, len(largest) // 2):]
+        if _field == "metrics.operations" and isinstance(metrics, dict):
+            metrics["operations"] = retained
+            metrics["operation_count"] = len(retained)
+        else:
+            data[_field] = retained
+    # Preserve extension fields for normal-sized records.  If a legacy or
+    # provider-specific field is what keeps an oversized record above the
+    # budget, discard the largest such fields only after known history has
+    # been compacted.
+    while _json_size(data) > MAX_RUN_RECORD_BYTES and unknown_fields:
+        field = max(
+            unknown_fields,
+            key=lambda name: _json_size({"value": data.get(name)}),
+        )
+        unknown_fields.remove(field)
+        data.pop(field, None)
+    if _json_size(data) > MAX_RUN_RECORD_BYTES:
+        # A single malformed legacy value can be larger than the budget even
+        # after history compaction.  Keep a valid marker rather than allowing
+        # the write boundary to recreate an oversized artifact.
+        data = {"schema_version": 1, "record_truncated": True}
+    return data
+
+
 def _write_run_record(path: Path, data: dict[str, Any]) -> None:
-    atomic_write_json(path, data)
+    atomic_write_json(path, _compact_run_record(data))
 
 
 def _number(value: Any) -> int | None:
@@ -464,11 +553,8 @@ def record_workflow_outcome(folder: Path, *, approved: bool, attempts: int,
 
 
 def read_run_usage(folder: Path) -> dict[str, Any]:
-    try:
-        data = json.loads(redact_secrets((folder / "run.json").read_text(encoding="utf-8")))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return combine_usage([])
-    if not isinstance(data, dict):
+    data = _read_run_record(folder / "run.json")
+    if not data:
         return combine_usage([])
     usage = data.get("usage", combine_usage([]))
     if not isinstance(usage, dict):

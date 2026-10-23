@@ -7,6 +7,12 @@ import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner.telemetry import (
     combine_usage,
     extract_jsonl_usage,
+    MAX_GUIDANCE_RECORDS,
+    MAX_GUIDANCE_STATS,
+    MAX_INVOCATION_RECORDS,
+    MAX_OPERATION_RECORDS,
+    MAX_POLICY_HISTORY_RECORDS,
+    MAX_RUN_RECORD_BYTES,
     read_run_usage,
     read_run_instruction,
     record_operation,
@@ -21,6 +27,65 @@ from agentic_runner.telemetry import (
 
 
 class TelemetryTests(unittest.TestCase):
+    def test_run_history_retains_only_newest_entries(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            raw = {
+                'schema_version': 1,
+                'metrics': {
+                    'operations': [{'name': f'op-{index}'} for index in range(150)],
+                },
+                'usage_by_invocation': [{'name': f'inv-{index}'} for index in range(150)],
+                'security_policy_history': [{'policy': {'mode': str(index)}} for index in range(75)],
+                'guidance_loads': [{'path': f'guide-{index}'} for index in range(150)],
+                'guidance_stats': [{'phase': str(index)} for index in range(150)],
+            }
+            (folder / 'run.json').write_text(json.dumps(raw), encoding='utf-8')
+
+            record_workflow_outcome(
+                folder, approved=False, attempts=1, first_pass=False,
+            )
+            stored = json.loads((folder / 'run.json').read_text(encoding='utf-8'))
+            self.assertEqual(len(stored['metrics']['operations']), MAX_OPERATION_RECORDS)
+            self.assertEqual(stored['metrics']['operations'][0]['name'], 'op-50')
+            self.assertEqual(len(stored['usage_by_invocation']), MAX_INVOCATION_RECORDS)
+            self.assertEqual(stored['usage_by_invocation'][0]['name'], 'inv-50')
+            self.assertEqual(len(stored['security_policy_history']), MAX_POLICY_HISTORY_RECORDS)
+            self.assertEqual(len(stored['guidance_loads']), MAX_GUIDANCE_RECORDS)
+            self.assertEqual(len(stored['guidance_stats']), MAX_GUIDANCE_STATS)
+
+    def test_oversized_legacy_run_record_is_not_read_or_rewritten_unbounded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            (folder / 'run.json').write_text(
+                json.dumps({'schema_version': 1, 'junk': 'x' * MAX_RUN_RECORD_BYTES}),
+                encoding='utf-8',
+            )
+
+            usage = read_run_usage(folder)
+            self.assertIsNone(usage['total_tokens'])
+            record_operation(folder, 'tests', 'test-command-001')
+            self.assertLessEqual((folder / 'run.json').stat().st_size, MAX_RUN_RECORD_BYTES)
+            self.assertEqual(
+                len(json.loads((folder / 'run.json').read_text())['metrics']['operations']), 1,
+            )
+
+    def test_small_legacy_extension_fields_survive_telemetry_write(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            extension = {"source": "legacy-provider", "enabled": True}
+            (folder / "run.json").write_text(
+                json.dumps({"schema_version": 1, "provider_extension": extension}),
+                encoding="utf-8",
+            )
+
+            record_workflow_outcome(
+                folder, approved=False, attempts=1, first_pass=False,
+            )
+
+            stored = json.loads((folder / "run.json").read_text(encoding="utf-8"))
+            self.assertEqual(stored["provider_extension"], extension)
+
     def test_issue_metadata_is_bounded_and_available_to_dashboard_reads(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
