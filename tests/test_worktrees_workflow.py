@@ -129,6 +129,36 @@ class WorkflowTests(_GitRepositoryTestCase):
         with self.assertRaises(agentic.NoCodeChangesError):
             agentic.prepare_patch(run.worktree, 'main', 10)
 
+    def test_publication_diff_commands_disable_git_helpers(self):
+        run = agentic.create_worktree(self.repo, 'main', 133)
+        (run.worktree / 'fix.py').write_text('fixed=True\n')
+        command_calls = []
+        git_calls = []
+        real_command = agentic_workflow.command
+        real_git = agentic_workflow.git
+
+        def capture_command(argv, cwd, **kwargs):
+            command_calls.append(argv)
+            return real_command(argv, cwd, **kwargs)
+
+        def capture_git(cwd, *args, **kwargs):
+            git_calls.append(["git", *args])
+            return real_git(cwd, *args, **kwargs)
+
+        with (patch.object(agentic_workflow, 'command', side_effect=capture_command),
+              patch.object(agentic_workflow, 'git', side_effect=capture_git)):
+            agentic_workflow.prepare_patch(run.worktree, 'main', 10)
+
+        diff_commands = [
+            argv for argv in [*command_calls, *git_calls]
+            if argv and argv[0] == 'git' and 'diff' in argv
+        ]
+        self.assertGreaterEqual(len(diff_commands), 5)
+        for argv in diff_commands:
+            self.assertIn('--no-ext-diff', argv)
+            self.assertIn('--no-textconv', argv)
+            self.assertIn('diff.external=', argv)
+
     def test_self_hosted_exception_allows_ci_workflows_but_not_policy_files(self):
         with patch.object(agentic_workflow, 'SCRIPT_DIR', self.repo):
             self.assertTrue(agentic_workflow._runner_source_change_allowed(

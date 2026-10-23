@@ -1561,7 +1561,10 @@ class ConfigurationTests(unittest.TestCase):
 
             fallback = Path(temp) / 'fallback'
             fallback.mkdir()
-            self.assertEqual(agentic.detect_test_commands(fallback)[0], [['git', 'diff', '--check']])
+            self.assertEqual(
+                agentic.detect_test_commands(fallback)[0],
+                [['git', 'diff', '--no-ext-diff', '--no-textconv', '--check']],
+            )
 
 
     def test_config_validation(self):
@@ -1583,11 +1586,14 @@ class ConfigurationTests(unittest.TestCase):
         for path in (
             'credentials.json', 'config/service-account.json',
             '.docker/config.json', 'keys/id_ecdsa', 'KEYS/ID_ED25519',
-            'nested/private.ppk',
+            'nested/private.ppk', 'secrets\\prod\\token.json',
+            'nested\\AGENTS.md',
         ):
             self.assertTrue(agentic.forbidden(path), path)
             self.assertTrue(sensitive_read(path), path)
         self.assertFalse(sensitive_read('src/credentials.txt'))
+        self.assertTrue(agentic.forbidden('.github\\workflows\\release.yml'))
+        self.assertFalse(sensitive_read('.github\\workflows\\release.yml'))
 
         with tempfile.TemporaryDirectory() as temp:
             unlimited = Path(temp) / 'agent_config.json'

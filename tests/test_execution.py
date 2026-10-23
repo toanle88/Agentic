@@ -862,6 +862,25 @@ class StreamingTests(unittest.TestCase):
             self.assertIn('deadline', report.lower())
             streamed.assert_called_once()
 
+    def test_cli_provider_uses_provider_defaults_and_explicit_policy_override(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with (patch.object(agentic_execution, 'cli_provider_command', return_value=(['provider'], False)) as build,
+                  patch.object(
+                      agentic_execution, 'streamed_command',
+                      return_value=CompletedProcess(['provider'], 0, stdout='done'),
+                  )):
+                agentic_execution.run_cli_provider(
+                    root, 'prompt', output=root / 'default.txt', provider='gemini',
+                )
+                self.assertNotIn('permission_policy', build.call_args.kwargs)
+                override = {'run_checks': False}
+                agentic_execution.run_cli_provider(
+                    root, 'prompt', output=root / 'override.txt', provider='gemini',
+                    permission_policy=override,
+                )
+                self.assertIs(build.call_args.kwargs['permission_policy'], override)
+
     def test_stream_timeout_does_not_hang(self):
         from io import StringIO
         with tempfile.TemporaryDirectory() as dirname:

@@ -81,6 +81,7 @@ from .shell_commands import (
 )
 from .shell_jobs import (
     FOREGROUND_PROMPT_PREFIXES as _FOREGROUND_PROMPT_PREFIXES,  # noqa: F401
+    BoundedLogWriter,
     ForegroundInputForwarder as _ForegroundInputForwarder,
     Job,
     display_escape as _display_escape,  # noqa: F401
@@ -324,23 +325,31 @@ class AgenticShell:
         self.next_number += 1
         log_path = self.session_dir / f"job-{number:03d}.log"
         record_path = self._record_path(number)
-        log_handle = log_path.open("w", encoding="utf-8", buffering=1)
+        log_writer = BoundedLogWriter(log_path)
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
         try:
             process = subprocess.Popen(
                 argv,
                 cwd=self.repo,
                 stdin=subprocess.DEVNULL,
-                stdout=log_handle,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 start_new_session=os.name != "nt",
                 creationflags=creationflags,
             )
         except OSError:
-            log_handle.close()
+            log_writer.close()
             raise
-        job = Job(number, argv, log_path, process, time.time(), log_handle,
-                  record_path, self.session_id, completion_callback=on_complete)
+        log_thread = threading.Thread(
+            target=log_writer.copy_from,
+            args=(process.stdout,),
+            name=f"agentic-log-{number}",
+            daemon=True,
+        )
+        log_thread.start()
+        job = Job(number, argv, log_path, process, time.time(), log_writer,
+                  record_path, self.session_id, completion_callback=on_complete,
+                  log_thread=log_thread)
         self.jobs[number] = job
         self._write_record(job)
         _shell_print(f"[JOB {number}] started (PID {process.pid})")
@@ -400,6 +409,8 @@ class AgenticShell:
             return
         job.finished = time.time()
         job.exit_code = code
+        if job.log_thread is not None:
+            job.log_thread.join()
         if job.log_handle is not None:
             try:
                 job.log_handle.close()
