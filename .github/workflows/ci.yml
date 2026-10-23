@@ -36,6 +36,52 @@ jobs:
       - name: Run tests
         run: python -m unittest discover -s tests -q
 
+  windows:
+    name: Native Windows (Python 3.12)
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Compile Python sources
+        shell: pwsh
+        run: |
+          $runtime = @(
+            "agentic.py",
+            "agentic_shell.py",
+            "agentic_dashboard.py"
+          ) + @(Get-ChildItem -Path "src/agentic_runner" -Filter "*.py" | ForEach-Object { $_.FullName })
+          python -m py_compile $runtime
+      - name: Check diff whitespace
+        shell: pwsh
+        run: git diff --check
+      - name: Run native Windows behavior tests
+        shell: pwsh
+        run: |
+          python -m unittest discover -s tests -p "test_worktrees.py" -v
+          python -m unittest discover -s tests -p "test_shell*.py" -v
+          python -m unittest discover -s tests -p "test_test_discovery.py" -v
+      - name: Run offline unittest suite
+        run: python -m unittest discover -s tests -q
+      - name: Smoke test installed CLI
+        shell: pwsh
+        run: |
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "agentic-cli-smoke"
+          python -m venv $smokeRoot
+          $smokePython = Join-Path $smokeRoot "Scripts\python.exe"
+          & $smokePython -m pip install --no-deps .
+          $smokeBin = Join-Path $smokeRoot "Scripts"
+          & (Join-Path $smokeBin "agentic.exe") --version
+          & (Join-Path $smokeBin "agentic.exe") --help
+          & (Join-Path $smokeBin "agentic-shell.exe") --help
+          & (Join-Path $smokeBin "agentic-dashboard.exe") --help
+          & (Join-Path $smokeBin "agentic.exe") init --help
+          & (Join-Path $smokeBin "agentic.exe") doctor --help
+          & $smokePython -c "import agentic_runner; print(agentic_runner.__version__)"
+
   package:
     name: Build package
     runs-on: ubuntu-latest

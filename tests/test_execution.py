@@ -2,6 +2,7 @@
 import json
 import os
 import subprocess
+import shutil
 import sys
 import tempfile
 import time
@@ -583,11 +584,12 @@ class StreamingTests(unittest.TestCase):
     def test_test_runner_removes_configured_credentials_from_child_environment(self):
         from io import StringIO
         value = 'custom-test-credential-123456'
+        git_executable = shutil.which('git') or 'git'
         with tempfile.TemporaryDirectory() as dirname, patch.dict(
             'os.environ', {'SERVICE_VALUE': value}, clear=True
         ):
             root = Path(dirname)
-            sh('git', 'init', cwd=root)
+            sh(git_executable, 'init', cwd=root)
             script = 'import os; print(os.environ.get("SERVICE_VALUE", "missing"))'
             with patch('sys.stdout', new_callable=StringIO) as output:
                 passed, report = agentic.run_tests(
@@ -845,6 +847,20 @@ class StreamingTests(unittest.TestCase):
 
             self.assertEqual(repaired, ['new.txt'])
             self.assertEqual(target.read_bytes(), b'value\r\n')
+
+    def test_eof_repair_works_without_no_follow_open_primitive(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            target = root / 'new.py'
+            target.write_bytes(b'value = 1\n\n')
+
+            with patch.object(agentic_workflow.os, 'O_NOFOLLOW', None, create=True):
+                repaired = agentic_workflow._repair_eof_blank_lines(
+                    root, 'new.py:2: new blank line at EOF.'
+                )
+
+            self.assertEqual(repaired, ['new.py'])
+            self.assertEqual(target.read_bytes(), b'value = 1\n')
 
     def test_test_runner_stops_when_deadline_expires_between_commands(self):
         with tempfile.TemporaryDirectory() as dirname:

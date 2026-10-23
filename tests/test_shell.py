@@ -1328,7 +1328,7 @@ class ShellTests(unittest.TestCase):
                 shell.run_issue(['/run', '--profile', 'slow'])
             argv = launch.call_args.args[0]
             self.assertIn('--task-file', argv)
-            self.assertIn(str(task), argv)
+            self.assertIn(str(task.resolve()), argv)
             self.assertIn('--profile', argv)
             self.assertIn('slow', argv)
 
@@ -1626,7 +1626,7 @@ class ShellTests(unittest.TestCase):
                 shell.execute('/run 119 --instruction "--preserve"')
                 argv = launch.call_args.args[0]
                 self.assertIn('--instruction=--preserve', argv)
-                parsed = agentic.build_parser().parse_args(argv[3:])
+                parsed = agentic.build_parser().parse_args(argv[argv.index('--repo'):])
                 self.assertEqual(parsed.instruction, '--preserve')
 
                 shell.execute('/run 119 --instruction "--publish"')
@@ -1637,7 +1637,7 @@ class ShellTests(unittest.TestCase):
                 shell.execute('/run 119 --instruction ""')
                 argv = launch.call_args.args[0]
                 self.assertIn('--instruction=', argv)
-                parsed = agentic.build_parser().parse_args(argv[3:])
+                parsed = agentic.build_parser().parse_args(argv[argv.index('--repo'):])
                 self.assertEqual(parsed.instruction, '')
 
 
@@ -1690,7 +1690,7 @@ class ShellTests(unittest.TestCase):
                   patch('agentic_shell.subprocess.Popen') as popen):
                 shell._run_foreground(['publish'])
 
-            run.assert_called_once_with(['publish'], cwd=root, check=False)
+            run.assert_called_once_with(['publish'], cwd=root.resolve(), check=False)
             popen.assert_not_called()
 
 

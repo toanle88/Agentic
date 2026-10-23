@@ -295,7 +295,7 @@ class DashboardTests(unittest.TestCase):
             )[0]
             embedded = json.dumps(json.loads(base64.b64decode(payload).decode("utf-8")))
             self.assertIn("The upstream service is unavailable.", embedded)
-            self.assertIn(str(run), embedded)
+            self.assertIn(json.dumps(str(run))[1:-1], embedded)
 
     def test_terminal_result_statuses_are_visible_and_legacy_blockers_still_parse(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -603,7 +603,7 @@ class DashboardTests(unittest.TestCase):
                     "--output", str(output), "--serve", "--port", "0",
                 ]), 0)
             serve.assert_called_once()
-            self.assertEqual(serve.call_args.args[0], output)
+            self.assertEqual(serve.call_args.args[0], output.resolve())
             render_current = serve.call_args.args[1]
             self.assertNotIn("Issue #73", output.read_text())
             first = render_current()

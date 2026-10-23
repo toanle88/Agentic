@@ -679,6 +679,13 @@ class _FileListIndex:
     pending_index: int = 0
     complete: bool = False
 
+    def __post_init__(self) -> None:
+        # Windows may spell the same temporary directory with an 8.3 path in
+        # one caller and its long path in another.  Normalize both roots
+        # before resolving children and computing relative paths.
+        self.root = self.root.resolve()
+        self.target = self.target.resolve()
+
     def _advance(self, limit: int) -> None:
         while not self.complete and len(self.paths) < limit:
             if self.pending_current is None:
@@ -760,6 +767,8 @@ def _build_file_list_index(
 
 def _list_files_page(target: Path, root: Path, page: int) -> tuple[list[str], bool]:
     """Return one deterministic page using a bounded metadata-aware index cache."""
+    root = root.resolve()
+    target = target.resolve()
     key = (str(root), str(target))
     cached = _FILE_LIST_CACHE.get(key)
     if cached is None or cached.is_stale():
@@ -990,7 +999,7 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                 return "ERROR: editing files is disabled by the permission policy"
             if not target.exists() and not policy.get("create_files"):
                 return "ERROR: creating files is disabled by the permission policy"
-            relative = str(target.relative_to(worktree.resolve()))
+            relative = target.relative_to(worktree.resolve()).as_posix()
             relative_parts = [part.lower() for part in Path(relative).parts]
             self_hosted_ci = (
                 len(relative_parts) >= 3

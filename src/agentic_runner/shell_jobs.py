@@ -269,9 +269,13 @@ def signal_process_tree(process: subprocess.Popen[Any], signum: int) -> None:
     """Signal a foreground process and descendants in its isolated group."""
     if os.name == "nt":
         pid = int(getattr(process, "pid", 0) or 0)
-        expected = process_identity(pid)
-        terminate_windows_process_tree(pid, expected)
-        return
+        if pid > 0:
+            expected = process_identity(pid)
+            if terminate_windows_process_tree(pid, expected):
+                return
+        # Keep the normal Popen/test-double fallback when taskkill cannot
+        # verify the process identity or the caller supplies a lightweight
+        # process object without a native Windows PID.
     if os.name != "nt":
         try:
             pid = int(process.pid)

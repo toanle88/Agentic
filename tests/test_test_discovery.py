@@ -6,7 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -16,6 +16,8 @@ from agentic_runner.test_discovery import (
     MAX_OUTPUT_TAIL_BYTES,
     MAX_DISCOVERY_TIMEOUT_SECONDS,
     DiscoveryResult,
+    _kill_process_group,
+    _python_module_available,
     _run_candidate,
     _safe_agent_argv,
     discover_and_validate,
@@ -25,6 +27,21 @@ from agentic_runner.test_discovery import (
 
 
 class TestDiscovery(unittest.TestCase):
+    def test_windows_timeout_cleanup_terminates_the_process_tree(self):
+        process = type('Process', (), {'pid': 1234, 'kill': Mock()})()
+        with patch('agentic_runner.test_discovery.os.name', 'nt'), \
+                patch('agentic_runner.test_discovery.subprocess.run') as run:
+            _kill_process_group(process)
+
+        run.assert_called_once_with(
+            ['taskkill', '/F', '/T', '/PID', '1234'],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        process.kill.assert_called_once_with()
+
     def test_discovery_options_are_exposed_on_init(self):
         args = agentic.build_parser().parse_args([
             "init", "--discover-tests", "--discovery-timeout", "7",
@@ -100,7 +117,7 @@ class TestDiscovery(unittest.TestCase):
             repo = Path(temp)
             with self.assertRaisesRegex(ValueError, "from 1 to 86400"):
                 validate_test_candidates(repo, [], timeout=0)
-            with patch("agentic_test_discovery.subprocess.run") as probe:
+            with patch("agentic_runner.test_discovery.subprocess.run") as probe:
                 probe.return_value.returncode = 1
                 result = validate_test_candidates(
                     repo,
@@ -113,12 +130,25 @@ class TestDiscovery(unittest.TestCase):
         self.assertLessEqual(probe.call_args.kwargs["timeout"], 1)
         self.assertEqual(MAX_DISCOVERY_TIMEOUT_SECONDS, 86_400)
 
+    def test_windows_python_executable_runs_module_probe(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            with patch("agentic_runner.test_discovery.subprocess.run") as probe:
+                probe.return_value.returncode = 1
+                available, timed_out = _python_module_available(
+                    ["python.exe", "-m", "pytest"], repo, 1,
+                )
+
+        self.assertFalse(available)
+        self.assertFalse(timed_out)
+        probe.assert_called_once()
+
     def test_python_module_probe_and_command_share_one_candidate_deadline(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = Path(temp)
-            with (patch("agentic_test_discovery._python_module_available", return_value=(True, False)) as probe,
-                  patch("agentic_test_discovery._run_candidate", return_value=(0, "", False)) as run,
-                  patch("agentic_test_discovery.time.monotonic", side_effect=[100.0, 100.2, 100.4, 100.5])):
+            with (patch("agentic_runner.test_discovery._python_module_available", return_value=(True, False)) as probe,
+                  patch("agentic_runner.test_discovery._run_candidate", return_value=(0, "", False)) as run,
+                  patch("agentic_runner.test_discovery.time.monotonic", side_effect=[100.0, 100.2, 100.4, 100.5])):
                 results = validate_test_candidates(
                     repo,
                     [{"argv": [sys.executable, "-m", "pytest"], "reason": "module"}],
@@ -133,7 +163,7 @@ class TestDiscovery(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             repo = Path(temp)
             with patch(
-                "agentic_test_discovery.subprocess.run",
+                "agentic_runner.test_discovery.subprocess.run",
                 side_effect=subprocess.TimeoutExpired(cmd="python", timeout=1),
             ):
                 results = validate_test_candidates(
@@ -160,7 +190,7 @@ class TestDiscovery(unittest.TestCase):
             repo = Path(temp)
             settings = {"enabled": True, "engine": "docker", "image": "test-image"}
             with patch(
-                "agentic_test_discovery.sandbox_command",
+                "agentic_runner.test_discovery.sandbox_command",
                 return_value=[sys.executable, "-c", "pass"],
             ) as sandbox:
                 results = validate_test_candidates(

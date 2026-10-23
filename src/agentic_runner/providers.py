@@ -13,7 +13,7 @@ import shlex
 import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath
 
 from .policy import PERMISSION_FIELDS, default_permission_policy
 
@@ -41,9 +41,17 @@ def _readonly_git_unsafe_patterns(prefix: str) -> list[str]:
     return patterns
 
 
-def _provider_worktree_scope(worktree: Path | None, *, sandbox_enabled: bool) -> Path:
+def _provider_worktree_scope(worktree: Path | None, *, sandbox_enabled: bool) -> PurePath:
     """Return the path visible to a native provider for worktree rules."""
-    return (Path("/workspace") if sandbox_enabled else (worktree or Path.cwd())).resolve()
+    # This is a path inside the provider's container, not a host path.  Do
+    # not resolve it through the host filesystem (which turns it into a
+    # drive-qualified Windows path such as ``D:\\workspace``).
+    if sandbox_enabled:
+        return PurePosixPath("/workspace")
+    # Native provider rules use slash-separated path patterns even when the
+    # host is Windows. Preserve a rooted POSIX-looking test path such as
+    # ``/tmp/worktree`` instead of resolving it to the current drive.
+    return PurePosixPath(str(worktree or Path.cwd()).replace("\\", "/"))
 
 
 def _network_shell_patterns(prefix: str) -> list[str]:
@@ -300,7 +308,14 @@ def _usable_executable(value: str) -> str | None:
     """Return an executable command or path only when it can be started."""
     candidate = Path(value).expanduser()
     if candidate.is_absolute() or len(candidate.parts) > 1:
-        return str(candidate) if candidate.is_file() and os.access(candidate, os.X_OK) else None
+        if not candidate.is_file():
+            return None
+        # Windows launchability is determined by the executable suffix and
+        # file association, not by POSIX execute permission bits. The
+        # downloaded Copilot binary is intentionally extensionless.
+        if os.name == "nt":
+            return str(candidate)
+        return str(candidate) if os.access(candidate, os.X_OK) else None
     found = shutil.which(value)
     if found:
         return found
@@ -311,15 +326,21 @@ def copilot_candidate_paths(environ: Mapping[str, str] | None = None) -> list[Pa
     """Return known host paths used by the GitHub CLI Copilot installer."""
     environment = os.environ if environ is None else environ
     data_home_value = environment.get("XDG_DATA_HOME")
-    data_home = (
-        Path(data_home_value).expanduser()
-        if data_home_value
-        else Path.home() / ".local" / "share"
-    )
-    candidates = [data_home / "gh" / "copilot" / "copilot"]
-    if os.name == "nt":
-        candidates.append(data_home / "gh" / "copilot" / "copilot.exe")
-    return candidates
+    if data_home_value:
+        data_home = Path(data_home_value).expanduser()
+    else:
+        try:
+            data_home = Path.home() / ".local" / "share"
+        except RuntimeError:
+            # A deliberately minimal child environment may not contain any
+            # home-directory variables.  Provider discovery is optional and
+            # must not make an otherwise valid invocation fail.
+            return []
+    install_dir = data_home / "gh" / "copilot"
+    # GitHub CLI has used both names across platforms/releases. Check both so
+    # discovery remains stable when a Windows runner supplies a POSIX-style
+    # XDG_DATA_HOME or when a copied fixture has the other suffix.
+    return [install_dir / "copilot", install_dir / "copilot.exe"]
 
 
 def resolve_provider_executable(
@@ -365,7 +386,7 @@ def display_provider_path(path: str) -> str:
     candidate = Path(path)
     try:
         return "~" + str(candidate.expanduser().relative_to(Path.home()))
-    except ValueError:
+    except (ValueError, RuntimeError):
         return str(candidate)
 
 

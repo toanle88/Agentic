@@ -19,6 +19,17 @@ from agentic_runner import openrouter_tools as agentic_openrouter_tools
 
 
 class OpenRouterTests(unittest.TestCase):
+    def assert_process_stopped(self, pid):
+        if os.name == 'nt':
+            result = subprocess.run(
+                ['tasklist', '/FI', f'PID eq {pid}'],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertNotIn(str(pid), result.stdout)
+            return
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
     def test_request_budget_trims_large_system_and_task_without_breaking_pairing(self):
         messages = [
             {"role": "system", "content": "system-" + ("s" * 20_000)},
@@ -1014,8 +1025,7 @@ class OpenRouterTests(unittest.TestCase):
                 len(result.split('\n', 1)[1]),
                 agentic_openrouter.OPENROUTER_COMMAND_OUTPUT_CHARS,
             )
-            with self.assertRaises(ProcessLookupError):
-                os.kill(pid, 0)
+            self.assert_process_stopped(pid)
 
     def test_openrouter_tool_command_timeout_is_reported_and_process_is_stopped(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1035,8 +1045,7 @@ class OpenRouterTests(unittest.TestCase):
             )
             pid = int(pid_file.read_text(encoding='utf-8'))
             self.assertIn('timed out after 1s', result)
-            with self.assertRaises(ProcessLookupError):
-                os.kill(pid, 0)
+            self.assert_process_stopped(pid)
 
     def test_openrouter_command_capture_failure_stops_and_reaps_process(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1077,6 +1086,5 @@ class OpenRouterTests(unittest.TestCase):
             self.assertTrue(pid_file.exists())
             pid = int(pid_file.read_text(encoding='utf-8'))
             stop.assert_called_once()
-            with self.assertRaises(ProcessLookupError):
-                os.kill(pid, 0)
+            self.assert_process_stopped(pid)
 

@@ -608,6 +608,8 @@ class ConfigurationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             repo = Path(temp)
             data_home = repo / 'xdg-data'
+            # The GitHub CLI download is an extensionless binary on every
+            # host; Windows launchability must not be inferred from .exe.
             executable = data_home / 'gh' / 'copilot' / 'copilot'
             executable.parent.mkdir(parents=True)
             executable.write_text('#!/bin/sh\n', encoding='utf-8')
