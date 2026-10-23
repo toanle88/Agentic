@@ -44,7 +44,9 @@ SEVERITY_RANK = {
 }
 _RUN_CACHE_LIMIT = 512
 _MAX_SNAPSHOT_RETRIES = 4
-_RUN_SNAPSHOT_CACHE: dict[tuple[str, str], tuple[tuple[tuple[str, int, int], ...], dict[str, Any] | None]] = {}
+_RUN_SNAPSHOT_CACHE: dict[
+    tuple[str, str], tuple[tuple[tuple[str, int, int, int], ...], dict[str, Any] | None]
+] = {}
 _RUN_SNAPSHOT_CACHE_LOCK = threading.RLock()
 
 
