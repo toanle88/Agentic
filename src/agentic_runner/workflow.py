@@ -416,6 +416,17 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
 
 
 _EOF_BLANK_LINE_RE = re.compile(r"^(?P<path>.+):\d+: new blank line at EOF\.$")
+_WHITESPACE_DIAGNOSTIC_RE = re.compile(
+    r":\d+: (?:trailing whitespace\.|new blank line at EOF\.)$"
+)
+
+
+def _git_whitespace_diagnostics(output: str) -> str:
+    """Keep Git whitespace errors while dropping platform conversion warnings."""
+    return "\n".join(
+        line for line in output.splitlines()
+        if _WHITESPACE_DIAGNOSTIC_RE.search(line)
+    )
 
 
 def _whitespace_check(worktree: Path, timeout: int) -> str:
@@ -452,10 +463,11 @@ def _whitespace_check(worktree: Path, timeout: int) -> str:
             )
         # --no-index returns 1 for a clean difference and 3 when it reports
         # whitespace errors.
-            if candidate.stdout.strip():
-                return candidate.stdout.strip()
+            diagnostics = _git_whitespace_diagnostics(candidate.stdout)
+            if diagnostics:
+                return diagnostics
             if candidate.returncode not in (0, 1):
-                return candidate.stdout.strip()
+                return diagnostics
     finally:
         try:
             empty_path.unlink()
