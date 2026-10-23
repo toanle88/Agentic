@@ -53,7 +53,20 @@ The `main` branch is protected. Changes must go through a pull request.
 5. Open a pull request against `main`.
 6. Merge only after required CI checks and review pass.
 
-CI tests Python 3.10 through 3.14, runs static checks, coverage, Docker sandbox integration tests, and builds the package artifacts. Configure those checks as required status checks in repository branch protection.
+CI tests Python 3.10 through 3.14 on Ubuntu, and runs a native
+`windows-latest` job with Python 3.12. The Windows job compiles the runtime,
+checks whitespace, runs the offline suite and the Windows-sensitive worktree,
+process-tree, path, environment, and shell-input tests, and smoke-tests the
+installed CLI. It does not use WSL, Docker, provider CLIs, credentials, or
+GitHub write access. Static checks, coverage, Docker sandbox integration tests,
+and package artifact builds remain on Linux. Configure those checks as required
+status checks in repository branch protection.
+
+The native Windows job validates Windows Python and Windows Git behavior only;
+it does not emulate a WSL environment. When a worktree must be opened by both
+WSL Git and Windows Git, use the shared-state and Git 2.48+ guidance in
+[Getting started](getting-started.md#check-the-environment) and
+[Troubleshooting](troubleshooting.md#wslwindows-git-reports-not-a-git-repository).
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for the repository contribution policy.
 

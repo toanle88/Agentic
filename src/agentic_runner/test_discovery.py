@@ -539,7 +539,19 @@ def _kill_process_group(process: subprocess.Popen[Any]) -> None:
             return
         except (OSError, ProcessLookupError):
             pass
-    process.kill()
+    else:
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, check=False,
+            )
+        except OSError:
+            pass
+    try:
+        process.kill()
+    except OSError:
+        pass
 
 
 def _run_candidate(
