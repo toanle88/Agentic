@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime
 import json
 import shlex
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,9 @@ from .output import strip_ansi
 from .persistence import atomic_write_json, atomic_write_text
 from .security import redact_secrets
 from .worktrees import issue_fingerprint
+
+MANUAL_APPROVAL_FILENAME = "manual-approval.json"
+REVIEW_APPROVAL_FILENAME = "review-approval.json"
 
 
 def next_log(folder: Path, kind: str, ext: str = "txt") -> Path:
@@ -50,8 +54,12 @@ def load_latest_developer_report(folder: Path, limit: int = 6_000) -> str:
         return ""
 
 
+def manual_approval_path(folder: Path) -> Path:
+    return folder / MANUAL_APPROVAL_FILENAME
+
+
 def review_approval_path(folder: Path) -> Path:
-    return folder / "review-approval.json"
+    return folder / REVIEW_APPROVAL_FILENAME
 
 
 def _blocked_path(folder: Path) -> Path:
@@ -206,36 +214,95 @@ def clear_blocked(folder: Path) -> None:
     _blocked_path(folder).unlink(missing_ok=True)
 
 
-def _load_approval(path: Path, required: tuple[str, ...]) -> dict[str, Any] | None:
-    if not path.is_file():
-        return None
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Approval record is unreadable: {path}") from exc
-    if not isinstance(value, dict) or value.get("status") != "approved":
-        raise RuntimeError(f"Approval record is invalid: {path}")
-    if any(not isinstance(value.get(key), str) or not value[key].strip() for key in required):
-        raise RuntimeError(f"Approval record is incomplete: {path}")
+def _normalize_approval(value: dict[str, Any], path: Path, label: str) -> dict[str, Any]:
+    """Normalize optional reviewer evidence before it reaches callers."""
+    if "summary" in value and not isinstance(value["summary"], str):
+        raise RuntimeError(f"{label} is invalid: {path}")
+    skipped = value.get("skipped")
+    if skipped is not None and (
+        not isinstance(skipped, list)
+        or any(not isinstance(item, str) for item in skipped)
+    ):
+        raise RuntimeError(f"{label} is invalid: {path}")
+    if "summary" in value:
+        value["summary"] = result_text(value["summary"], 2_000)
+    if skipped is not None:
+        value["skipped"] = [
+            bounded for item in skipped
+            if (bounded := result_text(item, 1_000))
+        ]
     return value
 
 
-def load_publication_approval(folder: Path) -> dict[str, Any] | None:
-    candidates: list[tuple[float, dict[str, Any]]] = []
-    manual_path = folder / "manual-approval.json"
-    manual = _load_approval(
-        manual_path, ("branch", "issue_digest", "base_sha", "patch_digest", "reason"),
+def _load_approval(path: Path, required: tuple[str, ...], label: str) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        value = json.loads(redact_secrets(path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"{label} is unreadable: {path}") from exc
+    if not isinstance(value, dict) or value.get("status") != "approved":
+        raise RuntimeError(f"{label} is invalid: {path}")
+    if any(not isinstance(value.get(key), str) or not value[key].strip() for key in required):
+        raise RuntimeError(f"{label} is incomplete: {path}")
+    return _normalize_approval(value, path, label)
+
+
+def load_manual_approval(folder: Path) -> dict[str, Any] | None:
+    """Load a human completion record, rejecting corrupt approval state."""
+    return _load_approval(
+        manual_approval_path(folder),
+        ("branch", "issue_digest", "base_sha", "patch_digest", "reason"),
+        "Manual completion record",
     )
+
+
+def load_review_approval(folder: Path) -> dict[str, Any] | None:
+    """Load an automated review record, rejecting corrupt approval state."""
+    return _load_approval(
+        review_approval_path(folder),
+        ("branch", "issue_digest", "base_sha", "patch_digest"),
+        "Automated review approval",
+    )
+
+
+def load_publication_approval(
+    folder: Path, *,
+    manual_loader: Callable[[Path], dict[str, Any] | None] | None = None,
+    review_loader: Callable[[Path], dict[str, Any] | None] | None = None,
+) -> dict[str, Any] | None:
+    """Load the newest human or automated approval available for publication."""
+    candidates: list[tuple[float, dict[str, Any]]] = []
+    manual_loader = manual_loader or load_manual_approval
+    review_loader = review_loader or load_review_approval
+    manual_path = manual_approval_path(folder)
+    manual = manual_loader(folder)
     if manual is not None:
         manual["kind"] = "manual"
         candidates.append((manual_path.stat().st_mtime, manual))
     review_path = review_approval_path(folder)
-    review_approval = _load_approval(
-        review_path, ("branch", "issue_digest", "base_sha", "patch_digest"),
-    )
+    review_approval = review_loader(folder)
     if review_approval is not None:
         candidates.append((review_path.stat().st_mtime, review_approval))
     return max(candidates, key=lambda item: item[0])[1] if candidates else None
+
+
+def record_manual_approval(run: Run, issue: Issue, base: str, base_sha: str,
+                           patch_digest: str, folder: Path, reason: str) -> dict[str, Any]:
+    """Persist a human completion decision tied to the exact current patch."""
+    approval = {
+        "status": "approved",
+        "issue": issue.reference,
+        "issue_digest": issue_fingerprint(issue),
+        "branch": run.branch,
+        "base": base,
+        "base_sha": base_sha,
+        "patch_digest": patch_digest,
+        "reason": result_text(reason, 2_000) or "Manually marked done by user",
+        "marked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    atomic_write_json(manual_approval_path(folder), approval)
+    return approval
 
 
 def record_review_approval(run: Run, issue: Issue, base: str, base_sha: str,
@@ -264,8 +331,10 @@ def record_review_approval(run: Run, issue: Issue, base: str, base_sha: str,
 
 __all__ = [
     "clear_blocked", "clear_result", "developer_attempts", "latest_numbered_log",
-    "load_blocked", "load_latest_developer_report", "load_publication_approval",
+    "load_blocked", "load_latest_developer_report", "load_manual_approval",
+    "load_publication_approval", "load_review_approval",
     "local_resume_task_file", "next_log", "record_blocked", "record_no_code_changes_blocked",
-    "record_result", "record_review_approval", "result_text", "review_approval_path",
+    "record_manual_approval", "record_result", "record_review_approval", "result_text",
+    "manual_approval_path", "review_approval_path",
     "review_reason", "resume_action",
 ]
