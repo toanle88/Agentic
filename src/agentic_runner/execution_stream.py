@@ -607,7 +607,13 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
             pass
         else:
             raise ValueError("provider output directory must be outside durable run state")
+    raw_file = None
+    human_log = None
+    proc = None
     try:
+        raw_path = log_file.with_suffix(".jsonl") if codex_json else None
+        raw_file = raw_path.open("w", encoding="utf-8") if raw_path else None
+        human_log = log_file.open("w", encoding="utf-8", buffering=1)
         process_argv = sandbox_command(
             argv, cwd, sandbox, output_root=output_root, read_only=sandbox_read_only,
             pass_env=sandbox_pass_env, env=env,
@@ -618,10 +624,18 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
             bufsize=1, env=env, **_process_group_kwargs(),
         )
     except OSError as exc:
+        if human_log is not None:
+            human_log.close()
+        if raw_file is not None:
+            raw_file.close()
         if invocation_temp is not None:
             invocation_temp.cleanup()
         raise RuntimeError(f"Could not start {argv[0]!r}: {exc}") from exc
     except Exception:
+        if human_log is not None:
+            human_log.close()
+        if raw_file is not None:
+            raw_file.close()
         if invocation_temp is not None:
             invocation_temp.cleanup()
         raise
@@ -652,13 +666,11 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
     last_notice = started
     tail = ""
     timed_out = False
-    raw_path = log_file.with_suffix(".jsonl") if codex_json else None
-    raw_file = raw_path.open("w", encoding="utf-8") if raw_path else None
     raw_bytes = 0
     raw_log_truncated = False
     human_log_truncated = False
     try:
-        with log_file.open("w", encoding="utf-8", buffering=1) as human_log:
+        with human_log:
             live_status = False
             live_status_enabled = bool(getattr(sys.stdout, "isatty", lambda: False)())
             last_heartbeat_log: float | None = None
@@ -812,17 +824,17 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                 f"Finished in {seconds}s (exit {code})" + (" [TIMEOUT]" if timed_out else ""),
                 style_status_tokens=True,
             )
-            if metrics_folder is not None:
-                record_operation(
-                    metrics_folder, label.lower(), log_file.stem,
-                    started_at=started_at.isoformat(timespec="milliseconds"),
-                    finished_at=datetime.datetime.now(datetime.timezone.utc).isoformat(
-                        timespec="milliseconds"
-                    ),
-                    duration_seconds=time.monotonic() - started,
-                    status="timeout" if timed_out else "completed" if code == 0 else "failed",
-                    exit_code=124 if timed_out else code,
-                )
+        if metrics_folder is not None:
+            record_operation(
+                metrics_folder, label.lower(), log_file.stem,
+                started_at=started_at.isoformat(timespec="milliseconds"),
+                finished_at=datetime.datetime.now(datetime.timezone.utc).isoformat(
+                    timespec="milliseconds"
+                ),
+                duration_seconds=time.monotonic() - started,
+                status="timeout" if timed_out else "completed" if code == 0 else "failed",
+                exit_code=124 if timed_out else code,
+            )
     except KeyboardInterrupt:
         _append_bounded_human_log(
             log_file,
@@ -833,8 +845,13 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
         proc.wait()
         raise
     finally:
+        if proc.poll() is None:
+            _stop_process_tree(proc)
+            proc.wait()
         if proc.stdout:
             proc.stdout.close()
+        if human_log:
+            human_log.close()
         if raw_file:
             raw_file.close()
         if invocation_temp is not None:

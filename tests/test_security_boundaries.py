@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from subprocess import CompletedProcess
 from unittest.mock import patch
 
 import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
@@ -11,6 +12,7 @@ from agentic_runner import execution as agentic_execution
 from agentic_runner import dashboard_data as agentic_dashboard_data
 from agentic_runner import openrouter as agentic_openrouter
 import agentic_runner.sandbox as agentic_sandbox
+import agentic_runner.execution_stream as execution_stream
 from agentic_runner.openrouter_tools import _openrouter_tool_call
 from agentic_runner.config import PROVIDER_API_KEY_ENV, provider_process_environment
 from agentic_runner.sandbox import sandbox_command, validate_sandbox
@@ -112,6 +114,74 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
             self.assertNotIn(value, message)
             for path in (root / "review.txt", root / "review.log", root / "review.jsonl"):
                 self.assertNotIn(value, path.read_text(encoding="utf-8"))
+
+    def test_native_readonly_providers_use_a_protected_file_free_view(self):
+        value = 'native-review-secret-123456'
+        with tempfile.TemporaryDirectory() as temp, patch.dict(
+            "os.environ", {"SERVICE_VALUE": value}, clear=True
+        ):
+            root = Path(temp)
+            (root / ".env").write_text(value, encoding="utf-8")
+            (root / "safe.py").write_text("print('safe')\n", encoding="utf-8")
+            provider_script = (
+                "import pathlib; print(f'env={pathlib.Path(\".env\").exists()} "
+                "safe={pathlib.Path(\"safe.py\").exists()}')"
+            )
+            for provider in ("gemini", "claude", "copilot"):
+                with self.subTest(provider=provider), patch(
+                    "agentic_execution.cli_provider_command",
+                    return_value=([sys.executable, "-c", provider_script], False),
+                ):
+                    ok, message = agentic_execution.run_cli_provider(
+                        root, "review", output=root / f"{provider}.txt",
+                        provider=provider, readonly=True, api_key_env="SERVICE_VALUE",
+                        permission_policy={"read_files": True}, timeout=10,
+                    )
+                self.assertTrue(ok)
+                self.assertIn("env=False safe=True", message)
+                self.assertNotIn(value, message)
+
+    def test_codex_readonly_uses_a_protected_file_free_worktree(self):
+        value = "codex-review-secret-123456"
+        with tempfile.TemporaryDirectory() as temp, patch.dict(
+            "os.environ", {"OPENAI_API_KEY": value}, clear=True
+        ):
+            root = Path(temp)
+            (root / ".env").write_text(value, encoding="utf-8")
+            (root / "safe.py").write_text("print('safe')\n", encoding="utf-8")
+
+            def fake_stream(argv, cwd, **kwargs):
+                self.assertNotEqual(cwd, root)
+                self.assertFalse((cwd / ".env").exists())
+                self.assertTrue((cwd / "safe.py").is_file())
+                result_path = Path(argv[argv.index("--output-last-message") + 1])
+                result_path.write_text("reviewed", encoding="utf-8")
+                return CompletedProcess(argv, 0, stdout="")
+
+            with patch(
+                "agentic_execution.streamed_command", side_effect=fake_stream
+            ):
+                ok, message = agentic_execution.run_codex(
+                    root, "review", output=root / "review.txt", readonly=True,
+                    api_key_env="OPENAI_API_KEY", timeout=10,
+                )
+
+            self.assertTrue(ok)
+            self.assertEqual(message, "reviewed")
+            self.assertNotIn(value, (root / "review.txt").read_text(encoding="utf-8"))
+
+    def test_streamed_command_opens_logs_before_starting_process(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            log = root / "not-a-file.log"
+            log.mkdir()
+            with patch.object(execution_stream.subprocess, "Popen") as popen:
+                with self.assertRaises(RuntimeError):
+                    streamed_command(
+                        [sys.executable, "-c", "print('unexpected')"], root,
+                        label="TESTS", log_file=log, timeout=10,
+                    )
+            popen.assert_not_called()
 
     def test_synthetic_credentials_stay_out_of_streams_and_durable_channels(self):
         value = "sk-proj-synthetic-channel-123456"

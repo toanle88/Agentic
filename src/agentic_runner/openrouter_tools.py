@@ -13,6 +13,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -664,62 +665,104 @@ def _bounded_file_text(path: Path, *, start_line: int | None = None,
     return text
 
 
-_FILE_LIST_CACHE: OrderedDict[
-    tuple[str, str], tuple[tuple[str, ...], tuple[tuple[str, int, int], ...]]
-] = OrderedDict()
+@dataclass
+class _FileListIndex:
+    """Lazily materialized, protected file listing for one worktree path."""
+
+    target: Path
+    root: Path
+    paths: list[str] = field(default_factory=list)
+    metadata: list[tuple[str, int, int]] = field(default_factory=list)
+    walker: Any | None = None
+    pending_current: Path | None = None
+    pending_filenames: list[str] = field(default_factory=list)
+    pending_index: int = 0
+    complete: bool = False
+
+    def _advance(self, limit: int) -> None:
+        while not self.complete and len(self.paths) < limit:
+            if self.pending_current is None:
+                if self.walker is None:
+                    self.walker = os.walk(self.target, topdown=True, followlinks=False)
+                try:
+                    current, directories, filenames = next(self.walker)
+                except StopIteration:
+                    self.complete = True
+                    return
+                directories[:] = [directory for directory in directories if not sensitive_read(
+                    (Path(current) / directory).relative_to(self.root).as_posix()
+                )]
+                directories.sort()
+                filenames.sort()
+                current_path = Path(current)
+                try:
+                    stat = current_path.stat()
+                    relative = current_path.relative_to(self.root).as_posix()
+                except (OSError, ValueError):
+                    continue
+                self.metadata.append((relative, stat.st_mtime_ns, stat.st_size))
+                self.pending_current = current_path
+                self.pending_filenames = filenames
+                self.pending_index = 0
+                if not filenames:
+                    self.pending_current = None
+                    continue
+            filename = self.pending_filenames[self.pending_index]
+            self.pending_index += 1
+            item = self.pending_current / filename
+            try:
+                resolved_item = item.resolve()
+                relative_item = resolved_item.relative_to(self.root).as_posix()
+            except (OSError, ValueError):
+                if self.pending_index == len(self.pending_filenames):
+                    self.pending_current = None
+                    self.pending_filenames = []
+                    self.pending_index = 0
+                continue
+            if sensitive_read(relative_item) or not resolved_item.is_file():
+                if self.pending_index == len(self.pending_filenames):
+                    self.pending_current = None
+                    self.pending_filenames = []
+                    self.pending_index = 0
+                continue
+            self.paths.append(relative_item)
+            if self.pending_index == len(self.pending_filenames):
+                self.pending_current = None
+                self.pending_filenames = []
+                self.pending_index = 0
+
+    def ensure(self, count: int) -> None:
+        """Observe enough entries to answer a page and its continuation flag."""
+        while len(self.paths) < count and not self.complete:
+            self._advance(count)
+
+    def is_stale(self) -> bool:
+        """Check only directories observed by this bounded index so far."""
+        for relative, modified, size in self.metadata:
+            try:
+                current = (self.root / relative).stat()
+            except OSError:
+                return True
+            if current.st_mtime_ns != modified or current.st_size != size:
+                return True
+        return False
 
 
-def _directory_metadata(
-    target: Path, root: Path,
-) -> tuple[tuple[str, int, int], ...]:
-    """Return bounded metadata for directories participating in a file index."""
-    metadata: list[tuple[str, int, int]] = []
-    for current, directories, _filenames in os.walk(target, topdown=True, followlinks=False):
-        directories[:] = [directory for directory in directories if not sensitive_read(
-            (Path(current) / directory).relative_to(root).as_posix()
-        )]
-        directories.sort()
-        current_path = Path(current)
-        try:
-            stat = current_path.stat()
-            relative = current_path.relative_to(root).as_posix()
-        except (OSError, ValueError):
-            continue
-        metadata.append((relative, stat.st_mtime_ns, stat.st_size))
-    return tuple(metadata)
+_FILE_LIST_CACHE: OrderedDict[tuple[str, str], _FileListIndex] = OrderedDict()
 
 
 def _build_file_list_index(
     target: Path, root: Path,
-) -> tuple[tuple[str, ...], tuple[tuple[str, int, int], ...]]:
-    """Build one sorted, protected-path-filtered file index."""
-    paths: list[str] = []
-    for current, directories, filenames in os.walk(target, topdown=True, followlinks=False):
-        directories[:] = [directory for directory in directories if not sensitive_read(
-            (Path(current) / directory).relative_to(root).as_posix()
-        )]
-        directories.sort()
-        filenames.sort()
-        current_path = Path(current)
-        for filename in filenames:
-            item = current_path / filename
-            try:
-                resolved_item = item.resolve()
-                relative_item = resolved_item.relative_to(root).as_posix()
-            except (OSError, ValueError):
-                continue
-            if sensitive_read(relative_item) or not resolved_item.is_file():
-                continue
-            paths.append(relative_item)
-    return tuple(paths), _directory_metadata(target, root)
+) -> _FileListIndex:
+    """Create a lazy, sorted, protected-path-filtered file index."""
+    return _FileListIndex(target, root)
 
 
 def _list_files_page(target: Path, root: Path, page: int) -> tuple[list[str], bool]:
     """Return one deterministic page using a bounded metadata-aware index cache."""
     key = (str(root), str(target))
     cached = _FILE_LIST_CACHE.get(key)
-    metadata = _directory_metadata(target, root) if cached is not None else None
-    if cached is None or metadata != cached[1]:
+    if cached is None or cached.is_stale():
         cached = _build_file_list_index(target, root)
         _FILE_LIST_CACHE[key] = cached
         _FILE_LIST_CACHE.move_to_end(key)
@@ -727,10 +770,10 @@ def _list_files_page(target: Path, root: Path, page: int) -> tuple[list[str], bo
             _FILE_LIST_CACHE.popitem(last=False)
     else:
         _FILE_LIST_CACHE.move_to_end(key)
-    indexed_paths = cached[0]
     offset = (page - 1) * OPENROUTER_LIST_FILES_PAGE_SIZE
     end = offset + OPENROUTER_LIST_FILES_PAGE_SIZE
-    return list(indexed_paths[offset:end]), end < len(indexed_paths)
+    cached.ensure(end + 1)
+    return cached.paths[offset:end], end < len(cached.paths)
 
 
 def _stop_command_process(process: subprocess.Popen[Any]) -> None:
