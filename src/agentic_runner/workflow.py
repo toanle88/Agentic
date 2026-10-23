@@ -59,6 +59,7 @@ from .review import (
     parse_review_result,
     record_review_findings,
 )
+from .security import redact_secrets
 from .telemetry import read_run_instruction, record_workflow_outcome
 from .worktrees import (
     AUDIT_BRANCH_RE,
@@ -1693,6 +1694,111 @@ def _clean_terminal_output(text: str) -> str:
                     if character in "\n\t" or ord(character) >= 32)
 
 
+_CHANGE_SUMMARY_LIMIT = 1_800
+_CHANGE_SUMMARY_ITEM_LIMIT = 320
+_CHANGE_SUMMARY_ITEMS = 4
+_CHANGE_SECTION_RE = re.compile(
+    r"^(?:implemented|what changed|changes?(?: made)?|summary(?: of changes)?)"
+    r"\s*:?(?:\s+(.*))?$",
+    re.IGNORECASE,
+)
+_CHANGE_SECTION_END_RE = re.compile(
+    r"^(?:validation|verified|tests?|review|notes?|skipped|not implemented|"
+    r"remaining|blocker|review finding actions?)\b",
+    re.IGNORECASE,
+)
+_INLINE_IMPLEMENTATION_STATUS_RE = re.compile(
+    r"^implemented\s+(?:issue|task|audit)\b",
+    re.IGNORECASE,
+)
+
+
+def _publication_evidence(value: Any, limit: int) -> str:
+    """Bound and redact evidence before putting it in a pull-request body."""
+    return _bounded_text(
+        redact_secrets(_clean_terminal_output(str(value or ""))), limit,
+    ).strip()
+
+
+def _handoff_change_lines(developer_report: str) -> list[str]:
+    """Extract a few change claims from the developer's bounded handoff."""
+    report = _publication_evidence(developer_report, 6_000)
+    if not report:
+        return []
+    candidates: list[str] = []
+    in_change_section = False
+    for raw_line in report.splitlines():
+        line = re.sub(r"^#{1,6}\s+", "", raw_line.strip())
+        if not line:
+            if in_change_section and candidates:
+                break
+            continue
+        match = _CHANGE_SECTION_RE.match(line)
+        if match:
+            in_change_section = True
+            inline = (match.group(1) or "").strip()
+            if inline and not _INLINE_IMPLEMENTATION_STATUS_RE.match(line):
+                candidates.append(inline)
+            continue
+        if in_change_section and _CHANGE_SECTION_END_RE.match(line):
+            break
+        if not in_change_section:
+            continue
+        item = re.sub(r"^(?:[-*•]\s+|\d+[.)]\s+)", "", line).strip()
+        if item:
+            candidates.append(item)
+        if len(candidates) >= _CHANGE_SUMMARY_ITEMS:
+            break
+    unique: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        item = _publication_evidence(item, _CHANGE_SUMMARY_ITEM_LIMIT)
+        key = item.casefold()
+        if item and key not in seen:
+            unique.append(item)
+            seen.add(key)
+    return unique[:_CHANGE_SUMMARY_ITEMS]
+
+
+def _diff_stat_change_lines(patch_summary: str) -> list[str]:
+    """Turn the approved diff stat into bounded, safe summary evidence."""
+    lines: list[str] = []
+    for raw_line in _publication_evidence(patch_summary, 4_000).splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if re.match(r"^\d+\s+files? changed\b", line, re.IGNORECASE):
+            label = "Patch total: "
+        elif "|" in line or line.casefold().startswith("binary files"):
+            label = "Changed file: "
+        else:
+            continue
+        lines.append(label + line)
+        if len(lines) >= _CHANGE_SUMMARY_ITEMS + 1:
+            break
+    return lines
+
+
+def _change_summary(patch_summary: str, developer_report: str = "") -> str:
+    """Build the concise, sanitized change section for a draft PR."""
+    items = _handoff_change_lines(developer_report)
+    items.extend(_diff_stat_change_lines(patch_summary))
+    if not items:
+        items.append("The approved patch details are available in the Agentic run logs.")
+    rendered = ["## What changed", ""]
+    for item in items[:_CHANGE_SUMMARY_ITEMS + 1]:
+        safe = html.escape(_publication_evidence(item, _CHANGE_SUMMARY_ITEM_LIMIT))
+        candidate = f"- <code>{safe.replace('`', '&#96;')}</code>"
+        current_length = len("\n".join(rendered))
+        remaining = _CHANGE_SUMMARY_LIMIT - current_length - 1
+        if remaining <= len("- <code>...</code>"):
+            break
+        if len(candidate) > remaining:
+            candidate = candidate[:remaining - 3] + "..."
+        rendered.append(candidate)
+    return "\n".join(rendered)
+
+
 def _validation_summary(report: str, test_commands: list[list[str]], *, checks_ran: bool = True) -> str:
     """Format concise, safe validation evidence for a pull-request body."""
     if not checks_ran:
@@ -1759,7 +1865,7 @@ def _publish(run: Run, issue: Issue, github_repo: str, base: str,
         raise RuntimeError(
             "No approval recorded for the current patch; run --review or complete development first"
         )
-    base_sha, digest, _summary = validate_publication_approval(
+    base_sha, digest, patch_summary = validate_publication_approval(
         run, issue, base, config, approval,
     )
     # Use the same escape-sequence-aware editor as the interactive shell when
@@ -1829,18 +1935,24 @@ def _publish(run: Run, issue: Issue, github_repo: str, base: str,
     checks_ran = approval.get("kind") != "manual"
     report_path = _latest_numbered_log(folder, "tests", "txt") if checks_ran else None
     report = report_path.read_text(encoding="utf-8", errors="replace") if report_path else ""
+    developer_report = load_latest_developer_report(folder)
     if not checks_ran:
         review_section = ("## Review status\n\n"
-                          f"Manual completion approval: {approval.get('reason', '')}\n\n"
+                          "Manual completion approval: "
+                          f"{_publication_evidence(approval.get('reason', ''), 1_200)}\n\n"
                           "Automated review was not run during publication.")
     else:
         reviewer_provider = approval.get("reviewer_provider", "codex")
+        review_summary = _publication_evidence(approval.get("summary", ""), 2_000)
         review_section = (f"## Independent {reviewer_provider.title()} review\n\n"
-                          f"{approval.get('summary', '')}")
+                          f"{review_summary or 'Independent review approved the patch; no additional summary was recorded.'}")
     validation_commands = test_commands if test_commands is not None else config["test_commands"]
-    body = (f"{task_section}## Independent validation\n\n"
+    body = (f"{task_section}{_change_summary(patch_summary, developer_report)}\n\n"
+            f"## Independent validation\n\n"
             f"{_validation_summary(report, validation_commands, checks_ran=checks_ran)}\n\n"
             f"{review_section}\n\n"
+            "## Notes\n\n"
+            "Full command output and detailed telemetry are retained in the Agentic run logs.\n\n"
             "Draft PR: CI and human review still required.")
     title_prefix = "Audit" if issue.is_audit else "Task" if issue.is_local else f"Issue #{issue.number}"
     result = command([

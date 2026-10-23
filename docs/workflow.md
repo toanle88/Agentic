@@ -404,6 +404,16 @@ redrawn on terminal resize. At a publication prompt, enter `/stop` to cancel the
 foreground operation; Agentic also records its foreground job ID so `/stop JOB`
 from another shell can terminate it.
 
+Generated draft PR bodies include a `What changed` section immediately after
+the issue or task context, followed by the existing validation and
+independent-review sections, then `Notes` and the draft status reminder. The
+change summary combines the approved final diff statistics with
+up to a few lines from the latest developer handoff's implemented/summary
+section. Handoff text is bounded, redacted, stripped of terminal controls, and
+escaped before it is inserted. If the handoff or review/telemetry details are
+unavailable, the body retains the final-patch fallback and the validation,
+review-status, and run-log notes.
+
 For a local task, use `agentic --task-file task.md --publish` or resume from
 the saved task file created by the interactive shell.
 
