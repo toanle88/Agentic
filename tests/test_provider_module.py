@@ -21,7 +21,9 @@ class ProviderCommandTests(unittest.TestCase):
             model="test-model",
             reasoning_effort="high",
         )
-        self.assertEqual(command[:6], ["codex", "exec", "--json", "--sandbox", "read-only", "--model"])
+        self.assertEqual(command[:5], ["codex", "exec", "--json", "--sandbox", "read-only"])
+        self.assertIn("--skip-git-repo-check", command)
+        self.assertEqual(command[command.index("--model") + 1], "test-model")
         self.assertIn("--output-schema", command)
         self.assertIn("--output-last-message", command)
         self.assertEqual(command[-1], "inspect the task; do not execute shell text")
@@ -40,6 +42,7 @@ class ProviderCommandTests(unittest.TestCase):
 
         command = codex_command("develop")
         self.assertEqual(command[command.index("--sandbox") + 1], "workspace-write")
+        self.assertNotIn("--skip-git-repo-check", command)
 
     def test_native_provider_modes_keep_reviewer_restrictions(self):
         gemini, structured = cli_provider_command("gemini", "review", readonly=True)
