@@ -183,7 +183,7 @@ class PublicationTests(_GitRepositoryTestCase):
             verify.assert_not_called()
             run_tests.assert_not_called()
             self.assertFalse(any(c.args[0][:2] == ['gh', 'pr'] for c in mock_command.call_args_list))
-            self.assertFalse(any(c.args[0][:3] == ['git', 'push', '-u'] for c in mock_command.call_args_list))
+            self.assertFalse(any('push' in c.args[0] for c in mock_command.call_args_list))
         self.assertIn('fix.py', agentic.git(run.worktree, 'diff', '--cached', '--name-only'))
 
 
@@ -211,7 +211,7 @@ class PublicationTests(_GitRepositoryTestCase):
 
         self.assertEqual(confirm.call_count, 2)
         self.assertTrue(any('Invalid confirmation' in call.args[0] for call in status.call_args_list))
-        self.assertFalse(any(c.args[0][:3] == ['git', 'push', '-u'] for c in mock_command.call_args_list))
+        self.assertFalse(any('push' in c.args[0] for c in mock_command.call_args_list))
 
 
     def test_publish_empty_and_n_confirmations_cancel_without_publishing(self):
@@ -237,7 +237,7 @@ class PublicationTests(_GitRepositoryTestCase):
                       patch('agentic.command', wraps=agentic.command) as mock_command):
                     agentic.publish(run, issue, 'fake/repo', 'main', cfg, folder)
                 self.assertFalse(any(
-                    call_item.args[0][:3] == ['git', 'push', '-u']
+                    'push' in call_item.args[0]
                     for call_item in mock_command.call_args_list
                 ))
 
@@ -354,7 +354,10 @@ class PublicationTests(_GitRepositoryTestCase):
             run.worktree, '-c', 'core.hooksPath=/dev/null', 'commit',
             '-m', 'fix: resolve issue #30',
         ), git_mock.call_args_list)
-        self.assertIn(call(run.worktree, 'push', '-u', 'origin', run.branch), git_mock.call_args_list)
+        self.assertIn(call(
+            run.worktree, '-c', 'core.hooksPath=/dev/null',
+            'push', '-u', 'origin', run.branch,
+        ), git_mock.call_args_list)
         pr_command = next(argv for argv in commands if argv[:3] == ['gh', 'pr', 'create'])
         self.assertIn('--draft', pr_command)
         self.assertIn('--base', pr_command)
@@ -404,7 +407,7 @@ class PublicationTests(_GitRepositoryTestCase):
             return real_command(argv, cwd, **kwargs)
 
         def git_without_push(repo, *args, **kwargs):
-            if args[:2] == ('push', '-u'):
+            if args[2:4] == ('push', '-u'):
                 return ''
             return real_git(repo, *args, **kwargs)
 
@@ -433,7 +436,7 @@ class PublicationTests(_GitRepositoryTestCase):
         )
 
         def fail_on_push(_repo, *args, **_kwargs):
-            if args[:2] == ('push', '-u'):
+            if args[2:4] == ('push', '-u'):
                 raise RuntimeError('remote rejected the push')
             return ''
 
@@ -542,5 +545,8 @@ class PublicationTests(_GitRepositoryTestCase):
                 run, issue, 'owner/repo', 'main', config, folder, pull_request,
                 fetch_pr=lambda: pull_request,
             )
-        self.assertIn(call(run.worktree, 'push', '-u', 'origin', run.branch), git_mock.call_args_list)
+        self.assertIn(call(
+            run.worktree, '-c', 'core.hooksPath=/dev/null',
+            'push', '-u', 'origin', run.branch,
+        ), git_mock.call_args_list)
         self.assertFalse(any(argv[:3] == ['gh', 'pr', 'create'] for argv in commands))

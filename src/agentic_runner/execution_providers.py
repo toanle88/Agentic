@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -17,7 +18,7 @@ from .execution_stream import (
 from .guidance import guidance_phase, guidance_prompt
 from .config import PROVIDER_API_KEY_ENV, provider_process_environment
 from .persistence import atomic_write_text
-from .policy import default_permission_policy
+from .policy import default_permission_policy, sensitive_read
 from .providers import (
     cli_provider_command,
     codex_command,
@@ -47,6 +48,47 @@ def _stage_provider_input(source: Path, destination: Path) -> None:
         # The invocation directory is disposable; a platform that cannot set
         # this mode still keeps the durable source outside the provider mount.
         pass
+
+
+def _stage_readonly_worktree(source: Path, destination: Path) -> Path:
+    """Create an allowlisted read-only provider view of a worktree.
+
+    Native CLIs do not share a path-deny policy.  Staging the visible tree
+    makes the protected-file boundary provider-independent for reviewer turns.
+    Git metadata, symlinks, and paths covered by ``sensitive_read`` are never
+    copied into the provider's cwd.
+    """
+    source = source.resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+    for current, directories, filenames in os.walk(source, topdown=True, followlinks=False):
+        current_path = Path(current)
+        try:
+            relative_current = current_path.relative_to(source).as_posix()
+        except ValueError:
+            continue
+        directories[:] = [
+            directory for directory in directories
+            if not sensitive_read(
+                (Path(relative_current) / directory).as_posix()
+            )
+        ]
+        directories.sort()
+        filenames.sort()
+        for filename in filenames:
+            source_path = current_path / filename
+            if source_path.is_symlink() or not source_path.is_file():
+                continue
+            relative = source_path.relative_to(source).as_posix()
+            if sensitive_read(relative):
+                continue
+            destination_path = destination / relative
+            destination_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source_path, destination_path)
+            try:
+                destination_path.chmod(0o444)
+            except OSError:
+                pass
+    return destination
 
 
 def _read_provider_result(root: Path, name: str) -> str | None:
@@ -88,6 +130,11 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
     redaction_values = [credential_value] if credential_value else []
     with tempfile.TemporaryDirectory(prefix="agentic-provider-") as temporary_directory:
         invocation_output = Path(temporary_directory)
+        provider_worktree = worktree
+        if readonly:
+            provider_worktree = _stage_readonly_worktree(
+                worktree, invocation_output / "review-worktree",
+            )
         temporary_output = invocation_output / "result.txt"
         staged_schema: Path | None = None
         if schema is not None:
@@ -103,7 +150,7 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
         label = "REVIEW" if readonly else "DEVELOPER"
         invocation_started = time.monotonic()
         result = streamed_command(
-            args, worktree, label=label, log_file=output.with_suffix(".log"),
+            args, provider_worktree, label=label, log_file=output.with_suffix(".log"),
             timeout=timeout, codex_json=True, verbose=verbose, sandbox=sandbox,
             sandbox_read_only=readonly,
             sandbox_pass_env=(sandbox or {}).get("pass_env", []),
@@ -248,11 +295,6 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
     command_kwargs["sandbox_allow_network"] = bool(
         effective_sandbox and effective_sandbox.get("allow_network")
     )
-    args, structured = cli_provider_command(
-        provider, prompt, readonly=readonly, model=model, worktree=worktree,
-        **command_kwargs,
-    )
-
     label = "REVIEW" if readonly else "DEVELOPER"
     invocation_started = time.monotonic()
     sandbox_pass_env = list((sandbox or {}).get("pass_env", []))
@@ -266,15 +308,27 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
         process_env = dict(process_env or os.environ)
         process_env["COPILOT_GH_HOST"] = host
     with tempfile.TemporaryDirectory(prefix="agentic-provider-") as temporary_directory:
+        invocation_root = Path(temporary_directory)
+        provider_worktree = worktree
+        if readonly:
+            provider_worktree = _stage_readonly_worktree(
+                worktree, invocation_root / "review-worktree",
+            )
+        args, structured = cli_provider_command(
+            provider, prompt, readonly=readonly, model=model,
+            worktree=provider_worktree, **command_kwargs,
+        )
+        output_root = invocation_root / "output"
+        output_root.mkdir()
         result = streamed_command(
-            args, worktree, label=label, log_file=output.with_suffix(".log"),
+            args, provider_worktree, label=label, log_file=output.with_suffix(".log"),
             timeout=timeout, codex_json=structured, verbose=verbose,
             progress_parser=(lambda line: _provider_progress(line, provider)) if structured else None,
             sandbox=effective_sandbox, sandbox_read_only=readonly,
             sandbox_pass_env=sandbox_pass_env,
             metrics_folder=output.parent, env=process_env,
             redaction_values=redaction_values,
-            output_root=Path(temporary_directory),
+            output_root=output_root,
         )
     raw_path = output.with_suffix(".jsonl") if structured else None
     raw = raw_path.read_text(encoding="utf-8", errors="replace") if raw_path and raw_path.exists() else result.stdout

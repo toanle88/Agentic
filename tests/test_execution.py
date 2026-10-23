@@ -580,6 +580,28 @@ class StreamingTests(unittest.TestCase):
             for path in root.glob('test-command-*'):
                 self.assertNotIn(token, path.read_text(encoding='utf-8'))
 
+    def test_test_runner_removes_configured_credentials_from_child_environment(self):
+        from io import StringIO
+        value = 'custom-test-credential-123456'
+        with tempfile.TemporaryDirectory() as dirname, patch.dict(
+            'os.environ', {'SERVICE_VALUE': value}, clear=True
+        ):
+            root = Path(dirname)
+            sh('git', 'init', cwd=root)
+            script = 'import os; print(os.environ.get("SERVICE_VALUE", "missing"))'
+            with patch('sys.stdout', new_callable=StringIO) as output:
+                passed, report = agentic.run_tests(
+                    root,
+                    [[sys.executable, '-c', script]],
+                    folder=root,
+                    credential_names=['SERVICE_VALUE'],
+                )
+            self.assertTrue(passed)
+            self.assertIn('missing', output.getvalue())
+            self.assertIn('missing', report)
+            self.assertNotIn(value, output.getvalue())
+            self.assertNotIn(value, report)
+
     def test_verbose_streamed_codex_log_keeps_routine_progress(self):
         from io import StringIO
         with tempfile.TemporaryDirectory() as dirname:

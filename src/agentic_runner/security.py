@@ -32,6 +32,29 @@ def sensitive_environment_values(environ: Mapping[str, str] | None = None) -> li
     return sorted(values, key=len, reverse=True)
 
 
+def restricted_test_environment(
+    environ: Mapping[str, str] | None = None,
+    blocked_names: Iterable[str] = (),
+) -> tuple[dict[str, str], list[str]]:
+    """Remove credential-like variables before running repository tests.
+
+    Configured credential names are accepted separately because their names may
+    be intentionally non-semantic (for example ``SERVICE_VALUE``).  The
+    returned values are used only for output redaction and are never persisted.
+    """
+    source = os.environ if environ is None else environ
+    blocked = {str(name).casefold() for name in blocked_names}
+    safe: dict[str, str] = {}
+    removed_values: list[str] = []
+    for name, value in source.items():
+        if _SENSITIVE_ENV_NAME.search(name) or name.casefold() in blocked:
+            if len(value) >= 8:
+                removed_values.append(value)
+            continue
+        safe[name] = value
+    return safe, sorted(set(removed_values), key=len, reverse=True)
+
+
 def redact_secrets(text: str, extra_values: Iterable[str] = ()) -> str:
     """Redact credentials from terminal output, durable logs, and dashboards.
 

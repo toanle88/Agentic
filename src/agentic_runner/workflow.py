@@ -59,7 +59,7 @@ from .review import (
     parse_review_result,
     record_review_findings,
 )
-from .security import redact_secrets
+from .security import redact_secrets, restricted_test_environment
 from .telemetry import read_run_instruction, record_workflow_outcome
 from .worktrees import (
     AUDIT_BRANCH_RE,
@@ -544,11 +544,15 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
               folder: Path | None = None, timeout: int | None = None,
               sandbox: dict[str, Any] | None = None,
               deadline: float | None = None,
-              verbose: bool = False) -> tuple[bool, str]:
+              verbose: bool = False,
+              credential_names: list[str] | None = None) -> tuple[bool, str]:
     def safe_command_label(argv: list[str]) -> str:
         """Describe configured checks without persisting literal arguments."""
         return f"<configured test command: {len(argv)} argv values>"
 
+    test_environment, redaction_values = restricted_test_environment(
+        blocked_names=credential_names or (),
+    )
     results: list[str] = []
     for argv in test_commands:
         if deadline is not None and time.monotonic() >= deadline:
@@ -561,7 +565,9 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
         result = streamed_command(argv, worktree, label="TESTS", log_file=log,
                                   timeout=_remaining_timeout(deadline, timeout),
                                   heartbeat=15, sandbox=sandbox, sandbox_pass_env=[],
-                                  metrics_folder=folder, verbose=verbose)
+                                  metrics_folder=folder, verbose=verbose,
+                                  env=test_environment,
+                                  redaction_values=redaction_values)
         results.append(f"$ {display_command}\n{result.stdout[-6000:]}")
         if result.returncode:
             _status_print(f"[TESTS] FAILED (exit {result.returncode})", flush=True)
@@ -1494,6 +1500,20 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
     commands = test_commands if test_commands is not None else config["test_commands"]
     if system_prompt is None:
         system_prompt = config.get("system_prompt")
+    credential_names: list[str] = []
+    for role in ("developer", "reviewer"):
+        settings = config.get(f"{role}_agent", {})
+        if isinstance(settings, dict):
+            provider = str(settings.get("provider", "codex"))
+            name = api_key_env_for_provider(provider, settings.get("api_key_env"))
+            if name:
+                credential_names.append(name)
+    sandbox_settings = config.get("sandbox", {})
+    if isinstance(sandbox_settings, dict):
+        credential_names.extend(
+            name for name in sandbox_settings.get("pass_env", [])
+            if isinstance(name, str)
+        )
     passed, report = run_tests(
         run.worktree, commands, folder,
         timeout=_remaining_timeout(
@@ -1503,6 +1523,7 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
         sandbox=config.get("sandbox"),
         deadline=deadline,
         verbose=verbose,
+        credential_names=credential_names,
     )
     atomic_write_text(next_log(folder, "tests"), report)
     if not passed:
@@ -1678,7 +1699,7 @@ def push_existing_pr(run: Run, issue: Issue, github_repo: str, base: str,
             raise RuntimeError("Patch changed before publication push; not publishing")
     current = lookup()
     _validate_pull_request_identity(pull_request, current)
-    git(run.worktree, "push", "-u", "origin", run.branch)
+    git(run.worktree, "-c", "core.hooksPath=/dev/null", "push", "-u", "origin", run.branch)
     _status_print(f"[PUBLISH] Completed: updated PR #{pull_request.number}: {pull_request.url}")
 
 
@@ -1915,7 +1936,7 @@ def _publish(run: Run, issue: Issue, github_repo: str, base: str,
         )
         if current_base_sha != base_sha or current_digest != digest:
             raise RuntimeError("Patch changed before publication push; not publishing")
-    git(run.worktree, "push", "-u", "origin", run.branch)
+    git(run.worktree, "-c", "core.hooksPath=/dev/null", "push", "-u", "origin", run.branch)
     if issue.is_audit:
         audit = load_audit_report(folder, issue.audit_key or AUDIT_KEY) or {}
         audit_findings = audit.get("findings", [])
