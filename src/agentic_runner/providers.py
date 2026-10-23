@@ -271,6 +271,11 @@ def codex_command(
         )
     sandbox_mode = "read-only" if readonly or not policy.get("edit_files", False) else "workspace-write"
     args = ["codex", "exec", "--json", "--sandbox", sandbox_mode]
+    if readonly:
+        # Read-only reviews run against an allowlisted staged tree without
+        # Git metadata, so Codex must not reject the temporary cwd before it
+        # can inspect the files.
+        args.append("--skip-git-repo-check")
     if model:
         args += ["--model", model]
     if reasoning_effort:
