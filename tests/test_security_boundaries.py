@@ -639,7 +639,7 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
                 worktree, settings, output_root=invocation, read_only=True,
             )
             mounts = [value for index, value in enumerate(command) if command[index - 1] == "-v"]
-            self.assertIn(f"{invocation}:/agentic-output:rw", mounts)
+            self.assertIn(f"{invocation.resolve()}:/agentic-output:rw", mounts)
             self.assertNotIn(f"{durable}:/agentic-output:rw", mounts)
             self.assertNotIn(f"{durable}:/workspace:rw", mounts)
 

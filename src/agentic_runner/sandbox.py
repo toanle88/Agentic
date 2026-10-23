@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import subprocess
 from typing import Any
@@ -24,8 +24,17 @@ def _relative_path_setting(name: str, value: Any, *, default: str | None = None)
         return default
     if not isinstance(value, str) or not value.strip() or any(char in value for char in "\r\n\x00"):
         raise ValueError(f"sandbox.{name} must be a nonempty relative path")
-    path = Path(value)
-    if path.is_absolute() or ".." in path.parts:
+    # Validate both path syntaxes so a configuration written on one platform
+    # cannot bypass the repository boundary when read on another.
+    posix_path = PurePosixPath(value)
+    windows_path = PureWindowsPath(value)
+    if (
+        Path(value).is_absolute()
+        or posix_path.is_absolute()
+        or windows_path.is_absolute()
+        or ".." in posix_path.parts
+        or ".." in windows_path.parts
+    ):
         raise ValueError(f"sandbox.{name} must stay within the repository")
     return value
 

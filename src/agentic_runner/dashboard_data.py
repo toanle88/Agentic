@@ -488,11 +488,11 @@ def _all_log_files(folder: Path) -> list[Path]:
     ]
 
 
-def _folder_signature(folder: Path) -> tuple[tuple[str, int, int], ...]:
+def _folder_signature(folder: Path) -> tuple[tuple[str, int, int, int], ...]:
     """Return cache metadata for regular artifacts with one directory scan."""
     if not folder.is_dir():
         return ()
-    signature: list[tuple[str, int, int]] = []
+    signature: list[tuple[str, int, int, int]] = []
     try:
         entries = os.scandir(folder)
         with entries:
@@ -503,7 +503,10 @@ def _folder_signature(folder: Path) -> tuple[tuple[str, int, int], ...]:
                     stat = entry.stat(follow_symlinks=False)
                 except OSError:
                     continue
-                signature.append((entry.name, stat.st_size, stat.st_mtime_ns))
+                # Windows can retain the same nanosecond mtime for two rapid
+                # writes.  ctime is the metadata-change clock there and also
+                # strengthens cache invalidation on other filesystems.
+                signature.append((entry.name, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
     except OSError:
         return ()
     return tuple(sorted(signature))

@@ -102,7 +102,7 @@ class ProviderCommandTests(unittest.TestCase):
         command, _ = cli_provider_command(
             "copilot", "review", readonly=False,
             permission_policy={"run_checks": False},
-            worktree=Path("/tmp/agentic-worktree"),
+            worktree=Path("/tmp/agentic-worktree").resolve(),
         )
         available = command[command.index("--available-tools") + 1]
         self.assertNotIn("bash", available.split(","))

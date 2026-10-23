@@ -43,7 +43,12 @@ def _readonly_git_unsafe_patterns(prefix: str) -> list[str]:
 
 def _provider_worktree_scope(worktree: Path | None, *, sandbox_enabled: bool) -> Path:
     """Return the path visible to a native provider for worktree rules."""
-    return (Path("/workspace") if sandbox_enabled else (worktree or Path.cwd())).resolve()
+    # This is a path inside the provider's container, not a host path.  Do
+    # not resolve it through the host filesystem (which turns it into a
+    # drive-qualified Windows path such as ``D:\\workspace``).
+    if sandbox_enabled:
+        return Path("/workspace")
+    return (worktree or Path.cwd()).resolve()
 
 
 def _network_shell_patterns(prefix: str) -> list[str]:
@@ -311,11 +316,16 @@ def copilot_candidate_paths(environ: Mapping[str, str] | None = None) -> list[Pa
     """Return known host paths used by the GitHub CLI Copilot installer."""
     environment = os.environ if environ is None else environ
     data_home_value = environment.get("XDG_DATA_HOME")
-    data_home = (
-        Path(data_home_value).expanduser()
-        if data_home_value
-        else Path.home() / ".local" / "share"
-    )
+    if data_home_value:
+        data_home = Path(data_home_value).expanduser()
+    else:
+        try:
+            data_home = Path.home() / ".local" / "share"
+        except RuntimeError:
+            # A deliberately minimal child environment may not contain any
+            # home-directory variables.  Provider discovery is optional and
+            # must not make an otherwise valid invocation fail.
+            return []
     candidates = [data_home / "gh" / "copilot" / "copilot"]
     if os.name == "nt":
         candidates.append(data_home / "gh" / "copilot" / "copilot.exe")

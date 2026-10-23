@@ -2,6 +2,7 @@
 import json
 import os
 import subprocess
+import shutil
 import sys
 import tempfile
 import time
@@ -587,7 +588,7 @@ class StreamingTests(unittest.TestCase):
             'os.environ', {'SERVICE_VALUE': value}, clear=True
         ):
             root = Path(dirname)
-            sh('git', 'init', cwd=root)
+            sh(shutil.which('git') or 'git', 'init', cwd=root)
             script = 'import os; print(os.environ.get("SERVICE_VALUE", "missing"))'
             with patch('sys.stdout', new_callable=StringIO) as output:
                 passed, report = agentic.run_tests(

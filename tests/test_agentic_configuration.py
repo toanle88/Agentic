@@ -608,7 +608,8 @@ class ConfigurationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             repo = Path(temp)
             data_home = repo / 'xdg-data'
-            executable = data_home / 'gh' / 'copilot' / 'copilot'
+            executable_name = 'copilot.exe' if os.name == 'nt' else 'copilot'
+            executable = data_home / 'gh' / 'copilot' / executable_name
             executable.parent.mkdir(parents=True)
             executable.write_text('#!/bin/sh\n', encoding='utf-8')
             executable.chmod(0o755)

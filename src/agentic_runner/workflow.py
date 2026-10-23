@@ -434,19 +434,28 @@ def _whitespace_check(worktree: Path, timeout: int) -> str:
     )
     if untracked.returncode:
         return untracked.stdout.strip() or "git ls-files failed"
-    for path in filter(None, untracked.stdout.split("\x00")):
-        candidate = command(
-            [
-                "git", "-c", "core.whitespace=cr-at-eol", "-c", "diff.external=",
-                "diff", "--no-ext-diff", "--no-textconv", "--no-index", "--check",
-                "--", os.devnull, path,
-            ],
-            worktree, timeout=timeout, check=False,
-        )
+    empty_file = tempfile.NamedTemporaryFile(prefix="agentic-empty-", delete=False)
+    empty_path = Path(empty_file.name)
+    empty_file.close()
+    try:
+        for path in filter(None, untracked.stdout.split("\x00")):
+            candidate = command(
+                [
+                    "git", "-c", "core.whitespace=cr-at-eol", "-c", "diff.external=",
+                    "diff", "--no-ext-diff", "--no-textconv", "--no-index", "--check",
+                    "--", str(empty_path), path,
+                ],
+                worktree, timeout=timeout, check=False,
+            )
         # --no-index returns 1 for a clean difference and 3 when it reports
         # whitespace errors.
-        if candidate.returncode not in (0, 1):
-            return candidate.stdout.strip()
+            if candidate.returncode not in (0, 1):
+                return candidate.stdout.strip()
+    finally:
+        try:
+            empty_path.unlink()
+        except OSError:
+            pass
     return ""
 
 
