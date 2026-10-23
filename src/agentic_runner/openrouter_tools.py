@@ -130,7 +130,12 @@ def _safe_read_worktree_path(
             if current.is_symlink():
                 raise ValueError("symbolic links are not allowed for worktree reads")
     target = _safe_worktree_path(worktree, relative)
-    normalized = target.relative_to(root).as_posix()
+    try:
+        normalized = target.relative_to(root).as_posix()
+    except ValueError as exc:
+        # pathlib's Windows error includes the host path, which is both noisy
+        # and inconsistent with the boundary errors on POSIX.
+        raise ValueError("path must stay inside the worktree") from exc
     if sensitive_read(normalized):
         raise ValueError(protected_error)
     return target

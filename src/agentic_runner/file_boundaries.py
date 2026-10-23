@@ -31,6 +31,14 @@ def _supports_anchored_traversal() -> bool:
     )
 
 
+def _is_reparse_or_symbolic_link(path: Path) -> bool:
+    """Return whether a path component redirects through another object."""
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    return bool(is_junction is not None and is_junction())
+
+
 def _parts(relative: str | Path) -> list[str]:
     path = Path(relative)
     if path.is_absolute() or ".." in path.parts:
@@ -81,6 +89,122 @@ def _walk_to_parent(root: Path, parts: list[str], *, create: bool) -> tuple[int,
         raise
 
 
+def _validate_windows_path_components(
+    root: Path, parts: list[str], *, create: bool, description: str,
+) -> Path:
+    """Validate a Windows path when POSIX ``dir_fd`` traversal is unavailable.
+
+    Windows does not expose Python's ``dir_fd``/``O_NOFOLLOW`` primitives.
+    Keep the existing safe behavior for ordinary Windows worktrees by
+    validating every component, rejecting reparse points, and checking the
+    resolved target before and after opening it.  The descriptor identity
+    check in ``open_single_link_regular`` still rejects a final-component
+    replacement between the metadata check and ``os.open``.
+    """
+    root = root.resolve(strict=True)
+    if not root.is_dir() or _is_reparse_or_symbolic_link(root):
+        raise ValueError(f"{description} root must be a real directory")
+    current = root
+    for index, part in enumerate(parts):
+        current /= part
+        is_final = index == len(parts) - 1
+        if _is_reparse_or_symbolic_link(current):
+            raise ValueError(f"symbolic links are not allowed for {description}")
+        if current.exists():
+            if not is_final and not current.is_dir():
+                raise NotADirectoryError(str(current))
+            continue
+        if not create:
+            raise FileNotFoundError(str(current))
+        if not is_final:
+            current.mkdir()
+    target = root.joinpath(*parts)
+    resolved = target.resolve(strict=False)
+    if not resolved.is_relative_to(root):
+        raise ValueError(f"{description} must stay inside the worktree")
+    return target
+
+
+def _open_relative_regular_without_dir_fd(
+    root: Path,
+    parts: list[str],
+    flags: int,
+    mode: int,
+    *,
+    create_parents: bool,
+    description: str,
+) -> tuple[int, tuple[int, int]]:
+    """Use the validated Windows path fallback for regular-file operations."""
+    target = _validate_windows_path_components(
+        root, parts, create=create_parents, description=description,
+    )
+    descriptor, expected_identity = open_single_link_regular(
+        target, flags | getattr(os, "O_NONBLOCK", 0), mode,
+        description=description,
+    )
+    try:
+        resolved = target.resolve(strict=False)
+        if not resolved.is_relative_to(root.resolve(strict=True)):
+            raise ValueError(f"{description} must stay inside the worktree")
+        return descriptor, expected_identity
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _iter_safe_regular_files_without_dir_fd(
+    root: Path,
+    parts: list[str],
+    *,
+    skip: Callable[[str], bool] | None,
+    max_entries: int | None,
+    max_directories: int | None,
+) -> Iterator[tuple[str, str, os.stat_result]]:
+    """Walk regular files on Windows without following directory links."""
+    target = _validate_windows_path_components(
+        root, parts, create=False, description="directory",
+    )
+    if not target.is_dir():
+        raise NotADirectoryError(str(target))
+    stack: list[tuple[Path, str]] = [(target, "/".join(parts))]
+    entries_seen = 0
+    directories_seen = 0
+    while stack:
+        directory, directory_relative = stack.pop()
+        directories_seen += 1
+        if max_directories is not None and directories_seen > max_directories:
+            raise SafeTraversalUnavailable("directory listing exceeded its safety bound")
+        directory_metadata = directory.stat()
+        yield ("directory", directory_relative, directory_metadata)
+        children: list[tuple[Path, str, os.stat_result]] = []
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                entries_seen += 1
+                if max_entries is not None and entries_seen > max_entries:
+                    raise SafeTraversalUnavailable("directory listing exceeded its safety bound")
+                child_relative = "/".join(
+                    item for item in (directory_relative, entry.name) if item
+                )
+                if skip is not None and skip(child_relative):
+                    continue
+                child = Path(entry.path)
+                if _is_reparse_or_symbolic_link(child):
+                    continue
+                try:
+                    metadata = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                children.append((child, child_relative, metadata))
+        children.sort(key=lambda item: item[1])
+        subdirectories: list[tuple[Path, str]] = []
+        for child, child_relative, metadata in children:
+            if stat.S_ISDIR(metadata.st_mode):
+                subdirectories.append((child, child_relative))
+            elif stat.S_ISREG(metadata.st_mode):
+                yield ("file", child_relative, metadata)
+        stack.extend(reversed(subdirectories))
+
+
 def open_relative_regular(
     root: Path,
     relative: str | Path,
@@ -99,6 +223,11 @@ def open_relative_regular(
     parts = _parts(relative)
     if not parts:
         raise ValueError(f"{description} must name a file")
+    if not _supports_anchored_traversal():
+        return _open_relative_regular_without_dir_fd(
+            root, parts, flags, mode, create_parents=create_parents,
+            description=description,
+        )
     parent, name = _walk_to_parent(root, parts, create=create_parents)
     try:
         open_flags = flags | os.O_NOFOLLOW
@@ -128,6 +257,12 @@ def iter_safe_regular_files(
 ) -> Iterator[tuple[str, str, os.stat_result]]:
     """Yield ``(kind, relative_path, metadata)`` without raced parents."""
     parts = _parts(relative)
+    if not _supports_anchored_traversal():
+        yield from _iter_safe_regular_files_without_dir_fd(
+            root, parts, skip=skip, max_entries=max_entries,
+            max_directories=max_directories,
+        )
+        return
     root_descriptor = _open_root_directory(root)
     current = root_descriptor
     stack: list[tuple[int, str]] = []
