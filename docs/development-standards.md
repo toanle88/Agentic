@@ -12,6 +12,22 @@ design choices in [`decisions/`](decisions/).
 - Treat unavailable external services as an explicit skipped check, not as a
   reason to weaken or delete a test.
 
+## Native Windows validation
+
+Native Windows CI is a supported execution environment, so a Linux or WSL pass
+does not prove Windows behavior. When a Windows check fails, inspect the
+Windows traceback first and preserve the platform contract rather than
+weakening the test.
+
+- Use `pathlib` or `os.fspath` and platform-native expected values; do not
+  hard-code POSIX separators, `/tmp` paths, Unix execute bits, or shell syntax.
+- Cover minimal home and temporary-directory environments, `PATHEXT` and
+  extensionless executables, CRLF/EOF handling, argv quoting, process-tree
+  cleanup, and Windows Git/worktree behavior when those contracts are relevant.
+- Run focused Windows-sensitive tests before the full offline suite. If native
+  Windows is unavailable locally, report that validation as skipped instead of
+  claiming Linux or WSL emulation is equivalent.
+
 ## Naming and boundaries
 
 - Use descriptive `snake_case` for Python functions and variables and
