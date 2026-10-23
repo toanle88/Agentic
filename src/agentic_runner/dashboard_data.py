@@ -64,7 +64,7 @@ if os.name == "nt":
         ]
 
 
-    def _windows_file_change_time(path: Path, fallback: int) -> int:
+    def _windows_file_change_time(path: str | Path, fallback: int) -> int:
         """Read NTFS ChangeTime without reading the artifact contents."""
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.CreateFileW.restype = wintypes.HANDLE
@@ -552,7 +552,7 @@ def _folder_signature(folder: Path) -> tuple[tuple[str, int, int, int | str], ..
                 # writes.  Its native ChangeTime is more reliable than
                 # Python's creation-time-compatible st_ctime on Windows.
                 change_time = (
-                    f"{_windows_file_change_time(Path(entry.path), stat.st_ctime_ns)}:"
+                    f"{_windows_file_change_time(entry.path, stat.st_ctime_ns)}:"
                     f"{getattr(stat, 'st_ino', 0)}"
                     if os.name == "nt" else stat.st_ctime_ns
                 )
