@@ -224,6 +224,12 @@ GitHub repository operations use `github_host` through a per-process `GH_HOST`
 environment override. A Copilot provider can use a different Enterprise Cloud
 or data-residency host with its role-specific `host` setting:
 
+Completed online GitHub issue runs also use the authenticated GitHub CLI to
+read existing issue comments and write one idempotent final summary comment.
+The identity must have permission to read and write issue comments. This is
+automatic and has no configuration flag; offline resumes, local tasks, and
+audits do not use it.
+
 ```json
 {
   "github_host": "github.com",

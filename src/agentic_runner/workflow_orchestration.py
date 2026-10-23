@@ -265,6 +265,11 @@ def develop(
             )
             next_action = (f"python agentic.py --issue {issue.number} --publish"
                            if not issue.is_local else "rerun with --publish to create a GitHub draft PR")
+            record_result(
+                folder, "APPROVED", attempts=attempt + 1,
+                max_retries=config["max_retries"], reason=resume_reason,
+                worktree=run.worktree, next_action=next_action,
+            )
             print_run_summary(
                 run, "APPROVED", next_action, reason=resume_reason, logs_path=folder,
             )

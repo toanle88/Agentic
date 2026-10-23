@@ -521,6 +521,8 @@ class WorkflowTests(_GitRepositoryTestCase):
         self.assertIn('Evidence:', second_prompt)
         usage = json.loads((folder / 'run.json').read_text(encoding='utf-8'))
         self.assertEqual(usage['workflow_metrics']['review_findings'], 1)
+        result = json.loads((folder / 'result.json').read_text(encoding='utf-8'))
+        self.assertEqual(result['status'], 'APPROVED')
 
 
     def test_develop_reports_attempts_and_stops_after_five_retries(self):
@@ -773,7 +775,8 @@ class WorkflowTests(_GitRepositoryTestCase):
 
         run_agent.assert_called_once()
         self.assertFalse((folder / 'blocked.json').exists())
-        self.assertFalse((folder / 'result.json').exists())
+        result = json.loads((folder / 'result.json').read_text(encoding='utf-8'))
+        self.assertEqual(result['status'], 'APPROVED')
         self.assertIn('[RESUME] Issue changed since the previous blocked run; resumed development.',
                       output.getvalue())
         self.assertIn('Reason:   Issue changed since the previous blocked run; resumed development.',
@@ -819,7 +822,8 @@ class WorkflowTests(_GitRepositoryTestCase):
 
         resumed_agent.assert_called_once()
         self.assertFalse((folder / 'blocked.json').exists())
-        self.assertFalse((folder / 'result.json').exists())
+        result = json.loads((folder / 'result.json').read_text(encoding='utf-8'))
+        self.assertEqual(result['status'], 'APPROVED')
         self.assertIn('[RESUME] Issue changed since the previous blocked run; resumed development.',
                       output.getvalue())
 

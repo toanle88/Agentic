@@ -34,6 +34,7 @@ Agentic is intentionally small and uses the Python standard library at runtime.
 | `src/agentic_runner/models.py` | Immutable task, run, state, and provider configuration models. |
 | `src/agentic_runner/security.py` | Shared credential redaction for logs and dashboard output. |
 | `src/agentic_runner/telemetry.py` | Optional provider usage normalization and durable cost records. |
+| `src/agentic_runner/github_comments.py` | Bounded, idempotent final comments for online GitHub issue runs. |
 | `src/agentic_runner/sandbox.py` | Optional Docker/Podman command wrapping for providers, OpenRouter tool commands, and checks. |
 | `scripts/agent_benchmark.py` | Compatibility-facing benchmark CLI and scenario aggregation orchestration. |
 | `scripts/agent_benchmark_config.py` | Benchmark corpus schema, safe path validation, and argv placeholder rendering. |
@@ -41,7 +42,7 @@ Agentic is intentionally small and uses the Python standard library at runtime.
 | `scripts/agent_benchmark_reporting.py` | Provider-neutral aggregation of normalized benchmark scenario metrics. |
 | `agent_config.json` | Target-repository checks and per-run policy settings. |
 | Git worktrees | Isolate issue, local-task, or repository-audit changes from the base checkout and preserve unfinished work. |
-| GitHub CLI | Read issues and publish an explicitly approved branch/PR. |
+| GitHub CLI | Read issues, post terminal comments, and publish an explicitly approved branch/PR. |
 | Provider adapters | Run Codex, Gemini, Claude Code, GitHub Copilot, or OpenRouter for developer/reviewer turns. |
 
 `agentic init` and `agentic doctor` are local setup tools. Initialization creates ignored, target-specific configuration; doctor performs prerequisite checks without running the full project test suite.
@@ -115,7 +116,10 @@ boundary, and streamed output is redacted into run artifacts. Tests and the
 read-only reviewer consume the worktree and recorded evidence; publication
 consumes only an approved, revalidated patch. Repository guidance follows the
 same prompt path as other bounded context, while its source files remain in
-the worktree and only a sanitized inventory enters run metadata.
+the worktree and only a sanitized inventory enters run metadata. Terminal
+result state for online GitHub issue runs is converted into one allowlisted,
+redacted issue comment after the result is recorded; local tasks, audits, and
+offline resumes do not perform this external write.
 
 ## Extension points
 

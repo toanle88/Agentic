@@ -20,6 +20,7 @@ Agentic is designed for human-supervised development. It does not silently commi
 - Centralized user-level state so target repositories stay clean.
 - WSL/Windows Git worktree compatibility when supported by both Git installations.
 - Secret redaction in provider, test, and dashboard output.
+- Automatic concise final comments on completed online GitHub issue runs.
 - Machine-readable diagnostics and worktree status for shell automation.
 
 ## Requirements
@@ -212,6 +213,13 @@ set `"task_source": "local"` in the target's ignored `agent_config.json`, then
 run `/run` in the interactive shell and finish the pasted task with `/done`.
 Local tasks use the same review and resume flow and can still be published as
 GitHub draft pull requests.
+
+Completed online issue runs automatically post one concise, redacted summary
+comment to the related issue. The comment reports the terminal result, test and
+review status, branch, next action, duration, total tokens, and available
+per-stage usage/cost. This requires `gh` authentication with permission to read
+and write issue comments; no opt-in flag is needed. Offline resumes, local
+tasks, and read-only audits do not post comments.
 
 `agentic audit` is independent of GitHub issue and local-task mode. Each plain
 invocation starts a fresh read-only audit in a first-class timestamped

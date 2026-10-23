@@ -96,6 +96,7 @@ from .execution import (  # noqa: F401
     run_codex,
     streamed_command,
 )
+from .github_comments import post_terminal_comment
 from .output import style_system_text, style_text
 from .persistence import read_text_tail
 from .openrouter import (  # noqa: F401
@@ -1269,6 +1270,15 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
             system_prompt=system_prompt,
             verbose=args.verbose,
         )
+    if github_repo and not issue.is_local and not issue.is_audit:
+        if not post_terminal_comment(
+            run, issue, folder, github_repo=github_repo, github_host=github_host,
+            cwd=repo, offline=offline_run is not None,
+        ):
+            _status_print(
+                "[GITHUB] Completion comment was not posted; the terminal result remains in local logs.",
+                file=sys.stderr,
+            )
     if not completed:
         terminal_result = None
         try:

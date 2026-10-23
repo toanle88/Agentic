@@ -382,7 +382,7 @@ def _result(folder: Path) -> dict[str, Any] | None:
         return None
     status = value.get("status")
     if not isinstance(status, str) or status not in {
-        "RETRY_EXHAUSTED", "BLOCKED", "NO_CHANGES",
+        "APPROVED", "RETRY_EXHAUSTED", "BLOCKED", "NO_CHANGES",
     }:
         return None
     return value
