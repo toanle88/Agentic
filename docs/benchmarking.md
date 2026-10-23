@@ -15,6 +15,22 @@ The quality benchmark below measures normalized workflow outcomes, not these
 performance budgets. Provider calls and external services are never required
 for the offline performance or schema checks.
 
+The dashboard corpus and measurement path are reproducible with the standard
+library helper below. It generates 500 run folders, 24 artifacts per folder,
+and one 8 MiB developer artifact per folder, then records three cold and three
+warm samples with p50, p95, p99, peak resident memory, and host metadata:
+
+```bash
+python scripts/dashboard_benchmark.py --logs /tmp/agentic-dashboard-corpus \
+  --generate --output /tmp/agentic-dashboard-results.json
+```
+
+Use `--logs` without `--generate` to measure an existing corpus. The helper
+clears only the in-process dashboard snapshot cache between cold samples and
+does not invoke providers or network services. Filesystem type is reported as
+unknown when the standard library cannot identify it; record it from the host
+when comparing results across filesystems.
+
 The benchmark harness runs deterministic argv-array cases without provider
 credentials. This is suitable for fake providers, fixture repositories, and
 regression checks:

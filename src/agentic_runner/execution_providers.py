@@ -15,7 +15,12 @@ from .execution_stream import (
     _short,
     streamed_command,
 )
-from .file_boundaries import open_single_link_regular, revalidate_single_link_regular
+from .file_boundaries import (
+    iter_safe_regular_files,
+    open_relative_regular,
+    open_single_link_regular,
+    revalidate_single_link_regular,
+)
 from .guidance import guidance_phase, guidance_prompt
 from .config import PROVIDER_API_KEY_ENV, provider_process_environment
 from .persistence import atomic_write_text
@@ -73,31 +78,17 @@ def _stage_readonly_worktree(source: Path, destination: Path) -> Path:
     """
     source = source.resolve()
     destination.mkdir(parents=True, exist_ok=True)
-    for current, directories, filenames in os.walk(source, topdown=True, followlinks=False):
-        current_path = Path(current)
-        try:
-            relative_current = current_path.relative_to(source).as_posix()
-        except ValueError:
-            continue
-        directories[:] = [
-            directory for directory in directories
-            if not sensitive_read(
-                (Path(relative_current) / directory).as_posix()
-            )
-        ]
-        directories.sort()
-        filenames.sort()
-        for filename in filenames:
-            source_path = current_path / filename
-            relative = source_path.relative_to(source).as_posix()
-            if sensitive_read(relative):
+    try:
+        entries = iter_safe_regular_files(source, skip=sensitive_read)
+        for kind, relative, _ in entries:
+            if kind != "file":
                 continue
             destination_path = destination / relative
             destination_path.parent.mkdir(parents=True, exist_ok=True)
             descriptor = -1
             try:
-                descriptor, expected_identity = open_single_link_regular(
-                    source_path, os.O_RDONLY, description="review worktree file",
+                descriptor, expected_identity = open_relative_regular(
+                    source, relative, os.O_RDONLY, description="review worktree file",
                 )
                 with os.fdopen(descriptor, "rb") as source_stream:
                     descriptor = -1
@@ -107,7 +98,7 @@ def _stage_readonly_worktree(source: Path, destination: Path) -> Path:
                     )
                     with destination_path.open("wb") as destination_stream:
                         shutil.copyfileobj(source_stream, destination_stream)
-            except (OSError, ValueError):
+            except (OSError, ValueError, RuntimeError):
                 if descriptor >= 0:
                     os.close(descriptor)
                 continue
@@ -115,27 +106,34 @@ def _stage_readonly_worktree(source: Path, destination: Path) -> Path:
                 destination_path.chmod(0o444)
             except OSError:
                 pass
+    except (OSError, RuntimeError, ValueError):
+        # A platform without anchored traversal or a changed tree is not safe
+        # to expose to a read-only provider.
+        return destination
     return destination
 
 
 def _read_provider_result(root: Path, name: str) -> str | None:
     """Read an exact, bounded result file without following provider links."""
-    candidate = root / name
-    root = root.resolve()
+    descriptor = -1
     try:
-        if candidate.parent.resolve() != root or candidate.is_symlink() or not candidate.is_file():
-            return None
-        flags = os.O_RDONLY
-        nofollow = getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(candidate, flags | nofollow)
-        with os.fdopen(fd, "rb") as handle:
-            if os.fstat(handle.fileno()).st_size > MAX_PROVIDER_RESULT_BYTES:
+        descriptor, expected_identity = open_relative_regular(
+            root, name, os.O_RDONLY, description="provider result",
+        )
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            metadata = revalidate_single_link_regular(
+                handle.fileno(), expected_identity, description="provider result",
+            )
+            if metadata.st_size > MAX_PROVIDER_RESULT_BYTES:
                 return None
             data = handle.read(MAX_PROVIDER_RESULT_BYTES + 1)
         if len(data) > MAX_PROVIDER_RESULT_BYTES:
             return None
         return data.decode("utf-8")
-    except (OSError, UnicodeError):
+    except (OSError, RuntimeError, ValueError, UnicodeError):
+        if descriptor >= 0:
+            os.close(descriptor)
         return None
 
 def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = False,

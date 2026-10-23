@@ -20,9 +20,24 @@ from scripts.agent_benchmark_scenarios import (
 )
 from scripts.benchmark import run_case
 from scripts.benchmark_execution import process_group_kwargs
+from scripts.dashboard_benchmark import generate_corpus, measure, percentile
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_dashboard_benchmark_generates_and_measures_cold_and_warm_samples(self):
+        with tempfile.TemporaryDirectory() as temp:
+            logs = Path(temp) / "dashboard-corpus"
+            generate_corpus(logs, runs=3, artifacts=2, developer_bytes=128)
+            result = measure(logs, repetitions=3)
+
+        self.assertEqual(result["repetitions"], 3)
+        for phase in ("cold", "warm"):
+            self.assertEqual(
+                set(result[phase]), {"p50_seconds", "p95_seconds", "p99_seconds"}
+            )
+        self.assertIn("python", result["host"])
+        self.assertEqual(percentile([1.0, 2.0, 4.0], 0.5), 2.0)
+
     def test_benchmark_facade_preserves_split_component_contract(self):
         self.assertIs(load_benchmark, load_benchmark_config)
         self.assertIs(run_scenario, run_scenario_facade)

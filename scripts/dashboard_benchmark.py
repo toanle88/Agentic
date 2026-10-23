@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""Measure dashboard collection with reproducible cold and warm samples.
+
+The command is offline and provider-free.  Pass an existing run corpus with
+``--logs`` or create the documented synthetic corpus with ``--generate``.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import platform
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+try:
+    import resource
+except ImportError:  # pragma: no cover - native Windows has no resource module.
+    resource = None
+
+try:
+    from agentic_runner import dashboard_data
+except ModuleNotFoundError:  # Direct source-checkout execution.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    from agentic_runner import dashboard_data
+
+
+def percentile(values: list[float], fraction: float) -> float:
+    """Return a linearly interpolated percentile for a non-empty sample."""
+    if not values:
+        raise ValueError("percentile requires at least one value")
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * fraction
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
+
+
+def peak_rss_bytes() -> int | None:
+    if resource is None:
+        return None
+    value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    # Linux reports KiB; macOS reports bytes.
+    return int(value * 1024 if sys.platform.startswith("linux") else value)
+
+
+def generate_corpus(
+    root: Path,
+    *,
+    runs: int,
+    artifacts: int,
+    developer_bytes: int,
+) -> None:
+    """Create the bounded historical-style dashboard corpus without providers."""
+    if root.exists():
+        raise ValueError(f"refusing to overwrite existing corpus: {root}")
+    if min(runs, artifacts, developer_bytes) < 1:
+        raise ValueError("corpus dimensions must be positive")
+    payload = b"x" * min(developer_bytes, 1024 * 1024)
+    root.mkdir(parents=True)
+    for run_number in range(runs):
+        folder = root / f"agent-issue-{run_number + 1}-benchmark{run_number:04d}"
+        folder.mkdir()
+        remaining = developer_bytes
+        with (folder / "developer-001.txt").open("wb") as stream:
+            while remaining:
+                chunk = payload[:min(remaining, len(payload))]
+                stream.write(chunk)
+                remaining -= len(chunk)
+        for artifact_number in range(2, artifacts + 1):
+            (folder / f"artifact-{artifact_number:03d}.log").write_bytes(b"x\n")
+
+
+def sample(logs: Path, *, cold: bool) -> tuple[float, int | None]:
+    if cold:
+        with dashboard_data._RUN_SNAPSHOT_CACHE_LOCK:
+            dashboard_data._RUN_SNAPSHOT_CACHE.clear()
+    started = time.perf_counter()
+    dashboard_data.collect_runs(logs)
+    return time.perf_counter() - started, peak_rss_bytes()
+
+
+def measure(logs: Path, repetitions: int) -> dict[str, Any]:
+    cold: list[float] = []
+    warm: list[float] = []
+    peak_values: list[int] = []
+    for _ in range(repetitions):
+        cold_seconds, cold_peak = sample(logs, cold=True)
+        warm_seconds, warm_peak = sample(logs, cold=False)
+        cold.append(cold_seconds)
+        warm.append(warm_seconds)
+        peak_values.extend(value for value in (cold_peak, warm_peak) if value is not None)
+
+    def summary(values: list[float]) -> dict[str, float]:
+        return {
+            "p50_seconds": percentile(values, 0.50),
+            "p95_seconds": percentile(values, 0.95),
+            "p99_seconds": percentile(values, 0.99),
+        }
+
+    return {
+        "repetitions": repetitions,
+        "cold": summary(cold),
+        "warm": summary(warm),
+        "peak_resident_memory_bytes": max(peak_values) if peak_values else None,
+        "host": {
+            "python": platform.python_version(),
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+            "processor": platform.processor(),
+            "filesystem": "not identified by the standard library",
+        },
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--logs", type=Path, required=True)
+    parser.add_argument("--repetitions", type=int, default=3)
+    parser.add_argument("--generate", action="store_true")
+    parser.add_argument("--runs", type=int, default=500)
+    parser.add_argument("--artifacts", type=int, default=24)
+    parser.add_argument("--developer-bytes", type=int, default=8 * 1024 * 1024)
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args(argv)
+    if not 3 <= args.repetitions <= 20:
+        parser.error("--repetitions must be between 3 and 20")
+    logs = args.logs.resolve()
+    try:
+        if args.generate:
+            generate_corpus(
+                logs, runs=args.runs, artifacts=args.artifacts,
+                developer_bytes=args.developer_bytes,
+            )
+        if not logs.is_dir():
+            raise ValueError(f"logs directory does not exist: {logs}")
+        payload = {
+            "schema_version": 1,
+            "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+            "logs": str(logs),
+            "measurement": measure(logs, args.repetitions),
+        }
+    except ValueError as exc:
+        parser.error(str(exc))
+    text = json.dumps(payload, indent=2) + "\n"
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(text, encoding="utf-8")
+    else:
+        print(text, end="")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

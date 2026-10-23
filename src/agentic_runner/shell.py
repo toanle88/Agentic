@@ -874,11 +874,11 @@ class AgenticShell:
         # below. Keep following in that case so the terminal mode covers the
         # complete live-output operation and the log writer gets drained.
         follow = job.finished is None
-        self._refresh(job)
         _shell_print(
             f"--- job {job.number}: {_display_command(job.argv)} ---",
             style_status_tokens=False,
         )
+        self._refresh(job)
         if follow:
             self._set_terminal_mode(TerminalMode.LIVE_OUTPUT)
             try:

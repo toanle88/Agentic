@@ -16,11 +16,104 @@ import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner import cli as agentic
 from agentic_runner import context as agentic_context
 from agentic_runner import openrouter as agentic_openrouter
+from agentic_runner import file_boundaries
 from agentic_runner.context import compact_openrouter_request
 from agentic_runner import openrouter_tools as agentic_openrouter_tools
 
 
 class OpenRouterTests(unittest.TestCase):
+    def test_file_tools_stay_on_open_parent_when_directory_is_replaced(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            root = base / "worktree"
+            root.mkdir()
+            (root / "nested").mkdir()
+            (root / "nested" / "note.txt").write_text("safe\n", encoding="utf-8")
+            outside = base / "outside"
+            outside.mkdir()
+            (outside / "note.txt").write_text("outside\n", encoding="utf-8")
+            original = file_boundaries._open_directory_at
+
+            def replace_parent(descriptor, name):
+                opened = original(descriptor, name)
+                if name == "nested":
+                    (root / "nested").rename(root / "nested-original")
+                    try:
+                        (root / "nested").symlink_to(outside, target_is_directory=True)
+                    except OSError as exc:
+                        self.skipTest(f"directory symlinks unavailable: {exc}")
+                return opened
+
+            with patch.object(file_boundaries, "_open_directory_at", side_effect=replace_parent):
+                result = agentic_openrouter._openrouter_tool_call(
+                    root, "read_file", {"path": "nested/note.txt"}, readonly=True,
+                )
+        self.assertEqual(result, "safe\n")
+
+    def test_file_listing_stays_on_open_directory_when_target_is_replaced(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            root = base / "worktree"
+            root.mkdir()
+            (root / "tree").mkdir()
+            (root / "tree" / "safe.txt").write_text("safe", encoding="utf-8")
+            outside = base / "outside"
+            outside.mkdir()
+            (outside / "secret.txt").write_text("secret", encoding="utf-8")
+            original = file_boundaries._open_directory_at
+
+            def replace_target(descriptor, name):
+                opened = original(descriptor, name)
+                if name == "tree":
+                    (root / "tree").rename(root / "tree-original")
+                    try:
+                        (root / "tree").symlink_to(outside, target_is_directory=True)
+                    except OSError as exc:
+                        self.skipTest(f"directory symlinks unavailable: {exc}")
+                return opened
+
+            with patch.object(file_boundaries, "_open_directory_at", side_effect=replace_target):
+                result = agentic_openrouter._openrouter_tool_call(
+                    root, "list_files", {"path": "tree"}, readonly=True,
+                )
+        self.assertIn("tree/safe.txt", result)
+        self.assertNotIn("secret.txt", result)
+
+    def test_file_write_stays_on_open_parent_when_directory_is_replaced(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            root = base / "worktree"
+            root.mkdir()
+            (root / "nested").mkdir()
+            (root / "nested" / "note.txt").write_text("safe\n", encoding="utf-8")
+            outside = base / "outside"
+            outside.mkdir()
+            (outside / "note.txt").write_text("outside\n", encoding="utf-8")
+            original = file_boundaries._open_directory_at
+
+            def replace_parent(descriptor, name):
+                opened = original(descriptor, name)
+                if name == "nested":
+                    (root / "nested").rename(root / "nested-original")
+                    try:
+                        (root / "nested").symlink_to(outside, target_is_directory=True)
+                    except OSError as exc:
+                        self.skipTest(f"directory symlinks unavailable: {exc}")
+                return opened
+
+            with patch.object(file_boundaries, "_open_directory_at", side_effect=replace_parent):
+                result = agentic_openrouter._openrouter_tool_call(
+                    root, "write_file", {
+                        "path": "nested/note.txt", "content": "updated\n",
+                    }, readonly=False,
+                )
+            self.assertEqual((outside / "note.txt").read_text(encoding="utf-8"), "outside\n")
+            self.assertEqual(
+                (root / "nested-original" / "note.txt").read_text(encoding="utf-8"),
+                "updated\n",
+            )
+        self.assertEqual(result, "Wrote nested/note.txt")
+
     def assert_process_stopped(self, pid):
         if os.name == 'nt':
             result = subprocess.run(
@@ -917,6 +1010,42 @@ class OpenRouterTests(unittest.TestCase):
                 root, 'read_file', {'path': 'pipe'}, readonly=True,
             )
         self.assertIn('regular files', result)
+
+    @unittest.skipUnless(
+        hasattr(os, 'mkfifo') and hasattr(os, 'O_NONBLOCK'),
+        'FIFO and nonblocking open are unavailable',
+    )
+    def test_openrouter_write_rejects_fifo_without_blocking(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            os.mkfifo(root / 'pipe')
+            source_root = Path(__file__).resolve().parents[1] / 'src'
+            environment = os.environ.copy()
+            environment['PYTHONPATH'] = os.pathsep.join(
+                item for item in (str(source_root), environment.get('PYTHONPATH', ''))
+                if item
+            )
+            probe = subprocess.run(
+                [
+                    sys.executable,
+                    '-c',
+                    (
+                        'from pathlib import Path; '
+                        'from agentic_runner.openrouter import _openrouter_tool_call; '
+                        'import sys; '
+                        "print(_openrouter_tool_call(Path(sys.argv[1]), 'write_file', "
+                        "{'path': 'pipe', 'content': 'blocked'}, readonly=False))"
+                    ),
+                    str(root),
+                ],
+                capture_output=True,
+                text=True,
+                env=environment,
+                timeout=2,
+                check=False,
+            )
+        self.assertEqual(probe.returncode, 0, probe.stderr)
+        self.assertIn('could not open', probe.stdout)
 
     def test_openrouter_file_tools_bound_large_tree_and_file_reads(self):
         with tempfile.TemporaryDirectory() as temp:

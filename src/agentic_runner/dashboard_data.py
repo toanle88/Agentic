@@ -10,6 +10,9 @@ import datetime as dt
 import hashlib
 import json
 import os
+if os.name == "nt":
+    import ctypes
+    from ctypes import wintypes
 import re
 import threading
 from collections import defaultdict
@@ -46,9 +49,65 @@ SEVERITY_RANK = {
 _RUN_CACHE_LIMIT = 512
 _MAX_SNAPSHOT_RETRIES = 4
 _RUN_SNAPSHOT_CACHE: dict[
-    tuple[str, str], tuple[tuple[tuple[str, int, int, int, str], ...], dict[str, Any] | None]
+    tuple[str, str], tuple[tuple[tuple[str, int, int, int | str], ...], dict[str, Any] | None]
 ] = {}
 _RUN_SNAPSHOT_CACHE_LOCK = threading.RLock()
+
+
+def _windows_file_content_signature(path: Path) -> str:
+    """Fingerprint a Windows artifact when filesystem timestamps are unstable."""
+    digest = hashlib.blake2b(digest_size=16)
+    descriptor = -1
+    try:
+        descriptor = os.open(str(path), os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+    except OSError:
+        return "unreadable"
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    return digest.hexdigest()
+
+
+if os.name == "nt":
+    class _WindowsFileBasicInformation(ctypes.Structure):
+        _fields_ = [
+            ("creation_time", ctypes.c_longlong),
+            ("last_access_time", ctypes.c_longlong),
+            ("last_write_time", ctypes.c_longlong),
+            ("change_time", ctypes.c_longlong),
+            ("file_attributes", wintypes.DWORD),
+        ]
+
+
+    def _windows_file_change_time(path: Path, fallback: int) -> int:
+        """Read NTFS ChangeTime without reading the artifact contents."""
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.CreateFileW(
+            str(path),
+            0x00000080,  # FILE_READ_ATTRIBUTES
+            0x00000007,  # share read/write/delete
+            None,
+            3,  # OPEN_EXISTING
+            0x00200000,  # FILE_FLAG_OPEN_REPARSE_POINT
+            None,
+        )
+        value = getattr(handle, "value", handle)
+        if value in (None, 0, ctypes.c_void_p(-1).value):
+            return fallback
+        try:
+            info = _WindowsFileBasicInformation()
+            if not kernel32.GetFileInformationByHandleEx(
+                handle, 0, ctypes.byref(info), ctypes.sizeof(info),
+            ):
+                return fallback
+            return int(info.change_time)
+        finally:
+            kernel32.CloseHandle(handle)
 
 
 def filter_runs(runs: Iterable[dict[str, Any]], *, query: str = "",
@@ -491,22 +550,11 @@ def _all_log_files(folder: Path) -> list[Path]:
     ]
 
 
-def _file_content_signature(path: Path) -> str:
-    digest = hashlib.blake2b(digest_size=16)
-    try:
-        with path.open("rb") as stream:
-            while chunk := stream.read(1024 * 1024):
-                digest.update(chunk)
-    except OSError:
-        return "unreadable"
-    return digest.hexdigest()
-
-
-def _folder_signature(folder: Path) -> tuple[tuple[str, int, int, int, str], ...]:
+def _folder_signature(folder: Path) -> tuple[tuple[str, int, int, int | str], ...]:
     """Return cache metadata for regular artifacts with one directory scan."""
     if not folder.is_dir():
         return ()
-    signature: list[tuple[str, int, int, int, str]] = []
+    signature: list[tuple[str, int, int, int]] = []
     try:
         entries = os.scandir(folder)
         with entries:
@@ -518,11 +566,15 @@ def _folder_signature(folder: Path) -> tuple[tuple[str, int, int, int, str], ...
                 except OSError:
                     continue
                 # Windows can retain the same nanosecond mtime for two rapid
-                # writes.  ctime is the metadata-change clock there and also
-                # strengthens cache invalidation on other filesystems.
+                # writes.  Its native ChangeTime is more reliable than
+                # Python's creation-time-compatible st_ctime on Windows.
+                change_time = (
+                    f"{_windows_file_change_time(Path(entry.path), stat.st_ctime_ns)}:"
+                    f"{_windows_file_content_signature(Path(entry.path))}"
+                    if os.name == "nt" else stat.st_ctime_ns
+                )
                 signature.append((
-                    entry.name, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns,
-                    _file_content_signature(Path(entry.path)),
+                    entry.name, stat.st_size, stat.st_mtime_ns, change_time,
                 ))
     except OSError:
         return ()

@@ -15,7 +15,12 @@ from agentic_runner import openrouter as agentic_openrouter
 import agentic_runner.sandbox as agentic_sandbox
 import agentic_runner.execution_stream as execution_stream
 from agentic_runner.openrouter_tools import _openrouter_tool_call
-from agentic_runner.execution_providers import _stage_provider_input, _stage_readonly_worktree
+from agentic_runner.execution_providers import (
+    _read_provider_result,
+    _stage_provider_input,
+    _stage_readonly_worktree,
+)
+from agentic_runner import file_boundaries
 from agentic_runner.config import PROVIDER_API_KEY_ENV, provider_process_environment
 from agentic_runner.sandbox import sandbox_command, validate_sandbox
 from agentic_runner.security import redact_secrets
@@ -27,6 +32,32 @@ from agentic_runner.models import Issue, Run
 
 
 class ReadOnlyBoundaryTests(unittest.TestCase):
+    def test_provider_result_reader_stays_on_open_parent_when_directory_is_replaced(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            root = base / "invocation"
+            root.mkdir()
+            (root / "nested").mkdir()
+            (root / "nested" / "result.txt").write_text("safe", encoding="utf-8")
+            outside = base / "outside"
+            outside.mkdir()
+            (outside / "result.txt").write_text("outside", encoding="utf-8")
+            original = file_boundaries._open_directory_at
+
+            def replace_parent(descriptor, name):
+                opened = original(descriptor, name)
+                if name == "nested":
+                    (root / "nested").rename(root / "nested-original")
+                    try:
+                        (root / "nested").symlink_to(outside, target_is_directory=True)
+                    except OSError as exc:
+                        self.skipTest(f"directory symlinks unavailable: {exc}")
+                return opened
+
+            with patch.object(file_boundaries, "_open_directory_at", side_effect=replace_parent):
+                result = _read_provider_result(root, "nested/result.txt")
+        self.assertEqual(result, "safe")
+
     def test_secret_canary_formats_are_redacted(self):
         value = "canary-secret-value-123456"
         payload = (
