@@ -15,6 +15,7 @@ from .execution_stream import (
     _short,
     streamed_command,
 )
+from .file_boundaries import open_single_link_regular, revalidate_single_link_regular
 from .guidance import guidance_phase, guidance_prompt
 from .config import PROVIDER_API_KEY_ENV, provider_process_environment
 from .persistence import atomic_write_text
@@ -32,16 +33,28 @@ MAX_PROVIDER_RESULT_BYTES = 4 * 1024 * 1024
 
 
 def _stage_provider_input(source: Path, destination: Path) -> None:
-    """Copy one trusted provider input without following a source symlink."""
-    if source.is_symlink() or not source.is_file():
-        raise RuntimeError(f"Provider input is not a regular file: {source}")
+    """Copy one trusted provider input without following a source hardlink."""
     try:
-        size = source.stat().st_size
-    except OSError as exc:
+        descriptor, expected_identity = open_single_link_regular(
+            source, os.O_RDONLY, description="provider input",
+        )
+    except (OSError, ValueError) as exc:
         raise RuntimeError(f"Could not inspect provider input: {source}") from exc
-    if size > MAX_PROVIDER_RESULT_BYTES:
-        raise RuntimeError(f"Provider input is too large: {source}")
-    destination.write_bytes(source.read_bytes())
+    try:
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = -1
+            metadata = revalidate_single_link_regular(
+                stream.fileno(), expected_identity, description="provider input",
+            )
+            if metadata.st_size > MAX_PROVIDER_RESULT_BYTES:
+                raise RuntimeError(f"Provider input is too large: {source}")
+            data = stream.read(MAX_PROVIDER_RESULT_BYTES + 1)
+            if len(data) > MAX_PROVIDER_RESULT_BYTES:
+                raise RuntimeError(f"Provider input is too large: {source}")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    destination.write_bytes(data)
     try:
         destination.chmod(0o444)
     except OSError:
@@ -76,14 +89,28 @@ def _stage_readonly_worktree(source: Path, destination: Path) -> Path:
         filenames.sort()
         for filename in filenames:
             source_path = current_path / filename
-            if source_path.is_symlink() or not source_path.is_file():
-                continue
             relative = source_path.relative_to(source).as_posix()
             if sensitive_read(relative):
                 continue
             destination_path = destination / relative
             destination_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source_path, destination_path)
+            descriptor = -1
+            try:
+                descriptor, expected_identity = open_single_link_regular(
+                    source_path, os.O_RDONLY, description="review worktree file",
+                )
+                with os.fdopen(descriptor, "rb") as source_stream:
+                    descriptor = -1
+                    revalidate_single_link_regular(
+                        source_stream.fileno(), expected_identity,
+                        description="review worktree file",
+                    )
+                    with destination_path.open("wb") as destination_stream:
+                        shutil.copyfileobj(source_stream, destination_stream)
+            except (OSError, ValueError):
+                if descriptor >= 0:
+                    os.close(descriptor)
+                continue
             try:
                 destination_path.chmod(0o444)
             except OSError:

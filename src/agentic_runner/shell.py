@@ -870,12 +870,16 @@ class AgenticShell:
             job = _job_for_issue(self.jobs.values(), identifier)
         if job is None:
             raise ValueError(f"unknown job, PID, or issue: {parts[1]}")
+        # The child can exit after command dispatch but before the refresh
+        # below. Keep following in that case so the terminal mode covers the
+        # complete live-output operation and the log writer gets drained.
+        follow = job.finished is None
         self._refresh(job)
         _shell_print(
             f"--- job {job.number}: {_display_command(job.argv)} ---",
             style_status_tokens=False,
         )
-        if job.running:
+        if follow:
             self._set_terminal_mode(TerminalMode.LIVE_OUTPUT)
             try:
                 _shell_print("--- following live output; press Ctrl-C to stop following ---")

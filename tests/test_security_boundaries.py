@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -14,6 +15,7 @@ from agentic_runner import openrouter as agentic_openrouter
 import agentic_runner.sandbox as agentic_sandbox
 import agentic_runner.execution_stream as execution_stream
 from agentic_runner.openrouter_tools import _openrouter_tool_call
+from agentic_runner.execution_providers import _stage_provider_input, _stage_readonly_worktree
 from agentic_runner.config import PROVIDER_API_KEY_ENV, provider_process_environment
 from agentic_runner.sandbox import sandbox_command, validate_sandbox
 from agentic_runner.security import redact_secrets
@@ -169,6 +171,24 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
             self.assertTrue(ok)
             self.assertEqual(message, "reviewed")
             self.assertNotIn(value, (root / "review.txt").read_text(encoding="utf-8"))
+
+    def test_provider_staging_rejects_hardlinked_inputs_and_aliases(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'worktree'
+            root.mkdir()
+            outside = Path(temp) / 'outside-secret.txt'
+            outside.write_text('external-secret\n', encoding='utf-8')
+            alias = root / 'public.py'
+            try:
+                os.link(outside, alias)
+            except OSError as exc:
+                self.skipTest(f'hardlinks unavailable: {exc}')
+
+            with self.assertRaisesRegex(RuntimeError, 'provider input'):
+                _stage_provider_input(alias, Path(temp) / 'staged.txt')
+
+            staged = _stage_readonly_worktree(root, Path(temp) / 'review-worktree')
+            self.assertFalse((staged / 'public.py').exists())
 
     def test_streamed_command_opens_logs_before_starting_process(self):
         with tempfile.TemporaryDirectory() as temp:

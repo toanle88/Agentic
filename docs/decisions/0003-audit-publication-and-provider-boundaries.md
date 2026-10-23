@@ -26,10 +26,13 @@ behavior as the extracted workflow module.
   `id`, `type`, and `function.name`/`function.arguments`. Unknown provider
   metadata is dropped before the existing character-based request budget is
   applied.
-- OpenRouter `read_file` accepts only regular files. Symlink path components
-  are rejected, and reads use a non-following, nonblocking descriptor followed
-  by an `fstat` regular-file check so FIFOs and other special files cannot
-  block the tool loop.
+- OpenRouter `read_file` and `write_file`, plus native-provider staging, accept
+  only single-link regular files. Symlink path components are rejected, and
+  reads use a non-following, nonblocking descriptor followed by an `fstat`
+  regular-file, link-count, and device/inode identity check so FIFOs, hard
+  links, and other special files cannot cross the worktree boundary. Writes
+  open existing targets without truncation, validate the descriptor, and only
+  then truncate and write.
 - `workflow_state.py` is the canonical implementation for compatibility state
   helpers. Existing blocked and developer log files remain readable; loading
   applies redaction, while new records use the shared bounded redaction path.
