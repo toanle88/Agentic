@@ -1244,7 +1244,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
             else f"python agentic.py --issue {issue.number} --publish"
             if not issue.is_local else "rerun with --publish to create a GitHub draft PR"
         )
-        print_run_summary(run, "VALIDATED", next_action)
+        print_run_summary(run, "VALIDATED", next_action, logs_path=folder)
         return 0
     if args.publish:
         if not github_repo:
@@ -1274,7 +1274,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
             else f"python agentic.py --issue {issue.number} --publish"
             if not issue.is_local else "rerun with --publish to create a GitHub draft PR"
         )
-        print_run_summary(run, "MANUALLY APPROVED", next_action)
+        print_run_summary(run, "MANUALLY APPROVED", next_action, logs_path=folder)
         return 0
     if not eligible(issue):
         raise RuntimeError("Issue is closed; development blocked")

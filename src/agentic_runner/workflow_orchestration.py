@@ -265,7 +265,9 @@ def develop(
             )
             next_action = (f"python agentic.py --issue {issue.number} --publish"
                            if not issue.is_local else "rerun with --publish to create a GitHub draft PR")
-            print_run_summary(run, "APPROVED", next_action, reason=resume_reason)
+            print_run_summary(
+                run, "APPROVED", next_action, reason=resume_reason, logs_path=folder,
+            )
             return True
         if verdict:
             review_findings_seen += len(verdict.get("findings", []))
