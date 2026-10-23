@@ -8,8 +8,10 @@ import sys
 import tempfile
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
 from pathlib import Path
+from threading import Lock
 from unittest.mock import patch
 
 import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
@@ -22,6 +24,60 @@ from agentic_runner import openrouter_tools as agentic_openrouter_tools
 
 
 class OpenRouterTests(unittest.TestCase):
+    def test_openrouter_facade_serializes_compatibility_mutation(self):
+        observed = []
+        state_lock = Lock()
+        active = 0
+        max_active = 0
+
+        def fake_run(*args, **kwargs):
+            nonlocal active, max_active
+            with state_lock:
+                active += 1
+                max_active = max(max_active, active)
+            observed.append((
+                agentic_openrouter._loop._openrouter_request,
+                agentic_openrouter._loop._openrouter_tool_call,
+                agentic_openrouter._loop.OPENROUTER_MAX_TURNS,
+            ))
+            time.sleep(0.02)
+            with state_lock:
+                active -= 1
+            return args, kwargs
+
+        original_request = agentic_openrouter._loop._openrouter_request
+        original_tool_call = agentic_openrouter._loop._openrouter_tool_call
+        original_turns = agentic_openrouter._loop.OPENROUTER_MAX_TURNS
+        with patch.object(agentic_openrouter._loop, "run_openrouter", side_effect=fake_run):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(agentic_openrouter.run_openrouter, ("one", "two")))
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(max_active, 1)
+        self.assertEqual(
+            observed,
+            [
+                (
+                    agentic_openrouter._openrouter_request,
+                    agentic_openrouter._openrouter_tool_call,
+                    agentic_openrouter.OPENROUTER_MAX_TURNS,
+                ),
+            ] * 2,
+        )
+        self.assertIs(agentic_openrouter._loop._openrouter_request, original_request)
+        self.assertIs(agentic_openrouter._loop._openrouter_tool_call, original_tool_call)
+        self.assertEqual(agentic_openrouter._loop.OPENROUTER_MAX_TURNS, original_turns)
+
+        with patch.object(
+            agentic_openrouter._loop,
+            "run_openrouter",
+            side_effect=RuntimeError("OpenRouter failed"),
+        ), self.assertRaises(RuntimeError):
+            agentic_openrouter.run_openrouter("failed")
+        self.assertIs(agentic_openrouter._loop._openrouter_request, original_request)
+        self.assertIs(agentic_openrouter._loop._openrouter_tool_call, original_tool_call)
+        self.assertEqual(agentic_openrouter._loop.OPENROUTER_MAX_TURNS, original_turns)
+
     def test_file_tools_stay_on_open_parent_when_directory_is_replaced(self):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)

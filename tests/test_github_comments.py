@@ -68,6 +68,20 @@ class GithubCommentTests(unittest.TestCase):
         self.assertNotIn("forged completion", body)
         self.assertNotIn("do-not-publish", body)
 
+    def test_completion_comment_uses_highest_numeric_review_attempt(self):
+        self._result("BLOCKED")
+        (self.folder / "review-schema.json").write_text("{}", encoding="utf-8")
+        (self.folder / "review-009.json").write_text(
+            json.dumps({"approved": False}), encoding="utf-8",
+        )
+        (self.folder / "review-010.json").write_text(
+            json.dumps({"approved": True}), encoding="utf-8",
+        )
+        _, body = format_completion_comment(
+            self.run, self.issue, self.folder, {"status": "BLOCKED"},
+        )
+        self.assertIn("Review: approved", body)
+
     def test_summary_uses_total_and_per_stage_telemetry_without_estimation(self):
         record_usage(
             self.folder, "developer",
