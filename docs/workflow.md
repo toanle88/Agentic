@@ -22,6 +22,13 @@ newest timestamp first. Legacy branch names remain supported.
 8. Ask an independent read-only configured reviewer for a structured verdict.
 9. Approve, retry with evidence, or preserve the worktree for resume.
 
+Approved, validated, and manually approved runs print a terminal-only execution
+summary. It reports bounded total and per-stage token telemetry, prompt/output
+breakdowns, provider cost when available, stage durations and counts, retries,
+review findings, and the run-log path. Missing provider telemetry is shown as
+`unknown`; local test commands always show `0 tokens`. ANSI styling is used
+only for interactive terminal output and is never written to durable logs.
+
 ## Repository audits
 
 Run a reusable repository audit without creating a GitHub issue or task file:

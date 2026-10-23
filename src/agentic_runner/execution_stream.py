@@ -4,6 +4,7 @@ from __future__ import annotations
 import builtins
 import datetime
 import json
+import math
 import os
 import queue
 import signal
@@ -27,7 +28,7 @@ from .output import (
 )
 from .sandbox import sandbox_command
 from .security import redact_secrets
-from .telemetry import record_operation, record_usage
+from .telemetry import read_run_usage, record_operation, record_usage
 
 
 MAX_STREAM_QUEUE = 256
@@ -290,6 +291,153 @@ def print_review_summary(verdict: dict[str, Any]) -> None:
                 ))
 
 
+def _summary_token_text(value: Any) -> str:
+    """Format a token count without turning missing provider data into zero."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "unknown"
+    if value < 0 or (isinstance(value, float) and (not math.isfinite(value) or not value.is_integer())):
+        return "unknown"
+    return f"{int(value):,} tokens"
+
+
+def _summary_duration_text(value: Any) -> str:
+    """Format bounded telemetry durations for a compact terminal row."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "unknown"
+    if not math.isfinite(float(value)) or value < 0:
+        return "unknown"
+    seconds = int(round(float(value)))
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m {seconds}s"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
+def _summary_stage_data(usage: dict[str, Any], stage: str) -> tuple[int, float | None]:
+    """Return operation count and summed duration for one execution stage."""
+    metrics = usage.get("metrics")
+    operations = metrics.get("operations") if isinstance(metrics, dict) else None
+    if isinstance(operations, list):
+        matching = [
+            item for item in operations
+            if isinstance(item, dict) and item.get("role") == stage
+        ]
+        if matching:
+            durations: list[float] = []
+            for item in matching:
+                value = item.get("duration_seconds")
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    continue
+                if math.isfinite(float(value)) and value >= 0:
+                    durations.append(float(value))
+            return len(matching), round(sum(durations), 3) if durations else None
+
+    invocations = usage.get("by_invocation")
+    if isinstance(invocations, list):
+        matching = [
+            item for item in invocations
+            if isinstance(item, dict)
+            and (item.get("stage") == stage or item.get("role") == stage)
+        ]
+        if matching:
+            durations = []
+            for item in matching:
+                value = item.get("duration_seconds")
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    if math.isfinite(float(value)) and value >= 0:
+                        durations.append(float(value))
+            return len(matching), round(sum(durations), 3) if durations else None
+    return 0, None
+
+
+def _summary_stage_usage(usage: dict[str, Any], stage: str, count: int) -> dict[str, Any]:
+    """Select stage usage while preserving unknown provider fields."""
+    by_stage = usage.get("by_stage")
+    candidate = by_stage.get(stage) if isinstance(by_stage, dict) else None
+    if not isinstance(candidate, dict):
+        by_role = usage.get("by_role")
+        candidate = by_role.get(stage) if isinstance(by_role, dict) else None
+    if isinstance(candidate, dict):
+        return candidate
+    return {"total_tokens": 0 if stage == "tests" else None}
+
+
+def _summary_stage_line(stage: str, count: int, tokens: str, duration: str,
+                        suffix: str = "") -> str:
+    run_word = "run" if count == 1 else "runs"
+    label = "REVIEW" if stage == "reviewer" else stage.upper()
+    prefix = style_text(f"[{label}]", style_status_tokens=False)
+    rendered_duration = _paint(duration, "36")
+    return f"{prefix} {count} {run_word} | {tokens:<16} | {rendered_duration}{suffix}"
+
+
+def _print_execution_summary(folder: Path) -> None:
+    """Print bounded, terminal-only execution telemetry for an approved run."""
+    usage = read_run_usage(folder)
+    total = _summary_token_text(usage.get("total_tokens"))
+    prompt = _summary_token_text(usage.get("prompt_tokens"))
+    completion = _summary_token_text(usage.get("completion_tokens"))
+    cost_value = usage.get("estimated_cost_usd")
+    if (
+        isinstance(cost_value, (int, float))
+        and not isinstance(cost_value, bool)
+        and math.isfinite(float(cost_value))
+        and cost_value >= 0
+    ):
+        cost = f"${float(cost_value):.4f}"
+    else:
+        cost = "unknown"
+    metrics = usage.get("metrics")
+    total_duration = metrics.get("duration_seconds") if isinstance(metrics, dict) else None
+    _console_print(style_text(
+        f"[SUMMARY] Total: {total} | Prompt/input: {prompt} | "
+        f"Completion/output: {completion} | Cost: {cost}",
+        style_status_tokens=False,
+    ))
+    _console_print(style_text(
+        f"[SUMMARY] Duration: {_summary_duration_text(total_duration)}",
+        style_status_tokens=False,
+    ))
+
+    for stage in ("developer", "tests", "reviewer"):
+        count, duration = _summary_stage_data(usage, stage)
+        stage_usage = _summary_stage_usage(usage, stage, count)
+        tokens = _summary_token_text(stage_usage.get("total_tokens"))
+        suffix = ""
+        if stage == "reviewer":
+            workflow_metrics = usage.get("workflow_metrics")
+            findings = (
+                workflow_metrics.get("review_findings")
+                if isinstance(workflow_metrics, dict) else None
+            )
+            findings_text = (
+                str(findings)
+                if isinstance(findings, int) and not isinstance(findings, bool)
+                else "unknown"
+            )
+            suffix = f" | Findings: {findings_text}"
+        _console_print(_summary_stage_line(
+            stage, count, tokens, _summary_duration_text(duration), suffix,
+        ))
+
+    workflow_metrics = usage.get("workflow_metrics")
+    attempts = workflow_metrics.get("attempts") if isinstance(workflow_metrics, dict) else None
+    retries = workflow_metrics.get("retries") if isinstance(workflow_metrics, dict) else None
+    attempts_text = (
+        str(attempts) if isinstance(attempts, int) and not isinstance(attempts, bool) else "unknown"
+    )
+    retries_text = (
+        str(retries) if isinstance(retries, int) and not isinstance(retries, bool) else "unknown"
+    )
+    _console_print(style_text(
+        f"[RETRY] Attempts: {attempts_text} | Retries: {retries_text}",
+        style_status_tokens=False,
+    ))
+
+
 def print_run_summary(run: Run, status: str, next_action: str, *,
                       attempts: int | None = None,
                       max_retries: int | None = None,
@@ -313,6 +461,8 @@ def print_run_summary(run: Run, status: str, next_action: str, *,
         _console_print(f"Reason:   {reason}")
     if logs_path is not None:
         _console_print(f"Logs:     {logs_path}")
+    if logs_path is not None and status.upper() in {"APPROVED", "VALIDATED", "MANUALLY APPROVED"}:
+        _print_execution_summary(logs_path)
     _console_print(f"Next:     {next_action}")
     _console_print(separator, flush=True)
 

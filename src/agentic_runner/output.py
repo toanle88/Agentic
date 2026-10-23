@@ -68,7 +68,7 @@ def paint(text: Any, code: str, stream: Any = None) -> str:
 _TIMESTAMP_RE = re.compile(r"^\s*(\[\d{2}:\d{2}:\d{2}\])")
 _PREFIX_RE = re.compile(
     r"^\s*(?:\[\d{2}:\d{2}:\d{2}\]\s*)?"
-    r"(\[(?:DEVELOPER|REVIEW|TESTS|RETRY|GIT|PATCH|ERROR|RESULT|INVESTIGATION|BASELINE|"
+    r"(\[(?:DEVELOPER|REVIEW|TESTS|RETRY|GIT|PATCH|ERROR|RESULT|SUMMARY|INVESTIGATION|BASELINE|"
     r"PUBLISH|SKIP|INIT|CLEAN|SYSTEM|COST|NO_CHANGES|CANCEL|DOCTOR|"
     r"JOB [^\]]+|DASHBOARD|MANUAL|"
     r"TIMEOUT|BLOCKED|STOP|RESUME|DRY RUN)\])"
@@ -119,6 +119,7 @@ _PREFIX_COLORS = {
     "PATCH": "95",
     "ERROR": "31",
     "RESULT": "32",
+    "SUMMARY": "36",
     "COST": "90",
     "OK": "32",
     "PASSED": "32",

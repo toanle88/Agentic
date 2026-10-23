@@ -22,6 +22,7 @@ from agentic_runner.review import (
     MAX_REVIEW_HISTORY_FIELD,
     load_review_history,
 )
+from agentic_runner.telemetry import record_operation, record_usage, record_workflow_outcome
 
 
 def sh(*args, cwd):
@@ -65,6 +66,96 @@ class PureTests(unittest.TestCase):
             agentic.print_run_summary(run, 'APPROVED', 'continue')
         self.assertIn('-' * 72, output.getvalue())
         self.assertNotIn('─', output.getvalue())
+
+    def test_approved_run_summary_aggregates_telemetry_without_ansi(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            record_usage(
+                folder, 'developer',
+                {'prompt_tokens': 150, 'completion_tokens': 50, 'estimated_cost_usd': 0.02},
+                invocation={'name': 'developer-001', 'stage': 'developer'},
+            )
+            record_usage(
+                folder, 'developer',
+                {'prompt_tokens': 50, 'completion_tokens': 20, 'estimated_cost_usd': 0.01},
+                invocation={'name': 'developer-002', 'stage': 'developer'},
+            )
+            record_usage(
+                folder, 'reviewer',
+                {'prompt_tokens': 10, 'completion_tokens': 20},
+                invocation={'name': 'review-001', 'stage': 'reviewer'},
+            )
+            operations = [
+                ('developer', '00:00:00', '00:01:00', 60),
+                ('developer', '00:01:00', '00:02:00', 60),
+                ('tests', '00:02:00', '00:02:30', 30),
+                ('tests', '00:02:30', '00:03:00', 30),
+                ('reviewer', '00:03:00', '00:03:45', 45),
+            ]
+            for index, (role, started, finished, duration) in enumerate(operations, 1):
+                record_operation(
+                    folder, role, f'{role}-{index}',
+                    started_at=f'2026-01-01T{started}.000+00:00',
+                    finished_at=f'2026-01-01T{finished}.000+00:00',
+                    duration_seconds=duration,
+                )
+            record_workflow_outcome(
+                folder, approved=True, attempts=2, first_pass=False, review_findings=3,
+            )
+            output = io.StringIO()
+            run = agentic.Run(1, 'agent/issue-1-test', Path('/tmp/worktree'))
+            with patch.object(agentic.sys, 'stdout', output):
+                agentic.print_run_summary(run, 'APPROVED', 'continue', logs_path=folder)
+
+        rendered = output.getvalue()
+        self.assertIn('[SUMMARY] Total: 300 tokens', rendered)
+        self.assertIn('Prompt/input: 210 tokens', rendered)
+        self.assertIn('Completion/output: 90 tokens', rendered)
+        self.assertIn('Cost: $0.0300', rendered)
+        self.assertIn('[SUMMARY] Duration: 3m 45s', rendered)
+        self.assertIn('[DEVELOPER] 2 runs | 270 tokens', rendered)
+        self.assertIn('[TESTS] 2 runs | 0 tokens', rendered)
+        self.assertIn('[REVIEW] 1 run | 30 tokens', rendered)
+        self.assertIn('Findings: 3', rendered)
+        self.assertIn('[RETRY] Attempts: 2 | Retries: 1', rendered)
+        self.assertIn(f'Logs:     {folder}', rendered)
+        self.assertNotIn('\033[', rendered)
+
+    def test_approved_run_summary_shows_unknown_provider_telemetry(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            output = io.StringIO()
+            run = agentic.Run(1, 'agent/issue-1-test', Path('/tmp/worktree'))
+            with patch.object(agentic.sys, 'stdout', output):
+                agentic.print_run_summary(run, 'APPROVED', 'continue', logs_path=folder)
+
+        rendered = output.getvalue()
+        self.assertIn('[SUMMARY] Total: unknown', rendered)
+        self.assertIn('Prompt/input: unknown', rendered)
+        self.assertIn('Cost: unknown', rendered)
+        self.assertIn('[DEVELOPER] 0 runs | unknown', rendered)
+        self.assertIn('[TESTS] 0 runs | 0 tokens', rendered)
+        self.assertIn('[REVIEW] 0 runs | unknown', rendered)
+        self.assertIn('Findings: unknown', rendered)
+        self.assertIn('[RETRY] Attempts: unknown | Retries: unknown', rendered)
+
+    def test_approved_run_summary_colors_generated_sections_on_tty(self):
+        class TTYBuffer(io.StringIO):
+            def isatty(self):
+                return True
+
+        with tempfile.TemporaryDirectory() as temp:
+            output = TTYBuffer()
+            run = agentic.Run(1, 'agent/issue-1-test', Path('/tmp/worktree'))
+            with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+                 patch.object(agentic.sys, 'stdout', output):
+                agentic.print_run_summary(run, 'APPROVED', 'continue', logs_path=Path(temp))
+
+        rendered = output.getvalue()
+        self.assertIn('\033[36m[SUMMARY]\033[0m', rendered)
+        self.assertIn('\033[36m[DEVELOPER]\033[0m', rendered)
+        self.assertIn('\033[35m[REVIEW]\033[0m', rendered)
+        self.assertIn('\033[36munknown\033[0m', rendered)
 
 
     def test_relative_worktree_configuration_is_not_written_when_unsupported(self):
