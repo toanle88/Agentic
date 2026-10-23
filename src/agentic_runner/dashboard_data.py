@@ -9,6 +9,9 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+if os.name == "nt":
+    import ctypes
+    from ctypes import wintypes
 import re
 import threading
 from collections import defaultdict
@@ -48,6 +51,43 @@ _RUN_SNAPSHOT_CACHE: dict[
     tuple[str, str], tuple[tuple[tuple[str, int, int, int], ...], dict[str, Any] | None]
 ] = {}
 _RUN_SNAPSHOT_CACHE_LOCK = threading.RLock()
+
+
+if os.name == "nt":
+    class _WindowsFileBasicInformation(ctypes.Structure):
+        _fields_ = [
+            ("creation_time", ctypes.c_longlong),
+            ("last_access_time", ctypes.c_longlong),
+            ("last_write_time", ctypes.c_longlong),
+            ("change_time", ctypes.c_longlong),
+            ("file_attributes", wintypes.DWORD),
+        ]
+
+
+    def _windows_file_change_time(path: Path, fallback: int) -> int:
+        """Read NTFS ChangeTime without reading the artifact contents."""
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.CreateFileW(
+            str(path),
+            0x00000080,  # FILE_READ_ATTRIBUTES
+            0x00000007,  # share read/write/delete
+            None,
+            3,  # OPEN_EXISTING
+            0x00200000,  # FILE_FLAG_OPEN_REPARSE_POINT
+            None,
+        )
+        value = getattr(handle, "value", handle)
+        if value in (None, 0, ctypes.c_void_p(-1).value):
+            return fallback
+        try:
+            info = _WindowsFileBasicInformation()
+            if not kernel32.GetFileInformationByHandleEx(
+                handle, 0, ctypes.byref(info), ctypes.sizeof(info),
+            ):
+                return fallback
+            return int(info.change_time)
+        finally:
+            kernel32.CloseHandle(handle)
 
 
 def filter_runs(runs: Iterable[dict[str, Any]], *, query: str = "",
@@ -506,10 +546,14 @@ def _folder_signature(folder: Path) -> tuple[tuple[str, int, int, int], ...]:
                 except OSError:
                     continue
                 # Windows can retain the same nanosecond mtime for two rapid
-                # writes.  ctime is the metadata-change clock there and also
-                # strengthens cache invalidation on other filesystems.
+                # writes.  Its native ChangeTime is more reliable than
+                # Python's creation-time-compatible st_ctime on Windows.
+                change_time = (
+                    _windows_file_change_time(Path(entry.path), stat.st_ctime_ns)
+                    if os.name == "nt" else stat.st_ctime_ns
+                )
                 signature.append((
-                    entry.name, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns,
+                    entry.name, stat.st_size, stat.st_mtime_ns, change_time,
                 ))
     except OSError:
         return ()

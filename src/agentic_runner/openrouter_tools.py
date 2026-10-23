@@ -755,7 +755,20 @@ def _list_files_page(target: Path, root: Path, page: int) -> tuple[list[str], bo
             f"page must be between 1 and {OPENROUTER_LIST_FILES_MAX_PAGE}"
         )
     root = root.resolve()
-    target = root / target.relative_to(root)
+    try:
+        relative_target = target.resolve().relative_to(root)
+    except ValueError as exc:
+        # Windows can spell the same temporary directory with an 8.3 name
+        # in one caller and its long form in another.
+        if os.name != "nt":
+            raise
+        try:
+            relative_target = Path(os.path.abspath(target)).relative_to(
+                Path(os.path.abspath(root)),
+            )
+        except ValueError:
+            raise ValueError("file-list target must stay inside the worktree") from exc
+    target = root / relative_target
     key = (str(root), str(target))
     cached = _FILE_LIST_CACHE.get(key)
     if cached is None or cached.is_stale():

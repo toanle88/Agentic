@@ -39,6 +39,179 @@ def _is_reparse_or_symbolic_link(path: Path) -> bool:
     return bool(is_junction is not None and is_junction())
 
 
+if os.name == "nt":
+    import ctypes
+    from ctypes import wintypes
+
+
+    class _WindowsDirectoryHandle:
+        """Small owner for a Windows directory handle used as a path anchor."""
+
+        def __init__(self, handle: int) -> None:
+            self.handle = handle
+
+        def path(self) -> Path:
+            return _windows_handle_path(self.handle)
+
+        def close(self) -> None:
+            if self.handle >= 0:
+                _windows_close_handle(self.handle)
+                self.handle = -1
+
+
+    class _WindowsFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+
+    def _windows_kernel32() -> Any:
+        return ctypes.WinDLL("kernel32", use_last_error=True)
+
+
+    def _windows_close_handle(handle: int) -> None:
+        _windows_kernel32().CloseHandle(wintypes.HANDLE(handle))
+
+
+    def _windows_handle_info(handle: int) -> _WindowsFileInformation:
+        info = _WindowsFileInformation()
+        if not _windows_kernel32().GetFileInformationByHandle(
+            wintypes.HANDLE(handle), ctypes.byref(info),
+        ):
+            error = ctypes.get_last_error()
+            raise OSError(error, os.strerror(error))
+        return info
+
+
+    def _windows_handle_path(handle: int) -> Path:
+        size = 512
+        kernel32 = _windows_kernel32()
+        while size <= 32768:
+            buffer = ctypes.create_unicode_buffer(size)
+            length = kernel32.GetFinalPathNameByHandleW(
+                wintypes.HANDLE(handle), buffer, size, 0,
+            )
+            if length == 0:
+                error = ctypes.get_last_error()
+                raise OSError(error, os.strerror(error))
+            if length < size - 1:
+                value = buffer.value
+                if value.startswith("\\\\?\\UNC\\"):
+                    value = "\\\\" + value[8:]
+                elif value.startswith("\\\\?\\"):
+                    value = value[4:]
+                return Path(value)
+            size *= 2
+        raise OSError("Windows path exceeds the supported handle-path limit")
+
+
+    def _windows_open_handle(
+        path: Path, *, directory: bool = False, flags: int = os.O_RDONLY,
+        mode: int = 0o644,
+    ) -> int:
+        del mode
+        kernel32 = _windows_kernel32()
+        generic_read = 0x80000000
+        generic_write = 0x40000000
+        file_read_attributes = 0x00000080
+        file_list_directory = 0x00000001
+        file_share_read = 0x00000001
+        file_share_write = 0x00000002
+        file_share_delete = 0x00000004
+        open_existing = 3
+        create_new = 1
+        create_always = 2
+        open_always = 4
+        file_attribute_normal = 0x00000080
+        file_flag_open_reparse_point = 0x00200000
+        file_flag_backup_semantics = 0x02000000
+
+        if directory:
+            desired = file_read_attributes | file_list_directory
+            creation = open_existing
+            attributes = file_attribute_normal | file_flag_open_reparse_point | file_flag_backup_semantics
+        else:
+            read = not (flags & os.O_WRONLY) or bool(flags & os.O_RDWR)
+            write = bool(flags & (os.O_WRONLY | os.O_RDWR))
+            desired = (generic_read if read else 0) | (generic_write if write else 0)
+            if flags & os.O_CREAT:
+                creation = create_new if flags & os.O_EXCL else create_always if flags & os.O_TRUNC else open_always
+            else:
+                creation = create_always if flags & os.O_TRUNC else open_existing
+            attributes = file_attribute_normal | file_flag_open_reparse_point
+
+        handle = kernel32.CreateFileW(
+            str(path), desired,
+            file_share_read | file_share_write | file_share_delete,
+            None, creation, attributes, None,
+        )
+        value = getattr(handle, "value", handle)
+        if value in (None, 0, ctypes.c_void_p(-1).value):
+            error = ctypes.get_last_error()
+            raise OSError(error, os.strerror(error), str(path))
+        return int(value)
+
+
+    def _windows_open_directory(path: Path) -> _WindowsDirectoryHandle:
+        if _is_reparse_or_symbolic_link(path):
+            raise ValueError("symbolic links are not allowed for directory traversal")
+        handle = _windows_open_handle(path, directory=True)
+        try:
+            info = _windows_handle_info(handle)
+            if not info.dwFileAttributes & 0x00000010:
+                raise NotADirectoryError(str(path))
+            if info.dwFileAttributes & 0x00000400:
+                raise ValueError("reparse points are not allowed for directory traversal")
+            return _WindowsDirectoryHandle(handle)
+        except Exception:
+            _windows_close_handle(handle)
+            raise
+
+
+    def _windows_open_directory_at(
+        descriptor: _WindowsDirectoryHandle | Path, name: str,
+    ) -> _WindowsDirectoryHandle:
+        base = descriptor.path() if isinstance(descriptor, _WindowsDirectoryHandle) else descriptor
+        return _windows_open_directory(base / name)
+
+
+    def _windows_open_regular_at(
+        descriptor: _WindowsDirectoryHandle, name: str, flags: int, mode: int,
+        *, description: str,
+    ) -> tuple[int, tuple[int, int]]:
+        path = descriptor.path() / name
+        handle = _windows_open_handle(path, flags=flags, mode=mode)
+        try:
+            info = _windows_handle_info(handle)
+            if info.dwFileAttributes & 0x00000400:
+                raise ValueError(f"symbolic links are not allowed for {description}")
+            fd_flags = os.O_BINARY
+            if flags & os.O_RDWR:
+                fd_flags |= os.O_RDWR
+            elif flags & os.O_WRONLY:
+                fd_flags |= os.O_WRONLY
+            else:
+                fd_flags |= os.O_RDONLY
+            import msvcrt
+            descriptor_fd = msvcrt.open_osfhandle(handle, fd_flags)
+            handle = -1
+            metadata = os.fstat(descriptor_fd)
+            _validate_single_link_regular(metadata, description=description)
+            return descriptor_fd, _identity(metadata)
+        finally:
+            if handle >= 0:
+                _windows_close_handle(handle)
+
+
 def _parts(relative: str | Path) -> list[str]:
     path = Path(relative)
     if path.is_absolute() or ".." in path.parts:
@@ -46,7 +219,9 @@ def _parts(relative: str | Path) -> list[str]:
     return [part for part in path.parts if part not in {"", "."}]
 
 
-def _open_directory_at(descriptor: int, name: str) -> int:
+def _open_directory_at(descriptor: Any, name: str) -> Any:
+    if os.name == "nt":
+        return _windows_open_directory_at(descriptor, name)
     return os.open(
         name,
         os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
@@ -135,6 +310,19 @@ def _open_relative_regular_without_dir_fd(
     description: str,
 ) -> tuple[int, tuple[int, int]]:
     """Use the validated Windows path fallback for regular-file operations."""
+    if os.name == "nt":
+        root_handle = _windows_open_directory(root)
+        current = root_handle
+        try:
+            for part in parts[:-1]:
+                child = _open_directory_at(current, part)
+                current.close()
+                current = child
+            return _windows_open_regular_at(
+                current, parts[-1], flags, mode, description=description,
+            )
+        finally:
+            current.close()
     target = _validate_windows_path_components(
         root, parts, create=create_parents, description=description,
     )
@@ -161,6 +349,69 @@ def _iter_safe_regular_files_without_dir_fd(
     max_directories: int | None,
 ) -> Iterator[tuple[str, str, os.stat_result]]:
     """Walk regular files on Windows without following directory links."""
+    if os.name == "nt":
+        root_handle = _windows_open_directory(root)
+        current = root_handle
+        try:
+            for part in parts:
+                child = _open_directory_at(current, part)
+                current.close()
+                current = child
+            stack = [(current, "/".join(parts))]
+            current = None
+            entries_seen = 0
+            directories_seen = 0
+            while stack:
+                directory, directory_relative = stack.pop()
+                try:
+                    directories_seen += 1
+                    if max_directories is not None and directories_seen > max_directories:
+                        raise SafeTraversalUnavailable("directory listing exceeded its safety bound")
+                    directory_path = directory.path()
+                    directory_metadata = os.stat(directory_path, follow_symlinks=False)
+                    yield ("directory", directory_relative, directory_metadata)
+                    children: list[tuple[str, os.stat_result]] = []
+                    with os.scandir(directory_path) as entries:
+                        for entry in entries:
+                            entries_seen += 1
+                            if max_entries is not None and entries_seen > max_entries:
+                                raise SafeTraversalUnavailable("directory listing exceeded its safety bound")
+                            child_relative = "/".join(
+                                item for item in (directory_relative, entry.name) if item
+                            )
+                            if skip is not None and skip(child_relative):
+                                continue
+                            child = Path(entry.path)
+                            if _is_reparse_or_symbolic_link(child):
+                                continue
+                            try:
+                                metadata = entry.stat(follow_symlinks=False)
+                            except OSError:
+                                continue
+                            children.append((entry.name, metadata))
+                    children.sort(key=lambda item: item[0])
+                    subdirectories: list[tuple[_WindowsDirectoryHandle, str]] = []
+                    for name, metadata in children:
+                        child_relative = "/".join(
+                            item for item in (directory_relative, name) if item
+                        )
+                        if stat.S_ISDIR(metadata.st_mode):
+                            try:
+                                child_directory = _open_directory_at(directory, name)
+                            except OSError:
+                                continue
+                            subdirectories.append((child_directory, child_relative))
+                        elif stat.S_ISREG(metadata.st_mode):
+                            yield ("file", child_relative, metadata)
+                    stack.extend(reversed(subdirectories))
+                finally:
+                    directory.close()
+        finally:
+            if current is not None:
+                current.close()
+            for directory, _ in stack:
+                directory.close()
+        return
     target = _validate_windows_path_components(
         root, parts, create=False, description="directory",
     )

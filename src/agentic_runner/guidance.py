@@ -125,6 +125,8 @@ def _read_guidance(root: Path, relative: str) -> GuidanceFile | None:
     # Decode after hashing so the audit digest identifies the complete source
     # file even when a provider receives only a bounded representation.
     content = bytes(prefix).decode("utf-8", errors="replace")
+    if os.name == "nt":
+        content = content.replace("\r\n", "\n").replace("\r", "\n")
     return GuidanceFile(
         relative,
         content[:MAX_GUIDANCE_FILE_CHARS],
