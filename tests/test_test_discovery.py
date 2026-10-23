@@ -17,6 +17,7 @@ from agentic_runner.test_discovery import (
     MAX_DISCOVERY_TIMEOUT_SECONDS,
     DiscoveryResult,
     _kill_process_group,
+    _python_module_available,
     _run_candidate,
     _safe_agent_argv,
     discover_and_validate,
@@ -128,6 +129,19 @@ class TestDiscovery(unittest.TestCase):
         self.assertGreater(probe.call_args.kwargs["timeout"], 0)
         self.assertLessEqual(probe.call_args.kwargs["timeout"], 1)
         self.assertEqual(MAX_DISCOVERY_TIMEOUT_SECONDS, 86_400)
+
+    def test_windows_python_executable_runs_module_probe(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            with patch("agentic_runner.test_discovery.subprocess.run") as probe:
+                probe.return_value.returncode = 1
+                available, timed_out = _python_module_available(
+                    ["python.exe", "-m", "pytest"], repo, 1,
+                )
+
+        self.assertFalse(available)
+        self.assertFalse(timed_out)
+        probe.assert_called_once()
 
     def test_python_module_probe_and_command_share_one_candidate_deadline(self):
         with tempfile.TemporaryDirectory() as temp:

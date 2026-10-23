@@ -484,7 +484,10 @@ def _executable_available(argv: list[str], repo: Path) -> bool:
 
 
 def _python_module_available(argv: list[str], repo: Path, timeout: float) -> tuple[bool, bool]:
-    if len(argv) < 3 or argv[1] != "-m" or Path(argv[0]).name.lower() not in {"python", "python3", "py"}:
+    executable_name = Path(argv[0]).name.lower()
+    if executable_name.endswith(".exe"):
+        executable_name = executable_name[:-4]
+    if len(argv) < 3 or argv[1] != "-m" or executable_name not in {"python", "python3", "py"}:
         return True, False
     if timeout <= 0:
         return False, True
