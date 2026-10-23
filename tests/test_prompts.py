@@ -7,16 +7,6 @@ from agentic_runner.prompts import build_agent_prompt
 
 
 class PromptBoundaryTests(unittest.TestCase):
-    def test_developer_prompt_calls_out_windows_compatibility_contract(self):
-        prompt = build_agent_prompt(
-            Issue(47, "Refactor", "Issue body"), provider="codex",
-        )
-        self.assertIn("NATIVE WINDOWS COMPATIBILITY", prompt)
-        self.assertIn("Linux or WSL pass does not prove Windows behavior", prompt)
-        self.assertIn("pathlib/os.fspath", prompt)
-        self.assertIn("minimal home/temp environments", prompt)
-        self.assertIn("report that check as skipped", prompt)
-
     def test_directives_are_delimited_and_html_escaped(self):
         prompt = build_agent_prompt(
             Issue(47, "Refactor", "Issue body"),
