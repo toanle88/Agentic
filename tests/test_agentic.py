@@ -17,6 +17,7 @@ from agentic_runner import execution as agentic_execution
 from agentic_runner.sandbox import sandbox_command
 from agentic_runner import workflow as agentic_workflow
 from agentic_runner.execution_providers import _read_provider_result
+from agentic_runner.output import strip_ansi
 from agentic_runner.review import (
     MAX_REVIEW_HISTORY_BYTES,
     MAX_REVIEW_HISTORY_FIELD,
@@ -27,6 +28,13 @@ from agentic_runner.telemetry import record_operation, record_usage, record_work
 
 def sh(*args, cwd):
     return subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def summary_stage_lines(rendered):
+    return [
+        line for line in rendered.splitlines()
+        if line.startswith(('[DEVELOPER]', '[TESTS]', '[REVIEW]'))
+    ]
 
 
 
@@ -113,10 +121,11 @@ class PureTests(unittest.TestCase):
         self.assertIn('Completion/output: 90 tokens', rendered)
         self.assertIn('Cost: $0.0300', rendered)
         self.assertIn('[SUMMARY] Duration: 3m 45s', rendered)
-        self.assertIn('[DEVELOPER] 2 runs | 270 tokens', rendered)
-        self.assertIn('[TESTS] 2 runs | 0 tokens', rendered)
-        self.assertIn('[REVIEW] 1 run | 30 tokens', rendered)
-        self.assertIn('Findings: 3', rendered)
+        self.assertEqual(summary_stage_lines(rendered), [
+            '[DEVELOPER]  Runs:  2 | Tokens: 270 | Time: 2m 0s',
+            '[TESTS]      Runs:  2 | Tokens:   0 | Time: 1m 0s',
+            '[REVIEW]     Runs:  1 | Tokens:  30 | Time:   45s | Findings: 3',
+        ])
         self.assertIn('[RETRY] Attempts: 2 | Retries: 1', rendered)
         self.assertIn(f'Logs:     {folder}', rendered)
         self.assertNotIn('\033[', rendered)
@@ -133,10 +142,11 @@ class PureTests(unittest.TestCase):
         self.assertIn('[SUMMARY] Total: unknown', rendered)
         self.assertIn('Prompt/input: unknown', rendered)
         self.assertIn('Cost: unknown', rendered)
-        self.assertIn('[DEVELOPER] 0 runs | unknown', rendered)
-        self.assertIn('[TESTS] 0 runs | 0 tokens', rendered)
-        self.assertIn('[REVIEW] 0 runs | unknown', rendered)
-        self.assertIn('Findings: unknown', rendered)
+        self.assertEqual(summary_stage_lines(rendered), [
+            '[DEVELOPER]  Runs:  0 | Tokens: unknown | Time: unknown',
+            '[TESTS]      Runs:  0 | Tokens:       0 | Time: unknown',
+            '[REVIEW]     Runs:  0 | Tokens: unknown | Time: unknown | Findings: unknown',
+        ])
         self.assertIn('[RETRY] Attempts: unknown | Retries: unknown', rendered)
 
     def test_approved_run_summary_colors_generated_sections_on_tty(self):
@@ -145,6 +155,12 @@ class PureTests(unittest.TestCase):
                 return True
 
         with tempfile.TemporaryDirectory() as temp:
+            plain_output = io.StringIO()
+            run = agentic.Run(1, 'agent/issue-1-test', Path('/tmp/worktree'))
+            with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+                 patch.object(agentic.sys, 'stdout', plain_output):
+                agentic.print_run_summary(run, 'APPROVED', 'continue', logs_path=Path(temp))
+
             output = TTYBuffer()
             run = agentic.Run(1, 'agent/issue-1-test', Path('/tmp/worktree'))
             with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
@@ -156,6 +172,43 @@ class PureTests(unittest.TestCase):
         self.assertIn('\033[36m[DEVELOPER]\033[0m', rendered)
         self.assertIn('\033[35m[REVIEW]\033[0m', rendered)
         self.assertIn('\033[36munknown\033[0m', rendered)
+        self.assertEqual(strip_ansi(rendered), plain_output.getvalue())
+
+    def test_approved_run_summary_aligns_different_stage_widths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            for index, total_tokens in enumerate((1_500_000, 1_500_000, 1_671_548), 1):
+                record_usage(
+                    folder, 'developer', {'total_tokens': total_tokens},
+                    invocation={'name': f'developer-{index:03d}', 'stage': 'developer'},
+                )
+            for index in range(1, 13):
+                record_operation(
+                    folder, 'tests', f'tests-{index:03d}', duration_seconds=11 if index <= 10 else 12,
+                )
+            for index, duration in enumerate((172, 173, 173), 1):
+                record_operation(
+                    folder, 'developer', f'developer-{index:03d}', duration_seconds=duration,
+                )
+            record_usage(
+                folder, 'reviewer', {'total_tokens': 89_366},
+                invocation={'name': 'review-001', 'stage': 'reviewer'},
+            )
+            record_operation(folder, 'reviewer', 'review-001', duration_seconds=54)
+            record_workflow_outcome(
+                folder, approved=True, attempts=1, first_pass=True, review_findings=1,
+            )
+            output = io.StringIO()
+            run = agentic.Run(1, 'agent/issue-1-test', Path('/tmp/worktree'))
+            with patch.object(agentic.sys, 'stdout', output):
+                agentic.print_run_summary(run, 'APPROVED', 'continue', logs_path=folder)
+
+        rendered = output.getvalue()
+        self.assertEqual(summary_stage_lines(rendered), [
+            '[DEVELOPER]  Runs:  3 | Tokens: 4,671,548 | Time: 8m 38s',
+            '[TESTS]      Runs: 12 | Tokens:         0 | Time: 2m 14s',
+            '[REVIEW]     Runs:  1 | Tokens:    89,366 | Time:    54s | Findings: 1',
+        ])
 
 
     def test_relative_worktree_configuration_is_not_written_when_unsupported(self):
