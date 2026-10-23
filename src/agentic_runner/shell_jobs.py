@@ -180,8 +180,30 @@ def process_identity_matches(pid: int, expected: dict[str, Any] | None) -> bool:
     return True
 
 
+def terminate_windows_process_tree(pid: int, expected: dict[str, Any] | None) -> bool:
+    """Kill a verified Windows process tree, including all descendants."""
+    if os.name != "nt" or pid <= 0 or not process_identity_matches(pid, expected):
+        return False
+    try:
+        result = subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except (OSError, TypeError, ValueError):
+        return False
+    return result.returncode == 0
+
+
 def signal_process_tree(process: subprocess.Popen[Any], signum: int) -> None:
     """Signal a foreground process and descendants in its isolated group."""
+    if os.name == "nt":
+        pid = int(getattr(process, "pid", 0) or 0)
+        expected = process_identity(pid)
+        terminate_windows_process_tree(pid, expected)
+        return
     if os.name != "nt":
         try:
             pid = int(process.pid)
@@ -413,5 +435,5 @@ __all__ = [
     "display_escape", "foreground_prompt_prefix", "is_foreground_prompt",
     "job_for_issue", "normalize_foreground_output", "pid_running",
     "process_identity", "process_identity_matches",
-    "signal_process_tree", "tail", "tail_from_text",
+    "signal_process_tree", "terminate_windows_process_tree", "tail", "tail_from_text",
 ]
