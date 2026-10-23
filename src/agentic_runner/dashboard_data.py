@@ -60,8 +60,13 @@ def _windows_file_content_signature(path: Path) -> str:
     descriptor = -1
     try:
         descriptor = os.open(str(path), os.O_RDONLY | getattr(os, "O_BINARY", 0))
-        while chunk := os.read(descriptor, 1024 * 1024):
-            digest.update(chunk)
+        size = os.fstat(descriptor).st_size
+        sample_size = 32 * 1024
+        digest.update(str(size).encode("ascii"))
+        digest.update(os.read(descriptor, sample_size))
+        if size > sample_size:
+            os.lseek(descriptor, max(0, size - sample_size), os.SEEK_SET)
+            digest.update(os.read(descriptor, sample_size))
     except OSError:
         return "unreadable"
     finally:
