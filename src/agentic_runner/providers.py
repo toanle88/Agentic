@@ -13,7 +13,7 @@ import shlex
 import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath
 
 from .policy import PERMISSION_FIELDS, default_permission_policy
 
@@ -41,13 +41,13 @@ def _readonly_git_unsafe_patterns(prefix: str) -> list[str]:
     return patterns
 
 
-def _provider_worktree_scope(worktree: Path | None, *, sandbox_enabled: bool) -> Path:
+def _provider_worktree_scope(worktree: Path | None, *, sandbox_enabled: bool) -> PurePath:
     """Return the path visible to a native provider for worktree rules."""
     # This is a path inside the provider's container, not a host path.  Do
     # not resolve it through the host filesystem (which turns it into a
     # drive-qualified Windows path such as ``D:\\workspace``).
     if sandbox_enabled:
-        return Path("/workspace")
+        return PurePosixPath("/workspace")
     return (worktree or Path.cwd()).resolve()
 
 
@@ -305,7 +305,13 @@ def _usable_executable(value: str) -> str | None:
     """Return an executable command or path only when it can be started."""
     candidate = Path(value).expanduser()
     if candidate.is_absolute() or len(candidate.parts) > 1:
-        return str(candidate) if candidate.is_file() and os.access(candidate, os.X_OK) else None
+        if not candidate.is_file():
+            return None
+        # Windows launchability is determined by the executable suffix and
+        # file association, not by POSIX execute permission bits.
+        if os.name == "nt":
+            return str(candidate) if candidate.suffix.lower() in {".exe", ".cmd", ".bat"} else None
+        return str(candidate) if os.access(candidate, os.X_OK) else None
     found = shutil.which(value)
     if found:
         return found

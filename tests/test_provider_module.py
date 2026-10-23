@@ -134,7 +134,7 @@ class ProviderCommandTests(unittest.TestCase):
         }
         claude, _ = cli_provider_command(
             "claude", "develop", permission_policy=policy,
-            worktree=Path("/tmp/agentic-worktree"),
+            worktree=Path("/tmp/agentic-worktree").resolve(),
             check_commands=[["python", "-m", "unittest", "discover", "-s", "tests"]],
         )
         self.assertIn("--allowedTools", claude)

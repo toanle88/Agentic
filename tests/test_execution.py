@@ -584,11 +584,12 @@ class StreamingTests(unittest.TestCase):
     def test_test_runner_removes_configured_credentials_from_child_environment(self):
         from io import StringIO
         value = 'custom-test-credential-123456'
+        git_executable = shutil.which('git') or 'git'
         with tempfile.TemporaryDirectory() as dirname, patch.dict(
             'os.environ', {'SERVICE_VALUE': value}, clear=True
         ):
             root = Path(dirname)
-            sh(shutil.which('git') or 'git', 'init', cwd=root)
+            sh(git_executable, 'init', cwd=root)
             script = 'import os; print(os.environ.get("SERVICE_VALUE", "missing"))'
             with patch('sys.stdout', new_callable=StringIO) as output:
                 passed, report = agentic.run_tests(

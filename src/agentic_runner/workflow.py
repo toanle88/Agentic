@@ -449,6 +449,8 @@ def _whitespace_check(worktree: Path, timeout: int) -> str:
             )
         # --no-index returns 1 for a clean difference and 3 when it reports
         # whitespace errors.
+            if candidate.stdout.strip():
+                return candidate.stdout.strip()
             if candidate.returncode not in (0, 1):
                 return candidate.stdout.strip()
     finally:
