@@ -419,7 +419,10 @@ _EOF_BLANK_LINE_RE = re.compile(r"^(?P<path>.+):\d+: new blank line at EOF\.$")
 def _whitespace_check(worktree: Path, timeout: int) -> str:
     """Return Git whitespace diagnostics, including untracked files."""
     diff_check = command(
-        ["git", "-c", "core.whitespace=cr-at-eol", "diff", "--check"], worktree,
+        [
+            "git", "-c", "core.whitespace=cr-at-eol", "-c", "diff.external=",
+            "diff", "--no-ext-diff", "--no-textconv", "--check",
+        ], worktree,
         timeout=timeout, check=False,
     )
     if diff_check.returncode:
@@ -434,8 +437,9 @@ def _whitespace_check(worktree: Path, timeout: int) -> str:
     for path in filter(None, untracked.stdout.split("\x00")):
         candidate = command(
             [
-                "git", "-c", "core.whitespace=cr-at-eol", "diff",
-                "--no-index", "--check", "--", os.devnull, path,
+                "git", "-c", "core.whitespace=cr-at-eol", "-c", "diff.external=",
+                "diff", "--no-ext-diff", "--no-textconv", "--no-index", "--check",
+                "--", os.devnull, path,
             ],
             worktree, timeout=timeout, check=False,
         )
@@ -668,7 +672,10 @@ def pending_files(worktree: Path) -> list[str]:
 def _staged_non_regular_files(worktree: Path, base_sha: str) -> list[str]:
     """Return proposed paths whose staged Git mode is not a regular file."""
     raw = command(
-        ["git", "diff", "--cached", "--raw", "-z", "--no-renames", base_sha],
+        [
+            "git", "-c", "diff.external=", "diff", "--no-ext-diff", "--no-textconv",
+            "--cached", "--raw", "-z", "--no-renames", base_sha,
+        ],
         worktree,
     ).stdout
     fields = raw.split("\x00")
@@ -747,7 +754,12 @@ def prepare_patch(worktree: Path, base: str, max_files: int | None) -> tuple[str
     non_regular = _staged_non_regular_files(worktree, base_sha)
     if non_regular:
         raise RuntimeError(f"Non-regular files changed, publication blocked: {non_regular}")
-    raw_names = command(["git", "diff", "--cached", "--name-only", "-z", base_sha], worktree).stdout
+    raw_names = command(
+        [
+            "git", "-c", "diff.external=", "diff", "--no-ext-diff", "--no-textconv",
+            "--cached", "--name-only", "-z", base_sha,
+        ], worktree,
+    ).stdout
     names = [p for p in raw_names.split("\x00") if p]
     disallowed = [p for p in names if _publication_forbidden(worktree, p)]
     if disallowed:
@@ -756,10 +768,21 @@ def prepare_patch(worktree: Path, base: str, max_files: int | None) -> tuple[str
         raise NoCodeChangesError("No code changes compared to base branch")
     if max_files is not None and len(names) > max_files:
         raise RuntimeError(f"Patch modifies {len(names)} files; max_files={max_files}")
-    git(worktree, "-c", "core.whitespace=cr-at-eol", "diff", "--cached", "--check", base_sha)
-    diff = command(["git", "diff", "--cached", "--binary", base_sha], worktree).stdout
+    git(
+        worktree, "-c", "core.whitespace=cr-at-eol", "-c", "diff.external=", "diff",
+        "--no-ext-diff", "--no-textconv", "--cached", "--check", base_sha,
+    )
+    diff = command(
+        [
+            "git", "-c", "diff.external=", "diff", "--no-ext-diff", "--no-textconv",
+            "--cached", "--binary", base_sha,
+        ], worktree,
+    ).stdout
     digest = hashlib.sha256(diff.encode("utf-8")).hexdigest()
-    summary = git(worktree, "diff", "--cached", "--stat", base_sha)
+    summary = git(
+        worktree, "-c", "diff.external=", "diff", "--no-ext-diff", "--no-textconv",
+        "--cached", "--stat", base_sha,
+    )
     return base_sha, digest, summary
 
 
@@ -1686,7 +1709,12 @@ def push_existing_pr(run: Run, issue: Issue, github_repo: str, base: str,
         raise RuntimeError("Patch changed since repair review; not publishing")
     current = lookup()
     _validate_pull_request_identity(pull_request, current)
-    if command(["git", "diff", "--cached", "--quiet"], run.worktree, check=False).returncode:
+    if command(
+        [
+            "git", "-c", "diff.external=", "diff", "--no-ext-diff", "--no-textconv",
+            "--cached", "--quiet",
+        ], run.worktree, check=False,
+    ).returncode:
         _commit_publication_and_revalidate(
             run, base, config["max_files"], _new_base_sha, new_digest,
             f"fix: repair PR #{pull_request.number}",
@@ -1920,7 +1948,12 @@ def _publish(run: Run, issue: Issue, github_repo: str, base: str,
     if digest != new_digest:
         raise RuntimeError("Patch changed since verification; not publishing")
     # Commit pending changes; previous commits on the branch are preserved.
-    if command(["git", "diff", "--cached", "--quiet"], run.worktree, check=False).returncode:
+    if command(
+        [
+            "git", "-c", "diff.external=", "diff", "--no-ext-diff", "--no-textconv",
+            "--cached", "--quiet",
+        ], run.worktree, check=False,
+    ).returncode:
         message = (
             f"fix: complete repository audit - {issue.title[:64]}"
             if issue.is_audit else

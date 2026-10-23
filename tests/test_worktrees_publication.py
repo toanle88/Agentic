@@ -335,7 +335,7 @@ class PublicationTests(_GitRepositoryTestCase):
 
         def fake_command(argv, cwd, **kwargs):
             commands.append(argv)
-            if argv[:4] == ['git', 'diff', '--cached', '--quiet']:
+            if 'diff' in argv and '--cached' in argv and '--quiet' in argv:
                 return CompletedProcess(argv, 1, stdout='')
             return CompletedProcess(argv, 0, stdout='https://github.test/pr/30')
 
@@ -470,7 +470,7 @@ class PublicationTests(_GitRepositoryTestCase):
 
         def fake_command(argv, cwd, **kwargs):
             commands.append(argv)
-            if argv[:4] == ['git', 'diff', '--cached', '--quiet']:
+            if 'diff' in argv and '--cached' in argv and '--quiet' in argv:
                 return CompletedProcess(argv, 1, stdout='')
             return CompletedProcess(argv, 0, stdout='https://github.test/pr/33')
 
@@ -533,7 +533,7 @@ class PublicationTests(_GitRepositoryTestCase):
 
         def fake_command(argv, cwd, **kwargs):
             commands.append(argv)
-            if argv[:4] == ['git', 'diff', '--cached', '--quiet']:
+            if 'diff' in argv and '--cached' in argv and '--quiet' in argv:
                 return CompletedProcess(argv, 1, stdout='')
             return CompletedProcess(argv, 0, stdout='')
 

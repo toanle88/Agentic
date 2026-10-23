@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from .config import SAFE_GIT_DIFF_CHECK
 from .sandbox import sandbox_command
 
 
@@ -236,7 +237,7 @@ def discover_test_candidates(repo: Path) -> list[dict[str, Any]]:
             _add_candidate(candidates, seen, _candidate(["python", "-m", "unittest", "discover", "-s", "tests", "-q"], "Python tests directory; stdlib unittest"))
     _package_candidates(repo, candidates, seen)
     _make_candidates(repo, candidates, seen)
-    _add_candidate(candidates, seen, _candidate(["git", "diff", "--check"], "Git whitespace validation"))
+    _add_candidate(candidates, seen, _candidate(list(SAFE_GIT_DIFF_CHECK), "Git whitespace validation"))
     return candidates
 
 
@@ -422,7 +423,7 @@ def _agent_candidates(
     timeout: int,
     sandbox: dict[str, Any] | None,
 ) -> tuple[list[dict[str, Any]], str | None]:
-    meaningful = [item for item in candidates if item.get("argv") != ["git", "diff", "--check"]]
+    meaningful = [item for item in candidates if item.get("argv") != list(SAFE_GIT_DIFF_CHECK)]
     # A single unambiguous project check does not need a provider turn. The
     # fallback whitespace check is intentionally excluded from this decision.
     if agent_runner is None or len(meaningful) < 2:

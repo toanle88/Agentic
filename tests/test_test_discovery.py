@@ -189,7 +189,7 @@ class TestDiscovery(unittest.TestCase):
                 return True, json.dumps({"commands": [
                     {"argv": ["sh", "-c", "rm -rf ."], "profile": "fast"},
                     {"argv": [str(evil_executable), "-c", "pass"], "profile": "fast"},
-                    {"argv": ["git", "diff", "--check"], "profile": "fast"},
+                    {"argv": ["git", "diff", "--no-ext-diff", "--no-textconv", "--check"], "profile": "fast"},
                 ]})
 
             result = discover_and_validate(
@@ -388,10 +388,10 @@ class TestDiscovery(unittest.TestCase):
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             discovery = DiscoveryResult(
                 results=[{
-                    "argv": ["git", "diff", "--check"], "display": "git diff --check",
+                    "argv": ["git", "diff", "--no-ext-diff", "--no-textconv", "--check"], "display": "git diff --no-ext-diff --no-textconv --check",
                     "status": "passed", "profile": "fast", "detail": "passed in 0.001s",
                 }],
-                fast_commands=[["git", "diff", "--check"]], slow_commands=[],
+                fast_commands=[["git", "diff", "--no-ext-diff", "--no-textconv", "--check"]], slow_commands=[],
             )
             with patch("agentic.discover_and_validate", return_value=discovery) as discovery_mock, \
                  patch("builtins.input", return_value="n"):
@@ -406,16 +406,19 @@ class TestDiscovery(unittest.TestCase):
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             discovery = DiscoveryResult(
                 results=[{
-                    "argv": ["git", "diff", "--check"], "display": "git diff --check",
+                    "argv": ["git", "diff", "--no-ext-diff", "--no-textconv", "--check"], "display": "git diff --no-ext-diff --no-textconv --check",
                     "status": "passed", "profile": "fast", "detail": "passed in 0.001s",
                 }],
-                fast_commands=[["git", "diff", "--check"]], slow_commands=[],
+                fast_commands=[["git", "diff", "--no-ext-diff", "--no-textconv", "--check"]], slow_commands=[],
             )
             with patch("agentic.discover_and_validate", return_value=discovery), \
                  patch("builtins.input", return_value="y"):
                 self.assertEqual(agentic.init_repository(repo, discover_tests=True), 0)
             config = json.loads((repo / "agent_config.json").read_text())
-            self.assertEqual(config["test_commands"], [["git", "diff", "--check"]])
+            self.assertEqual(
+                config["test_commands"],
+                [["git", "diff", "--no-ext-diff", "--no-textconv", "--check"]],
+            )
 
     def test_protected_existing_config_skips_assisted_discovery(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -435,7 +438,7 @@ class TestDiscovery(unittest.TestCase):
             subprocess.run(["git", "init", "--initial-branch=main", str(repo)], check=True,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             discovery = DiscoveryResult(
-                results=[], fast_commands=[["git", "diff", "--check"]], slow_commands=[],
+                results=[], fast_commands=[["git", "diff", "--no-ext-diff", "--no-textconv", "--check"]], slow_commands=[],
             )
             events = []
 

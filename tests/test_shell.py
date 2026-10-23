@@ -1073,6 +1073,25 @@ class ShellTests(unittest.TestCase):
             self.assertIn('hello', job.log_path.read_text())
             self.assertIn('EXIT 0', _capture_ps(shell))
 
+    def test_oversized_background_logs_are_bounded_and_marked(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            job = shell._launch([
+                sys.executable, '-c',
+                'import sys; sys.stdout.write("x" * 250000 + "\\nfinal\\n")',
+            ])
+            job.process.wait(timeout=5)
+            shell.refresh()
+            content = job.log_path.read_text(encoding='utf-8')
+            self.assertLessEqual(job.log_path.stat().st_size, 200_000)
+            self.assertIn('log capped at 200,000 bytes', content)
+            self.assertIn('final', content)
+            self.assertIn(
+                'log capped at 200,000 bytes',
+                agentic_shell._tail(job.log_path, 1, verbose=True),
+            )
+
 
     def test_show_processes_places_running_jobs_first(self):
         with tempfile.TemporaryDirectory() as temp:

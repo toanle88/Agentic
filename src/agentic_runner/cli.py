@@ -35,6 +35,7 @@ from .config import (  # noqa: F401
     PROVIDER_API_KEY_ENV,
     OPENROUTER_MAX_TURNS,
     SECURITY_MODES,
+    SAFE_GIT_DIFF_CHECK,
     SUPPORTED_PROVIDERS,
     _append_git_exclude_entry,
     default_provider_settings,
@@ -720,7 +721,7 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
             agents_path.write_text(DEFAULT_AGENTS, encoding="utf-8")
             _status_print(f"[INIT] Wrote {agents_path}")
     _status_print(f"[INIT] {detection}: {' '.join(commands[0])}")
-    if commands == [["git", "diff", "--check"]]:
+    if commands == [list(SAFE_GIT_DIFF_CHECK)]:
         _status_print("[INIT] Warning: replace the starter check with the project's real test/build commands")
     _status_print(f"[INIT] Providers: developer={provider}, reviewer={reviewer_provider}")
     if security_mode == "isolated":

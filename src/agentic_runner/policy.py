@@ -32,7 +32,10 @@ _PROTECTED_SUFFIXES = (".pem", ".p12", ".pfx", ".key", ".ppk", ".der")
 
 
 def _protected_path(filename: str) -> tuple[list[str], str]:
-    path = PurePosixPath(filename)
+    # Git and Windows-facing callers may provide either slash spelling.  Use
+    # one separator convention before checking components so nested protected
+    # paths cannot evade the policy on a POSIX host.
+    path = PurePosixPath(filename.replace("\\", "/"))
     return [item.lower() for item in path.parts], path.name.lower()
 
 
@@ -116,7 +119,7 @@ def forbidden(filename: str) -> bool:
     """Identify paths that must never be included in a proposed patch."""
     parts, base = _protected_path(filename)
     return (
-        filename.lower() in {"agentic.py", "agent_config.json", "agents.md"}
+        filename.replace("\\", "/").lower() in {"agentic.py", "agent_config.json", "agents.md"}
         or _protected_basename(parts, base)
         or "secrets" in parts or ".git" in parts
         or ".codex" in parts

@@ -18,7 +18,7 @@ from .execution_stream import (
 from .guidance import guidance_phase, guidance_prompt
 from .config import PROVIDER_API_KEY_ENV, provider_process_environment
 from .persistence import atomic_write_text
-from .policy import default_permission_policy, sensitive_read
+from .policy import sensitive_read
 from .providers import (
     cli_provider_command,
     codex_command,
@@ -287,9 +287,6 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
         command_kwargs["permission_policy"] = permission_policy
     if check_commands is not None:
         command_kwargs["check_commands"] = check_commands
-    policy = default_permission_policy("reviewer" if readonly else "developer")
-    if permission_policy:
-        policy.update(permission_policy)
     effective_sandbox = dict(sandbox) if sandbox is not None else None
     command_kwargs["sandbox_enabled"] = bool(effective_sandbox and effective_sandbox.get("enabled"))
     command_kwargs["sandbox_allow_network"] = bool(

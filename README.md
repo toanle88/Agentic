@@ -295,7 +295,9 @@ Interactive shell commands include `/audit`, `/run`, `/ps`, `/logs`, `/list`, `/
 `/status`, `/dashboard`, `/init`, `/doctor`, `/cleanup`, `/version`, `/help`,
 `/stop`, and `/quit`. Use `/run --task-file PATH` for a local task already saved
 in a file. `/runs` lists Agentic worktrees; `/ps --all` lists persisted shell
-jobs. Use `/stop --all` to request termination for every running Agentic job.
+jobs. Background job logs retain at most 200,000 bytes; `/logs` marks omitted
+earlier output when that bound is reached. Use `/stop --all` to request
+termination for every running Agentic job.
 
 ## Common commands
 

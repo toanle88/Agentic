@@ -21,6 +21,63 @@ from .output import ConciseLogStream
 from .shell_input import _KeyReader
 
 
+MAX_LOG_BYTES = 200_000
+LOG_TRUNCATION_MARKER = "[... earlier output omitted; log capped at 200,000 bytes ...]\n"
+
+
+class BoundedLogWriter:
+    """Persist only a bounded suffix of one background job's output."""
+
+    def __init__(self, path: Path, *, max_bytes: int = MAX_LOG_BYTES) -> None:
+        self.path = path
+        self.max_bytes = max_bytes
+        self._marker = LOG_TRUNCATION_MARKER.encode("utf-8")
+        self._retained = bytearray()
+        self._truncated = False
+        self._stream = path.open("wb")
+
+    def _rewrite(self) -> None:
+        payload = bytes(self._retained)
+        if self._truncated:
+            payload = self._marker + payload
+        self._stream.seek(0)
+        self._stream.write(payload)
+        self._stream.truncate()
+        self._stream.flush()
+
+    def write(self, data: bytes) -> int:
+        if not data:
+            return 0
+        if not self._truncated and len(self._retained) + len(data) <= self.max_bytes:
+            self._retained.extend(data)
+            self._stream.write(data)
+            self._stream.flush()
+            return len(data)
+        self._truncated = True
+        capacity = max(0, self.max_bytes - len(self._marker))
+        self._retained = bytearray((bytes(self._retained) + data)[-capacity:])
+        self._rewrite()
+        return len(data)
+
+    def copy_from(self, source: Any) -> None:
+        try:
+            while True:
+                chunk = source.read(8192)
+                if not chunk:
+                    return
+                self.write(chunk)
+        finally:
+            try:
+                source.close()
+            except (AttributeError, OSError, ValueError):
+                pass
+            self.close()
+
+    def close(self) -> None:
+        if not self._stream.closed:
+            self._stream.close()
+
+
 @dataclass
 class Job:
     number: int
@@ -28,7 +85,7 @@ class Job:
     log_path: Path
     process: subprocess.Popen[Any] | None
     started: float
-    log_handle: TextIO | None
+    log_handle: TextIO | BoundedLogWriter | None
     record_path: Path
     session_id: str
     persisted_pid: int = 0
@@ -38,6 +95,7 @@ class Job:
     completion_callback: Callable[[int], None] | None = None
     stop_requested: bool = False
     identity: dict[str, Any] | None = None
+    log_thread: threading.Thread | None = None
 
     @property
     def running(self) -> bool:
@@ -72,15 +130,25 @@ def job_for_issue(jobs: Iterable[Job], issue: int) -> Job | None:
 
 def tail(path: Path, lines: int, *, verbose: bool = False) -> str:
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            end = stream.tell()
+            start = max(0, end - MAX_LOG_BYTES)
+            stream.seek(start)
+            text = stream.read(end - start).decode("utf-8", errors="replace")
     except OSError as exc:
         return f"Could not read {path}: {exc}"
-    text = text[-200_000:]
+    truncated = start > 0 or text.startswith(LOG_TRUNCATION_MARKER)
+    if truncated and not text.startswith(LOG_TRUNCATION_MARKER):
+        text = LOG_TRUNCATION_MARKER + text
     if not verbose:
         concise = ConciseLogStream()
         text = concise.feed(text) + concise.flush()
     selected = text.splitlines()[-lines:]
-    return "\n".join(selected) or "(log is empty)"
+    result = "\n".join(selected) or "(log is empty)"
+    if truncated and LOG_TRUNCATION_MARKER.rstrip("\n") not in result:
+        result = LOG_TRUNCATION_MARKER.rstrip("\n") + "\n" + result
+    return result
 
 
 def tail_from_text(text: str, lines: int, *, verbose: bool = False) -> str:

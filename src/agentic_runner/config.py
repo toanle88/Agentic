@@ -61,6 +61,7 @@ DEFAULT_REVIEWER_TIMEOUT = 300
 DEFAULT_TASK_TIMEOUT = 1800
 MAX_TASK_TIMEOUT = 86400
 DEFAULT_OPENROUTER_COMMAND_TIMEOUT = 300
+SAFE_GIT_DIFF_CHECK = ("git", "diff", "--no-ext-diff", "--no-textconv", "--check")
 HOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
 PROVIDER_SETTING_FIELDS = frozenset({
     "provider", "model", "reasoning_effort", "timeout_seconds", "auth",
@@ -584,7 +585,7 @@ def detect_test_commands(repo: Path) -> tuple[list[list[str]], str]:
     if (repo / "pyproject.toml").is_file() or (repo / "setup.py").is_file():
         if (repo / "tests").is_dir():
             return [["python", "-m", "unittest", "discover", "-s", "tests", "-q"]], "Detected Python tests directory"
-    return [["git", "diff", "--check"]], "No test framework detected; using Git whitespace validation"
+    return [list(SAFE_GIT_DIFF_CHECK)], "No test framework detected; using Git whitespace validation"
 
 
 def _git_info_exclude_path(repo: Path) -> Path:
