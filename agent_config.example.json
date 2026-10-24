@@ -1,5 +1,8 @@
 {
   "task_source": "github",
+  "automation": {
+    "auto_publish": false
+  },
   "test_commands": [
     ["python", "-m", "unittest", "discover", "-s", "tests", "-q"]
   ],

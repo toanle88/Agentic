@@ -278,6 +278,69 @@ class AuditTests(unittest.TestCase):
             self.assertIn("Unsafe boundary", argv[-1])
             self.assertTrue((folder / "audit-issue.json").is_file())
 
+    def test_auto_publish_audit_reuses_matching_remote_issue_without_prompt(self):
+        issue = Issue.for_audit("0123456789ab", "Audit scope")
+        report = {
+            "schema_version": 1, "audit_key": issue.audit_key,
+            "summary": "Audit summary", "findings": [], "measurements": [],
+            "skipped": [],
+        }
+        run = Run(None, "agent/audit-0123456789ab-20261022T123456789012Z", Path("/tmp/audit"))
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            (folder / "audit-report.json").write_text(json.dumps(report))
+            title = audit_workflow._audit_issue_title(run)
+            with patch.object(audit_workflow, "command", return_value=CompletedProcess(
+                ["gh"], 0, stdout=json.dumps([{"title": title, "url": "https://github.test/issues/8"}]), stderr="",
+            )) as command, patch("agentic_runner.shell_input._interactive_line", side_effect=AssertionError("prompted")):
+                url = audit_workflow.publish_audit_issue(
+                    run, issue, "owner/repo", "github.test", folder, auto=True,
+                )
+            self.assertEqual(url, "https://github.test/issues/8")
+            self.assertTrue((folder / "publication.json").is_file())
+            self.assertEqual(command.call_count, 1)
+
+    def test_auto_publish_audit_reuses_local_publication_record_without_github_lookup(self):
+        issue = Issue.for_audit("0123456789ab", "Audit scope")
+        report = {
+            "schema_version": 1, "audit_key": issue.audit_key,
+            "summary": "Audit summary", "findings": [], "measurements": [],
+            "skipped": [],
+        }
+        run = Run(None, "agent/audit-0123456789ab-20261022T123456789012Z", Path("/tmp/audit"))
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            (folder / "audit-report.json").write_text(json.dumps(report))
+            (folder / "publication.json").write_text(json.dumps({
+                "status": "published", "kind": "audit_issue",
+                "url": "https://github.test/issues/8", "branch": run.branch,
+            }))
+            with patch.object(audit_workflow, "command", side_effect=AssertionError("looked up remote")):
+                url = audit_workflow.publish_audit_issue(
+                    run, issue, "owner/repo", "github.test", folder, auto=True,
+                )
+            self.assertEqual(url, "https://github.test/issues/8")
+
+    def test_automatic_audit_publication_rejects_terminal_state_markers(self):
+        issue = Issue.for_audit("0123456789ab", "Audit scope")
+        report = {
+            "schema_version": 1, "audit_key": issue.audit_key,
+            "summary": "Audit summary", "findings": [], "measurements": [],
+            "skipped": [],
+        }
+        for marker, payload in (
+            ("blocked.json", {"status": "blocked"}),
+            ("result.json", {"status": "FAILED"}),
+            ("result.json", {"status": "RETRY_EXHAUSTED"}),
+            ("result.json", {"status": "NO_CHANGES"}),
+        ):
+            with self.subTest(marker=marker, status=payload["status"]):
+                with tempfile.TemporaryDirectory() as temp:
+                    folder = Path(temp)
+                    (folder / "audit-report.json").write_text(json.dumps(report))
+                    (folder / marker).write_text(json.dumps(payload))
+                    self.assertFalse(agentic._automatic_candidate_eligible(issue, folder))
+
     def test_dashboard_keeps_audit_identity_in_generated_views_and_suffix(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

@@ -35,7 +35,7 @@ design choices in [`decisions/`](decisions/).
 - Do not commit credentials, private keys, `.env` files, or connection strings.
 - Redact secrets before durable logs and keep run metadata to bounded,
   sanitized facts.
-- Reviewers remain read-only, and publication requires explicit approval.
+- Reviewers remain read-only, and publication requires recorded approval; automatic publication is available only through the explicit opt-in configuration setting.
 
 ## Migrations and contracts
 

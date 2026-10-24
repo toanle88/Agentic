@@ -69,8 +69,12 @@ The dashboard and `/logs` can inspect the durable report and provider logs.
 from the saved report without creating a commit or pull request. The issue title
 includes the audit worktree's UTC timestamp so repeated audit publications are
 easy to distinguish. Cancellation retains the worktree and report for resume.
-`audit --offline` can resume an existing audit worktree without GitHub issue
-intake.
+When `automation.auto_publish` is `true`, a valid completed audit attempts this
+publication without prompting. Existing issues are detected and recorded
+locally; unavailable access or a publication failure leaves the report,
+worktree, and logs intact for a later `--publish` retry. `audit --offline` can
+resume an existing audit worktree without GitHub issue intake, and automatic
+publication is skipped for offline runs.
 
 ## Issue investigation
 

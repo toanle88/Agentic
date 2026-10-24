@@ -208,6 +208,13 @@ agentic audit --resume                      # reuse an existing audit report
 agentic audit --publish                    # confirm and create a GitHub issue from the report
 ```
 
+Publication is manual by default. Set `"automation": {"auto_publish": true}`
+in `agent_config.json` to publish eligible completed audits as GitHub issues
+and approved successful issue/local-task runs as draft pull requests. Automatic
+publication skips offline runs, missing GitHub targets/access, and incomplete
+durable state. Existing remote objects and a local publication record make
+retries idempotent; failures retain the run for manual `--publish` retry.
+
 GitHub issues are the default task source. To use manually pasted requirements,
 set `"task_source": "local"` in the target's ignored `agent_config.json`, then
 run `/run` in the interactive shell and finish the pasted task with `/done`.

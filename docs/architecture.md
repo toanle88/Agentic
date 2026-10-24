@@ -42,7 +42,7 @@ Agentic is intentionally small and uses the Python standard library at runtime.
 | `scripts/agent_benchmark_reporting.py` | Provider-neutral aggregation of normalized benchmark scenario metrics. |
 | `agent_config.json` | Target-repository checks and per-run policy settings. |
 | Git worktrees | Isolate issue, local-task, or repository-audit changes from the base checkout and preserve unfinished work. |
-| GitHub CLI | Read issues, post terminal comments, and publish an explicitly approved branch/PR. |
+| GitHub CLI | Read issues, post terminal comments, and publish an explicitly approved branch/PR, optionally through configured automatic publication. |
 | Provider adapters | Run Codex, Gemini, Claude Code, GitHub Copilot, or OpenRouter for developer/reviewer turns. |
 
 `agentic init` and `agentic doctor` are local setup tools. Initialization creates ignored, target-specific configuration; doctor performs prerequisite checks without running the full project test suite.
@@ -171,7 +171,7 @@ Set `AGENTIC_STATE_DIR` or pass `--state-dir PATH` to choose another root. A sha
 - Issue text, repository files, and test output are untrusted input to the selected provider.
 - Provider and test output is redacted before it is persisted or shown in the dashboard; use a trusted checkout because redaction cannot identify every possible secret.
 - GitHub issue intake is the default; local task intake is opt-in through `task_source: "local"`.
-- The developer does not commit or push. Publication requires a separate validation step and explicit human confirmation.
+- The developer does not commit or push. Publication requires a separate validation step; explicit human confirmation is the safe default, while `automation.auto_publish` is an opt-in path for eligible completed runs.
 - A repository lock prevents concurrent mutating runs from corrupting shared Git metadata.
 - Repository metadata operations use a shared lock while independent worktrees use separate locks.
 - Provider usage and cost are recorded only when the provider reports them; missing usage remains unknown. Each run also records operation-level status, exit code, timestamps, and duration, plus an aggregate elapsed duration. Command arguments and prompt text are not persisted.
