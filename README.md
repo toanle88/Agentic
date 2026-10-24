@@ -283,6 +283,9 @@ detailed output; the default `/logs JOB|PID|ISSUE` view stays concise.
 When a background job fails, the shell prints the same bounded concise tail
 immediately after its failure notification; use `/logs JOB` to replay it or
 `/logs JOB --verbose` to inspect the complete captured output.
+When a background job completes, its notification includes the durable result,
+test/review status, duration, token usage, estimated cost, and full log path;
+missing metrics are shown as `unknown`.
 For test commands, concise replay keeps the command, result, and duration while
 omitting successful case/output lines. Failed or timed-out commands retain at
 most 80 lines and 12,000 characters of failure diagnostics; use `--verbose` or

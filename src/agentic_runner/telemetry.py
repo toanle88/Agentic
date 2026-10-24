@@ -40,7 +40,7 @@ _KNOWN_RUN_FIELDS = {
     "schema_version", "usage_by_role", "usage_by_stage", "usage",
     "usage_by_invocation", "security_policy", "security_policy_history",
     "instruction", "issue_metadata", "metrics", "guidance_loads",
-    "guidance_stats", "workflow_metrics",
+    "guidance_stats", "workflow_metrics", "shell_job_id",
 }
 
 
@@ -366,7 +366,8 @@ def record_run_instruction(folder: Path, instruction: str) -> None:
 
 def record_issue_metadata(folder: Path, *, number: int | None, title: str,
                           state: str, source: str = "github",
-                          body: str = "", audit_key: str | None = None) -> None:
+                          body: str = "", audit_key: str | None = None,
+                          shell_job_id: str | None = None) -> None:
     """Persist bounded issue identity for read-only dashboards and resumes."""
     path, data = _load_run_record(folder)
     data["issue_metadata"] = {
@@ -377,6 +378,8 @@ def record_issue_metadata(folder: Path, *, number: int | None, title: str,
     }
     if audit_key:
         data["issue_metadata"]["audit_key"] = _bounded_text(audit_key, 32)
+    if shell_job_id:
+        data["shell_job_id"] = _bounded_text(redact_secrets(shell_job_id), 64)
     # Keep a bounded, redacted task snapshot so an existing run can be resumed
     # during a GitHub outage.  It is intentionally separate from run.json and
     # excluded from dashboard log listings.
@@ -591,6 +594,8 @@ def read_run_usage(folder: Path) -> dict[str, Any]:
             result["tokens_per_approved_task"] = result["total_tokens"]
     if isinstance(data.get("issue_metadata"), dict):
         result["issue_metadata"] = data["issue_metadata"]
+    if isinstance(data.get("shell_job_id"), str):
+        result["shell_job_id"] = data["shell_job_id"]
     instruction = data.get("instruction")
     if isinstance(instruction, str) and instruction.strip():
         result["instruction"] = _bounded_text(instruction, INSTRUCTION_CONTEXT_CHARS)
