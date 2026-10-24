@@ -270,6 +270,10 @@ timeouts, final results, and diagnostics remain in the human-readable log. Use
 progress. Structured provider events remain in the adjacent `.jsonl` trace.
 In the interactive shell, `/logs JOB|PID|ISSUE --verbose` replays the captured
 detailed output; the default `/logs JOB|PID|ISSUE` view stays concise.
+For test commands, concise replay keeps the command, result, and duration while
+omitting successful case/output lines. Failed or timed-out commands retain at
+most 80 lines and 12,000 characters of failure diagnostics; use `--verbose` or
+the full-log path printed by `/logs` for the complete captured output.
 
 Interactive input keeps a two-line status prompt with the developer provider
 and model, working directory, and active task. Up/Down recalls command history;
