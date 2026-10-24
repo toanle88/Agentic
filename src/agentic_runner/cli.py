@@ -1274,6 +1274,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
         folder, number=issue.number, title=issue.title,
         state=issue.state, source=issue.source, body=issue.body,
         audit_key=issue.audit_key,
+        shell_job_id=os.environ.get("AGENTIC_SHELL_JOB_ID"),
     )
     record_security_policy(folder, config)
     manual_approval = load_publication_approval(folder)

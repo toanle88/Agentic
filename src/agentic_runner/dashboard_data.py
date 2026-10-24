@@ -731,6 +731,7 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
     snapshot: dict[str, Any] = {
         "id": folder.name, "issue": issue_value, "label": label, "branch": branch,
         "audit": audit_key is not None, "audit_key": audit_key,
+        "shell_job_id": usage.get("shell_job_id"),
         "status": status, "investigation": investigation, "attempts": developer["attempts"],
         "stage": stage, "severity": severity, "providers": providers, "models": models,
         "issue_metadata": issue_metadata,

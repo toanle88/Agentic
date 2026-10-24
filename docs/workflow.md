@@ -152,6 +152,13 @@ failure notification followed by the default bounded concise log tail. This
 keeps retry, test, provider, and final-result summaries visible without dumping
 the full transcript; use `/logs JOB --verbose` for complete output.
 
+When a background job completes, the shell also prints the durable final result,
+test and review statuses, run duration, total token usage, estimated cost, and
+the full shell log path. Missing values are shown as `unknown` (or `not-run`
+when the durable run explicitly has no test or review result). This summary is
+emitted after the shell log has finished draining; `/logs JOB` and
+`/logs JOB --verbose` remain the paths to the complete transcript.
+
 `/list` synchronously lists the target repository's open GitHub issues. It uses
 the same GitHub CLI-backed issue listing as `agentic --list` and does not create
 a background job.

@@ -96,6 +96,7 @@ class Job:
     stop_requested: bool = False
     identity: dict[str, Any] | None = None
     log_thread: threading.Thread | None = None
+    shell_job_id: str | None = None
 
     @property
     def running(self) -> bool:

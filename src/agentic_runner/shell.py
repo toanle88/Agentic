@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Sequence
 import json
+import math
 import os
 from queue import Empty, Queue
 import shlex
@@ -161,6 +162,61 @@ def _display_command(argv: list[str]) -> str:
     return shlex.join(argv)
 
 
+def _argv_option(argv: Sequence[str], option: str) -> str | None:
+    for index, value in enumerate(argv):
+        if value == option and index + 1 < len(argv):
+            return argv[index + 1]
+        if value.startswith(f"{option}="):
+            return value.partition("=")[2]
+    return None
+
+
+def _completion_duration(value: Any) -> str:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "unknown"
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return "unknown"
+    if not math.isfinite(number) or value < 0:
+        return "unknown"
+    seconds = int(round(number))
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m {seconds}s"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
+def _completion_tokens(value: Any) -> str:
+    if isinstance(value, bool):
+        return "unknown"
+    if isinstance(value, int) and value >= 0:
+        return f"{value:,}"
+    if (
+        isinstance(value, float)
+        and math.isfinite(value)
+        and value.is_integer()
+        and value >= 0
+    ):
+        return f"{int(value):,}"
+    return "unknown"
+
+
+def _completion_cost(value: Any) -> str:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "unknown"
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return "unknown"
+    if not math.isfinite(number) or value < 0:
+        return "unknown"
+    return f"${number:.4f}"
+
+
 class AgenticShell:
     def __init__(self, repo: Path, runner: Path, config: Path | None = None,
                  session_dir: Path | None = None,
@@ -282,6 +338,7 @@ class AgenticShell:
             "session_id": job.session_id,
             "stop_requested": job.stop_requested,
             "identity": job.identity,
+            "shell_job_id": job.shell_job_id,
         }
         atomic_write_text(job.record_path, json.dumps(record, indent=2) + "\n")
 
@@ -303,7 +360,8 @@ class AgenticShell:
                           record_path, str(record.get("session_id", "unknown")),
                           persisted_pid=pid, notified=False,
                           stop_requested=bool(record.get("stop_requested", False)),
-                          identity=identity)
+                          identity=identity,
+                          shell_job_id=(str(record["shell_job_id"]) if record.get("shell_job_id") else None))
                 self.jobs[number] = job
                 continue
             finished = record.get("finished")
@@ -315,19 +373,25 @@ class AgenticShell:
                 notified=True,
                 stop_requested=bool(record.get("stop_requested", False)),
                 identity=identity if isinstance(identity, dict) else None,
+                shell_job_id=(str(record["shell_job_id"]) if record.get("shell_job_id") else None),
             )
             self.jobs[number] = job
             if state == "running":
                 self._write_record(job)
 
     def _launch(self, argv: list[str],
-                on_complete: Callable[[int], None] | None = None) -> Job:
+                on_complete: Callable[[int], None] | None = None,
+                run_token: str | None = None) -> Job:
         number = self.next_number
         self.next_number += 1
         log_path = self.session_dir / f"job-{number:03d}.log"
         record_path = self._record_path(number)
         log_writer = BoundedLogWriter(log_path)
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+        environment = None
+        if run_token:
+            environment = os.environ.copy()
+            environment["AGENTIC_SHELL_JOB_ID"] = run_token
         try:
             process = subprocess.Popen(
                 argv,
@@ -337,6 +401,7 @@ class AgenticShell:
                 stderr=subprocess.STDOUT,
                 start_new_session=os.name != "nt",
                 creationflags=creationflags,
+                env=environment,
             )
         except OSError:
             log_writer.close()
@@ -350,7 +415,7 @@ class AgenticShell:
         log_thread.start()
         job = Job(number, argv, log_path, process, time.time(), log_writer,
                   record_path, self.session_id, completion_callback=on_complete,
-                  log_thread=log_thread)
+                  log_thread=log_thread, shell_job_id=run_token)
         self.jobs[number] = job
         self._write_record(job)
         _shell_print(f"[JOB {number}] started (PID {process.pid})")
@@ -398,6 +463,96 @@ class AgenticShell:
         except Exception as exc:  # desktop openers must not crash the shell
             _shell_print(f"[DASHBOARD] Could not open dashboard: {exc}")
 
+    def _completion_snapshot(self, job: Job) -> dict[str, Any] | None:
+        """Read the bounded durable snapshot belonging to one runner job."""
+        try:
+            from .cli import legacy_runs_dir, state_paths
+            from .dashboard_data import collect_runs_from_roots
+
+            roots = [state_paths(self.repo, self.state_dir).runs, legacy_runs_dir(self.repo)]
+            snapshots = collect_runs_from_roots(roots)
+        except (OSError, RuntimeError, ValueError, TypeError):
+            return None
+
+        issue = _argv_option(job.argv, "--issue")
+        token = job.shell_job_id
+        try:
+            issue_number = int(issue) if issue is not None else None
+        except ValueError:
+            issue_number = None
+        audit = "audit" in job.argv
+        candidates: list[tuple[float, dict[str, Any]]] = []
+        for snapshot in snapshots:
+            if not isinstance(snapshot, dict):
+                continue
+            if token is not None:
+                if snapshot.get("shell_job_id") != token:
+                    continue
+            elif snapshot.get("issue") is None and snapshot.get("audit") is not True:
+                # Legacy local jobs have no durable identity. Do not guess
+                # from the newest local folder when concurrent runs exist.
+                continue
+            if issue_number is not None:
+                if snapshot.get("issue") != issue_number:
+                    continue
+            elif audit:
+                if snapshot.get("audit") is not True:
+                    continue
+            elif snapshot.get("issue") is not None or snapshot.get("audit") is True:
+                continue
+            run_id = snapshot.get("id")
+            if not isinstance(run_id, str) or not run_id:
+                continue
+            for root in roots:
+                folder = root / run_id
+                try:
+                    modified = folder.stat().st_mtime if folder.is_dir() else None
+                except OSError:
+                    modified = None
+                if modified is not None:
+                    candidates.append((modified, snapshot))
+                    break
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: item[0])[1]
+
+    @staticmethod
+    def _completion_lines(job: Job, code: int, snapshot: dict[str, Any] | None) -> list[str]:
+        result = snapshot.get("result") if isinstance(snapshot, dict) else None
+        result_status = result.get("status") if isinstance(result, dict) else None
+        if not isinstance(result_status, str) or not result_status:
+            result_status = "FAILED" if code != 0 else "unknown"
+
+        tests_status = "unknown"
+        review_status = "unknown"
+        duration: Any = None
+        total_tokens: Any = None
+        cost: Any = None
+        if isinstance(snapshot, dict):
+            tests = snapshot.get("tests")
+            if isinstance(tests, dict) and isinstance(tests.get("status"), str):
+                tests_status = tests["status"]
+            review = snapshot.get("review")
+            if isinstance(review, dict) and isinstance(review.get("status"), str):
+                review_status = review["status"]
+            usage = snapshot.get("usage")
+            if isinstance(usage, dict):
+                total_tokens = usage.get("total_tokens")
+                cost = usage.get("estimated_cost_usd")
+                metrics = usage.get("metrics")
+                if isinstance(metrics, dict):
+                    duration = metrics.get("duration_seconds")
+
+        return [
+            f"Result: {result_status}",
+            f"Tests: {tests_status}",
+            f"Review: {review_status}",
+            f"Duration: {_completion_duration(duration)}",
+            f"Tokens: {_completion_tokens(total_tokens)}",
+            f"Cost: {_completion_cost(cost)}",
+            f"Logs: {job.log_path}",
+        ]
+
     def _refresh(self, job: Job, *, show_failure_tail: bool = True) -> None:
         if job.finished is not None:
             return
@@ -421,7 +576,10 @@ class AgenticShell:
         if not job.notified:
             job.notified = True
             state = "finished" if code == 0 else f"failed (exit {code})"
-            _shell_print(f"\n[JOB {job.number}] {state} after {job.elapsed}s; use /logs {job.number}")
+            snapshot = self._completion_snapshot(job)
+            _shell_print(f"\n[JOB {job.number}] {state}")
+            for line in self._completion_lines(job, code, snapshot):
+                _shell_print(line, style_status_tokens=False)
             if code != 0 and show_failure_tail:
                 _shell_print(
                     f"--- concise failure tail; use /logs {job.number} --verbose for complete output ---",
@@ -815,7 +973,7 @@ class AgenticShell:
             _shell_print("[PUBLISH] Running in the foreground so publication confirmation can be entered")
             self._run_foreground(argv)
         else:
-            self._launch(argv)
+            self._launch(argv, run_token=uuid.uuid4().hex)
 
     def run_audit(self, parts: list[str]) -> None:
         flags = _parse_audit_command(parts)
@@ -826,7 +984,7 @@ class AgenticShell:
             _shell_print("[PUBLISH] Running in the foreground so publication confirmation can be entered")
             self._run_foreground(argv)
         else:
-            self._launch(argv)
+            self._launch(argv, run_token=uuid.uuid4().hex)
 
     def run_dashboard(self, parts: list[str]) -> None:
         dashboard = self.runner.with_name("agentic_dashboard.py")

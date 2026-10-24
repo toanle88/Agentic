@@ -1184,6 +1184,7 @@ class ShellTests(unittest.TestCase):
             argv = launch.call_args.args[0]
             self.assertIn('--task-file', argv)
             self.assertIn(str(task.resolve()), argv)
+            self.assertIsInstance(launch.call_args.kwargs['run_token'], str)
 
 
     def test_local_task_capture_writes_a_reusable_task_file(self):
@@ -1226,8 +1227,27 @@ class ShellTests(unittest.TestCase):
         script = f'import sys; sys.stdout.write({chr(10).join(lines)!r}); raise SystemExit(1)'
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
-            job = shell._launch([sys.executable, '-c', script])
+            state_dir = root / 'state'
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), session_dir=root / 'logs', state_dir=state_dir,
+            )
+            run_folder = state_paths(root, state_dir).runs / 'agent-issue-119-deadbeef'
+            run_folder.mkdir(parents=True)
+            (run_folder / 'result.json').write_text(json.dumps({
+                'status': 'RETRY_EXHAUSTED',
+            }), encoding='utf-8')
+            (run_folder / 'test-command-001.txt').write_text(
+                '[TESTS] Finished in 4s (exit 1)\n[TESTS] FAILED (exit 1)\n',
+                encoding='utf-8',
+            )
+            (run_folder / 'review-001.json').write_text(json.dumps({
+                'approved': False, 'summary': 'Review failed', 'findings': [], 'skipped': [],
+            }), encoding='utf-8')
+            (run_folder / 'run.json').write_text(json.dumps({
+                'usage': {'total_tokens': 3456},
+                'metrics': {'duration_seconds': 868},
+            }), encoding='utf-8')
+            job = shell._launch([sys.executable, '-c', script, '--issue', '119'])
             job.process.wait(timeout=5)
 
             output = StringIO()
@@ -1236,6 +1256,13 @@ class ShellTests(unittest.TestCase):
 
             rendered = output.getvalue()
             self.assertIn(f'[JOB {job.number}] failed (exit 1)', rendered)
+            self.assertIn('Result: RETRY_EXHAUSTED', rendered)
+            self.assertIn('Tests: failed', rendered)
+            self.assertIn('Review: rejected', rendered)
+            self.assertIn('Duration: 14m 28s', rendered)
+            self.assertIn('Tokens: 3,456', rendered)
+            self.assertIn('Cost: unknown', rendered)
+            self.assertIn(f'Logs: {job.log_path}', rendered)
             self.assertIn('concise failure tail', rendered)
             self.assertIn('[RETRY] Attempt 2/2', rendered)
             self.assertIn('[ERROR] provider failed', rendered)
@@ -1279,14 +1306,33 @@ class ShellTests(unittest.TestCase):
                 shell.refresh()
             self.assertIn('[RESULT] drained failure summary', output.getvalue())
 
-    def test_successful_background_job_keeps_compact_completion_notification(self):
+    def test_successful_background_job_prints_durable_completion_summary(self):
         from contextlib import redirect_stdout
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            state_dir = root / 'state'
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), session_dir=root / 'logs', state_dir=state_dir,
+            )
+            run_folder = state_paths(root, state_dir).runs / 'agent-issue-119-deadbeef'
+            run_folder.mkdir(parents=True)
+            (run_folder / 'result.json').write_text(json.dumps({
+                'status': 'APPROVED',
+            }), encoding='utf-8')
+            (run_folder / 'test-command-001.txt').write_text(
+                '[TESTS] Finished in 4s (exit 0)\n', encoding='utf-8',
+            )
+            (run_folder / 'review-001.json').write_text(json.dumps({
+                'approved': True, 'summary': 'Approved', 'findings': [], 'skipped': [],
+            }), encoding='utf-8')
+            (run_folder / 'run.json').write_text(json.dumps({
+                'usage': {'total_tokens': 5677495},
+                'metrics': {'duration_seconds': 868},
+            }), encoding='utf-8')
             job = shell._launch([
                 sys.executable, '-c', 'print("successful job detail", flush=True)',
+                '--issue', '119',
             ])
             job.process.wait(timeout=5)
 
@@ -1296,8 +1342,147 @@ class ShellTests(unittest.TestCase):
 
             rendered = output.getvalue()
             self.assertIn(f'[JOB {job.number}] finished', rendered)
+            self.assertIn('Result: APPROVED', rendered)
+            self.assertIn('Tests: passed', rendered)
+            self.assertIn('Review: approved', rendered)
+            self.assertIn('Duration: 14m 28s', rendered)
+            self.assertIn('Tokens: 5,677,495', rendered)
+            self.assertIn('Cost: unknown', rendered)
+            self.assertIn(f'Logs: {job.log_path}', rendered)
             self.assertNotIn('failure tail', rendered)
             self.assertNotIn('successful job detail', rendered)
+
+    def test_incomplete_background_job_reports_unknown_metrics_without_transcript(self):
+        from contextlib import redirect_stdout
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state_dir = root / 'state'
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), session_dir=root / 'logs', state_dir=state_dir,
+            )
+            run_folder = state_paths(root, state_dir).runs / 'agent-issue-119-deadbeef'
+            run_folder.mkdir(parents=True)
+            (run_folder / 'run.json').write_text(json.dumps({
+                'usage': {}, 'metrics': {},
+            }), encoding='utf-8')
+            job = shell._launch([
+                sys.executable, '-c', 'print("incomplete job detail", flush=True)',
+                '--issue', '119',
+            ])
+            job.process.wait(timeout=5)
+
+            output = StringIO()
+            with redirect_stdout(output):
+                shell.refresh()
+
+            rendered = output.getvalue()
+            self.assertIn('Result: unknown', rendered)
+            self.assertIn('Tests: not-run', rendered)
+            self.assertIn('Review: not-run', rendered)
+            self.assertIn('Duration: unknown', rendered)
+            self.assertIn('Tokens: unknown', rendered)
+            self.assertIn('Cost: unknown', rendered)
+            self.assertIn(f'Logs: {job.log_path}', rendered)
+            self.assertNotIn('incomplete job detail', rendered)
+
+    def test_local_completion_matches_the_job_token_not_the_newest_run(self):
+        from contextlib import redirect_stdout
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state_dir = root / 'state'
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), session_dir=root / 'logs', state_dir=state_dir,
+            )
+            runs_root = state_paths(root, state_dir).runs
+            for name, token, status in (
+                ('agent-task-first-aabbccddeeff', 'first-token', 'APPROVED'),
+                ('agent-task-second-ffeeddccbbaa', 'second-token', 'RETRY_EXHAUSTED'),
+            ):
+                folder = runs_root / name
+                folder.mkdir(parents=True)
+                (folder / 'run.json').write_text(
+                    json.dumps({'shell_job_id': token}), encoding='utf-8',
+                )
+                (folder / 'result.json').write_text(
+                    json.dumps({'status': status}), encoding='utf-8',
+                )
+            job = shell._launch(
+                [sys.executable, '-c', 'print("local completion", flush=True)'],
+                run_token='first-token',
+            )
+            record = json.loads(job.record_path.read_text(encoding='utf-8'))
+            self.assertEqual(record['shell_job_id'], 'first-token')
+            job.process.wait(timeout=5)
+
+            output = StringIO()
+            with redirect_stdout(output):
+                shell.refresh()
+
+            rendered = output.getvalue()
+            self.assertIn('Result: APPROVED', rendered)
+            self.assertNotIn('Result: RETRY_EXHAUSTED', rendered)
+
+    def test_unidentified_legacy_local_completion_does_not_guess_a_run(self):
+        from contextlib import redirect_stdout
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state_dir = root / 'state'
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), session_dir=root / 'logs', state_dir=state_dir,
+            )
+            runs_root = state_paths(root, state_dir).runs
+            for name, status in (
+                ('agent-task-first-aabbccddeeff', 'APPROVED'),
+                ('agent-task-newest-ffeeddccbbaa', 'RETRY_EXHAUSTED'),
+            ):
+                folder = runs_root / name
+                folder.mkdir(parents=True)
+                (folder / 'result.json').write_text(
+                    json.dumps({'status': status}), encoding='utf-8',
+                )
+            job = shell._launch([
+                sys.executable, '-c', 'print("legacy local completion", flush=True)',
+            ])
+            job.process.wait(timeout=5)
+
+            output = StringIO()
+            with redirect_stdout(output):
+                shell.refresh()
+
+            rendered = output.getvalue()
+            self.assertIn('Result: unknown', rendered)
+            self.assertNotIn('Result: APPROVED', rendered)
+            self.assertNotIn('Result: RETRY_EXHAUSTED', rendered)
+
+    def test_completion_summary_treats_overflowing_numeric_metadata_as_unknown(self):
+        lines = agentic_shell.AgenticShell._completion_lines(
+            agentic_shell.Job(
+                1, [], Path('/tmp/job.log'), None, 0.0, None, Path('/tmp/job.json'), 'test',
+            ),
+            0,
+            {
+                'usage': {
+                    'total_tokens': 1,
+                    'estimated_cost_usd': 10 ** 400,
+                    'metrics': {'duration_seconds': 10 ** 400},
+                },
+            },
+        )
+        self.assertIn('Duration: unknown', lines)
+        self.assertIn('Cost: unknown', lines)
+
+    def test_completion_summary_treats_nonfinite_token_metadata_as_unknown(self):
+        lines = agentic_shell.AgenticShell._completion_lines(
+            agentic_shell.Job(
+                1, [], Path('/tmp/job.log'), None, 0.0, None, Path('/tmp/job.json'), 'test',
+            ),
+            0,
+            {'usage': {'total_tokens': float('inf')}},
+        )
+        self.assertIn('Tokens: unknown', lines)
 
     def test_oversized_background_logs_are_bounded_and_marked(self):
         with tempfile.TemporaryDirectory() as temp:
