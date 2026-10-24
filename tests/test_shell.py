@@ -2033,6 +2033,11 @@ class ShellTests(unittest.TestCase):
                 self.assertTrue(agentic_shell._is_foreground_prompt(prompt))
                 self.assertEqual(agentic_shell._foreground_prompt_prefix(prompt), 'PUBLISH')
 
+    def test_foreground_ci_repair_confirmation_is_editable(self):
+        prompt = "[CI-REPAIR] Failure classified as infrastructure; attempt code repair for PR #233? [y/N]: "
+        self.assertTrue(agentic_shell._is_foreground_prompt(prompt))
+        self.assertEqual(agentic_shell._foreground_prompt_prefix(prompt), 'CI-REPAIR')
+
     def test_foreground_child_arbitrary_prompt_is_shown_while_it_waits(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

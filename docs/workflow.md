@@ -285,12 +285,18 @@ and bounded failed-run log excerpts as untrusted evidence, classifies
 the failure, and uses only the exact existing worktree for the PR branch. The
 worktree must exist, be clean, and have `HEAD` equal to the current PR head;
 missing, dirty, ambiguous, or stale worktrees stop with an actionable blocker.
-CI log text is never treated as commands.
+Before reading the PR, Agentic verifies the active `gh` authentication using
+the same `GH_TOKEN` and `GH_HOST` environment that repair commands receive.
+Authentication failures and GitHub API connectivity failures are reported
+separately so a transient TLS or network problem is not mistaken for a bad
+credential. CI log text is never treated as commands.
 
 Code/test and identified flaky failures may be repaired automatically.
 Infrastructure, permission, and ambiguous failures require explicit
-confirmation. The developer remains write-capable and the reviewer remains
-read-only. Local checks and review must approve a patch before publication.
+confirmation unless `ci_repair.auto_confirm_non_code_failures` is `true`.
+That setting is intended only for explicitly unattended repair workflows. The
+developer remains write-capable and the reviewer remains read-only. Local
+checks and review must approve a patch before publication.
 With `automation.auto_publish` false (the default), Agentic asks before
 committing and pushing; true permits the guarded same-branch push. The
 `ci_repair.max_attempts` and polling settings bound repeated repair cycles and

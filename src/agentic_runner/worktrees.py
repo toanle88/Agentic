@@ -414,7 +414,7 @@ def get_pull_request(
             "number,title,body,state,url,baseRefName,baseRefOid,"
             "headRefName,headRefOid,headRepository,headRepositoryOwner"
         ),
-    ), repo, env=_github_environment(github_host), max_output_bytes=256_000).stdout)
+    ), repo, timeout=30, env=_github_environment(github_host), max_output_bytes=256_000).stdout)
     return PullRequest.parse(raw)
 
 

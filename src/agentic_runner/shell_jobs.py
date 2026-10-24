@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 import hashlib
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -304,11 +305,6 @@ def signal_process_tree(process: subprocess.Popen[Any], signum: int) -> None:
             pass
 
 
-def is_foreground_prompt(text: str) -> bool:
-    """Recognize the child prompts that are safe to make editable."""
-    return text in FOREGROUND_PROMPT_PREFIXES
-
-
 FOREGROUND_PROMPT_PREFIXES = {
     "[RESUME] Waiting for worktree selection. Enter a number or 'q' to cancel: ": "RESUME",
     "[PUBLISH] Waiting for worktree selection. Enter a number or 'q' to cancel: ": "PUBLISH",
@@ -318,11 +314,23 @@ FOREGROUND_PROMPT_PREFIXES = {
     # Retain recognition for logs and older runner children.
     "[PUBLISH] Publish this patch? Type 'publish' to approve: ": "PUBLISH",
 }
+_CI_REPAIR_PROMPT = re.compile(
+    r"\[CI-REPAIR\] Failure classified as [^;\r\n]+; "
+    r"attempt code repair for PR #\d+\? \[y/N\]: "
+)
 
 
 def foreground_prompt_prefix(text: str) -> str | None:
     """Return styling metadata for a recognized child prompt."""
-    return FOREGROUND_PROMPT_PREFIXES.get(text)
+    prefix = FOREGROUND_PROMPT_PREFIXES.get(text)
+    if prefix is not None:
+        return prefix
+    return "CI-REPAIR" if _CI_REPAIR_PROMPT.fullmatch(text) else None
+
+
+def is_foreground_prompt(text: str) -> bool:
+    """Recognize the child prompts that are safe to make editable."""
+    return foreground_prompt_prefix(text) is not None
 
 
 def display_escape(character: str) -> str:
