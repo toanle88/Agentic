@@ -61,8 +61,14 @@ class BoundedLogWriter:
 
     def copy_from(self, source: Any) -> None:
         try:
+            # Buffered pipe readers expose read1(), which returns the bytes
+            # currently available instead of waiting for the full requested
+            # buffer. This keeps small flushed child output visible while the
+            # process is still running; the fallback preserves compatibility
+            # with file-like sources used by callers and tests.
+            read = getattr(source, "read1", source.read)
             while True:
-                chunk = source.read(8192)
+                chunk = read(8192)
                 if not chunk:
                     return
                 self.write(chunk)

@@ -78,6 +78,7 @@ from .shell_commands import (
     parse_audit_command as _parse_audit_command,
     option_value as _option_value,
     parse_job_command as _parse_job_command,
+    parse_repair_pr_command as _parse_repair_pr_command,
     parse_log_command as _parse_log_command,
     parse_options as _parse_options,
 )
@@ -975,6 +976,13 @@ class AgenticShell:
         else:
             self._launch(argv, run_token=uuid.uuid4().hex)
 
+    def run_repair_pr(self, parts: list[str]) -> None:
+        pr_number = _parse_repair_pr_command(parts)
+        self.active_task = f"CI repair for PR #{pr_number}"
+        argv = self._runner_args(None, ["--pr", pr_number, "--repair-ci"])
+        _shell_print("[CI-REPAIR] Running in the foreground so confirmation can be entered")
+        self._run_foreground(argv)
+
     def run_audit(self, parts: list[str]) -> None:
         flags = _parse_audit_command(parts)
         argv = self._runner_args(None, flags)
@@ -1278,6 +1286,8 @@ class AgenticShell:
                 self.run_audit(parts)
             elif command == "/run":
                 self.run_issue(parts)
+            elif command == "/repair-pr":
+                self.run_repair_pr(parts)
             elif command == "/ps":
                 self.show_processes(parts)
             elif command == "/logs":

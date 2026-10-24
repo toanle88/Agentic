@@ -1827,8 +1827,12 @@ def _validate_pull_request_identity(expected: PullRequest, current: PullRequest)
 def push_existing_pr(run: Run, issue: Issue, github_repo: str, base: str,
                      config: dict[str, Any], folder: Path,
                      pull_request: PullRequest,
-                     fetch_pr: Any | None = None) -> None:
-    """Push a freshly reviewed patch to the same open PR, never create one."""
+                     fetch_pr: Any | None = None) -> str:
+    """Push a freshly reviewed patch to the same open PR, never create one.
+
+    Return the exact local commit sent to the remote so callers can monitor
+    CI for that head rather than accepting a later, unrelated PR update.
+    """
     if not eligible(issue):
         raise RuntimeError("Pull request is closed; publication blocked")
     if pull_request.head != run.branch or pull_request.base != base:
@@ -1872,10 +1876,14 @@ def push_existing_pr(run: Run, issue: Issue, github_repo: str, base: str,
         )
         if current_base_sha != _new_base_sha or current_digest != new_digest:
             raise RuntimeError("Patch changed before publication push; not publishing")
+    pushed_head_sha = git(run.worktree, "rev-parse", "HEAD")
+    if not pushed_head_sha:
+        raise RuntimeError("Could not determine the reviewed commit before pushing")
     current = lookup()
     _validate_pull_request_identity(pull_request, current)
     git(run.worktree, "-c", "core.hooksPath=/dev/null", "push", "-u", "origin", run.branch)
     _status_print(f"[PUBLISH] Completed: updated PR #{pull_request.number}: {pull_request.url}")
+    return pushed_head_sha
 
 
 _ANSI_SEQUENCE_RE = re.compile(

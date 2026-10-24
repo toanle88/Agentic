@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+from threading import Thread
 import uuid
 from typing import Any
 
@@ -122,12 +123,76 @@ def issue_fingerprint(issue: Issue) -> str:
 
 
 def command(argv: list[str], cwd: Path, *, timeout: int = 180,
-            check: bool = True, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+            check: bool = True, env: dict[str, str] | None = None,
+            max_output_bytes: int | None = None) -> subprocess.CompletedProcess[str]:
     """Subprocess without a shell; issue data never becomes shell code."""
+    if max_output_bytes is not None and max_output_bytes < 1:
+        raise ValueError("max_output_bytes must be positive")
     try:
-        result = subprocess.run(argv, cwd=cwd, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True, timeout=timeout,
-                                check=False, env=env)
+        if max_output_bytes is None:
+            result = subprocess.run(argv, cwd=cwd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True, timeout=timeout,
+                                    check=False, env=env)
+        else:
+            process = subprocess.Popen(
+                argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                env=env,
+            )
+            chunks: list[bytes] = []
+            overflow = False
+            read_error: BaseException | None = None
+
+            def read_output() -> None:
+                nonlocal overflow, read_error
+                total = 0
+                stream = process.stdout
+                if stream is None:
+                    return
+                try:
+                    while True:
+                        read = getattr(stream, "read1", stream.read)
+                        chunk = read(64 * 1024)
+                        if not chunk:
+                            return
+                        total += len(chunk)
+                        if total > max_output_bytes:
+                            overflow = True
+                            try:
+                                process.kill()
+                            except OSError:
+                                pass
+                            return
+                        chunks.append(chunk)
+                except BaseException as exc:  # pragma: no cover - OS-specific pipe failures
+                    read_error = exc
+
+            reader = Thread(target=read_output, daemon=True)
+            reader.start()
+            try:
+                returncode = process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired as exc:
+                process.kill()
+                process.wait()
+                reader.join(timeout=1)
+                if process.stdout is not None:
+                    process.stdout.close()
+                raise exc
+            reader.join(timeout=1)
+            if reader.is_alive():
+                process.kill()
+                process.wait()
+                reader.join(timeout=1)
+            if process.stdout is not None:
+                process.stdout.close()
+            if overflow:
+                raise RuntimeError(
+                    f"Command output exceeded the {max_output_bytes}-byte safety limit"
+                )
+            if read_error is not None:
+                raise RuntimeError("Could not read command output") from read_error
+            result = subprocess.CompletedProcess(
+                argv, returncode, b"".join(chunks).decode("utf-8", errors="replace"), None,
+            )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f"Could not execute {argv[0]!r}: {exc}") from exc
     if check and result.returncode:
@@ -349,7 +414,7 @@ def get_pull_request(
             "number,title,body,state,url,baseRefName,baseRefOid,"
             "headRefName,headRefOid,headRepository,headRepositoryOwner"
         ),
-    ), repo, env=_github_environment(github_host)).stdout)
+    ), repo, env=_github_environment(github_host), max_output_bytes=256_000).stdout)
     return PullRequest.parse(raw)
 
 

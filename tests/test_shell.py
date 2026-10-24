@@ -1548,6 +1548,75 @@ class ShellTests(unittest.TestCase):
             self.assertIn('full log:', rendered)
             self.assertEqual(shell.terminal_mode, agentic_shell.TerminalMode.OUTPUT)
 
+    def test_logs_streams_small_flushed_output_before_job_exits(self):
+        from contextlib import redirect_stdout
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            job = shell._launch([
+                sys.executable, '-c',
+                'import time; print("first", flush=True); time.sleep(1.0); '
+                'print("second", flush=True); time.sleep(.2)',
+            ])
+            output = StringIO()
+            follow_errors = []
+
+            def follow_logs():
+                try:
+                    with redirect_stdout(output):
+                        shell.show_logs(['/logs', str(job.number), '1'])
+                except BaseException as exc:  # pragma: no cover - surfaced below
+                    follow_errors.append(exc)
+
+            follower = threading.Thread(target=follow_logs)
+            follower.start()
+            try:
+                deadline = time.monotonic() + .5
+                while time.monotonic() < deadline and 'first' not in output.getvalue():
+                    time.sleep(.01)
+                self.assertFalse(follow_errors)
+                self.assertTrue(job.running)
+                self.assertIn('first', output.getvalue())
+            except BaseException:
+                if job.process is not None and job.process.poll() is None:
+                    job.process.terminate()
+                if job.process is not None:
+                    job.process.wait(timeout=5)
+                raise
+            finally:
+                follower.join(timeout=5)
+
+            self.assertFalse(follower.is_alive())
+            self.assertFalse(follow_errors)
+            rendered = output.getvalue()
+            self.assertIn('second', rendered)
+            self.assertEqual(shell.terminal_mode, agentic_shell.TerminalMode.OUTPUT)
+
+    def test_logs_ctrl_c_stops_following_without_stopping_job(self):
+        from contextlib import redirect_stdout
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            job = shell._launch([
+                sys.executable, '-c',
+                'import time; print("output", flush=True); time.sleep(3)',
+            ])
+            output = StringIO()
+            try:
+                with patch.object(agentic_shell.time, 'sleep', side_effect=KeyboardInterrupt), \
+                     redirect_stdout(output):
+                    shell.show_logs(['/logs', str(job.number), '1'])
+                self.assertIsNone(job.process.poll())
+                self.assertEqual(shell.terminal_mode, agentic_shell.TerminalMode.OUTPUT)
+                self.assertIn('live output follow stopped', output.getvalue())
+            finally:
+                if job.process is not None and job.process.poll() is None:
+                    job.process.terminate()
+                if job.process is not None:
+                    job.process.wait(timeout=5)
+
     def test_logs_accepts_issue_number(self):
         from contextlib import redirect_stdout
 
@@ -1771,6 +1840,19 @@ class ShellTests(unittest.TestCase):
             with patch.object(shell, '_launch') as launch:
                 shell.run_issue(['/run', '119', '--verbose'])
             self.assertIn('--verbose', launch.call_args.args[0])
+
+    def test_shell_runs_repair_pr_foreground_for_confirmation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), session_dir=root / 'logs'
+            )
+            with patch.object(shell, '_run_foreground') as run_foreground:
+                shell.run_repair_pr(['/repair-pr', '123'])
+            argv = run_foreground.call_args.args[0]
+            self.assertIn('--pr', argv)
+            self.assertIn('123', argv)
+            self.assertIn('--repair-ci', argv)
 
 
     def test_shell_runs_publish_in_foreground_for_confirmation(self):
