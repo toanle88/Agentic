@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .review import finding_severity
+from .persistence import read_text_bounded
 from .telemetry import read_run_usage
 
 
@@ -36,6 +37,7 @@ MAX_REVIEW_HISTORY_BYTES = 256_000
 MAX_REVIEW_HISTORY_ENTRIES = 50
 MAX_REVIEW_HISTORY_FINDINGS = 100
 MAX_REVIEW_HISTORY_FIELD = 4_000
+MAX_DURABLE_JSON_BYTES = 256_000
 SEVERITY_RANK = {
     "BLOCKER": 7,
     "CRITICAL": 6,
@@ -411,17 +413,23 @@ def _review(folder: Path, index: dict[str, list[Path]] | None = None) -> tuple[d
 
 
 def _blocked(folder: Path) -> dict[str, Any] | None:
+    raw = read_text_bounded(folder / "blocked.json", MAX_DURABLE_JSON_BYTES)
+    if raw is None:
+        return None
     try:
-        value = json.loads((folder / "blocked.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        value = json.loads(raw)
+    except json.JSONDecodeError:
         return None
     return value if isinstance(value, dict) and value.get("status") == "blocked" else None
 
 
 def _result(folder: Path) -> dict[str, Any] | None:
+    raw = read_text_bounded(folder / "result.json", MAX_DURABLE_JSON_BYTES)
+    if raw is None:
+        return None
     try:
-        value = json.loads((folder / "result.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        value = json.loads(raw)
+    except json.JSONDecodeError:
         return None
     if not isinstance(value, dict):
         return None

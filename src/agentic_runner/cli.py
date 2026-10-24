@@ -98,7 +98,7 @@ from .execution import (  # noqa: F401
 )
 from .github_comments import post_terminal_comment
 from .output import style_system_text, style_text
-from .persistence import read_text_tail
+from .persistence import read_text_bounded, read_text_tail
 from .openrouter import (  # noqa: F401
     run_openrouter,
 )
@@ -123,6 +123,7 @@ SCRIPT_DIR = _SOURCE_ROOT if (_SOURCE_ROOT / "agentic.py").is_file() else Path(_
 ISSUE_CONTEXT_CHARS = _agentic_context.ISSUE_CONTEXT_CHARS
 INSTRUCTION_CONTEXT_CHARS = _INSTRUCTION_CONTEXT_CHARS
 MAX_RESUME_LOG_BYTES = 64_000
+MAX_RESULT_BYTES = 256_000
 # Keep the configuration constants available from the historical runner module
 # while the implementation lives in agentic_config.
 DEFAULT_SECURITY_MODE = _agentic_config.DEFAULT_SECURITY_MODE
@@ -1282,8 +1283,9 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
     if not completed:
         terminal_result = None
         try:
-            candidate = json.loads((folder / "result.json").read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            raw_result = read_text_bounded(folder / "result.json", MAX_RESULT_BYTES)
+            candidate = json.loads(raw_result) if raw_result is not None else None
+        except (OSError, TypeError, json.JSONDecodeError):
             candidate = None
         if isinstance(candidate, dict):
             status = candidate.get("status")

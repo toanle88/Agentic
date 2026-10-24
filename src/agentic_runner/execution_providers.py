@@ -24,6 +24,7 @@ from .file_boundaries import (
 from .guidance import guidance_phase, guidance_prompt
 from .config import PROVIDER_API_KEY_ENV, provider_process_environment
 from .persistence import atomic_write_text
+from .persistence import read_text_tail
 from .policy import sensitive_read
 from .providers import (
     cli_provider_command,
@@ -35,6 +36,17 @@ from .telemetry import extract_jsonl_usage
 
 
 MAX_PROVIDER_RESULT_BYTES = 4 * 1024 * 1024
+MAX_PROVIDER_STREAM_BYTES = 2 * 1024 * 1024
+MAX_PROVIDER_MESSAGE_CHARS = 50_000
+PROVIDER_MESSAGE_TRUNCATION_MARKER = "\n[agentic_provider_message_truncated]\n"
+
+
+def _bound_provider_message(value: str) -> str:
+    """Keep durable provider messages within the documented character bound."""
+    if len(value) <= MAX_PROVIDER_MESSAGE_CHARS:
+        return value
+    keep = max(0, MAX_PROVIDER_MESSAGE_CHARS - len(PROVIDER_MESSAGE_TRUNCATION_MARKER))
+    return value[:keep] + PROVIDER_MESSAGE_TRUNCATION_MARKER
 
 
 def _stage_provider_input(source: Path, destination: Path) -> None:
@@ -79,37 +91,32 @@ def _stage_readonly_worktree(source: Path, destination: Path) -> Path:
     source = source.resolve()
     destination.mkdir(parents=True, exist_ok=True)
     try:
-        entries = iter_safe_regular_files(source, skip=sensitive_read)
+        entries = iter_safe_regular_files(
+            source, skip=sensitive_read, fail_on_error=True,
+        )
         for kind, relative, _ in entries:
             if kind != "file":
                 continue
             destination_path = destination / relative
             destination_path.parent.mkdir(parents=True, exist_ok=True)
-            descriptor = -1
-            try:
-                descriptor, expected_identity = open_relative_regular(
-                    source, relative, os.O_RDONLY, description="review worktree file",
+            descriptor, expected_identity = open_relative_regular(
+                source, relative, os.O_RDONLY, description="review worktree file",
+            )
+            with os.fdopen(descriptor, "rb") as source_stream:
+                revalidate_single_link_regular(
+                    source_stream.fileno(), expected_identity,
+                    description="review worktree file",
                 )
-                with os.fdopen(descriptor, "rb") as source_stream:
-                    descriptor = -1
-                    revalidate_single_link_regular(
-                        source_stream.fileno(), expected_identity,
-                        description="review worktree file",
-                    )
-                    with destination_path.open("wb") as destination_stream:
-                        shutil.copyfileobj(source_stream, destination_stream)
-            except (OSError, ValueError, RuntimeError):
-                if descriptor >= 0:
-                    os.close(descriptor)
-                continue
+                with destination_path.open("wb") as destination_stream:
+                    shutil.copyfileobj(source_stream, destination_stream)
             try:
                 destination_path.chmod(0o444)
             except OSError:
                 pass
-    except (OSError, RuntimeError, ValueError):
+    except (OSError, RuntimeError, ValueError) as exc:
         # A platform without anchored traversal or a changed tree is not safe
         # to expose to a read-only provider.
-        return destination
+        raise RuntimeError("Could not stage the complete read-only worktree") from exc
     return destination
 
 
@@ -187,11 +194,13 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
         message = _read_provider_result(invocation_output, "result.txt")
         if message is None:
             message = result.stdout[-4000:]
-        message = redact_secrets(message, extra_values=redaction_values)
+        message = _bound_provider_message(
+            redact_secrets(message, extra_values=redaction_values),
+        )
         atomic_write_text(output, message)
         usage_path = output.with_suffix(".jsonl")
         usage = extract_jsonl_usage(
-            usage_path.read_text(encoding="utf-8", errors="replace") if usage_path.exists() else "",
+            read_text_tail(usage_path, MAX_PROVIDER_STREAM_BYTES) if usage_path.exists() else "",
             provider="codex",
         )
         _record_provider_usage(
@@ -255,9 +264,11 @@ def _message_text(value: Any) -> str:
 def _extract_provider_message(raw: str, provider: str) -> str:
     """Recover the final assistant message from a provider's JSON stream."""
     if provider == "copilot":
-        return raw.strip()
+        return _bound_provider_message(raw.strip())
     chunks: list[str] = []
-    final: list[str] = []
+    chunk_chars = 0
+    chunks_truncated = False
+    final = ""
     for line in raw.splitlines():
         try:
             event = json.loads(line)
@@ -269,17 +280,32 @@ def _extract_provider_message(raw: str, provider: str) -> str:
         response = _message_text(event.get("response"))
         result = _message_text(event.get("result"))
         if response:
-            final.append(response)
+            final = _bound_provider_message(response)
         if result:
-            final.append(result)
+            final = _bound_provider_message(result)
         if event_type in {"message", "assistant", "agent_message"}:
             message = event.get("message")
             content = _message_text(event.get("content"))
             if not content and isinstance(message, dict):
                 content = _message_text(message.get("content"))
             if content:
-                chunks.append(content)
-    return (final[-1] if final else "\n".join(chunks)).strip()
+                if not chunks_truncated:
+                    remaining = MAX_PROVIDER_MESSAGE_CHARS - chunk_chars
+                    if len(content) > remaining:
+                        marker_space = max(
+                            0, MAX_PROVIDER_MESSAGE_CHARS
+                            - len(PROVIDER_MESSAGE_TRUNCATION_MARKER),
+                        )
+                        prefix = "".join(chunks)[:marker_space]
+                        if len(prefix) < marker_space:
+                            prefix += content[:marker_space - len(prefix)]
+                        chunks[:] = [prefix, PROVIDER_MESSAGE_TRUNCATION_MARKER]
+                        chunks_truncated = True
+                        chunk_chars = MAX_PROVIDER_MESSAGE_CHARS
+                    else:
+                        chunks.append(content)
+                        chunk_chars += len(content)
+    return _bound_provider_message(final or "\n".join(chunks)).strip()
 
 
 def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
@@ -353,7 +379,7 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
             output_root=output_root,
         )
     raw_path = output.with_suffix(".jsonl") if structured else None
-    raw = raw_path.read_text(encoding="utf-8", errors="replace") if raw_path and raw_path.exists() else result.stdout
+    raw = read_text_tail(raw_path, MAX_PROVIDER_STREAM_BYTES) if raw_path and raw_path.exists() else result.stdout
     message = redact_secrets(
         _extract_provider_message(raw, provider) or result.stdout[-10000:].strip(),
         extra_values=redaction_values,
@@ -367,6 +393,7 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
             "Verify the model is provisioned for that Copilot host and account.\n"
             + message
         )
+    message = _bound_provider_message(message)
     atomic_write_text(output, message)
     usage = extract_jsonl_usage(raw, provider=provider)
     _record_provider_usage(

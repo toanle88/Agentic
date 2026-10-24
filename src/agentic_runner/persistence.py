@@ -87,3 +87,23 @@ def read_text_tail(path: Path, max_bytes: int, *, encoding: str = "utf-8") -> st
     except OSError:
         return ""
     return payload.decode(encoding, errors="replace")
+
+
+def read_text_bounded(path: Path, max_bytes: int, *, encoding: str = "utf-8") -> str | None:
+    """Read a complete text artifact only when it fits the byte budget.
+
+    JSON state must be parsed as a complete document, so tail reads are not a
+    safe substitute here.  Returning ``None`` for missing, unreadable, or
+    oversized files lets callers fail closed without allocating for an
+    attacker-controlled artifact.
+    """
+    if max_bytes <= 0:
+        return "" if max_bytes == 0 else None
+    try:
+        with path.open("rb") as stream:
+            payload = stream.read(max_bytes + 1)
+    except OSError:
+        return None
+    if len(payload) > max_bytes:
+        return None
+    return payload.decode(encoding, errors="replace")

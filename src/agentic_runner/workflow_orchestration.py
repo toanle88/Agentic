@@ -12,6 +12,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .models import Issue, Run
+from .persistence import read_text_bounded
+
+
+MAX_DURABLE_JSON_BYTES = 256_000
 
 
 class WorkflowRuntime:
@@ -135,8 +139,9 @@ def develop(
     latest_review = _latest_numbered_log(folder, "review", "json")
     if latest_review:
         try:
-            previous_verdict = json.loads(latest_review.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            raw_review = read_text_bounded(latest_review, MAX_DURABLE_JSON_BYTES)
+            previous_verdict = json.loads(raw_review) if raw_review is not None else None
+        except (OSError, TypeError, json.JSONDecodeError):
             previous_verdict = None
         if isinstance(previous_verdict, dict) and previous_verdict.get("approved") is not True:
             previous_findings = [

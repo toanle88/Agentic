@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .context import INSTRUCTION_CONTEXT_CHARS, _bounded_text
-from .persistence import atomic_write_json
+from .persistence import atomic_write_json, read_text_bounded
 from .security import redact_secrets
 
 
@@ -391,8 +391,11 @@ def record_issue_metadata(folder: Path, *, number: int | None, title: str,
 def read_issue_snapshot(folder: Path) -> dict[str, Any] | None:
     """Read the bounded issue snapshot used by offline run resumes."""
     try:
-        value = json.loads(redact_secrets((folder / "issue-snapshot.json").read_text(encoding="utf-8")))
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        raw = read_text_bounded(folder / "issue-snapshot.json", MAX_RUN_RECORD_BYTES)
+        if raw is None:
+            return None
+        value = json.loads(redact_secrets(raw))
+    except json.JSONDecodeError:
         return None
     if not isinstance(value, dict):
         return None

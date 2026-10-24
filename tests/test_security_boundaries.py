@@ -218,8 +218,20 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'provider input'):
                 _stage_provider_input(alias, Path(temp) / 'staged.txt')
 
-            staged = _stage_readonly_worktree(root, Path(temp) / 'review-worktree')
-            self.assertFalse((staged / 'public.py').exists())
+            with self.assertRaisesRegex(RuntimeError, 'complete read-only worktree'):
+                _stage_readonly_worktree(root, Path(temp) / 'review-worktree')
+
+    def test_provider_staging_fails_closed_on_operational_copy_errors(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'worktree'
+            root.mkdir()
+            (root / 'public.py').write_text('print(1)\n', encoding='utf-8')
+            with patch(
+                'agentic_runner.execution_providers.open_relative_regular',
+                side_effect=OSError('simulated staging failure'),
+            ):
+                with self.assertRaisesRegex(RuntimeError, 'complete read-only worktree'):
+                    _stage_readonly_worktree(root, Path(temp) / 'review-worktree')
 
     def test_streamed_command_opens_logs_before_starting_process(self):
         with tempfile.TemporaryDirectory() as temp:
