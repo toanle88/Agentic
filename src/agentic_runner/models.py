@@ -129,6 +129,7 @@ class StatePaths:
     runs: Path
     shell: Path
     dashboards: Path
+    diagnostics: Path | None = None
 
 
 @dataclass(frozen=True)

@@ -182,7 +182,7 @@ agentic doctor --json
 agentic doctor --commands --worktree /path/to/worktree
 ```
 
-By default, worktrees, logs, shell records, and dashboards live under the user-level Agentic state directory, not beside the target repository. In WSL, use a shared Windows-mounted location when you need to open worktrees with Windows Git:
+By default, worktrees, logs, shell records, dashboards, and the bounded application diagnostic log live under the user-level Agentic state directory, not beside the target repository. The diagnostic log is at `diagnostics/agentic.log` within the project namespace and contains sanitized handled-error and crash records. In WSL, use a shared Windows-mounted location when you need to open worktrees with Windows Git:
 
 ```bash
 agentic --state-dir /path/to/shared-agentic-state --issue 119

@@ -25,6 +25,7 @@ from . import context as _agentic_context
 from . import workflow_state as _agentic_workflow_state
 from . import worktrees as _agentic_worktrees
 from . import __version__
+from .application_diagnostics import record_diagnostic, run_with_diagnostics
 from .config import (  # noqa: F401
     DEFAULT_INIT_SECURITY_MODE,
     DEFAULT_OPENROUTER_BASE_URL,
@@ -1299,14 +1300,14 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     raw_args = list(sys.argv[1:] if argv is None else argv)
     if raw_args and raw_args[0] == "shell":
         from .shell import main as shell_main
-        return shell_main(raw_args[1:])
+        return shell_main(raw_args[1:], _diagnostics=False)
     if raw_args and raw_args[0] == "dashboard":
         from .dashboard import main as dashboard_main
-        return dashboard_main(raw_args[1:])
+        return dashboard_main(raw_args[1:], _diagnostics=False)
     parser = build_parser()
     try:
         args = parser.parse_args(raw_args)
@@ -1392,11 +1393,23 @@ def main(argv: list[str] | None = None) -> int:
             return run_shell(Path(args.repo), runner, config, state_dir=state_dir)
         return execute(args)
     except UserCancelled as exc:
+        record_diagnostic("cancelled", exc=exc, argv=raw_args, entrypoint="cli")
         _status_print(f"[CANCEL] {exc}", file=sys.stderr)
         return 0
     except (RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        record_diagnostic("handled_error", exc=exc, argv=raw_args, entrypoint="cli")
         _status_print(f"ERROR: {exc}", file=sys.stderr)
         return 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    entrypoint = "dashboard" if raw_args and raw_args[0] == "dashboard" else (
+        "shell" if not raw_args or raw_args[0] == "shell" or "--interactive" in raw_args else "cli"
+    )
+    return run_with_diagnostics(
+        lambda: _main(raw_args), argv=raw_args, entrypoint=entrypoint,
+    )
 
 
 if __name__ == "__main__":

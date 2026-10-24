@@ -11,6 +11,7 @@ import json
 import math
 import os
 import ssl
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from .cli import (
     legacy_worktrees_dir,
     state_paths,
 )
+from .application_diagnostics import run_with_diagnostics
 from .persistence import atomic_write_text
 
 
@@ -560,7 +562,7 @@ def _dashboard_tls_context(certfile: Path, keyfile: Path) -> ssl.SSLContext:
     return context
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "help":
@@ -611,6 +613,15 @@ def main(argv: list[str] | None = None) -> int:
             tls_certfile=args.tls_certfile, tls_keyfile=args.tls_keyfile,
         )
     return 0
+
+
+def main(argv: list[str] | None = None, *, _diagnostics: bool = True) -> int:
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    if not _diagnostics:
+        return _main(raw_args)
+    return run_with_diagnostics(
+        lambda: _main(raw_args), argv=raw_args, entrypoint="dashboard",
+    )
 
 
 if __name__ == "__main__":
