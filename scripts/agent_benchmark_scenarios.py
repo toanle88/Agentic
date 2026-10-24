@@ -24,6 +24,7 @@ except ModuleNotFoundError:  # Direct ``python scripts/agent_benchmark.py`` use.
 SUCCESS_STATUSES = {"success", "completed", "passed", "approved"}
 REPORTED_STATUSES = SUCCESS_STATUSES | {"failed", "timeout", "runner-error"}
 MAX_ERROR = 500
+MAX_RESULT_BYTES = 256_000
 
 
 def _run_benchmark_command(
@@ -96,10 +97,20 @@ def _run_checks(repo: Path, checks: list[list[str]], timeout: int) -> tuple[bool
 
 def _read_result(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        with path.open("rb") as stream:
+            payload = stream.read(MAX_RESULT_BYTES + 1)
     except FileNotFoundError:
         return {"status": "runner-error", "error": "scenario did not write result_file"}
-    except (OSError, json.JSONDecodeError) as exc:
+    except OSError as exc:
+        return {"status": "runner-error", "error": f"invalid scenario result: {exc}"}
+    if len(payload) > MAX_RESULT_BYTES:
+        return {
+            "status": "runner-error",
+            "error": f"scenario result exceeds {MAX_RESULT_BYTES}-byte limit",
+        }
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         return {"status": "runner-error", "error": f"invalid scenario result: {exc}"}
     if not isinstance(value, dict):
         return {"status": "runner-error", "error": "scenario result must be a JSON object"}

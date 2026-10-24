@@ -128,6 +128,10 @@ should always emit this field; older adapters that omit it retain the
 compatibility fallback that infers completion from a successful status and
 zero exit code.
 
+Scenario result files are read through a single descriptor and are limited to
+256,000 bytes. Missing, malformed, non-object, or oversized results become a
+bounded `runner-error` record.
+
 Validate a corpus without running providers:
 
 ```bash
