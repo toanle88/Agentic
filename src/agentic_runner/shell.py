@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import __version__  # noqa: F401
+from .application_diagnostics import record_diagnostic, run_with_diagnostics
 from .output import (
     ConciseLogStream,
     PatchSummaryStream,
@@ -1089,6 +1090,10 @@ class AgenticShell:
         try:
             parts = shlex.split(line)
         except ValueError as exc:
+            record_diagnostic(
+                "handled_error", exc=exc, entrypoint="shell", action="input",
+                repo=self.repo, state_dir=self.state_dir,
+            )
             _shell_print(f"Input error: {exc}")
             return True
         if not parts:
@@ -1131,7 +1136,11 @@ class AgenticShell:
                 return False
             else:
                 _shell_print(f"Unknown command: {command}. Use /help.")
-        except (OSError, ValueError, RuntimeError) as exc:
+        except Exception as exc:
+            record_diagnostic(
+                "handled_error", exc=exc, entrypoint="shell", action=command,
+                repo=self.repo, state_dir=self.state_dir,
+            )
             _shell_print(f"Error: {exc}")
         finally:
             if self.terminal_mode is not TerminalMode.EXIT:
@@ -1212,13 +1221,22 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "help":
         parser.print_help()
         return 0
     return run_shell(args.repo, args.runner, args.config, args.session_dir, state_dir=args.state_dir)
+
+
+def main(argv: list[str] | None = None, *, _diagnostics: bool = True) -> int:
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    if not _diagnostics:
+        return _main(raw_args)
+    return run_with_diagnostics(
+        lambda: _main(raw_args), argv=raw_args, entrypoint="shell",
+    )
 
 
 if __name__ == "__main__":

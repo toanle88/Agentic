@@ -99,7 +99,7 @@ For shared repository guidance, copy [`AGENTS.example.md`](../AGENTS.example.md)
 agentic doctor
 ```
 
-Agentic stores worktrees, run logs, shell records, and dashboards in a user-level state directory. If both WSL Git and Windows Git must access the worktree, choose a shared mounted path:
+Agentic stores worktrees, run logs, shell records, dashboards, and a bounded application diagnostic log in a user-level state directory. The diagnostic log is `diagnostics/agentic.log` in the project namespace; inspect it with a pager or a JSON-lines viewer when diagnosing a handled error or crash. It contains sanitized runtime and stack context, not issue text, repository contents, credentials, or provider output. If both WSL Git and Windows Git must access the worktree, choose a shared mounted path:
 
 ```bash
 agentic --state-dir /path/to/shared-agentic-state --issue 119

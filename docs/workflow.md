@@ -454,9 +454,20 @@ Durable artifacts are stored in the centralized Agentic state directory:
 ~/.local/state/agentic/my-project-<identity>/worktrees/issue-119-<timestamp>-XXXXXXXX/
 ~/.local/state/agentic/my-project-<identity>/runs/agent-issue-119-<timestamp>-XXXXXXXX/
 ~/.local/state/agentic/my-project-<identity>/shell/job-001.log
+~/.local/state/agentic/my-project-<identity>/diagnostics/agentic.log
 ```
 
 Run logs include developer and reviewer progress, provider event traces, test output, structured review results, and resume evidence. They are outside the worktree so they cannot accidentally become part of the patch.
+
+Application failures are recorded separately in the JSON-lines diagnostic log.
+Handled CLI and interactive-shell errors, uncaught exceptions, and interrupts
+include a timestamp, Agentic version, sanitized command shape, runtime details,
+exception type, and bounded stack structure. Argument values, issue and
+repository text, environment variables, credentials, and provider output are
+not recorded. The active file is capped at 256,000 bytes and rotates through
+three numbered backups, so inspect the active file and `agentic.log.1` through
+`agentic.log.3` when looking for older events. Its location is shown in the
+state-directory layout above; `--state-dir PATH` changes the root.
 
 Human-readable provider logs are concise by default. Routine session, tool,
 heartbeat, and successful command-completion messages are kept as transient

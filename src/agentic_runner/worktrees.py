@@ -93,7 +93,10 @@ def repository_state_key(repo: Path) -> str:
 
 def state_paths(repo: Path, state_dir: Path | None = None) -> StatePaths:
     root = (state_dir or default_state_dir()).expanduser().resolve() / repository_state_key(repo)
-    return StatePaths(root, root / "worktrees", root / "runs", root / "shell", root / "dashboards")
+    return StatePaths(
+        root, root / "worktrees", root / "runs", root / "shell", root / "dashboards",
+        root / "diagnostics",
+    )
 
 
 def legacy_worktrees_dir(repo: Path) -> Path:
