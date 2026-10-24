@@ -69,6 +69,7 @@ PROVIDER_SETTING_FIELDS = frozenset({
     "host", "max_tool_turns", "command_timeout_seconds", "allow_network",
     "json_mode", "permission_policy",
 })
+AUTOMATION_FIELDS = frozenset({"auto_publish"})
 
 
 def _validate_host(value: Any, field: str, *, allow_none: bool = True) -> str | None:
@@ -332,6 +333,17 @@ def load_config(path: Path) -> dict[str, Any]:
     github_host = _validate_host(
         data.get("github_host", DEFAULT_GITHUB_HOST), "github_host", allow_none=False,
     )
+    automation = data.get("automation", {})
+    if not isinstance(automation, dict):
+        raise ValueError("automation must be an object")
+    unknown_automation = sorted(set(automation) - AUTOMATION_FIELDS)
+    if unknown_automation:
+        raise ValueError(
+            "automation contains unsupported field(s): " + ", ".join(unknown_automation)
+        )
+    auto_publish = automation.get("auto_publish", False)
+    if type(auto_publish) is not bool:
+        raise ValueError("automation.auto_publish must be a boolean")
     commands = data.get("test_commands")
     if not isinstance(commands, list) or not commands or not all(
         isinstance(c, list) and c and all(isinstance(part, str) and part for part in c)
@@ -395,6 +407,7 @@ def load_config(path: Path) -> dict[str, Any]:
     result = {
         "task_source": task_source,
         "github_host": github_host,
+        "automation": {"auto_publish": auto_publish},
         "test_commands": commands,
         "slow_test_commands": slow_commands,
         "max_retries": retries,

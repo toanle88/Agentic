@@ -258,6 +258,7 @@ AUDIT_CATEGORIES = ("code_quality", "security", "reliability", "performance")
 AUDIT_SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
 AUDIT_REPORT_FILENAME = "audit-report.json"
 AUDIT_ISSUE_FILENAME = "audit-issue.json"
+PUBLICATION_FILENAME = "publication.json"
 AUDIT_MEASUREMENT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -1080,6 +1081,34 @@ def audit_issue_path(folder: Path) -> Path:
     return folder / AUDIT_ISSUE_FILENAME
 
 
+def _publication_path(folder: Path) -> Path:
+    return folder / PUBLICATION_FILENAME
+
+
+def _load_publication_record(folder: Path) -> dict[str, Any] | None:
+    try:
+        raw = read_text_bounded(_publication_path(folder), MAX_DURABLE_JSON_BYTES)
+        if raw is None:
+            return None
+        value = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    url = value.get("url")
+    return value if isinstance(url, str) and url.strip() else None
+
+
+def _record_publication(folder: Path, *, kind: str, url: str, branch: str) -> None:
+    atomic_write_json(_publication_path(folder), {
+        "status": "published",
+        "kind": kind,
+        "url": url,
+        "branch": branch,
+        "published_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    })
+
+
 def _audit_issue_title(run: Run) -> str:
     """Return a readable, stable title for one audit publication."""
     timestamp = None
@@ -1142,8 +1171,12 @@ def _audit_issue_body(report: dict[str, Any]) -> str:
 
 
 def publish_audit_issue(run: Run, issue: Issue, github_repo: str,
-                        github_host: str, folder: Path) -> str:
-    """Create one GitHub issue from a saved audit report after confirmation."""
+                        github_host: str, folder: Path, *, auto: bool = False) -> str:
+    """Create one GitHub issue from a saved audit report.
+
+    Automatic publication skips confirmation and performs a bounded remote
+    title lookup in addition to the durable local marker.
+    """
     if not issue.is_audit or not issue.audit_key:
         raise ValueError("publish_audit_issue requires an audit work item")
     try:
@@ -1156,27 +1189,56 @@ def publish_audit_issue(run: Run, issue: Issue, github_repo: str,
         existing = None
     if isinstance(existing, dict) and isinstance(existing.get("url"), str) and existing["url"].strip():
         url = existing["url"].strip()
+        if auto:
+            _record_publication(folder, kind="audit_issue", url=url, branch=run.branch)
         _status_print(f"[PUBLISH] Audit GitHub issue already exists: {url}")
         return url
+    if auto:
+        recorded = _load_publication_record(folder)
+        if recorded is not None:
+            url = str(recorded["url"]).strip()
+            _status_print(f"[PUBLISH] Existing publication record: {url}")
+            return url
     report = load_audit_report(folder, issue.audit_key)
     if report is None:
         raise RuntimeError("No saved audit report; run /audit before publishing")
+    title = _audit_issue_title(run)
+    if auto:
+        raw_remote = command([
+            "gh", "issue", "list", "--repo", github_repo, "--state", "all",
+            "--limit", "100", "--json", "title,url",
+        ], run.worktree, env=_github_environment(github_host)).stdout
+        try:
+            remote_items = json.loads(raw_remote)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("GitHub issue lookup returned invalid JSON") from exc
+        if not isinstance(remote_items, list):
+            raise RuntimeError("GitHub issue lookup returned an invalid response")
+        for item in remote_items:
+            if not isinstance(item, dict) or item.get("title") != title:
+                continue
+            url = item.get("url")
+            if isinstance(url, str) and url.strip():
+                _record_publication(folder, kind="audit_issue", url=url.strip(), branch=run.branch)
+                _status_print(f"[PUBLISH] Audit GitHub issue already exists: {url.strip()}")
+                return url.strip()
     from .shell_input import _interactive_line
 
-    try:
-        confirm = _interactive_line(
-            "\n[PUBLISH] Create a GitHub issue from this audit report? [y/N]: ",
-            system_prefix="PUBLISH",
-        ).strip().casefold()
-    except KeyboardInterrupt:
-        _status_print("[PUBLISH] Issue creation cancelled by Ctrl-C")
-        return ""
-    if confirm not in {"y", "yes", "publish"}:
-        _status_print("[PUBLISH] Issue creation cancelled; audit report retained")
-        return ""
+    if not auto:
+        try:
+            confirm = _interactive_line(
+                "\n[PUBLISH] Create a GitHub issue from this audit report? [y/N]: ",
+                system_prefix="PUBLISH",
+            ).strip().casefold()
+        except KeyboardInterrupt:
+            _status_print("[PUBLISH] Issue creation cancelled by Ctrl-C")
+            return ""
+        if confirm not in {"y", "yes", "publish"}:
+            _status_print("[PUBLISH] Issue creation cancelled; audit report retained")
+            return ""
     result = command([
         "gh", "issue", "create", "--repo", github_repo,
-        "--title", _audit_issue_title(run),
+        "--title", title,
         "--body", _audit_issue_body(report),
     ], run.worktree, env=_github_environment(github_host))
     url = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
@@ -1188,6 +1250,8 @@ def publish_audit_issue(run: Run, issue: Issue, github_repo: str,
         "url": url,
         "published_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     })
+    if auto:
+        _record_publication(folder, kind="audit_issue", url=url, branch=run.branch)
     _status_print(f"[PUBLISH] Created GitHub issue: {url}")
     return url
 
@@ -1977,19 +2041,31 @@ def _publish(run: Run, issue: Issue, github_repo: str, base: str,
              config: dict[str, Any], folder: Path,
              test_commands: list[list[str]] | None = None,
              deadline: float | None = None,
-             manual_approval: dict[str, Any] | None = None) -> None:
+             manual_approval: dict[str, Any] | None = None,
+             auto: bool = False) -> str | None:
     """Publish the exact patch covered by an existing approval."""
     if not eligible(issue):
         raise RuntimeError("Issue is closed; publication blocked")
+    if auto:
+        recorded = _load_publication_record(folder)
+        if recorded is not None:
+            url = str(recorded["url"]).strip()
+            _status_print(f"[PUBLISH] Existing publication record: {url}")
+            return url
     _status_print("[PUBLISH] Running: checking the approved patch", flush=True)
     github_host = config.get("github_host", DEFAULT_GITHUB_HOST)
     prs = check_existing_pr(run.worktree, github_repo, run.branch, github_host)
     if prs:
+        url = str(prs[0].get("url", "")).strip()
+        if not url:
+            raise RuntimeError("Existing PR lookup returned no URL")
+        if auto:
+            _record_publication(folder, kind="draft_pr", url=url, branch=run.branch)
         _status_print(
             f"[PUBLISH] Completed: existing PR for this branch: "
-            f"{prs[0]['url']}. No duplicate PR created."
+            f"{url}. No duplicate PR created."
         )
-        return
+        return url
     approval = dict(manual_approval) if manual_approval is not None else load_publication_approval(folder)
     if approval is not None and manual_approval is not None:
         approval.setdefault("kind", "manual")
@@ -2006,26 +2082,27 @@ def _publish(run: Run, issue: Issue, github_repo: str, base: str,
     # used by its input forwarder.
     from .shell_input import _interactive_line
 
-    prompt = "\n[PUBLISH] Publish this patch? [y/N]: "
-    while True:
-        try:
-            confirm = _interactive_line(prompt, system_prefix="PUBLISH").strip().casefold()
-        except KeyboardInterrupt:
+    if not auto:
+        prompt = "\n[PUBLISH] Publish this patch? [y/N]: "
+        while True:
+            try:
+                confirm = _interactive_line(prompt, system_prefix="PUBLISH").strip().casefold()
+            except KeyboardInterrupt:
+                _status_print(
+                    "[PUBLISH] Publication cancelled by Ctrl-C; "
+                    "branch/worktree kept intact"
+                )
+                return None
+            if confirm in {"y", "yes", "publish"}:
+                _status_print("[PUBLISH] Publication approved; starting publication.", flush=True)
+                break
+            if confirm in {"", "n", "no", "q"}:
+                _status_print("[PUBLISH] Publication cancelled; branch/worktree kept intact")
+                return None
             _status_print(
-                "[PUBLISH] Publication cancelled by Ctrl-C; "
-                "branch/worktree kept intact"
+                "[PUBLISH] Invalid confirmation. Enter 'y' or 'yes' to publish, "
+                "or 'n', 'no', 'q', or Enter to cancel."
             )
-            return
-        if confirm in {"y", "yes", "publish"}:
-            _status_print("[PUBLISH] Publication approved; starting publication.", flush=True)
-            break
-        if confirm in {"", "n", "no", "q"}:
-            _status_print("[PUBLISH] Publication cancelled; branch/worktree kept intact")
-            return
-        _status_print(
-            "[PUBLISH] Invalid confirmation. Enter 'y' or 'yes' to publish, "
-            "or 'n', 'no', 'q', or Enter to cancel."
-        )
     # A human confirmation is not permission to publish a different patch.
     _, new_digest, _ = prepare_patch(run.worktree, base, config["max_files"])
     if digest != new_digest:
@@ -2097,21 +2174,29 @@ def _publish(run: Run, issue: Issue, github_repo: str, base: str,
         "--head", run.branch, "--title", f"{title_prefix}: {issue.title[:110]}",
         "--body", body,
     ], run.worktree, env=_github_environment(github_host))
-    _status_print("[PUBLISH] Completed: Draft PR: " + result.stdout.strip())
+    url = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
+    if not url:
+        raise RuntimeError("GitHub draft PR creation returned no URL")
+    if auto:
+        _record_publication(folder, kind="draft_pr", url=url, branch=run.branch)
+    _status_print("[PUBLISH] Completed: Draft PR: " + url)
+    return url
 
 
 def publish(run: Run, issue: Issue, github_repo: str, base: str,
             config: dict[str, Any], folder: Path,
             test_commands: list[list[str]] | None = None,
             deadline: float | None = None,
-            manual_approval: dict[str, Any] | None = None) -> None:
+            manual_approval: dict[str, Any] | None = None,
+            auto: bool = False) -> str | None:
     """Publish while making failures explicit before preserving the exception."""
     try:
-        _publish(
+        result = _publish(
             run, issue, github_repo, base, config, folder,
             test_commands=test_commands, deadline=deadline,
-            manual_approval=manual_approval,
+            manual_approval=manual_approval, auto=auto,
         )
+        return result
     except RuntimeError as exc:
         _status_print(f"[PUBLISH] Failed: {exc}")
         raise

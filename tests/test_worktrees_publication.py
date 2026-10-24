@@ -1,4 +1,5 @@
 """Focused publication tests."""
+import json
 import sys
 from io import StringIO
 from pathlib import Path
@@ -13,6 +14,37 @@ from test_worktrees import _GitRepositoryTestCase, sh
 
 
 class PublicationTests(_GitRepositoryTestCase):
+    def test_auto_publish_reuses_existing_pr_and_records_url_without_prompt(self):
+        run = agentic.create_worktree(self.repo, 'main', 190)
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(190, 'Existing automatic PR', '')
+        with (
+            patch('agentic.check_existing_pr', return_value=[{
+                'number': 9, 'url': 'https://github.test/pull/9', 'state': 'OPEN',
+            }]),
+            patch('agentic_shell_input._interactive_line', side_effect=AssertionError('prompted')),
+        ):
+            url = agentic.publish(
+                run, issue, 'owner/repo', 'main', {'max_files': 10}, folder,
+                auto=True,
+            )
+        self.assertEqual(url, 'https://github.test/pull/9')
+        self.assertEqual(
+            json.loads((folder / 'publication.json').read_text())['url'],
+            'https://github.test/pull/9',
+        )
+
+    def test_automatic_candidate_accepts_standalone_automated_review(self):
+        run = agentic.create_worktree(self.repo, 'main', 191)
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(191, 'Standalone review', '')
+        agentic.record_review_approval(
+            run, issue, 'main', 'base-sha', 'patch-digest',
+            {'approved': True, 'summary': 'Approved', 'findings': [], 'skipped': []},
+            {'reviewer_agent': {'provider': 'codex'}}, folder,
+        )
+        self.assertTrue(agentic._automatic_candidate_eligible(issue, folder))
+
     def test_manual_approval_records_exact_patch_and_reason(self):
         run = agentic.create_worktree(self.repo, 'main', 19)
         (run.worktree / 'fix.py').write_text('fixed=True\n')

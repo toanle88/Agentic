@@ -63,6 +63,9 @@ Runtime state is controlled separately from project configuration. Use `--state-
 ```json
 {
   "task_source": "github",
+  "automation": {
+    "auto_publish": false
+  },
   "test_commands": [
     ["make", "check-fast"],
     ["pnpm", "run", "test:web:fast"],
@@ -95,6 +98,21 @@ Runtime state is controlled separately from project configuration. Use `--state-
 
 Use commands that are actually supported by the target repository. Agentic does not assume that the project uses Python, Go, Node, or a particular test framework.
 
+### Automatic publication
+
+Set `automation.auto_publish` to `true` to opt in to external publication.
+The default is `false`. A valid completed audit is then published as a GitHub
+issue, while a successful issue or local-task run with durable approval is
+published as a draft pull request. Existing approval, validation,
+protected-file, and publication checks still apply.
+
+Automatic publication skips offline runs, local tasks without a GitHub origin,
+unavailable GitHub metadata or authentication, invalid or incomplete durable
+state, and unavailable remotes. Existing remote issues and pull requests, plus
+a local `publication.json` record, are detected so retries do not duplicate
+them. A failure preserves the completed run, worktree, and logs for manual
+`--publish` retry.
+
 ## Settings
 
 | Setting | Type | Default | Description |
@@ -111,6 +129,7 @@ Use commands that are actually supported by the target repository. Agentic does 
 | `task_timeout_seconds` | integer | `1800` | Maximum wall-clock time for one task invocation, including checks and review. |
 | `workflow_mode` | `quick`, `standard`, or `strict` | `standard` | `quick` skips automatic investigation only for conservatively classified low-risk tasks; `standard` preserves the normal flow; `strict` always performs independent investigation. High-risk tasks always require investigation. The CLI `--workflow-mode` overrides this setting for one run. |
 | `github_host` | hostname | `github.com` | Host used explicitly for GitHub CLI repository, issue, and publication operations. This is independent of provider hosts. |
+| `automation.auto_publish` | boolean | `false` | Opt in to automatic publication of eligible completed audits as GitHub issues and approved issue/local-task runs as draft pull requests. |
 | `system_prompt` | nonempty string or `null` | `null` | Optional persistent project guidance included as bounded, untrusted context in developer and reviewer prompts. |
 | `permission_policy` | object | safe role defaults | Provider-independent capabilities for `developer` and `reviewer`; legacy configurations are normalized to these defaults. |
 | `security_mode` | `trusted` or `isolated` | `trusted` | `isolated` requires the configured Docker/Podman engine and image and fails closed when either is unavailable. |

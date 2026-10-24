@@ -18,6 +18,33 @@ from test_worktrees import _GitRepositoryTestCase
 
 
 class WorkflowTests(_GitRepositoryTestCase):
+    def test_auto_publish_selects_first_eligible_completed_candidate(self):
+        issue = agentic.Issue(222, "Automatic publication", "Apply the approved change")
+        root = Path(self.tmp.name) / "automatic-publication"
+        newer_folder = root / "newer"
+        older_folder = root / "older"
+        newer_folder.mkdir(parents=True)
+        older_folder.mkdir()
+        newer = agentic.Run(222, "agent/issue-222-newer", self.repo / "newer-worktree")
+        older = agentic.Run(222, "agent/issue-222-older", self.repo / "older-worktree")
+        for run, folder in ((newer, newer_folder), (older, older_folder)):
+            agentic.record_review_approval(
+                run, issue, "main", "base-sha", "patch-digest",
+                {"approved": True, "summary": "Approved", "findings": [], "skipped": []},
+                {"reviewer_agent": {"provider": "codex"}}, folder,
+            )
+        with patch.object(agentic, "publish", return_value="https://github.test/pull/222") as publish:
+            agentic._attempt_auto_publication(
+                run=newer, issue=issue, github_repo="owner/repo", github_host="github.test",
+                base="main", config={
+                    "automation": {"auto_publish": True}, "test_commands": [],
+                }, folder=newer_folder, candidates=[
+                    (newer, newer_folder), (older, older_folder),
+                ],
+            )
+        publish.assert_called_once()
+        self.assertIs(publish.call_args.args[0], newer)
+
     def test_large_review_patch_includes_manifest_statistics_and_omission_notice(self):
         sections = []
         for index in range(1, 5):

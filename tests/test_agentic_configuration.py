@@ -112,6 +112,38 @@ class ConfigurationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'workflow_mode'):
                 agentic.load_config(path)
 
+    def test_auto_publish_defaults_to_false_and_requires_a_boolean(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'agent_config.json'
+            path.write_text(json.dumps({'test_commands': [['true']]}))
+            self.assertEqual(
+                agentic.load_config(path)['automation'], {'auto_publish': False}
+            )
+            path.write_text(json.dumps({
+                'test_commands': [['true']],
+                'automation': {'auto_publish': True},
+            }))
+            self.assertTrue(agentic.load_config(path)['automation']['auto_publish'])
+            for value in ('true', 1, None, []):
+                path.write_text(json.dumps({
+                    'test_commands': [['true']],
+                    'automation': {'auto_publish': value},
+                }))
+                with self.subTest(value=value), self.assertRaisesRegex(
+                    ValueError, 'automation.auto_publish'
+                ):
+                    agentic.load_config(path)
+
+    def test_generated_config_disables_automatic_publication(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            sh('git', 'init', '--initial-branch=main', str(repo), cwd=repo.parent)
+            self.assertEqual(agentic.init_repository(repo), 0)
+            self.assertEqual(
+                agentic.load_config(repo / 'agent_config.json')['automation'],
+                {'auto_publish': False},
+            )
+
 
     def test_init_uses_resolved_exclude_for_linked_worktree(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -156,6 +156,113 @@ def _warn_dangerous_permissions(config: dict[str, Any]) -> None:
         )
 
 
+def _auto_publish_enabled(config: dict[str, Any]) -> bool:
+    automation = config.get("automation", {})
+    return isinstance(automation, dict) and automation.get("auto_publish") is True
+
+
+def _approved_result(folder: Path) -> bool:
+    try:
+        raw = read_text_bounded(folder / "result.json", MAX_RESULT_BYTES)
+        result = json.loads(raw) if raw is not None else None
+    except (OSError, TypeError, json.JSONDecodeError):
+        return False
+    return isinstance(result, dict) and result.get("status") == "APPROVED"
+
+
+def _audit_has_terminal_state_marker(folder: Path) -> bool:
+    """Reject audit publication when any other terminal state is recorded."""
+    for name in ("blocked.json", "result.json"):
+        try:
+            # A malformed, oversized, unreadable, or non-regular marker is
+            # still evidence that the audit state cannot be trusted.
+            if os.path.lexists(folder / name):
+                return True
+        except OSError:
+            return True
+    return False
+
+
+def _automatic_candidate_eligible(issue: Issue, folder: Path) -> bool:
+    """Check durable completion evidence without touching the worktree."""
+    if issue.is_audit:
+        return (
+            not _audit_has_terminal_state_marker(folder)
+            and load_audit_report(folder, issue.audit_key or AUDIT_KEY) is not None
+        )
+    try:
+        approval = load_publication_approval(folder)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    if approval is None or load_blocked(folder) is not None:
+        return False
+    if _approved_result(folder):
+        return True
+    # Standalone review and manual completion both record approval without a
+    # developer result marker. A pre-existing failed/blocked result never
+    # qualifies, while the approval itself remains subject to publication's
+    # exact branch, issue, base, and patch validation.
+    return not (folder / "result.json").exists() and approval.get("kind") in {
+        "manual", "automated",
+    }
+
+
+def _attempt_auto_publication(
+    *, run: Run, issue: Issue, github_repo: str | None, github_host: str,
+    base: str, config: dict[str, Any], folder: Path,
+    offline: bool = False,
+    candidates: list[tuple[Run, Path]] | None = None,
+) -> None:
+    """Attempt opt-in publication while preserving a completed local run."""
+    if not _auto_publish_enabled(config):
+        return
+    if offline:
+        _status_print("[AUTO-PUBLISH] Skipped: offline mode")
+        return
+    if not github_repo:
+        _status_print("[AUTO-PUBLISH] Skipped: no GitHub repository target")
+        return
+    ordered_candidates = candidates or [(run, folder)]
+    selected = next(
+        (
+            (candidate_run, candidate_folder)
+            for candidate_run, candidate_folder in ordered_candidates
+            if _automatic_candidate_eligible(issue, candidate_folder)
+        ),
+        None,
+    )
+    if selected is None:
+        _status_print("[AUTO-PUBLISH] Skipped: no eligible completed run")
+        return
+    run, folder = selected
+    if issue.is_audit:
+        try:
+            url = publish_audit_issue(
+                run, issue, github_repo, github_host, folder, auto=True,
+            )
+        except Exception as exc:  # publication is best-effort after completion
+            _status_print(f"[AUTO-PUBLISH] Failed: {exc}", file=sys.stderr)
+            return
+        if url:
+            _status_print(f"[AUTO-PUBLISH] Completed: GitHub issue: {url}")
+        return
+    try:
+        approval = load_publication_approval(folder)
+        if approval is None:
+            _status_print("[AUTO-PUBLISH] Skipped: no valid publication approval")
+            return
+        url = publish(
+            run, issue, github_repo, base, config, folder,
+            test_commands=config["test_commands"],
+            auto=True,
+        )
+    except Exception as exc:  # publication is best-effort after completion
+        _status_print(f"[AUTO-PUBLISH] Failed: {exc}", file=sys.stderr)
+        return
+    if url:
+        _status_print(f"[AUTO-PUBLISH] Completed: Draft PR: {url}")
+
+
 PROVIDER_SANDBOX_ENV = _agentic_config.PROVIDER_SANDBOX_ENV
 DEFAULT_OPENROUTER_COMMAND_TIMEOUT = _agentic_config.DEFAULT_OPENROUTER_COMMAND_TIMEOUT
 OPENROUTER_MAX_TOOL_TURNS = _agentic_config.OPENROUTER_MAX_TOOL_TURNS
@@ -635,6 +742,7 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
     config = {
         "task_source": "github",
         "github_host": DEFAULT_GITHUB_HOST,
+        "automation": {"auto_publish": False},
         "test_commands": commands,
         "slow_test_commands": slow_commands,
         "max_retries": 3,
@@ -1189,6 +1297,16 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
             )
         if not passed:
             raise RuntimeError("Review or tests did not approve current changes")
+        with worktree_lock(repo, run, state_dir):
+            _attempt_auto_publication(
+                run=run, issue=issue, github_repo=github_repo, github_host=github_host,
+                base=base, config=config, folder=folder,
+                offline=offline_run is not None,
+                candidates=[(run, folder)] + [
+                    (candidate, _run_log_folder(repo, candidate, state_dir))
+                    for candidate in previous if candidate != run
+                ],
+            )
         next_action = (
             "python agentic.py audit --publish" if issue.is_audit
             else f"python agentic.py --issue {issue.number} --publish"
@@ -1219,6 +1337,11 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
                 (args.reason or "Manually marked done by user").strip()
                 or "Manually marked done by user",
             )
+        _attempt_auto_publication(
+            run=run, issue=issue, github_repo=github_repo, github_host=github_host,
+            base=base, config=config, folder=folder,
+            offline=offline_run is not None,
+        )
         next_action = (
             "python agentic.py audit --publish" if issue.is_audit
             else f"python agentic.py --issue {issue.number} --publish"
@@ -1239,6 +1362,16 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
     if issue.is_audit:
         _status_print("[AUDIT] Read-only audit complete; no code changes were made")
         _status_print(f"[AUDIT] Report and logs: {folder}")
+        with worktree_lock(repo, run, state_dir):
+            _attempt_auto_publication(
+                run=run, issue=issue, github_repo=github_repo, github_host=github_host,
+                base=base, config=config, folder=folder,
+                offline=offline_run is not None,
+                candidates=[(run, folder)] + [
+                    (candidate, _run_log_folder(repo, candidate, state_dir))
+                    for candidate in previous if candidate != run
+                ],
+            )
         _status_print("[AUDIT] Next: run `agentic audit --publish` to create a GitHub issue")
         return 0
     if not fresh and github_repo:
@@ -1297,6 +1430,16 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
             ):
                 terminal_result = f"{status}: {next_action}"
         raise RuntimeError(terminal_result or "Unable to complete the task; resume the preserved worktree")
+    with worktree_lock(repo, run, state_dir):
+        _attempt_auto_publication(
+            run=run, issue=issue, github_repo=github_repo, github_host=github_host,
+            base=base, config=config, folder=folder,
+            offline=offline_run is not None,
+            candidates=[(run, folder)] + [
+                (candidate, _run_log_folder(repo, candidate, state_dir))
+                for candidate in previous if candidate != run
+            ],
+        )
     return 0
 
 

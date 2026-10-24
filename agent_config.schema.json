@@ -6,6 +6,17 @@
   "additionalProperties": true,
   "properties": {
     "task_source": { "enum": ["github", "local"] },
+    "automation": {
+      "type": "object",
+      "properties": {
+        "auto_publish": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically publish eligible completed audits and approved issue/local-task runs"
+        }
+      },
+      "additionalProperties": false
+    },
     "github_host": { "type": "string", "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$", "default": "github.com", "description": "GitHub CLI host for repository, issue, and publication operations" },
     "test_commands": {
       "type": "array",
