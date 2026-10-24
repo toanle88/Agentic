@@ -225,7 +225,8 @@ and read-only audits do not post comments.
 
 `agentic audit` is independent of GitHub issue and local-task mode. Each plain
 invocation starts a fresh read-only audit in a first-class timestamped
-`agent/audit-<key>-<UTC timestamp>` worktree; audit selection sorts newest first.
+`agent/audit-<key>-<UTC timestamp>` worktree; audit selection sorts newest first
+and shows only the five newest entries.
 Use `audit --resume` to reuse an existing worktree and cached report,
 or `audit --new` to force a separate worktree even for the first attempt. It runs one read-only audit across
 code quality, security, reliability, and performance, and records a bounded

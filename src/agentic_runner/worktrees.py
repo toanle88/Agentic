@@ -39,6 +39,7 @@ AUDIT_BRANCH_RE = re.compile(
     r"|(?P<legacy_ident>-[a-f0-9]{8}))?$"
 )
 AUDIT_KEY = hashlib.sha256(b"agentic-repository-audit-v1").hexdigest()[:12]
+MAX_SELECTION_RUNS = 5
 RELATIVE_WORKTREE_GIT = (2, 48, 0)
 
 
@@ -457,14 +458,16 @@ def run_for_branch(repo: Path, branch: str) -> Run | None:
 
 
 def choose_existing(runs: list[Run], *, prompt_prefix: str = "RESUME") -> Run:
+    displayed_runs = runs[:MAX_SELECTION_RUNS]
     label = prompt_prefix.upper()
-    if len(runs) == 1:
+    if len(displayed_runs) == 1:
         _status_print(
-            f"[{label}] Worktree selected: {runs[0].branch} ({runs[0].worktree})"
+            f"[{label}] Worktree selected: {displayed_runs[0].branch} "
+            f"({displayed_runs[0].worktree})"
         )
-        return runs[0]
+        return displayed_runs[0]
     _status_print("\nMultiple worktrees exist for this issue:")
-    for idx, run in enumerate(runs, 1):
+    for idx, run in enumerate(displayed_runs, 1):
         _status_print(f" {idx}. {run.branch}  ({run.worktree})")
     prompt = (
         f"\n[{label}] Waiting for worktree selection. "
@@ -489,16 +492,16 @@ def choose_existing(runs: list[Run], *, prompt_prefix: str = "RESUME") -> Run:
         except ValueError:
             _status_print(
                 f"[{label}] Invalid worktree selection. Enter a number from 1 to "
-                f"{len(runs)} or 'q' to cancel."
+                f"{len(displayed_runs)} or 'q' to cancel."
             )
             continue
-        if not 1 <= selected_number <= len(runs):
+        if not 1 <= selected_number <= len(displayed_runs):
             _status_print(
                 f"[{label}] Invalid worktree selection. Enter a number from 1 to "
-                f"{len(runs)} or 'q' to cancel."
+                f"{len(displayed_runs)} or 'q' to cancel."
             )
             continue
-        selected = runs[selected_number - 1]
+        selected = displayed_runs[selected_number - 1]
         _status_print(
             f"[{label}] Worktree {selected_number} selected: "
             f"{selected.branch} ({selected.worktree})"

@@ -165,6 +165,55 @@ class GitTest(_GitRepositoryTestCase):
             messages,
         )
 
+    def test_choose_existing_limits_regular_selection_to_five_newest_runs(self):
+        runs = [
+            agentic.Run(
+                42,
+                f'agent/issue-42-2026102{day}T120000000000Z-{day:08x}',
+                self.repo / f'run-{day}',
+            )
+            for day in range(6, 0, -1)
+        ]
+        with (patch('builtins.input', side_effect=['6', '5']),
+              patch.object(agentic_worktrees, '_status_print') as status):
+            selected = agentic.choose_existing(runs, prompt_prefix='RESUME')
+
+        self.assertEqual(selected, runs[4])
+        messages = [call.args[0] for call in status.call_args_list]
+        listing = '\n'.join(messages)
+        for number, run in enumerate(runs[:5], 1):
+            self.assertIn(f' {number}. {run.branch}', listing)
+        self.assertNotIn(runs[5].branch, listing)
+        self.assertIn(
+            "[RESUME] Invalid worktree selection. Enter a number from 1 to 5 or 'q' to cancel.",
+            messages,
+        )
+
+    def test_choose_existing_limits_audit_selection_to_five_newest_runs(self):
+        runs = [
+            agentic.Run(
+                None,
+                f'agent/audit-0123456789ab-2026102{day}T120000Z',
+                self.repo / f'audit-{day}',
+                audit_key='0123456789ab',
+            )
+            for day in range(6, 0, -1)
+        ]
+        with (patch('builtins.input', side_effect=['6', '5']),
+              patch.object(agentic_worktrees, '_status_print') as status):
+            selected = agentic.choose_existing(runs, prompt_prefix='PUBLISH')
+
+        self.assertEqual(selected, runs[4])
+        messages = [call.args[0] for call in status.call_args_list]
+        listing = '\n'.join(messages)
+        for number, run in enumerate(runs[:5], 1):
+            self.assertIn(f' {number}. {run.branch}', listing)
+        self.assertNotIn(runs[5].branch, listing)
+        self.assertIn(
+            "[PUBLISH] Invalid worktree selection. Enter a number from 1 to 5 or 'q' to cancel.",
+            messages,
+        )
+
     def test_choose_existing_retries_non_ascii_and_oversized_digits(self):
         runs = [
             agentic.Run(42, 'agent/issue-42-aaaabbbb', self.repo / 'one'),
