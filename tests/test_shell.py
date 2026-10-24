@@ -1841,6 +1841,19 @@ class ShellTests(unittest.TestCase):
                 shell.run_issue(['/run', '119', '--verbose'])
             self.assertIn('--verbose', launch.call_args.args[0])
 
+    def test_shell_runs_repair_pr_foreground_for_confirmation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), session_dir=root / 'logs'
+            )
+            with patch.object(shell, '_run_foreground') as run_foreground:
+                shell.run_repair_pr(['/repair-pr', '123'])
+            argv = run_foreground.call_args.args[0]
+            self.assertIn('--pr', argv)
+            self.assertIn('123', argv)
+            self.assertIn('--repair-ci', argv)
+
 
     def test_shell_runs_publish_in_foreground_for_confirmation(self):
         with tempfile.TemporaryDirectory() as temp:

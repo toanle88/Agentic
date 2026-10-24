@@ -573,10 +573,12 @@ class PublicationTests(_GitRepositoryTestCase):
               patch('agentic.git') as git_mock,
               patch('agentic.command', side_effect=fake_command),
               patch('agentic._status_print')):
-            agentic.push_existing_pr(
+            git_mock.side_effect = ['', 'pushed-sha', '']
+            pushed_head = agentic.push_existing_pr(
                 run, issue, 'owner/repo', 'main', config, folder, pull_request,
                 fetch_pr=lambda: pull_request,
             )
+        self.assertEqual(pushed_head, 'pushed-sha')
         self.assertIn(call(
             run.worktree, '-c', 'core.hooksPath=/dev/null',
             'push', '-u', 'origin', run.branch,

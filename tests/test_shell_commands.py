@@ -3,10 +3,19 @@ import unittest
 
 import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner.output import ConciseLogStream
-from agentic_runner.shell_commands import parse_job_command, parse_log_command, parse_options
+from agentic_runner.shell_commands import (
+    parse_job_command, parse_log_command, parse_options, parse_repair_pr_command,
+)
 
 
 class ShellCommandTests(unittest.TestCase):
+    def test_repair_pr_requires_positive_numeric_pull_request(self):
+        self.assertEqual(parse_repair_pr_command(['/repair-pr', '123']), '123')
+        for parts in (['/repair-pr'], ['/repair-pr', '0'], ['/repair-pr', '-1'],
+                      ['/repair-pr', '123', '--verbose']):
+            with self.subTest(parts=parts), self.assertRaises(ValueError):
+                parse_repair_pr_command(parts)
+
     def test_instruction_keeps_option_like_and_empty_values(self):
         self.assertEqual(
             parse_job_command(["/run", "47", "--instruction", "--preserve"]),

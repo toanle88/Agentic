@@ -121,6 +121,9 @@ them. A failure preserves the completed run, worktree, and logs for manual
 | `test_commands` | array of argv arrays | required | Checks run inside the worktree. Each command must be an array such as `["go", "test", "./..."]`; shell strings are not accepted. |
 | `slow_test_commands` | array of argv arrays | `[]` | Additional checks run after `test_commands` when `--profile slow` is selected. Profiles select checks, not the provider model or reasoning setting. |
 | `max_retries` | integer `0..5` | `3` | Extra developer attempts after the first attempt. `5` permits up to six total attempts. |
+| `ci_repair.max_attempts` | integer `1..5` | `2` | Maximum pushed repair cycles for `--pr N --repair-ci`, separate from `max_retries`. |
+| `ci_repair.poll_interval_seconds` | integer `1..86400` | `15` | Delay between bounded post-push CI status polls. |
+| `ci_repair.poll_timeout_seconds` | integer `1..86400` | `900` | Maximum wait for one post-push CI result. |
 | `max_files` | integer `1..100` or `null` | `null` | Maximum distinct files in the proposed patch. `null` disables this limit. |
 | `codex_model` | string or `null` | `null` | Model passed to Codex. `null` inherits the Codex CLI configuration. |
 | `codex_reasoning_effort` | string or `null` | `null` | Reasoning setting passed to Codex, such as `max`. `null` inherits the Codex CLI configuration. |
@@ -129,7 +132,7 @@ them. A failure preserves the completed run, worktree, and logs for manual
 | `task_timeout_seconds` | integer | `1800` | Maximum wall-clock time for one task invocation, including checks and review. |
 | `workflow_mode` | `quick`, `standard`, or `strict` | `standard` | `quick` skips automatic investigation only for conservatively classified low-risk tasks; `standard` preserves the normal flow; `strict` always performs independent investigation. High-risk tasks always require investigation. The CLI `--workflow-mode` overrides this setting for one run. |
 | `github_host` | hostname | `github.com` | Host used explicitly for GitHub CLI repository, issue, and publication operations. This is independent of provider hosts. |
-| `automation.auto_publish` | boolean | `false` | Opt in to automatic publication of eligible completed audits as GitHub issues and approved issue/local-task runs as draft pull requests. |
+| `automation.auto_publish` | boolean | `false` | Opt in to automatic publication of eligible completed audits, approved issue/local-task runs, and reviewed CI-repair patches. For CI repair, this authorizes the guarded same-branch commit and push. |
 | `system_prompt` | nonempty string or `null` | `null` | Optional persistent project guidance included as bounded, untrusted context in developer and reviewer prompts. |
 | `permission_policy` | object | safe role defaults | Provider-independent capabilities for `developer` and `reviewer`; legacy configurations are normalized to these defaults. |
 | `security_mode` | `trusted` or `isolated` | `trusted` | `isolated` requires the configured Docker/Podman engine and image and fails closed when either is unavailable. |

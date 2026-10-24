@@ -25,6 +25,7 @@ from .providers import (
     validate_provider_permission_policy,
 )
 from .sandbox import sandbox_build_command, validate_sandbox
+from .ci_repair import validate_repair_limits
 
 
 SUPPORTED_PROVIDERS = ("codex", "gemini", "claude", "copilot", "openrouter")
@@ -361,6 +362,7 @@ def load_config(path: Path) -> dict[str, Any]:
     codex_timeout = data.get("codex_timeout_seconds")
     test_timeout = data.get("test_timeout_seconds")
     task_timeout = data.get("task_timeout_seconds", DEFAULT_TASK_TIMEOUT)
+    ci_repair = validate_repair_limits(data.get("ci_repair"))
     workflow_mode = data.get("workflow_mode", "standard")
     security_mode = data.get("security_mode", DEFAULT_SECURITY_MODE)
     codex_model = data.get("codex_model")
@@ -415,6 +417,7 @@ def load_config(path: Path) -> dict[str, Any]:
         "codex_timeout_seconds": codex_timeout,
         "test_timeout_seconds": test_timeout,
         "task_timeout_seconds": task_timeout,
+        "ci_repair": ci_repair,
         "workflow_mode": workflow_mode,
         # An omitted test timeout keeps the safe default; an explicit null
         # disables the per-test-command timeout.
