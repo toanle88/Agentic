@@ -7,7 +7,7 @@ from typing import Any
 
 SHELL_COMMANDS = (
     "/run", "/ps", "/logs", "/list", "/runs", "/stop", "/status", "/dashboard",
-    "/init", "/doctor", "/cleanup", "/version", "/help", "/quit", "/exit", "/?", "/audit",
+    "/init", "/doctor", "/cleanup", "/version", "/help", "/quit", "/exit", "/?", "/audit", "/repair-pr",
 )
 SHELL_OPTIONS = {
     "/audit": ("--profile", "--instruction", "--publish", "--new", "--resume", "--offline", "--verbose"),
@@ -25,6 +25,7 @@ COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/dashboard": "generate and open the HTML dashboard", "/init": "initialize target-repository configuration",
     "/doctor": "diagnose local prerequisites", "/cleanup": "preview or remove clean worktrees",
     "/version": "show the Agentic version", "/help": "show available commands and usage",
+    "/repair-pr": "inspect failed CI and repair an existing pull request",
     "/quit": "leave the shell; running jobs continue", "/exit": "leave the shell; running jobs continue",
     "/?": "show available commands and usage",
 }
@@ -67,6 +68,8 @@ def completion_candidates(line: str, cursor: int | None = None,
     previous = tokens[-1] if trailing_space else (tokens[-2] if len(tokens) > 1 else "")
     if command in {"/audit", "/run", "/doctor"} and previous == "--profile":
         return [value for value in ("fast", "slow") if value.startswith(current)]
+    if command == "/repair-pr":
+        return []
     if command == "/stop" and (current.startswith("-") or not job_numbers):
         return [option for option in SHELL_OPTIONS["/stop"] if option.startswith(current)]
     if command in {"/logs", "/stop"} and current.startswith("-"):

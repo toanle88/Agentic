@@ -8,6 +8,11 @@
   ],
   "slow_test_commands": [],
   "max_retries": 3,
+  "ci_repair": {
+    "max_attempts": 2,
+    "poll_interval_seconds": 15,
+    "poll_timeout_seconds": 900
+  },
   "max_files": null,
   "test_timeout_seconds": null,
   "task_timeout_seconds": 1800,

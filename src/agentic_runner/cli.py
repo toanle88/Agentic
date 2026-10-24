@@ -98,6 +98,13 @@ from .execution import (  # noqa: F401
     streamed_command,
 )
 from .github_comments import post_terminal_comment
+from .ci_repair import (
+    fetch_ci_evidence,
+    find_worktree_for_branch,
+    poll_ci,
+    record_event as record_ci_repair_event,
+    verify_worktree_for_pr,
+)
 from .output import style_system_text, style_text
 from .persistence import read_text_bounded, read_text_tail
 from .openrouter import (  # noqa: F401
@@ -433,6 +440,178 @@ def logs_path(repo: Path, run: Run, state_dir: Path | None = None) -> Path:
     return folder
 
 
+def _confirm_ci_repair(pr_number: int, classification: str) -> bool:
+    """Require explicit consent for failures that may not be code-repairable."""
+    from .shell_input import _interactive_line
+
+    try:
+        answer = _interactive_line(
+            f"\n[CI-REPAIR] Failure classified as {classification}; attempt code repair for PR "
+            f"#{pr_number}? [y/N]: ",
+            system_prefix="CI-REPAIR",
+        )
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return answer.strip().casefold() in {"y", "yes", "repair"}
+
+
+def _ci_repair_secret_values(config: dict[str, Any]) -> tuple[str, ...]:
+    """Resolve configured credential values only for in-memory redaction."""
+    names: set[str] = set()
+    for role in ("developer_agent", "reviewer_agent"):
+        settings = config.get(role)
+        if isinstance(settings, dict) and isinstance(settings.get("api_key_env"), str):
+            names.add(settings["api_key_env"])
+    sandbox = config.get("sandbox")
+    if isinstance(sandbox, dict):
+        names.update(name for name in sandbox.get("pass_env", ()) if isinstance(name, str))
+    return tuple(value for name in names if (value := os.environ.get(name)) and len(value) >= 8)
+
+
+def repair_ci(
+    repo: Path,
+    pr_number: int,
+    config: dict[str, Any],
+    *,
+    state_dir: Path | None = None,
+    verbose: bool = False,
+) -> int:
+    """Repair failed CI in the exact existing PR worktree, with bounded retries."""
+    if not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number <= 0:
+        raise RuntimeError("--pr must be a positive pull request number")
+    github_host = config.get("github_host", DEFAULT_GITHUB_HOST)
+    github_repo = github_repo_from_remote(repo, github_host)
+    if not github_repo:
+        raise RuntimeError("CI repair requires a GitHub origin remote for the target repository")
+    pull_request = get_pull_request(repo, github_repo, pr_number, github_host)
+    if pull_request.state.casefold() != "open":
+        raise RuntimeError(f"Pull request #{pr_number} is not open; CI repair is blocked")
+    run = find_worktree_for_branch(repo, pull_request.head)
+    verify_worktree_for_pr(run, pull_request)
+    folder = logs_path(repo, run, state_dir)
+    record_issue_metadata(
+        folder, number=pr_number, title=f"PR #{pr_number}: {pull_request.title}",
+        state=pull_request.state, source="github-pr", body=pull_request.body,
+        shell_job_id=os.environ.get("AGENTIC_SHELL_JOB_ID"),
+    )
+    record_security_policy(folder, config)
+    secret_values = _ci_repair_secret_values(config)
+
+    def record_event(event: dict[str, Any]) -> None:
+        record_ci_repair_event(folder, event, extra_values=secret_values)
+
+    record_event({
+        "event": "repair_started", "pr": pr_number, "branch": pull_request.head,
+        "head_sha": pull_request.head_sha, "worktree": str(run.worktree),
+    })
+    issue = Issue(
+        pr_number, f"Repair CI for PR #{pr_number}: {pull_request.title}",
+        pull_request.body, state="OPEN", source="github",
+    )
+    limits = config.get("ci_repair", {})
+    max_attempts = int(limits.get("max_attempts", 2))
+    poll_interval = int(limits.get("poll_interval_seconds", 15))
+    poll_timeout = int(limits.get("poll_timeout_seconds", 900))
+    deadline = time.monotonic() + int(config.get("task_timeout_seconds", DEFAULT_TASK_TIMEOUT))
+    evidence = fetch_ci_evidence(
+        repo, github_repo, pull_request, github_host, extra_values=secret_values,
+    )
+    record_event({
+        "event": "ci_evidence", "attempt": 0, "classification": evidence.classification,
+        "evidence": evidence.to_dict(),
+    })
+    if evidence.classification in {"infrastructure", "permission", "ambiguous"}:
+        if not _confirm_ci_repair(pr_number, evidence.classification):
+            record_event({
+                "event": "repair_blocked", "reason": "explicit confirmation not granted",
+                "classification": evidence.classification,
+            })
+            raise RuntimeError(
+                f"CI failure classified as {evidence.classification}; no repair attempted without explicit confirmation"
+            )
+
+    for attempt in range(1, max_attempts + 1):
+        if time.monotonic() >= deadline:
+            raise RuntimeError("CI repair task timeout reached; preserved the PR worktree and logs")
+        feedback = evidence.prompt_context()
+        with worktree_lock(repo, run, state_dir):
+            completed = develop(
+                run, issue, pull_request.base, config, folder,
+                initial_feedback=feedback,
+                test_commands=test_commands_for_profile(config, "fast"),
+                deadline=deadline, verbose=verbose,
+            )
+        record_event({
+            "event": "repair_attempt", "attempt": attempt, "completed": completed,
+            "classification": evidence.classification,
+        })
+        if not completed:
+            raise RuntimeError(
+                f"CI repair attempt {attempt}/{max_attempts} did not pass local checks and review; "
+                f"inspect the durable logs at {folder}"
+            )
+        if not _auto_publish_enabled(config) and not _confirm_ci_repair(pr_number, "reviewed code/test patch"):
+            record_event({"event": "push_blocked", "attempt": attempt})
+            _status_print("[CI-REPAIR] Patch prepared and reviewed; push cancelled")
+            return 0
+        record_event({
+            "event": "push_authorized", "attempt": attempt,
+            "automatic": _auto_publish_enabled(config),
+        })
+        with worktree_lock(repo, run, state_dir):
+            pushed_head_sha = push_existing_pr(
+                run, issue, github_repo, pull_request.base, config, folder, pull_request,
+            )
+        if not isinstance(pushed_head_sha, str) or not pushed_head_sha:
+            raise RuntimeError("Publication did not return the pushed PR head; refusing to monitor unbound CI")
+        outcome = poll_ci(
+            repo, github_repo, pull_request, github_host,
+            timeout_seconds=min(poll_timeout, max(1, int(deadline - time.monotonic()))),
+            interval_seconds=poll_interval,
+            expected_head_sha=pushed_head_sha,
+        )
+        record_event({
+            "event": "ci_outcome", "attempt": attempt, "outcome": outcome,
+            "head_sha": pushed_head_sha,
+        })
+        if outcome == "passed":
+            _status_print(f"[CI-REPAIR] PR #{pr_number} CI passed after attempt {attempt}")
+            return 0
+        if outcome == "timeout":
+            raise RuntimeError(
+                f"CI remained pending beyond the configured polling bound; inspect PR #{pr_number} and logs at {folder}"
+            )
+        if outcome == "head_changed":
+            raise RuntimeError(
+                f"PR #{pr_number} no longer reports the pushed head; refusing to accept unrelated CI results"
+            )
+        if attempt >= max_attempts:
+            raise RuntimeError(
+                f"CI still failed after {max_attempts} bounded repair attempt(s); logs: {folder}"
+            )
+        updated = get_pull_request(repo, github_repo, pr_number, github_host)
+        if updated.head_sha != pushed_head_sha:
+            raise RuntimeError(
+                f"PR #{pr_number} changed after the monitored push; refusing to repair an unrelated head"
+            )
+        pull_request = updated
+        verify_worktree_for_pr(run, pull_request)
+        evidence = fetch_ci_evidence(
+            repo, github_repo, pull_request, github_host, extra_values=secret_values,
+        )
+        record_event({
+            "event": "ci_evidence", "attempt": attempt, "classification": evidence.classification,
+            "evidence": evidence.to_dict(),
+        })
+        if evidence.classification in {"infrastructure", "permission", "ambiguous"} and not _confirm_ci_repair(
+            pr_number, evidence.classification,
+        ):
+            raise RuntimeError(
+                f"Follow-up CI failure classified as {evidence.classification}; explicit confirmation is required"
+            )
+    raise RuntimeError("CI repair ended without a terminal result")
+
+
 MANUAL_APPROVAL_FILENAME = _agentic_workflow_state.MANUAL_APPROVAL_FILENAME
 REVIEW_APPROVAL_FILENAME = _agentic_workflow_state.REVIEW_APPROVAL_FILENAME
 BLOCKED_FILENAME = "blocked.json"
@@ -746,6 +925,11 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
         "test_commands": commands,
         "slow_test_commands": slow_commands,
         "max_retries": 3,
+        "ci_repair": {
+            "max_attempts": 2,
+            "poll_interval_seconds": 15,
+            "poll_timeout_seconds": 900,
+        },
         "max_files": None,
         "test_timeout_seconds": DEFAULT_TEST_TIMEOUT,
         "task_timeout_seconds": DEFAULT_TASK_TIMEOUT,
@@ -977,6 +1161,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Workflow depth: quick skips low-risk investigation; standard is the default; strict always investigates",
     )
     parser.add_argument("--issue", type=int, help="GitHub issue number")
+    parser.add_argument("--pr", type=int, dest="pr_number", help="Existing GitHub pull request number")
+    parser.add_argument(
+        "--repair-ci", action="store_true",
+        help="Inspect failed CI and repair an existing pull request in its worktree",
+    )
     parser.add_argument(
         "--instruction", default=None,
         help="Optional untrusted instruction preserved for this run and its resumes",
@@ -1082,6 +1271,14 @@ def execute(args: argparse.Namespace) -> int:
 
 
 def execute_locked(args: argparse.Namespace, repo: Path) -> int:
+    if args.repair_ci and args.pr_number is None:
+        raise RuntimeError("--repair-ci requires --pr N")
+    if args.pr_number is not None and not args.repair_ci:
+        raise RuntimeError("--pr requires --repair-ci")
+    if args.repair_ci and any((args.issue is not None, args.task is not None, args.task_file is not None,
+                               args.review, args.publish, args.mark_done, args.new, args.offline,
+                               args.list, args.runs, args.command is not None)):
+        raise RuntimeError("--repair-ci can only be combined with --pr, --repo, --config, --state-dir, and --verbose")
     if args.new and (args.review or args.publish or args.mark_done or args.resume):
         raise RuntimeError("--new cannot be combined with --review, --publish, --mark-done, or --resume")
     if args.resume and args.command != "audit":
@@ -1128,6 +1325,11 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
             config["developer_agent"], config["reviewer_agent"], sandbox=config["sandbox"]
         )
     state_dir = Path(args.state_dir).expanduser().resolve() if args.state_dir else default_state_dir()
+    if args.repair_ci:
+        pr_number = args.pr_number
+        if not isinstance(pr_number, int) or isinstance(pr_number, bool):
+            raise RuntimeError("--repair-ci requires --pr N")
+        return repair_ci(repo, pr_number, config, state_dir=state_dir, verbose=args.verbose)
     task_deadline = time.monotonic() + config["task_timeout_seconds"]
 
     task_source = config["task_source"]
@@ -1516,6 +1718,8 @@ def _main(argv: list[str] | None = None) -> int:
         default_interactive = (
             args.command != "audit"
             and args.issue is None
+            and args.pr_number is None
+            and not args.repair_ci
             and not args.list
             and not args.runs
             and args.task is None
@@ -1525,7 +1729,8 @@ def _main(argv: list[str] | None = None) -> int:
             and not args.publish
         )
         if args.interactive or default_interactive:
-            if any((args.command == "audit", args.issue is not None, args.task is not None, args.task_file is not None,
+            if any((args.command == "audit", args.issue is not None, args.pr_number is not None,
+                    args.repair_ci, args.task is not None, args.task_file is not None,
                     args.list, args.runs, args.new, args.review, args.publish)):
                 parser.error("--interactive cannot be combined with a task, issue, list, runs, new, review, or publish option")
             from .shell import run_shell

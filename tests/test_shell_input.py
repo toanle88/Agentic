@@ -1003,7 +1003,7 @@ class InteractiveInputTests(unittest.TestCase):
         self.assertEqual(agentic_shell._completion_candidates('/ch'), [])
         self.assertEqual(
             agentic_shell._completion_candidates('/r'),
-            ['/run', '/runs'],
+            ['/run', '/runs', '/repair-pr'],
         )
         self.assertEqual(
             agentic_shell._completion_candidates('/li'),

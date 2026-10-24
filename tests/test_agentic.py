@@ -1152,8 +1152,9 @@ class PureTests(unittest.TestCase):
         ]).verbose)
         with self.assertRaises(SystemExit):
             agentic.build_parser().parse_args(['--chat', '--issue', '42'])
-        with self.assertRaises(SystemExit):
-            agentic.build_parser().parse_args(['--pr', '123'])
+        repair = agentic.build_parser().parse_args(['--pr', '123', '--repair-ci'])
+        self.assertEqual(repair.pr_number, 123)
+        self.assertTrue(repair.repair_ci)
         manual = agentic.build_parser().parse_args([
             '--issue', '42', '--mark-done', '--reason', 'human reviewed',
         ])
@@ -1185,6 +1186,11 @@ class PureTests(unittest.TestCase):
     def test_main_propagates_runner_exit_status(self):
         with patch('agentic.execute', return_value=1) as execute:
             self.assertEqual(agentic.main(['--issue', '42']), 1)
+        execute.assert_called_once()
+
+    def test_pr_repair_does_not_fall_into_interactive_shell(self):
+        with patch('agentic.execute', return_value=0) as execute:
+            self.assertEqual(agentic.main(['--pr', '123', '--repair-ci']), 0)
         execute.assert_called_once()
 
 

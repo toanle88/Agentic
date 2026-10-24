@@ -271,6 +271,32 @@ Use `--profile slow` when the issue needs the configured integration, browser, o
 agentic --issue 119 --profile slow
 ```
 
+### Repair failed CI on an existing pull request
+
+CI repair is explicitly opt-in:
+
+```bash
+agentic --pr 123 --repair-ci
+```
+
+The interactive shell provides `/repair-pr 123` and runs it in the foreground
+so confirmation prompts remain available. Agentic reads failed check summaries
+and bounded failed-run log excerpts as untrusted evidence, classifies
+the failure, and uses only the exact existing worktree for the PR branch. The
+worktree must exist, be clean, and have `HEAD` equal to the current PR head;
+missing, dirty, ambiguous, or stale worktrees stop with an actionable blocker.
+CI log text is never treated as commands.
+
+Code/test and identified flaky failures may be repaired automatically.
+Infrastructure, permission, and ambiguous failures require explicit
+confirmation. The developer remains write-capable and the reviewer remains
+read-only. Local checks and review must approve a patch before publication.
+With `automation.auto_publish` false (the default), Agentic asks before
+committing and pushing; true permits the guarded same-branch push. The
+`ci_repair.max_attempts` and polling settings bound repeated repair cycles and
+post-push monitoring. Evidence, attempts, review, push, and CI outcomes are
+retained in the durable run logs.
+
 An optional per-run instruction can be supplied when starting or resuming an
 issue. It is stored in the run metadata and passed to the developer and
 read-only reviewer as bounded, explicitly delimited untrusted data:
