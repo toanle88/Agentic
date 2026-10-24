@@ -17,6 +17,7 @@ from .output import strip_ansi
 from .persistence import atomic_write_json, read_text_tail
 from .security import redact_secrets
 from .telemetry import read_run_usage
+from .workflow_state import latest_numbered_log
 from .worktrees import command
 
 COMMENT_STATE_FILENAME = "github-comment.json"
@@ -132,10 +133,10 @@ def _test_status(result: dict[str, Any], usage: dict[str, Any], terminal: str) -
 
 
 def _latest_review(folder: Path) -> dict[str, Any] | None:
-    candidates = sorted(folder.glob("review-*.json"))
-    if not candidates:
+    latest = latest_numbered_log(folder, "review", "json")
+    if latest is None:
         return None
-    return _load_json(candidates[-1], 64_000)
+    return _load_json(latest, 64_000)
 
 
 def _review_status(result: dict[str, Any], usage: dict[str, Any], folder: Path,

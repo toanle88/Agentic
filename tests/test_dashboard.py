@@ -100,6 +100,24 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(len(signature), 1)
         self.assertEqual(len(signature[0]), 4)
 
+    def test_windows_dashboard_signature_does_not_read_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            run = Path(temp) / "agent-issue-125-ab12cd34"
+            run.mkdir(parents=True)
+            (run / "developer-001.txt").write_bytes(b"x" * (2 * 1024 * 1024))
+            with (patch.object(agentic_dashboard_data.os, "name", "nt"),
+                  patch.object(
+                      agentic_dashboard_data, "_windows_file_change_time",
+                      return_value=123, create=True,
+                  ),
+                  patch.object(
+                      agentic_dashboard_data.os, "read",
+                      side_effect=AssertionError("artifact was read"),
+                  )):
+                signature = agentic_dashboard_data._folder_signature(run)
+        self.assertEqual(len(signature), 1)
+        self.assertIn("123:", str(signature[0][3]))
+
     def test_dashboard_cache_serializes_concurrent_refreshes(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / ".demo-agent-runs"
@@ -146,7 +164,7 @@ class DashboardTests(unittest.TestCase):
                 calls += 1
                 value = marker.read_text(encoding="utf-8")
                 if calls == 1:
-                    marker.write_text("new\n", encoding="utf-8")
+                    marker.write_text("new content\n", encoding="utf-8")
                 return {
                     "id": folder.name,
                     "last_activity": "2026-01-01T00:00:00+00:00",
@@ -157,7 +175,7 @@ class DashboardTests(unittest.TestCase):
                 snapshots = agentic_dashboard_data.collect_runs(root)
 
             self.assertEqual(calls, 2)
-            self.assertEqual(snapshots[0]["developer"]["summary"], "new\n")
+            self.assertEqual(snapshots[0]["developer"]["summary"], "new content\n")
 
     def test_dashboard_exposes_run_metrics(self):
         with tempfile.TemporaryDirectory() as temp:

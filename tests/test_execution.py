@@ -7,9 +7,11 @@ import sys
 import tempfile
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
 from pathlib import Path
 from subprocess import CompletedProcess
+from threading import Lock
 from unittest.mock import patch
 
 import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
@@ -33,6 +35,63 @@ def sh(*args, cwd):
 
 
 class StreamingTests(unittest.TestCase):
+    def test_provider_facade_serializes_compatibility_mutation_and_restores_on_failure(self):
+        sentinel_streamed = object()
+        sentinel_codex = object()
+        observed = []
+        state_lock = Lock()
+        active = 0
+        max_active = 0
+
+        def fake_run_codex(*args, **kwargs):
+            nonlocal active, max_active
+            with state_lock:
+                active += 1
+                max_active = max(max_active, active)
+                observed.append((
+                    agentic_execution._providers.streamed_command,
+                    agentic_execution._providers.codex_command,
+                ))
+            time.sleep(0.02)
+            with state_lock:
+                active -= 1
+            return args, kwargs
+
+        with (
+            patch.object(agentic_execution, "streamed_command", sentinel_streamed),
+            patch.object(agentic_execution, "codex_command", sentinel_codex),
+            patch.object(
+                agentic_execution._providers,
+                "run_codex",
+                side_effect=fake_run_codex,
+            ),
+        ):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(agentic_execution.run_codex, ("one", "two")))
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(max_active, 1)
+        self.assertEqual(observed, [(sentinel_streamed, sentinel_codex)] * 2)
+        self.assertIs(
+            agentic_execution._providers.streamed_command,
+            agentic_execution.streamed_command,
+        )
+        self.assertIs(
+            agentic_execution._providers.codex_command,
+            agentic_execution.codex_command,
+        )
+
+        original_streamed = agentic_execution._providers.streamed_command
+        original_codex = agentic_execution._providers.codex_command
+        with patch.object(
+            agentic_execution._providers,
+            "run_codex",
+            side_effect=RuntimeError("provider failed"),
+        ), self.assertRaises(RuntimeError):
+            agentic_execution.run_codex("failed")
+        self.assertIs(agentic_execution._providers.streamed_command, original_streamed)
+        self.assertIs(agentic_execution._providers.codex_command, original_codex)
+
     def test_style_patch_summary_colors_git_additions_and_removals(self):
         class TTYBuffer(StringIO):
             def isatty(self):
