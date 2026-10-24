@@ -142,13 +142,16 @@ class DashboardTests(unittest.TestCase):
                 with ThreadPoolExecutor(max_workers=2) as executor:
                     first = executor.submit(agentic_dashboard_data.collect_runs, root)
                     self.assertTrue(entered.wait(timeout=2))
-                    marker.write_text("new\n", encoding="utf-8")
+                    # Windows can report identical metadata for rapid
+                    # same-size writes, so make the refreshed artifact's
+                    # size part of the observable cache change.
+                    marker.write_text("new content\n", encoding="utf-8")
                     second = executor.submit(agentic_dashboard_data.collect_runs, root)
                     self.assertFalse(second.done())
                     release.set()
                     first.result(timeout=2)
                     latest = second.result(timeout=2)
-            self.assertEqual(latest[0]["developer"]["summary"], "new\n")
+            self.assertEqual(latest[0]["developer"]["summary"], "new content\n")
 
     def test_dashboard_discards_snapshot_when_folder_changes_during_build(self):
         with tempfile.TemporaryDirectory() as temp:
