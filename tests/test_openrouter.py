@@ -652,10 +652,24 @@ class OpenRouterTests(unittest.TestCase):
                 ['git', 'log', '-p'],
                 ['git', 'log', '-p', 'HEAD'],
                 ['git', 'log', '-p', '--', '.'],
+                ['git', 'log', '-p', '--', 'public.txt'],
                 ['git', 'log', '-p', '--', 'deleted-dir'],
                 ['git', 'log', '--patch-with-stat'],
                 ['git', 'log', '--patch-with-raw', 'HEAD'],
                 ['git', 'log', '-pu'],
+                ['git', 'log', '-pu', '--', 'public.txt'],
+                ['git', 'log', '--follow', '--', 'public.txt'],
+                ['git', 'log', '-L', '1,1:public.txt'],
+                ['git', 'log', '-L1,1:public.txt'],
+                ['git', 'log', '--word-diff'],
+                ['git', 'log', '--word-diff=porcelain'],
+                ['git', 'log', '--word-diff-regex=.'],
+                ['git', 'log', '--color-words'],
+                ['git', 'log', '--stat'],
+                ['git', 'log', '--raw'],
+                ['git', 'log', '--name-only'],
+                ['git', 'log', '--diff-merges=first-parent'],
+                ['git', 'log', '--unknown-future-diff-option'],
                 ['git', 'diff', '--', 'outside-link'],
                 ['git', 'show', 'HEAD:.env'],
                 ['git', 'show', 'HEAD:.env', '--'],
@@ -697,6 +711,54 @@ class OpenRouterTests(unittest.TestCase):
                 )
             self.assertIn('exit 0', result)
             capture.assert_called_once()
+
+    def test_openrouter_git_log_rejects_history_content_after_protected_rename(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+
+            def run(*argv):
+                return subprocess.run(
+                    ['git', *argv], cwd=root, check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+
+            run('init', '-q')
+            (root / '.env').write_text('historical-secret\n', encoding='utf-8')
+            run('add', '.env')
+            run('-c', 'user.email=test@example.com', '-c', 'user.name=Test',
+                'commit', '-qm', 'protected')
+            (root / '.env').rename(root / 'public.txt')
+            run('add', '-A')
+            run('-c', 'user.email=test@example.com', '-c', 'user.name=Test',
+                'commit', '-qm', 'rename')
+
+            for argv in (
+                ['git', 'log', '-p', '--', 'public.txt'],
+                ['git', 'log', '-pu', '--', 'public.txt'],
+                ['git', 'log', '--follow', '--', 'public.txt'],
+                ['git', 'log', '-L1,1:public.txt'],
+            ):
+                with self.subTest(argv=argv), patch(
+                    'agentic_openrouter_tools._bounded_command_capture',
+                    side_effect=AssertionError('blocked command must not be captured'),
+                ) as capture:
+                    result = agentic_openrouter._openrouter_tool_call(
+                        root, 'run_command', {'argv': argv}, readonly=True,
+                    )
+                self.assertIn('ERROR:', result)
+                self.assertNotIn('historical-secret', result)
+                capture.assert_not_called()
+
+            for argv in (
+                ['git', 'log'],
+                ['git', 'log', '--oneline', '--', 'public.txt'],
+                ['git', 'log', '--pretty=%h', '--max-count=1', '--', 'public.txt'],
+                ['git', 'log', '--decorate=short', '--', 'public.txt'],
+            ):
+                allowed, reason = agentic_openrouter._openrouter_command_allowed(
+                    argv, readonly=True, worktree=root,
+                )
+                self.assertTrue(allowed, (argv, reason))
 
     def test_openrouter_git_diff_disables_malicious_external_diff_config(self):
         with tempfile.TemporaryDirectory() as temp:

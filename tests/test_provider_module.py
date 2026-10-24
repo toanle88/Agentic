@@ -149,6 +149,8 @@ class ProviderCommandTests(unittest.TestCase):
         for bare_tool in ("Read", "Glob", "Grep", "Edit", "Write"):
             self.assertNotIn(bare_tool, claude[claude.index("--allowedTools") + 1:])
         self.assertIn("Bash(git status)", claude)
+        self.assertIn("Bash(git log)", claude)
+        self.assertIn("Bash(git log:*)", claude)
         self.assertIn("Bash(git diff --no-ext-diff --no-textconv:*)", claude)
         self.assertIn("Bash(python -m unittest discover -s tests)", claude)
         allowed_start = claude.index("--allowedTools") + 1
@@ -174,8 +176,9 @@ class ProviderCommandTests(unittest.TestCase):
             check_commands=[["python", "-m", "unittest"]],
         )
         gemini_allowed = gemini_trusted[gemini_trusted.index("--allowed-tools") + 1]
-        for command in ("status", "log"):
-            self.assertIn(f"ShellTool(git {command})", gemini_allowed)
+        self.assertIn("ShellTool(git status)", gemini_allowed)
+        self.assertIn("ShellTool(git log)", gemini_allowed)
+        self.assertNotIn("ShellTool(git log,", gemini_allowed)
         for command in ("diff", "show"):
             self.assertIn(
                 f"ShellTool(git {command} --no-ext-diff --no-textconv)",

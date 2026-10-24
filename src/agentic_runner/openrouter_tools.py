@@ -26,6 +26,7 @@ from .file_boundaries import (
     open_relative_regular,
     revalidate_single_link_regular,
 )
+from .git_policy import GIT_LOG_CONTENT_OPTIONS, git_log_option_exposes_history
 from .sandbox import sandbox_command
 from .security import redact_secrets
 from .policy import default_permission_policy, forbidden, sensitive_read
@@ -117,10 +118,8 @@ RG_OPTIONS_WITH_VALUES = {
 RG_PATTERN_OPTIONS = {"-e", "-f", "--regexp", "--file"}
 RG_FILE_OPTIONS = {"-f", "--file", "--ignore-file", "--files-from"}
 GREP_FILE_OPTIONS = {"-f", "--file", "--exclude-from"}
-GIT_PATCH_OPTIONS = {
-    "-p", "-u", "--patch", "--full-diff", "-c", "--cc",
-    "--patch-with-stat", "--patch-with-raw",
-}
+# Compatibility-facing name retained for integrations that imported it.
+GIT_PATCH_OPTIONS = GIT_LOG_CONTENT_OPTIONS
 
 def _safe_worktree_path(worktree: Path, relative: str, *, write: bool = False) -> Path:
     """Resolve a model-supplied path without allowing worktree escape."""
@@ -295,15 +294,7 @@ def _option_file_operands(
 
 def _git_patch_option(part: str) -> bool:
     """Identify Git options that can make a log command emit file contents."""
-    option = part.split("=", 1)[0]
-    if option in GIT_PATCH_OPTIONS:
-        return True
-    # Git accepts combined short options such as ``-pu``.  Keep the check
-    # limited to lowercase patch flags so unrelated options are not treated
-    # as content-producing forms.
-    return option.startswith("-") and not option.startswith("--") and any(
-        flag in option[1:] for flag in "puc"
-    )
+    return git_log_option_exposes_history(part)
 
 
 def _git_show_path_is_directory(worktree: Path, argv: list[str], relative: str) -> bool:
@@ -474,9 +465,20 @@ def _readonly_git_command_allowed(
         ) or bool(separator is not None and argv[separator + 1:])
         if not explicit_show_path:
             return False, "git show must name an explicit path during read-only review"
-    if subcommand == "log" and any(_git_patch_option(part) for part in argv[2:]) \
-            and (separator is None or not argv[separator + 1:]):
-        return False, "git log patch output must name explicit paths during read-only review"
+    if subcommand == "log":
+        log_options = argv[2:] if separator is None else argv[2:separator]
+        blocked_option = next(
+            (
+                part for part in log_options
+                if git_log_option_exposes_history(part)
+            ),
+            None,
+        )
+        if blocked_option is not None:
+            return False, (
+                "git log diff, history-following, and unrecognized options are "
+                "not allowed during read-only review"
+            )
     for index, part in enumerate(argv[2:], 2):
         option = part.split("=", 1)[0]
         if option in GIT_UNSAFE_OPTIONS or option.startswith(("--git-dir", "--work-tree", "--output")):
