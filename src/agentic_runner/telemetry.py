@@ -49,13 +49,16 @@ def _timestamp(value: datetime | None = None) -> str:
 
 
 def _read_run_record(path: Path) -> dict[str, Any]:
+    raw = read_text_bounded(path, MAX_RUN_RECORD_BYTES)
+    if raw is None:
+        # An oversized legacy artifact is untrusted input.  Do not parse it;
+        # the next write starts a bounded record instead.  The bounded helper
+        # reads through one descriptor, so a concurrent replacement or growth
+        # cannot bypass this limit between a size check and a separate read.
+        return {}
     try:
-        if path.stat().st_size > MAX_RUN_RECORD_BYTES:
-            # An oversized legacy artifact is untrusted input.  Do not read
-            # it in full; the next write starts a bounded record instead.
-            return {}
-        data = json.loads(redact_secrets(path.read_text(encoding="utf-8")))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        data = json.loads(redact_secrets(raw))
+    except json.JSONDecodeError:
         return {}
     if not isinstance(data, dict):
         return {}

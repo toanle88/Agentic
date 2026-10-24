@@ -16,7 +16,7 @@ from scripts.agent_benchmark import (
 )
 from scripts.agent_benchmark_config import load_benchmark as load_benchmark_config
 from scripts.agent_benchmark_scenarios import (
-    _run_checks, _scenario_record, run_scenario,
+    MAX_RESULT_BYTES, _read_result, _run_checks, _scenario_record, run_scenario,
 )
 from scripts.benchmark import run_case
 from scripts.benchmark_execution import process_group_kwargs
@@ -24,6 +24,41 @@ from scripts.dashboard_benchmark import generate_corpus, measure, percentile
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_scenario_result_read_is_bounded_and_preserves_normal_objects(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "result.json"
+            path.write_text(json.dumps({"status": "success"}), encoding="utf-8")
+            self.assertEqual(_read_result(path), {"status": "success"})
+
+    def test_oversized_scenario_result_is_a_bounded_runner_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "result.json"
+            path.write_text(
+                json.dumps({"status": "success", "padding": "x" * MAX_RESULT_BYTES}),
+                encoding="utf-8",
+            )
+            result = _read_result(path)
+        self.assertEqual(result["status"], "runner-error")
+        self.assertEqual(
+            result["error"], f"scenario result exceeds {MAX_RESULT_BYTES}-byte limit",
+        )
+
+    def test_malformed_scenario_result_is_a_runner_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "result.json"
+            path.write_text("{not-json", encoding="utf-8")
+            result = _read_result(path)
+        self.assertEqual(result["status"], "runner-error")
+        self.assertIn("invalid scenario result:", result["error"])
+
+    def test_invalid_utf8_scenario_result_is_a_runner_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "result.json"
+            path.write_bytes(b'{"status":"success","detail":"\xff"}')
+            result = _read_result(path)
+        self.assertEqual(result["status"], "runner-error")
+        self.assertIn("invalid scenario result:", result["error"])
+
     def test_dashboard_benchmark_generates_and_measures_cold_and_warm_samples(self):
         with tempfile.TemporaryDirectory() as temp:
             logs = Path(temp) / "dashboard-corpus"

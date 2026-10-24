@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner.telemetry import (
@@ -69,6 +70,18 @@ class TelemetryTests(unittest.TestCase):
             self.assertEqual(
                 len(json.loads((folder / 'run.json').read_text())['metrics']['operations']), 1,
             )
+
+    def test_run_record_loader_uses_bounded_descriptor_read(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            (folder / "run.json").write_text(
+                json.dumps({"schema_version": 1, "usage": {"total_tokens": 7}}),
+                encoding="utf-8",
+            )
+            with patch.object(Path, "stat", side_effect=AssertionError("stat race")), \
+                 patch.object(Path, "read_text", side_effect=AssertionError("unbounded read")):
+                usage = read_run_usage(folder)
+        self.assertEqual(usage["total_tokens"], 7)
 
     def test_small_legacy_extension_fields_survive_telemetry_write(self):
         with tempfile.TemporaryDirectory() as temp:
