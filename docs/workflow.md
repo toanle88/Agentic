@@ -316,13 +316,15 @@ and emits a shell-safe `--task-file` invocation, so task text is not copied
 into terminal summaries or `result.json`.
 
 For an online GitHub issue run, Agentic automatically posts one concise final
-comment after a terminal `result.json` is recorded. The comment includes the
-result, test and review status, branch, next action, total duration and token
-usage, plus per-stage tokens and cost when the provider reports them. Missing
-metrics are shown as `unknown`; Agentic does not estimate them. The comment
-contains no provider transcript, issue text, local path, or credential. A
-deterministic marker and a local delivery record make retries idempotent, and a
-GitHub delivery failure leaves the terminal result intact for later retry.
+comment after a terminal `result.json` is recorded. The GitHub-native Markdown
+uses a heading, compact result/test/review/duration status table, collapsible
+usage and per-stage token/cost table, prominent next action, and a secondary
+branch footer. Status-specific icons and labels make approved, passed, failed,
+blocked, and unknown states easy to scan. Missing metrics are shown as
+`unknown`; Agentic does not estimate them. The comment contains no provider
+transcript, issue text, local path, or credential. A deterministic marker and a
+local delivery record make retries idempotent, and a GitHub delivery failure
+leaves the terminal result intact for later retry.
 
 This behavior is enabled by default and needs no flag. It requires the
 authenticated GitHub CLI identity to have permission to read issue comments

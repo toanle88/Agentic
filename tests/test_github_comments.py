@@ -33,25 +33,53 @@ class GithubCommentTests(unittest.TestCase):
         return value
 
     def test_all_terminal_outcomes_have_concise_public_fields(self):
-        for status in ("APPROVED", "BLOCKED", "RETRY_EXHAUSTED", "NO_CHANGES", "FAILED"):
+        expected_results = {
+            "APPROVED": "✅ Approved",
+            "BLOCKED": "⛔ Blocked",
+            "RETRY_EXHAUSTED": "⚠️ Retry exhausted",
+            "NO_CHANGES": "ℹ️ No changes",
+            "FAILED": "❌ Failed",
+        }
+        for status, expected_result in expected_results.items():
             with self.subTest(status=status):
                 result = self._result(status, tests="failed", review="not reached")
                 marker, body = format_completion_comment(
                     self.run, self.issue, self.folder, result,
                 )
                 self.assertIn(marker, body)
-                self.assertIn(f"Result: {status}", body)
-                self.assertIn("Tests: failed", body)
-                self.assertIn("Review: not reached", body)
-                self.assertIn("Branch: `agent/issue-119-aabbccdd`", body)
-                self.assertIn("Next step:", body)
+                self.assertTrue(
+                    next(line for line in body.splitlines() if line.startswith("## "))
+                    .endswith("Agentic run completed")
+                )
+                self.assertIn("| Check | Status |", body)
+                self.assertIn(f"| Result | {expected_result} |", body)
+                self.assertIn("| Tests | ❌ Failed |", body)
+                self.assertIn("| Review | ⏭️ Not reached |", body)
+                self.assertIn("<details>\n<summary>Usage and stages</summary>", body)
+                self.assertIn("| Stage | Tokens | Cost |", body)
+                self.assertIn("### Next step\n\n", body)
+                self.assertIn("---\nBranch: `agent/issue-119-aabbccdd`", body)
                 self.assertNotIn("do-not-publish", body)
                 self.assertNotIn("/private/worktree", body)
                 self.assertNotIn("provider output", body)
 
         result = self._result("malformed result")
         _, body = format_completion_comment(self.run, self.issue, self.folder, result)
-        self.assertIn("Result: INVALID", body)
+        self.assertIn("| Result | ❔ Unknown |", body)
+
+    def test_status_table_uses_clear_labels_for_passed_and_unknown_values(self):
+        result = self._result("APPROVED", tests="passed", review="unknown")
+        _, body = format_completion_comment(self.run, self.issue, self.folder, result)
+        self.assertIn("| Tests | ✅ Passed |", body)
+        self.assertIn("| Review | ❔ Unknown |", body)
+
+        unknown = self.folder / "unknown-status"
+        unknown.mkdir()
+        _, unknown_body = format_completion_comment(
+            self.run, self.issue, unknown, {"status": "BLOCKED"},
+        )
+        self.assertIn("| Tests | ❔ Unknown |", unknown_body)
+        self.assertIn("| Review | ⏭️ Not reached |", unknown_body)
 
     def test_result_status_fields_reject_multiline_or_arbitrary_text(self):
         result = self._result(
@@ -62,8 +90,8 @@ class GithubCommentTests(unittest.TestCase):
         _, body = format_completion_comment(
             self.run, self.issue, self.folder, result,
         )
-        self.assertIn("Tests: unknown", body)
-        self.assertIn("Review: not reached", body)
+        self.assertIn("| Tests | ❔ Unknown |", body)
+        self.assertIn("| Review | ⏭️ Not reached |", body)
         self.assertNotIn("Injected:", body)
         self.assertNotIn("forged completion", body)
         self.assertNotIn("do-not-publish", body)
@@ -80,7 +108,7 @@ class GithubCommentTests(unittest.TestCase):
         _, body = format_completion_comment(
             self.run, self.issue, self.folder, {"status": "BLOCKED"},
         )
-        self.assertIn("Review: approved", body)
+        self.assertIn("| Review | ✅ Approved |", body)
 
     def test_summary_uses_total_and_per_stage_telemetry_without_estimation(self):
         record_usage(
@@ -107,13 +135,12 @@ class GithubCommentTests(unittest.TestCase):
         )
         result = self._result("RETRY_EXHAUSTED")
         _, body = format_completion_comment(self.run, self.issue, self.folder, result)
-        self.assertIn("Duration: 8m 38s", body)
-        self.assertIn("Tokens: 31,204", body)
-        self.assertIn("Cost: $0.1420", body)
-        self.assertIn("- Developer: 31,000 tokens, $0.1400", body)
-        self.assertIn("- Review: 204 tokens, $0.0020", body)
-        self.assertIn("Tests: failed", body)
-        self.assertIn("Review: unknown", body)
+        self.assertIn("| Duration | 8m 38s |", body)
+        self.assertIn("| Total | 31,204 | $0.1420 |", body)
+        self.assertIn("| Developer | 31,000 | $0.1400 |", body)
+        self.assertIn("| Review | 204 | $0.0020 |", body)
+        self.assertIn("| Tests | ❌ Failed |", body)
+        self.assertIn("| Review | ❔ Unknown |", body)
 
         unknown_folder = self.folder / "unknown"
         unknown_folder.mkdir()
@@ -121,7 +148,7 @@ class GithubCommentTests(unittest.TestCase):
         _, unknown_body = format_completion_comment(
             self.run, self.issue, unknown_folder, unknown,
         )
-        self.assertIn("Tokens: unknown", unknown_body)
+        self.assertIn("| Total | unknown | unknown |", unknown_body)
 
     def test_duplicate_prevention_uses_local_marker_and_remote_marker(self):
         self._result("APPROVED", tests="passed", review="approved")
@@ -182,7 +209,7 @@ class GithubCommentTests(unittest.TestCase):
                     command_runner=runner,
                 ))
                 self.assertEqual(len(bodies), 1)
-                self.assertIn("Result: INVALID", bodies[0])
+                self.assertIn("| Result | ❔ Unknown |", bodies[0])
                 self.assertEqual(
                     json.loads((folder / COMMENT_STATE_FILENAME).read_text())["state"],
                     "posted",

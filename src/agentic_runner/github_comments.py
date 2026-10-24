@@ -40,6 +40,25 @@ _SAFE_RESULT_STATUSES = frozenset({
     "passed",
 })
 
+_STATUS_PRESENTATION = {
+    "approved": ("✅", "Approved"),
+    "blocked": ("⛔", "Blocked"),
+    "error": ("❌", "Error"),
+    "failed": ("❌", "Failed"),
+    "not reached": ("⏭️", "Not reached"),
+    "not run": ("⏭️", "Not run"),
+    "rejected": ("❌", "Rejected"),
+    "skipped": ("⏭️", "Skipped"),
+    "unknown": ("❔", "Unknown"),
+    "passed": ("✅", "Passed"),
+    "RETRY_EXHAUSTED": ("⚠️", "Retry exhausted"),
+    "NO_CHANGES": ("ℹ️", "No changes"),
+    "FAILED": ("❌", "Failed"),
+    "BLOCKED": ("⛔", "Blocked"),
+    "APPROVED": ("✅", "Approved"),
+    "INVALID": ("❔", "Unknown"),
+}
+
 
 def _clean(value: Any, limit: int) -> str:
     text = strip_ansi(str(value or ""))
@@ -157,7 +176,12 @@ def _review_status(result: dict[str, Any], usage: dict[str, Any], folder: Path,
     return "not reached"
 
 
-def _stage_line(label: str, usage: dict[str, Any], stage: str) -> str:
+def _status_label(value: str) -> str:
+    icon, label = _STATUS_PRESENTATION.get(value, _STATUS_PRESENTATION["unknown"])
+    return f"{icon} {label}"
+
+
+def _stage_values(usage: dict[str, Any], stage: str) -> tuple[str, str]:
     by_stage = usage.get("by_stage")
     stage_usage = by_stage.get(stage) if isinstance(by_stage, dict) else None
     if not isinstance(stage_usage, dict):
@@ -168,10 +192,7 @@ def _stage_line(label: str, usage: dict[str, Any], stage: str) -> str:
     token_value = stage_usage.get("total_tokens")
     if token_value is None and stage == "tests":
         token_value = 0
-    return (
-        f"- {label}: {_number(token_value)} tokens, "
-        f"{_cost(stage_usage.get('estimated_cost_usd'))}"
-    )
+    return _number(token_value), _cost(stage_usage.get("estimated_cost_usd"))
 
 
 def _next_action(issue: Issue, terminal: str) -> str:
@@ -195,22 +216,43 @@ def format_completion_comment(
     usage = read_run_usage(folder)
     metrics = usage.get("metrics")
     duration = metrics.get("duration_seconds") if isinstance(metrics, dict) else None
+    result_label = _status_label(terminal)
+    tests_label = _status_label(_test_status(result, usage, terminal))
+    review_label = _status_label(_review_status(result, usage, folder, terminal))
+    stages = [
+        ("Developer", *_stage_values(usage, "developer")),
+        ("Tests", *_stage_values(usage, "tests")),
+        ("Review", *_stage_values(usage, "reviewer")),
+        ("Total", _number(usage.get("total_tokens")), _cost(usage.get("estimated_cost_usd"))),
+    ]
+    stage_rows = [f"| {label} | {tokens} | {cost} |" for label, tokens, cost in stages]
+    heading_icon = _STATUS_PRESENTATION.get(terminal, _STATUS_PRESENTATION["unknown"])[0]
     body = "\n".join([
         _marker(run, terminal),
-        "Agentic run completed",
+        f"## {heading_icon} Agentic run completed",
         "",
-        f"Result: {terminal}",
-        f"Tests: {_test_status(result, usage, terminal)}",
-        f"Review: {_review_status(result, usage, folder, terminal)}",
+        "| Check | Status |",
+        "|---|---|",
+        f"| Result | {result_label} |",
+        f"| Tests | {tests_label} |",
+        f"| Review | {review_label} |",
+        f"| Duration | {_duration(duration)} |",
+        "",
+        "<details>",
+        "<summary>Usage and stages</summary>",
+        "",
+        "| Stage | Tokens | Cost |",
+        "|---|---:|---:|",
+        *stage_rows,
+        "",
+        "</details>",
+        "",
+        "### Next step",
+        "",
+        _next_action(issue, terminal),
+        "",
+        "---",
         f"Branch: `{_branch(run)}`",
-        f"Duration: {_duration(duration)}",
-        f"Tokens: {_number(usage.get('total_tokens'))}",
-        f"Cost: {_cost(usage.get('estimated_cost_usd'))}",
-        "Stages:",
-        _stage_line("Developer", usage, "developer"),
-        _stage_line("Tests", usage, "tests"),
-        _stage_line("Review", usage, "reviewer"),
-        f"Next step: {_next_action(issue, terminal)}",
     ])
     return _marker(run, terminal), _clean(body, MAX_COMMENT_CHARS)
 
