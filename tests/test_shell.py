@@ -1211,6 +1211,94 @@ class ShellTests(unittest.TestCase):
             self.assertIn('hello', job.log_path.read_text())
             self.assertIn('EXIT 0', _capture_ps(shell))
 
+    def test_failed_background_job_prints_concise_failure_tail_after_draining_log(self):
+        from contextlib import redirect_stdout
+
+        lines = [
+            '[DEVELOPER] Started (PID 123)',
+            '[RETRY] Attempt 2/2',
+            '[DEVELOPER] Command finished (exit 1)',
+            '[ERROR] provider failed',
+            '[TESTS] Finished in 4s (exit 1)',
+            '[TESTS] FAILED (exit 1)',
+            '[RESULT] retry exhausted',
+        ]
+        script = f'import sys; sys.stdout.write({chr(10).join(lines)!r}); raise SystemExit(1)'
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            job = shell._launch([sys.executable, '-c', script])
+            job.process.wait(timeout=5)
+
+            output = StringIO()
+            with redirect_stdout(output):
+                shell.refresh()
+
+            rendered = output.getvalue()
+            self.assertIn(f'[JOB {job.number}] failed (exit 1)', rendered)
+            self.assertIn('concise failure tail', rendered)
+            self.assertIn('[RETRY] Attempt 2/2', rendered)
+            self.assertIn('[ERROR] provider failed', rendered)
+            self.assertIn('[TESTS] FAILED (exit 1)', rendered)
+            self.assertIn('[RESULT] retry exhausted', rendered)
+            self.assertIn(f'/logs {job.number} --verbose', rendered)
+            self.assertLess(
+                rendered.index(f'[JOB {job.number}] failed'),
+                rendered.index('concise failure tail'),
+            )
+
+    def test_failed_background_tail_waits_for_log_writer_before_reading(self):
+        from contextlib import redirect_stdout
+
+        class DrainMarker:
+            joined = False
+
+            def join(self):
+                self.joined = True
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            job = shell._launch([
+                sys.executable, '-c', 'print("child failed", flush=True); raise SystemExit(1)',
+            ])
+            job.process.wait(timeout=5)
+            if job.log_thread is not None:
+                job.log_thread.join(timeout=5)
+            marker = DrainMarker()
+            job.log_thread = marker
+            job.log_path.write_text('[RESULT] drained failure summary\n', encoding='utf-8')
+
+            def tail_after_drain(_path, _lines, *, verbose=False):
+                self.assertFalse(verbose)
+                self.assertTrue(marker.joined)
+                return '[RESULT] drained failure summary'
+
+            output = StringIO()
+            with patch('agentic_shell._tail', side_effect=tail_after_drain), redirect_stdout(output):
+                shell.refresh()
+            self.assertIn('[RESULT] drained failure summary', output.getvalue())
+
+    def test_successful_background_job_keeps_compact_completion_notification(self):
+        from contextlib import redirect_stdout
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            job = shell._launch([
+                sys.executable, '-c', 'print("successful job detail", flush=True)',
+            ])
+            job.process.wait(timeout=5)
+
+            output = StringIO()
+            with redirect_stdout(output):
+                shell.refresh()
+
+            rendered = output.getvalue()
+            self.assertIn(f'[JOB {job.number}] finished', rendered)
+            self.assertNotIn('failure tail', rendered)
+            self.assertNotIn('successful job detail', rendered)
+
     def test_oversized_background_logs_are_bounded_and_marked(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1292,6 +1380,24 @@ class ShellTests(unittest.TestCase):
                 shell.show_logs(['/logs', '119'])
             self.assertIn('issue output', output.getvalue())
             self.assertIn(f'job {job.number}:', output.getvalue())
+
+    def test_logs_replay_suppresses_automatic_failure_tail(self):
+        from contextlib import redirect_stdout
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            job = shell._launch([
+                sys.executable, '-c', 'print("failed output", flush=True); raise SystemExit(1)',
+            ])
+            job.process.wait(timeout=5)
+            shell.refresh()
+
+            with patch.object(shell, '_refresh', wraps=shell._refresh) as refresh, \
+                 redirect_stdout(StringIO()):
+                shell.show_logs(['/logs', str(job.number)])
+
+            self.assertEqual(refresh.call_args.kwargs['show_failure_tail'], False)
 
     def test_logs_follow_uses_live_output_mode_until_follow_finishes(self):
         with tempfile.TemporaryDirectory() as temp:

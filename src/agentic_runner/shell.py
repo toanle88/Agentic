@@ -398,7 +398,7 @@ class AgenticShell:
         except Exception as exc:  # desktop openers must not crash the shell
             _shell_print(f"[DASHBOARD] Could not open dashboard: {exc}")
 
-    def _refresh(self, job: Job) -> None:
+    def _refresh(self, job: Job, *, show_failure_tail: bool = True) -> None:
         if job.finished is not None:
             return
         code = job.process.poll() if job.process is not None else None
@@ -422,6 +422,15 @@ class AgenticShell:
             job.notified = True
             state = "finished" if code == 0 else f"failed (exit {code})"
             _shell_print(f"\n[JOB {job.number}] {state} after {job.elapsed}s; use /logs {job.number}")
+            if code != 0 and show_failure_tail:
+                _shell_print(
+                    f"--- concise failure tail; use /logs {job.number} --verbose for complete output ---",
+                    style_status_tokens=False,
+                )
+                _shell_print(
+                    _tail(job.log_path, 40, verbose=False),
+                    style_status_tokens=False,
+                )
 
     def refresh(self) -> None:
         for job in self.jobs.values():
@@ -879,7 +888,9 @@ class AgenticShell:
             f"--- job {job.number}: {_display_command(job.argv)} ---",
             style_status_tokens=False,
         )
-        self._refresh(job)
+        # Explicit log replay owns the output below; never emit the automatic
+        # failure tail here, or a just-finished job can print it twice.
+        self._refresh(job, show_failure_tail=False)
         if follow:
             self._set_terminal_mode(TerminalMode.LIVE_OUTPUT)
             try:
@@ -925,7 +936,7 @@ class AgenticShell:
                 stream.seek(initial_end)
 
                 while job.running:
-                    self._refresh(job)
+                    self._refresh(job, show_failure_tail=False)
                     chunk = stream.read()
                     if chunk:
                         if concise is not None:
@@ -942,7 +953,7 @@ class AgenticShell:
 
                 # The child may have flushed its last bytes just before the
                 # process status changed. Drain once after observing exit.
-                self._refresh(job)
+                self._refresh(job, show_failure_tail=False)
                 chunk = stream.read()
                 if concise is not None:
                     chunk = concise.feed(chunk) + concise.flush()

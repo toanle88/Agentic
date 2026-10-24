@@ -143,6 +143,11 @@ sequences. Completion rows are reduced automatically when the terminal is short;
 
 `/run` starts a child process and returns immediately. `/ps` shows jobs started in the current shell; `/ps --all` also discovers job records from previous shell sessions. The child runner's durable logs remain available after the shell exits, and `/logs JOB` works for persisted jobs too. Use `/logs JOB` or `/logs PID` on a running job to follow new output until it exits; press Ctrl-C to stop following without stopping the job. Add `LINES` to control how much existing output is shown first. Running jobs are listed before completed jobs so active work is immediately visible. Use `/stop JOB` to stop one job or `/stop --all` to request termination for every running Agentic job visible to the shell, including jobs from previous shell sessions.
 
+When a background job exits unsuccessfully, the shell prints its existing
+failure notification followed by the default bounded concise log tail. This
+keeps retry, test, provider, and final-result summaries visible without dumping
+the full transcript; use `/logs JOB --verbose` for complete output.
+
 `/list` synchronously lists the target repository's open GitHub issues. It uses
 the same GitHub CLI-backed issue listing as `agentic --list` and does not create
 a background job.

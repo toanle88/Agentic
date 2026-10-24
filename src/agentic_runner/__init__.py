@@ -1,3 +1,3 @@
 """Agentic's installable runtime package."""
 
-__version__ = "1.1.95"
+__version__ = "1.1.96"
