@@ -92,6 +92,10 @@ In the interactive shell:
 ```
 
 The shell has no additional supervisor timeout. Configured developer, reviewer, and test timeouts still apply. A `null` test timeout means unlimited for that test command; the separate `task_timeout_seconds` limit still applies to the complete task. `/logs JOB` or `/logs PID` follows a running child and prints new output as it arrives; press Ctrl-C to return to the prompt without stopping it. Use `/stop JOB` only when you intentionally want to stop the child process.
+Concise `/logs` replay omits successful test-case/output lines and keeps the
+test command, result, duration, and a bounded failure tail (up to 80 lines or
+12,000 characters). Add `--verbose` to see the complete captured test output;
+the footer also identifies the full log path.
 
 For a direct foreground run, inspect the durable run log from another terminal. The current terminal is occupied by the foreground runner.
 

@@ -712,6 +712,144 @@ class ShellTests(unittest.TestCase):
             self.assertIn('Modified files: b.py', detailed_replay)
 
 
+    def test_logs_concise_replay_summarizes_successful_test_output(self):
+        from contextlib import redirect_stdout
+
+        lines = [
+            '[TESTS] Running: <configured test command: 2 argv values>',
+            '[TESTS] Started (PID 123); progress log: /tmp/tests.log',
+            '[TESTS] test_first_case ... PASSED',
+            '[TESTS] test_second_case ... PASSED',
+            '[TESTS] Finished in 3s (exit 0)',
+            '[TESTS] PASSED',
+            '[TESTS] All configured checks passed',
+        ]
+        script = f'import sys; sys.stdout.write({chr(10).join(lines)!r})'
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            job = shell._launch([sys.executable, '-c', script])
+            job.process.wait(timeout=5)
+            shell.refresh()
+
+            concise = StringIO()
+            with redirect_stdout(concise):
+                shell.show_logs(['/logs', str(job.number), '200'])
+            rendered = "\n".join(concise.getvalue().splitlines()[1:])
+            self.assertIn('[TESTS] Running:', rendered)
+            self.assertIn('[TESTS] Finished in 3s (exit 0)', rendered)
+            self.assertIn('[TESTS] PASSED', rendered)
+            self.assertNotIn('test_first_case', rendered)
+            self.assertNotIn('test_second_case', rendered)
+
+            verbose = StringIO()
+            with redirect_stdout(verbose):
+                shell.show_logs(['/logs', str(job.number), '200', '--verbose'])
+            detailed = "\n".join(verbose.getvalue().splitlines()[1:])
+            self.assertIn('test_first_case ... PASSED', detailed)
+            self.assertIn('test_second_case ... PASSED', detailed)
+
+
+    def test_logs_concise_replay_keeps_bounded_failure_diagnostics(self):
+        from contextlib import redirect_stdout
+
+        diagnostic_lines = [f'[TESTS] diagnostic line {index}' for index in range(100)]
+        lines = [
+            '[TESTS] Running: <configured test command: 2 argv values>',
+            *diagnostic_lines,
+            '[TESTS] Finished in 4s (exit 1)',
+            '[TESTS] FAILED (exit 1)',
+        ]
+        script = f'import sys; sys.stdout.write({chr(10).join(lines)!r})'
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            job = shell._launch([sys.executable, '-c', script])
+            job.process.wait(timeout=5)
+            shell.refresh()
+
+            concise = StringIO()
+            with redirect_stdout(concise):
+                shell.show_logs(['/logs', str(job.number), '200'])
+            rendered = "\n".join(concise.getvalue().splitlines()[1:])
+            self.assertIn('[TESTS] Finished in 4s (exit 1)', rendered)
+            self.assertIn('[TESTS] FAILED (exit 1)', rendered)
+            self.assertIn('[TESTS] Failure diagnostics (bounded;', rendered)
+            self.assertIn('[TESTS] diagnostic line 99', rendered)
+            self.assertNotIn('[TESTS] diagnostic line 0', rendered)
+            self.assertIn('full log:', rendered)
+            self.assertLessEqual(rendered.count('diagnostic line '), 80)
+            self.assertLess(
+                rendered.index('[TESTS] FAILED (exit 1)'),
+                rendered.index('[TESTS] Failure diagnostics'),
+            )
+
+            verbose = StringIO()
+            with redirect_stdout(verbose):
+                shell.show_logs(['/logs', str(job.number), '200', '--verbose'])
+            self.assertIn('[TESTS] diagnostic line 0', verbose.getvalue())
+
+
+    def test_running_logs_concise_replay_summarizes_split_test_output(self):
+        from contextlib import redirect_stdout
+
+        script = (
+            'import sys,time; '
+            'sys.stdout.write("[TESTS] Running: <configured test command: 2 argv values>\\n"); '
+            'sys.stdout.flush(); time.sleep(.1); '
+            'sys.stdout.write("[TESTS] test_split_case ... "); '
+            'sys.stdout.flush(); time.sleep(.1); '
+            'print("PASSED"); '
+            'time.sleep(.1); '
+            'print("[TESTS] Finished in 1s (exit 0)"); '
+            'print("[TESTS] PASSED")'
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            job = shell._launch([sys.executable, '-c', script])
+            output = StringIO()
+            with redirect_stdout(output):
+                shell.show_logs(['/logs', str(job.number), '200'])
+
+            rendered = "\n".join(output.getvalue().splitlines()[1:])
+            self.assertIn('[TESTS] Running:', rendered)
+            self.assertIn('[TESTS] Finished in 1s (exit 0)', rendered)
+            self.assertIn('[TESTS] PASSED', rendered)
+            self.assertNotIn('test_split_case', rendered)
+
+
+    def test_running_logs_concise_replay_shows_split_failure_after_result(self):
+        from contextlib import redirect_stdout
+
+        script = (
+            'import sys,time; '
+            'print("[TESTS] Running: <configured test command: 2 argv values>", flush=True); '
+            'time.sleep(.1); '
+            'sys.stdout.write("[TESTS] AssertionError: expected "); '
+            'sys.stdout.flush(); time.sleep(.1); '
+            'print("value"); time.sleep(.1); '
+            'print("[TESTS] Finished in 1s (exit 1)"); '
+            'print("[TESTS] FAILED (exit 1)")'
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            job = shell._launch([sys.executable, '-c', script])
+            output = StringIO()
+            with redirect_stdout(output):
+                shell.show_logs(['/logs', str(job.number), '200'])
+
+            rendered = "\n".join(output.getvalue().splitlines()[1:])
+            self.assertIn('[TESTS] Finished in 1s (exit 1)', rendered)
+            self.assertIn('[TESTS] FAILED (exit 1)', rendered)
+            self.assertIn('[TESTS] AssertionError: expected value', rendered)
+            self.assertLess(
+                rendered.index('[TESTS] FAILED (exit 1)'),
+                rendered.index('[TESTS] Failure diagnostics'),
+            )
+
+
     def test_running_logs_filter_split_routine_lines_and_show_tty_progress(self):
         from contextlib import redirect_stdout
 

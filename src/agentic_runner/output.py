@@ -553,6 +553,31 @@ _MODIFIED_FILES_RE = re.compile(
     re.IGNORECASE,
 )
 _MODIFIED_COUNT_RE = re.compile(r"\b(\d+)\s+files?\s+changed\b", re.IGNORECASE)
+_TESTS_PREFIX_RE = re.compile(
+    r"^\s*(?:\[\d{2}:\d{2}:\d{2}\]\s*)?\[TESTS\](?:\s+(?P<body>.*))?$",
+    re.IGNORECASE,
+)
+_TEST_FINISHED_RE = re.compile(
+    r"^Finished in \d+(?:\.\d+)?s \(exit (?P<code>-?\d+)\)"
+    r"(?: \[TIMEOUT\])?\s*$",
+    re.IGNORECASE,
+)
+_TEST_FAILURE_STATUS_RE = re.compile(
+    r"^FAILED(?: \(exit -?\d+\))?\s*$", re.IGNORECASE,
+)
+_TEST_SUCCESS_STATUS_RE = re.compile(r"^PASSED\s*$", re.IGNORECASE)
+_TEST_STRUCTURAL_RE = re.compile(
+    r"^(?:Running:|Finished in |PASSED$|FAILED(?: \(exit -?\d+\))?$|"
+    r"Overall task deadline reached$|Time limit reached \(|"
+    r"All configured checks passed$|git diff --check |Removed extra blank line at EOF:)",
+    re.IGNORECASE,
+)
+
+TEST_DIAGNOSTIC_MAX_LINES = 80
+TEST_DIAGNOSTIC_MAX_CHARS = 12_000
+_TEST_DIAGNOSTIC_HEADER = (
+    "[TESTS] Failure diagnostics (bounded; use --verbose for full output):\n"
+)
 
 
 def is_transient_progress(value: Any) -> bool:
@@ -575,6 +600,77 @@ class ConciseLogStream:
         self._modified_paths: set[str] = set()
         self._modified_count = 0
         self._last_transient: str | None = None
+        self._test_diagnostics: list[str] = []
+        self._test_diagnostic_chars = 0
+        self._test_diagnostics_truncated = False
+        self._test_failure_pending = False
+
+    @staticmethod
+    def _test_body(line: str) -> str | None:
+        match = _TESTS_PREFIX_RE.match(line.strip())
+        return match.group("body").strip() if match else None
+
+    def _remember_test_output(self, line: str) -> None:
+        """Keep only a bounded tail for a later failed test command."""
+        if len(line) > TEST_DIAGNOSTIC_MAX_CHARS:
+            line = line[-TEST_DIAGNOSTIC_MAX_CHARS:]
+            self._test_diagnostics_truncated = True
+        self._test_diagnostics.append(line)
+        self._test_diagnostic_chars += len(line)
+        while (
+            len(self._test_diagnostics) > TEST_DIAGNOSTIC_MAX_LINES
+            or self._test_diagnostic_chars > TEST_DIAGNOSTIC_MAX_CHARS
+        ):
+            removed = self._test_diagnostics.pop(0)
+            self._test_diagnostic_chars -= len(removed)
+            self._test_diagnostics_truncated = True
+
+    def _clear_test_output(self) -> None:
+        self._test_diagnostics.clear()
+        self._test_diagnostic_chars = 0
+        self._test_diagnostics_truncated = False
+        self._test_failure_pending = False
+
+    def _failure_diagnostics(self) -> str:
+        if not self._test_diagnostics:
+            self._clear_test_output()
+            return ""
+        output = _TEST_DIAGNOSTIC_HEADER
+        if self._test_diagnostics_truncated:
+            output += "[TESTS] Earlier diagnostics omitted by concise replay.\n"
+        output += "".join(self._test_diagnostics)
+        if not output.endswith(("\n", "\r")):
+            output += "\n"
+        self._clear_test_output()
+        return output
+
+    def _filter_test_line(self, line: str) -> str | None:
+        """Filter raw test output while keeping lifecycle and result rows."""
+        body = self._test_body(line)
+        if body is None:
+            return None
+        finished = _TEST_FINISHED_RE.match(body)
+        if finished:
+            failed = int(finished.group("code")) != 0
+            if failed:
+                self._test_failure_pending = True
+                return line
+            self._clear_test_output()
+            return line
+        if _TEST_FAILURE_STATUS_RE.match(body):
+            return line + ("" if line.endswith(("\n", "\r")) else "\n") + self._failure_diagnostics()
+        if _TEST_SUCCESS_STATUS_RE.match(body):
+            self._clear_test_output()
+            return line
+        if self._test_failure_pending:
+            diagnostics = self._failure_diagnostics()
+            if _TEST_STRUCTURAL_RE.match(body):
+                return diagnostics + line
+            return diagnostics
+        if _TEST_STRUCTURAL_RE.match(body):
+            return line
+        self._remember_test_output(line)
+        return ""
 
     def _record_modified_files(self, line: str) -> None:
         match = _MODIFIED_FILES_RE.match(line.strip())
@@ -594,13 +690,16 @@ class ConciseLogStream:
 
     def _filter_line(self, line: str) -> str:
         body = line.rstrip("\r\n")
+        if self._test_body(body) is not None:
+            return self._filter_test_line(line) or ""
+        diagnostics = self._failure_diagnostics() if self._test_failure_pending else ""
         if _MODIFIED_FILES_RE.match(body.strip()):
             self._record_modified_files(body)
-            return ""
+            return diagnostics
         if is_routine_log_progress(body):
             self._last_transient = body.strip()
-            return ""
-        return line
+            return diagnostics
+        return diagnostics + line
 
     def take_transient(self) -> str | None:
         """Return the latest routine status observed since the previous call."""
@@ -621,6 +720,8 @@ class ConciseLogStream:
         """Flush an incomplete line and emit one file-change summary."""
         output = self._filter_line(self._pending) if self._pending else ""
         self._pending = ""
+        if self._test_failure_pending:
+            output += self._failure_diagnostics()
         count = max(self._modified_count, len(self._modified_paths))
         if count:
             if output and not output.endswith(("\n", "\r")):
@@ -628,4 +729,5 @@ class ConciseLogStream:
             output += f"Modified files: {count} file{'s' if count != 1 else ''} changed\n"
         self._modified_paths.clear()
         self._modified_count = 0
+        self._clear_test_output()
         return output
