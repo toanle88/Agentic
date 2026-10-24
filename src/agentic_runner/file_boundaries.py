@@ -371,6 +371,7 @@ def _iter_safe_regular_files_without_dir_fd(
     skip: Callable[[str], bool] | None,
     max_entries: int | None,
     max_directories: int | None,
+    fail_on_error: bool,
 ) -> Iterator[tuple[str, str, os.stat_result]]:
     """Walk regular files on Windows without following directory links."""
     if os.name == "nt":
@@ -412,6 +413,8 @@ def _iter_safe_regular_files_without_dir_fd(
                             try:
                                 metadata = entry.stat(follow_symlinks=False)
                             except OSError:
+                                if fail_on_error:
+                                    raise
                                 continue
                             children.append((entry.name, metadata))
                     children.sort(key=lambda item: item[0])
@@ -424,6 +427,8 @@ def _iter_safe_regular_files_without_dir_fd(
                             try:
                                 child_directory = _open_directory_at(directory, name)
                             except OSError:
+                                if fail_on_error:
+                                    raise
                                 continue
                             subdirectories.append((child_directory, child_relative))
                         elif stat.S_ISREG(metadata.st_mode):
@@ -530,13 +535,20 @@ def iter_safe_regular_files(
     skip: Callable[[str], bool] | None = None,
     max_entries: int | None = None,
     max_directories: int | None = None,
+    fail_on_error: bool = False,
 ) -> Iterator[tuple[str, str, os.stat_result]]:
-    """Yield ``(kind, relative_path, metadata)`` without raced parents."""
+    """Yield ``(kind, relative_path, metadata)`` without raced parents.
+
+    Protected or non-regular entries remain intentionally filtered.  When
+    ``fail_on_error`` is true, operational traversal failures are surfaced so
+    callers that construct a security-sensitive staged view cannot silently
+    expose a partial tree.
+    """
     parts = _parts(relative)
     if not _supports_anchored_traversal():
         yield from _iter_safe_regular_files_without_dir_fd(
             root, parts, skip=skip, max_entries=max_entries,
-            max_directories=max_directories,
+            max_directories=max_directories, fail_on_error=fail_on_error,
         )
         return
     root_descriptor = _open_root_directory(root)
@@ -578,11 +590,15 @@ def iter_safe_regular_files(
                         try:
                             child_metadata = entry.stat(follow_symlinks=False)
                         except OSError:
+                            if fail_on_error:
+                                raise
                             continue
                         if stat.S_ISDIR(child_metadata.st_mode):
                             try:
                                 child_descriptor = _open_directory_at(directory, entry.name)
                             except OSError:
+                                if fail_on_error:
+                                    raise
                                 continue
                             subdirectories.append((child_relative, child_descriptor))
                         elif stat.S_ISREG(child_metadata.st_mode):

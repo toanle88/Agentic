@@ -50,7 +50,12 @@ from .execution import (
 from .models import DEFAULT_GITHUB_HOST, AgentSettings, Issue, PullRequest, Run
 from .openrouter import run_openrouter
 from .output import strip_ansi, style_patch_summary, style_system_text, style_text
-from .persistence import atomic_write_json, atomic_write_text
+from .persistence import (
+    atomic_write_json,
+    atomic_write_text,
+    read_text_bounded,
+    read_text_tail,
+)
 from .policy import default_permission_policy, forbidden
 from .prompts import build_agent_prompt, _run_instruction_context, _system_prompt_context
 from .review import (
@@ -101,6 +106,12 @@ _GIT_EXECUTABLE = shutil.which("git") or "git"
 SCRIPT_DIR = Path(__file__).resolve().parent
 REVIEW_DIFF_CONTEXT_CHARS = 24_000
 REVIEW_DIFF_LARGE_CHARS = REVIEW_DIFF_CONTEXT_CHARS
+MAX_DURABLE_JSON_BYTES = 256_000
+MAX_INVESTIGATION_SUMMARY_CHARS = 2_000
+MAX_INVESTIGATION_FINDING_CHARS = 1_500
+MAX_INVESTIGATION_FINDINGS = 40
+MAX_PUBLICATION_REPORT_BYTES = 64_000
+MAX_TEST_REPORT_CHARS = 50_000
 
 
 def _prioritized_diff_hunks(diff: str, limit: int) -> tuple[str, int]:
@@ -598,6 +609,14 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
         blocked_names=credential_names or (),
     )
     results: list[str] = []
+    report_chars = 0
+
+    def append_report(value: str) -> None:
+        nonlocal report_chars
+        results.append(value)
+        report_chars += len(value)
+        while report_chars > MAX_TEST_REPORT_CHARS and results:
+            report_chars -= len(results.pop(0))
     for argv in test_commands:
         if deadline is not None and time.monotonic() >= deadline:
             report = "\n\n".join(results) + "\nTask deadline reached before the next test command"
@@ -612,7 +631,7 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
                                   metrics_folder=folder, verbose=verbose,
                                   env=test_environment,
                                   redaction_values=redaction_values)
-        results.append(f"$ {display_command}\n{result.stdout[-6000:]}")
+        append_report(f"$ {display_command}\n{result.stdout[-6000:]}")
         if result.returncode:
             _status_print(f"[TESTS] FAILED (exit {result.returncode})", flush=True)
             return False, "\n\n".join(results)
@@ -906,7 +925,14 @@ paths and test names when they support the observation.
             "findings": [message[-1500:]],
             "_tooling_error": True,
         }
-    result = {"summary": data["summary"], "findings": data["findings"]}
+    result = {
+        "summary": _bounded_text(data["summary"], MAX_INVESTIGATION_SUMMARY_CHARS),
+        "findings": [
+            _bounded_text(item, MAX_INVESTIGATION_FINDING_CHARS)
+            for item in data["findings"][:MAX_INVESTIGATION_FINDINGS]
+            if _bounded_text(item, MAX_INVESTIGATION_FINDING_CHARS)
+        ],
+    }
     # Keep the provider-facing schema strict while recording which issue body
     # the cached feedback actually evaluated.
     atomic_write_json(output, {**result, "_issue_digest": issue_fingerprint(issue)})
@@ -918,8 +944,11 @@ def _latest_investigation(folder: Path, issue: Issue) -> dict[str, Any] | None:
     if path is None:
         return None
     try:
-        value = parse_review_result(path.read_text(encoding="utf-8", errors="replace"))
-    except OSError:
+        raw = read_text_bounded(path, MAX_DURABLE_JSON_BYTES)
+        if raw is None:
+            return None
+        value = parse_review_result(raw)
+    except (OSError, TypeError):
         return None
     if not isinstance(value, dict):
         return None
@@ -932,7 +961,14 @@ def _latest_investigation(folder: Path, issue: Issue) -> dict[str, Any] | None:
         or not all(isinstance(item, str) for item in findings)
     ):
         return None
-    return {"summary": value["summary"], "findings": findings}
+    return {
+        "summary": _bounded_text(value["summary"], MAX_INVESTIGATION_SUMMARY_CHARS),
+        "findings": [
+            _bounded_text(item, MAX_INVESTIGATION_FINDING_CHARS)
+            for item in findings[:MAX_INVESTIGATION_FINDINGS]
+            if _bounded_text(item, MAX_INVESTIGATION_FINDING_CHARS)
+        ],
+    }
 
 
 def _audit_text(value: Any, limit: int) -> str:
@@ -1021,7 +1057,10 @@ def audit_report_path(folder: Path) -> Path:
 
 def load_audit_report(folder: Path, audit_key: str = AUDIT_KEY) -> dict[str, Any] | None:
     try:
-        value = json.loads(audit_report_path(folder).read_text(encoding="utf-8"))
+        raw = read_text_bounded(audit_report_path(folder), MAX_DURABLE_JSON_BYTES)
+        if raw is None:
+            return None
+        value = json.loads(raw)
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(value, dict):
@@ -1108,7 +1147,11 @@ def publish_audit_issue(run: Run, issue: Issue, github_repo: str,
     if not issue.is_audit or not issue.audit_key:
         raise ValueError("publish_audit_issue requires an audit work item")
     try:
-        existing = json.loads(audit_issue_path(folder).read_text(encoding="utf-8"))
+        raw = read_text_bounded(audit_issue_path(folder), MAX_DURABLE_JSON_BYTES)
+        if raw is None:
+            existing = None
+        else:
+            existing = json.loads(raw)
     except (OSError, json.JSONDecodeError):
         existing = None
     if isinstance(existing, dict) and isinstance(existing.get("url"), str) and existing["url"].strip():
@@ -2028,7 +2071,7 @@ def _publish(run: Run, issue: Issue, github_repo: str, base: str,
                         if issue.is_local else f"Closes #{issue.number}\n\n")
     checks_ran = approval.get("kind") != "manual"
     report_path = _latest_numbered_log(folder, "tests", "txt") if checks_ran else None
-    report = report_path.read_text(encoding="utf-8", errors="replace") if report_path else ""
+    report = read_text_tail(report_path, MAX_PUBLICATION_REPORT_BYTES) if report_path else ""
     developer_report = load_latest_developer_report(folder)
     if not checks_ran:
         review_section = ("## Review status\n\n"

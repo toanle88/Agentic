@@ -17,6 +17,10 @@ from agentic_runner import execution as agentic_execution
 from agentic_runner.sandbox import sandbox_command
 from agentic_runner import workflow as agentic_workflow
 from agentic_runner.execution_providers import _read_provider_result
+from agentic_runner.execution_providers import (
+    MAX_PROVIDER_MESSAGE_CHARS,
+    _extract_provider_message,
+)
 from agentic_runner.output import strip_ansi
 from agentic_runner.review import (
     MAX_REVIEW_HISTORY_BYTES,
@@ -495,6 +499,32 @@ class PureTests(unittest.TestCase):
         self.assertTrue(verdict['_tooling_error'])
         self.assertIn('invalid', verdict['summary'])
 
+    def test_issue_investigation_persists_bounded_feedback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / 'logs'
+            folder.mkdir()
+            issue = agentic.Issue(22, 'Investigate', '')
+            message = json.dumps({
+                'summary': 's' * 10_000,
+                'findings': ['f' * 5_000 for _ in range(100)],
+            })
+            with patch('agentic.run_agent', return_value=(True, message)):
+                verdict = agentic.investigate_issue(Path(temp), issue, folder)
+            stored = json.loads((folder / 'investigation-001.json').read_text())
+        self.assertLessEqual(
+            len(stored['summary']), agentic_workflow.MAX_INVESTIGATION_SUMMARY_CHARS,
+        )
+        self.assertLessEqual(
+            len(stored['findings']), agentic_workflow.MAX_INVESTIGATION_FINDINGS,
+        )
+        self.assertTrue(all(
+            len(item) <= agentic_workflow.MAX_INVESTIGATION_FINDING_CHARS
+            for item in stored['findings']
+        ))
+        self.assertEqual(verdict, {
+            'summary': stored['summary'], 'findings': stored['findings'],
+        })
+
 
     def test_cached_investigation_is_invalidated_when_issue_changes(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -623,6 +653,26 @@ class PureTests(unittest.TestCase):
             self.assertIn('gpt-5.6-luna', argv)
             self.assertIn('model_reasoning_effort="max"', argv)
             self.assertEqual(streamed.call_args.kwargs['timeout'], 7)
+
+    def test_codex_provider_message_persistence_has_a_total_output_bound(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            output = root / 'message.txt'
+            oversized = 'x' * (MAX_PROVIDER_MESSAGE_CHARS + 1_000)
+
+            def fake_stream(argv, cwd, **kwargs):
+                Path(argv[argv.index('--output-last-message') + 1]).write_text(
+                    oversized, encoding='utf-8',
+                )
+                return CompletedProcess(argv, 0, stdout='')
+
+            with patch('agentic_execution.streamed_command', side_effect=fake_stream):
+                ok, message = agentic.run_codex(root, 'prompt', output=output)
+
+            self.assertTrue(ok)
+            self.assertLessEqual(len(message), MAX_PROVIDER_MESSAGE_CHARS)
+            self.assertIn('provider_message_truncated', message)
+            self.assertEqual(output.read_text(encoding='utf-8'), message)
 
     def test_codex_schema_is_staged_with_provider_output(self):
         with tempfile.TemporaryDirectory() as dirname:
@@ -817,6 +867,48 @@ class PureTests(unittest.TestCase):
         self.assertIn('ERROR:', agentic_execution._provider_progress(
             json.dumps({'type': 'turn.failed', 'message': 'failed'}), 'claude'
         ))
+
+    def test_provider_message_extraction_has_a_total_output_bound(self):
+        raw = "\n".join(
+            json.dumps({'type': 'assistant', 'content': 'x' * 20_000})
+            for _ in range(10)
+        )
+        message = _extract_provider_message(raw, 'claude')
+        self.assertLessEqual(len(message), MAX_PROVIDER_MESSAGE_CHARS)
+        self.assertIn('provider_message_truncated', message)
+
+    def test_provider_message_extraction_marks_overflow_after_exact_limit(self):
+        raw = "\n".join([
+            json.dumps({'type': 'assistant', 'content': 'x' * MAX_PROVIDER_MESSAGE_CHARS}),
+            json.dumps({'type': 'assistant', 'content': 'overflow'}),
+        ])
+        message = _extract_provider_message(raw, 'claude')
+        self.assertLessEqual(len(message), MAX_PROVIDER_MESSAGE_CHARS)
+        self.assertIn('provider_message_truncated', message)
+
+    def test_cli_provider_bounds_message_after_secret_redaction(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / 'provider.txt'
+            expanded = 'x' * (MAX_PROVIDER_MESSAGE_CHARS + 1_000)
+            with patch(
+                'agentic_execution.cli_provider_command',
+                return_value=(['provider'], False),
+            ), patch(
+                'agentic_runner.execution_providers.redact_secrets',
+                return_value=expanded,
+            ), patch(
+                'agentic_execution.streamed_command',
+                return_value=CompletedProcess(['provider'], 0, stdout='raw'),
+            ):
+                ok, message = agentic.run_cli_provider(
+                    root, 'prompt', output=output, provider='gemini',
+                )
+
+            self.assertTrue(ok)
+            self.assertLessEqual(len(message), MAX_PROVIDER_MESSAGE_CHARS)
+            self.assertIn('provider_message_truncated', message)
+            self.assertEqual(output.read_text(encoding='utf-8'), message)
 
 
     def test_cli_provider_failure_is_returned_and_saved(self):

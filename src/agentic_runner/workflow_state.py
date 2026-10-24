@@ -16,12 +16,19 @@ from typing import Any
 from .execution import _short
 from .models import Issue, Run
 from .output import strip_ansi
-from .persistence import atomic_write_json, atomic_write_text
+from .persistence import (
+    atomic_write_json,
+    atomic_write_text,
+    read_text_bounded,
+    read_text_tail,
+)
 from .security import redact_secrets
 from .worktrees import issue_fingerprint
 
 MANUAL_APPROVAL_FILENAME = "manual-approval.json"
 REVIEW_APPROVAL_FILENAME = "review-approval.json"
+MAX_DURABLE_JSON_BYTES = 256_000
+MAX_DEVELOPER_REPORT_BYTES = 24_000
 
 
 def next_log(folder: Path, kind: str, ext: str = "txt") -> Path:
@@ -48,10 +55,12 @@ def load_latest_developer_report(folder: Path, limit: int = 6_000) -> str:
     path = latest_numbered_log(folder, "developer", "txt")
     if path is None:
         return ""
-    try:
-        return redact_secrets(path.read_text(encoding="utf-8", errors="replace"))[-limit:]
-    except OSError:
+    limit = max(0, min(limit, 6_000))
+    if limit == 0:
         return ""
+    return redact_secrets(
+        read_text_tail(path, min(MAX_DEVELOPER_REPORT_BYTES, limit * 4))
+    )[-limit:]
 
 
 def manual_approval_path(folder: Path) -> Path:
@@ -158,8 +167,11 @@ def clear_result(folder: Path) -> None:
 
 def load_blocked(folder: Path) -> dict[str, Any] | None:
     try:
-        value = json.loads(redact_secrets(_blocked_path(folder).read_text(encoding="utf-8")))
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        raw = read_text_bounded(_blocked_path(folder), MAX_DURABLE_JSON_BYTES)
+        if raw is None:
+            return None
+        value = json.loads(redact_secrets(raw))
+    except json.JSONDecodeError:
         return None
     if not isinstance(value, dict) or value.get("status") != "blocked":
         return None
@@ -238,8 +250,11 @@ def _load_approval(path: Path, required: tuple[str, ...], label: str) -> dict[st
     if not path.is_file():
         return None
     try:
-        value = json.loads(redact_secrets(path.read_text(encoding="utf-8")))
-    except (OSError, json.JSONDecodeError) as exc:
+        raw = read_text_bounded(path, MAX_DURABLE_JSON_BYTES)
+        if raw is None:
+            raise ValueError("missing, unreadable, or oversized artifact")
+        value = json.loads(redact_secrets(raw))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"{label} is unreadable: {path}") from exc
     if not isinstance(value, dict) or value.get("status") != "approved":
         raise RuntimeError(f"{label} is invalid: {path}")

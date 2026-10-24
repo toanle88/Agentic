@@ -127,6 +127,33 @@ class PersistenceRecoveryTests(unittest.TestCase):
             self.assertIn("partial output", feedback)
             self.assertIn("Previous review output", feedback)
 
+    def test_oversized_durable_state_is_bounded_and_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            oversized = 'x' * (agentic_workflow_state.MAX_DURABLE_JSON_BYTES + 1)
+            (root / 'blocked.json').write_text(
+                json.dumps({'status': 'blocked', 'padding': oversized}), encoding='utf-8'
+            )
+            self.assertIsNone(agentic_workflow_state.load_blocked(root))
+
+            (root / 'manual-approval.json').write_text(
+                json.dumps({'status': 'approved', 'padding': oversized}), encoding='utf-8'
+            )
+            with self.assertRaisesRegex(RuntimeError, 'unreadable'):
+                agentic_workflow_state.load_manual_approval(root)
+
+            run = root / 'agent-issue-146-bounded'
+            run.mkdir()
+            (run / 'result.json').write_text(
+                json.dumps({'status': 'APPROVED', 'padding': oversized}), encoding='utf-8'
+            )
+            self.assertIsNone(agentic_dashboard_data._result(run))
+
+            (root / 'issue-snapshot.json').write_text(
+                json.dumps({'title': 'title', 'body': oversized}), encoding='utf-8'
+            )
+            self.assertIsNone(read_issue_snapshot(root))
+
     def test_review_approval_is_redacted_before_validation(self):
         value = "approval-synthetic-secret-123456"
         with tempfile.TemporaryDirectory() as temp, patch.dict(

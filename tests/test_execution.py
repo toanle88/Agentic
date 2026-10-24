@@ -640,6 +640,25 @@ class StreamingTests(unittest.TestCase):
             for path in root.glob('test-command-*'):
                 self.assertNotIn(token, path.read_text(encoding='utf-8'))
 
+    def test_test_runner_report_has_a_total_bound(self):
+        from io import StringIO
+        with tempfile.TemporaryDirectory() as dirname, patch(
+            'agentic_workflow.streamed_command',
+            side_effect=lambda *args, **kwargs: CompletedProcess(
+                args[0], 0, stdout='x' * 6_000,
+            ),
+        ):
+            root = Path(dirname)
+            sh('git', 'init', cwd=root)
+            with patch('sys.stdout', new_callable=StringIO):
+                passed, report = agentic.run_tests(
+                    root,
+                    [[sys.executable, '-c', 'pass']] * 20,
+                    folder=root,
+                )
+        self.assertTrue(passed)
+        self.assertLessEqual(len(report), agentic_workflow.MAX_TEST_REPORT_CHARS)
+
     def test_test_runner_removes_configured_credentials_from_child_environment(self):
         from io import StringIO
         value = 'custom-test-credential-123456'

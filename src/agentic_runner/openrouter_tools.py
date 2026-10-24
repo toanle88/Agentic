@@ -7,6 +7,7 @@ import http.client
 import json
 import os
 import queue
+import re
 import signal
 import subprocess
 import threading
@@ -64,7 +65,33 @@ READONLY_ALLOWLISTED_EXECUTABLES = READONLY_INSPECTION_COMMANDS | {"git"}
 INTERPRETER_EXECUTABLES = {
     "node", "nodejs", "perl", "php", "python", "python3", "py", "ruby",
 }
+# Evaluation flags are interpreter-specific.  In particular, Node's
+# ``-p``/``--print`` and PHP's ``-r``/``--run`` execute arbitrary source even
+# though they do not use the generic ``-c``/``-e`` spellings.  Keep the
+# historical set export for compatibility while policy decisions use the
+# executable-specific map below.
 INTERPRETER_EVAL_OPTIONS = {"-c", "--command", "-e", "--eval", "-exec"}
+INTERPRETER_EVAL_OPTIONS_BY_EXECUTABLE = {
+    "node": INTERPRETER_EVAL_OPTIONS | {"-p", "--print"},
+    "nodejs": INTERPRETER_EVAL_OPTIONS | {"-p", "--print"},
+    "perl": INTERPRETER_EVAL_OPTIONS | {"-E", "--execute"},
+    "php": INTERPRETER_EVAL_OPTIONS | {"-r", "--run"},
+    "python": INTERPRETER_EVAL_OPTIONS,
+    "python3": INTERPRETER_EVAL_OPTIONS,
+    "py": INTERPRETER_EVAL_OPTIONS,
+    "ruby": INTERPRETER_EVAL_OPTIONS,
+}
+INTERPRETER_FAMILY_PATTERNS = {
+    "node": re.compile(r"node(?:js)?(?:\d+(?:\.\d+)*)?"),
+    "perl": re.compile(r"perl(?:\d+(?:\.\d+)*)?"),
+    "php": re.compile(r"php(?:\d+(?:\.\d+)*)?"),
+    "python": re.compile(r"python(?:\d+(?:\.\d+)*)?"),
+    "py": re.compile(r"py(?:\d+(?:\.\d+)*)?"),
+    "ruby": re.compile(r"ruby(?:\d+(?:\.\d+)*)?"),
+}
+SAFE_INTERPRETER_MODULES = {"unittest"}
+SAFE_INTERPRETER_EXECUTABLES = {"python", "python3", "py"}
+INTERPRETER_OPTIONS_WITH_VALUES = {"-W", "-X", "--check-hash-based-pycs"}
 GIT_UNSAFE_OPTIONS = {
     "-c", "--config-env", "--exec-path", "--git-dir", "--work-tree", "-C",
     "--output", "-o", "--ext-diff", "--textconv", "--no-index",
@@ -310,6 +337,56 @@ def _git_show_path_is_directory(worktree: Path, argv: list[str], relative: str) 
     except (OSError, subprocess.TimeoutExpired):
         return True
     return False
+
+
+def _interpreter_module(argv: list[str]) -> tuple[str | None, bool]:
+    """Find an interpreter module only while interpreter options are active.
+
+    A module flag after a script operand belongs to the script, not to the
+    interpreter. Returning a separate malformed flag marker lets the policy
+    reject that ambiguous form instead of treating a later ``-m unittest`` as
+    the safe module invocation.
+    """
+    option_position = True
+    index = 1
+    while index < len(argv):
+        part = argv[index]
+        module_flag = part == "-m" or (part.startswith("-m") and len(part) > 2)
+        if option_position and module_flag:
+            if part == "-m" and index + 1 >= len(argv):
+                return None, True
+            return (
+                argv[index + 1] if part == "-m" and index + 1 < len(argv) else part[2:],
+                False,
+            )
+        if not option_position:
+            if module_flag:
+                return None, True
+            index += 1
+            continue
+        if part == "--":
+            option_position = False
+            index += 1
+            continue
+        if not part.startswith("-"):
+            option_position = False
+            index += 1
+            continue
+        if part in INTERPRETER_OPTIONS_WITH_VALUES and index + 1 < len(argv):
+            index += 2
+        else:
+            index += 1
+    return None, False
+
+
+def _interpreter_family(executable: str) -> str | None:
+    """Normalize common versioned and Windows interpreter aliases."""
+    if executable.endswith(".exe"):
+        executable = executable[:-4]
+    for family, pattern in INTERPRETER_FAMILY_PATTERNS.items():
+        if pattern.fullmatch(executable):
+            return family
+    return None
 
 
 def _readonly_command_paths(
@@ -559,6 +636,16 @@ def _openrouter_command_allowed(
     else:
         policy.update(permission_policy)
         allow_network = bool(policy.get("network"))
+    configured_check = False
+    if check_commands is not None:
+        if not isinstance(check_commands, list) or any(
+            not isinstance(command, list)
+            or not command
+            or not all(isinstance(part, str) and part for part in command)
+            for command in check_commands
+        ):
+            return False, "configured checks must be non-empty argv arrays"
+        configured_check = argv in check_commands
     if path_qualified_executable and executable in READONLY_ALLOWLISTED_EXECUTABLES:
         return False, (
             "path-qualified inspection executables are not allowed; "
@@ -568,10 +655,45 @@ def _openrouter_command_allowed(
         return False, f"launcher executable {executable} is not allowed from an OpenRouter tool call"
     if executable in {"bash", "sh", "zsh", "fish", "cmd", "powershell", "pwsh"}:
         return False, "shell commands are not allowed; provide argv directly"
-    if executable in INTERPRETER_EXECUTABLES and any(
-        part.split("=", 1)[0] in INTERPRETER_EVAL_OPTIONS for part in argv[1:]
-    ):
-        return False, f"{executable} code-evaluation flags are not allowed from an OpenRouter tool call"
+    interpreter_family = _interpreter_family(executable)
+    if interpreter_family is not None and not configured_check:
+        if not policy.get("run_checks"):
+            return False, "command execution is disabled by the permission policy"
+        if check_commands is not None:
+            return False, "command is not one of the configured checks"
+        evaluation_options = INTERPRETER_EVAL_OPTIONS_BY_EXECUTABLE[interpreter_family]
+        evaluation_flag = next(
+            (
+                part for part in argv[1:]
+                if part.split("=", 1)[0] in evaluation_options
+                or any(
+                    not option.startswith("--")
+                    and part.startswith(option)
+                    and len(part) > len(option)
+                    for option in evaluation_options
+                )
+            ),
+            None,
+        )
+        if evaluation_flag is not None:
+            return False, f"{executable} code-evaluation flags are not allowed from an OpenRouter tool call"
+        module, misplaced_module_flag = _interpreter_module(argv)
+        if misplaced_module_flag:
+            return False, (
+                f"{executable} module flags must appear before the script operand "
+                "in an OpenRouter tool call"
+            )
+        if (
+            interpreter_family in SAFE_INTERPRETER_EXECUTABLES
+            and module in SAFE_INTERPRETER_MODULES
+            and not readonly
+        ):
+            return True, ""
+        if module is not None:
+            return False, (
+                f"{executable} module execution is not allowed from an "
+                "OpenRouter tool call unless it is an exact configured check"
+            )
     if executable in ALWAYS_BLOCKED_COMMANDS:
         return False, f"{executable} is not allowed from an OpenRouter tool call"
     if executable in NETWORK_COMMANDS and not (allow_network and policy.get("network")):
@@ -594,14 +716,7 @@ def _openrouter_command_allowed(
     if not policy.get("run_checks"):
         return False, "command execution is disabled by the permission policy"
     if check_commands is not None:
-        if not isinstance(check_commands, list) or any(
-            not isinstance(command, list)
-            or not command
-            or not all(isinstance(part, str) and part for part in command)
-            for command in check_commands
-        ):
-            return False, "configured checks must be non-empty argv arrays"
-        if argv not in check_commands:
+        if not configured_check:
             return False, "command is not one of the configured checks"
     elif not (policy.get("edit_files") and policy.get("create_files")):
         return False, (
