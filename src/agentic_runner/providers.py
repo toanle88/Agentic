@@ -37,6 +37,10 @@ def _readonly_git_unsafe_patterns(prefix: str) -> list[str]:
             f"{prefix}(git {command}:*>*)",
             f"{prefix}(git {command}:*>>*)",
         ]
+    # Native provider tool patterns cannot safely inspect arbitrary log argv.
+    # Keep bare ``git log`` metadata inspection available and reject every
+    # argument-bearing form, including patch and --follow variants.
+    patterns.append(f"{prefix}(git log:*)")
     patterns.append(f"{prefix}(git diff:*--no-index*)")
     return patterns
 
@@ -65,13 +69,18 @@ def _readonly_git_patterns(prefix: str) -> list[str]:
     ``git diff`` and ``git show`` can execute repository-configured external
     diff and text-conversion helpers. Native provider tool patterns cannot
     inspect or rewrite command arguments, so those commands are only allowed
-    when the disabling flags are part of the command itself.
+    when the disabling flags are part of the command itself. The same
+    limitation means native ``git log`` is restricted to its bare,
+    metadata-only form; OpenRouter performs argv-level validation for richer
+    metadata-only log options.
     """
     patterns: list[str] = []
     for command in _READONLY_GIT_SUBCOMMANDS:
         if command in {"diff", "show"}:
             safe_command = f"git {command} --no-ext-diff --no-textconv"
             patterns += [f"{prefix}({safe_command})", f"{prefix}({safe_command}:*)"]
+        elif command == "log":
+            patterns.append(f"{prefix}(git log)")
         else:
             patterns += [f"{prefix}(git {command})", f"{prefix}(git {command}:*)"]
     return patterns
@@ -228,6 +237,8 @@ def _native_tool_policy_args(
                     allowed.append(
                         f"ShellTool(git {command} --no-ext-diff --no-textconv)"
                     )
+                elif command == "log":
+                    allowed.append("ShellTool(git log)")
                 else:
                     allowed.append(f"ShellTool(git {command})")
         # Configured checks are still run by Agentic after the provider turn,

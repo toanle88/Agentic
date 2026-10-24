@@ -183,7 +183,12 @@ Gemini developer turns receive its safe-tool approval list plus command-scoped
 `ShellTool(git status)`, `ShellTool(git diff)`, `ShellTool(git log)`, and
 `ShellTool(git show)` entries when `git_read` is enabled. Gemini reviewers
 receive only file-inspection tools; Agentic supplies the staged patch from its
-argv-only Git runner. A developer with `run_checks: true` is represented by
+argv-only Git runner. Native-provider `git log` is intentionally limited to
+the bare metadata-only command because provider tool patterns cannot safely
+validate its argv. OpenRouter additionally allows an explicit metadata-only
+log option set, but rejects patch, line-range, `--follow`, and unrecognized
+history-format options.
+A developer with `run_checks: true` is represented by
 Agentic running the configured checks itself; it does not grant Gemini
 unrestricted shell access. Gemini
 `network: true` is rejected because its native network-capable shell tool is
