@@ -10,7 +10,10 @@
 4. Open a pull request against `main` and wait for the CI checks.
 5. Merge only after the required checks and review pass.
 
-The CI workflow tests Python 3.10 through 3.14, runs static checks, coverage, Docker sandbox integration tests, and builds the package. Configure those checks as required status checks in the repository branch protection settings.
+The CI workflow tests Python 3.10 through 3.14, runs static checks, coverage,
+Docker sandbox integration tests, and builds and smoke-tests both package
+artifacts. The exact required status checks and CI reproducibility policy are
+documented in [Development](docs/development.md#ci-verification-and-branch-protection).
 
 ## Releases
 

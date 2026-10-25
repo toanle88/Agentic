@@ -11,6 +11,7 @@ permissions: {}
 jobs:
   verify:
     name: Verify release
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -64,9 +65,32 @@ jobs:
       - name: Run offline test suite
         run: python -m unittest discover -s tests -q
       - name: Install build tooling
-        run: python -m pip install --upgrade build
+        run: python -m pip install --upgrade "build==1.6.1"
       - name: Build release artifacts
         run: python -m build
+      - name: Smoke-test wheel and sdist in clean environments
+        run: |
+          python -m venv "$RUNNER_TEMP/agentic-release-wheel-smoke"
+          "$RUNNER_TEMP/agentic-release-wheel-smoke/bin/python" -m pip install --no-deps dist/*.whl
+          (
+            cd "$RUNNER_TEMP"
+            "$RUNNER_TEMP/agentic-release-wheel-smoke/bin/agentic" --version
+            "$RUNNER_TEMP/agentic-release-wheel-smoke/bin/agentic" --help
+            "$RUNNER_TEMP/agentic-release-wheel-smoke/bin/agentic-shell" --help
+            "$RUNNER_TEMP/agentic-release-wheel-smoke/bin/agentic-dashboard" --help
+            "$RUNNER_TEMP/agentic-release-wheel-smoke/bin/python" -c 'import agentic_runner; print(agentic_runner.__version__)'
+          )
+          python -m venv "$RUNNER_TEMP/agentic-release-sdist-smoke"
+          "$RUNNER_TEMP/agentic-release-sdist-smoke/bin/python" -m pip install --upgrade "setuptools==84.0.0"
+          "$RUNNER_TEMP/agentic-release-sdist-smoke/bin/python" -m pip install --no-deps --no-build-isolation dist/*.tar.gz
+          (
+            cd "$RUNNER_TEMP"
+            "$RUNNER_TEMP/agentic-release-sdist-smoke/bin/agentic" --version
+            "$RUNNER_TEMP/agentic-release-sdist-smoke/bin/agentic" --help
+            "$RUNNER_TEMP/agentic-release-sdist-smoke/bin/agentic-shell" --help
+            "$RUNNER_TEMP/agentic-release-sdist-smoke/bin/agentic-dashboard" --help
+            "$RUNNER_TEMP/agentic-release-sdist-smoke/bin/python" -c 'import agentic_runner; print(agentic_runner.__version__)'
+          )
       - name: Upload verified artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -83,6 +107,7 @@ jobs:
       startsWith(github.ref, 'refs/tags/') ||
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     needs: verify
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     environment: release
     permissions:

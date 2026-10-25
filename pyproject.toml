@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=84.0.0"]
+requires = ["setuptools==84.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -13,9 +13,10 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = [
-    "build>=1.2",
-    "pyright>=1.1.414",
-    "ruff>=0.8",
+    "build==1.6.1",
+    "coverage==7.6.10",
+    "pyright==1.1.414",
+    "ruff==0.17.2",
 ]
 
 [project.scripts]
