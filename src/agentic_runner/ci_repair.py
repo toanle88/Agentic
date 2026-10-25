@@ -28,6 +28,7 @@ MAX_EVENT_HISTORY = 8
 MAX_REPAIR_EVENT_BYTES = 32_000
 MAX_REPAIR_ARTIFACT_BYTES = 256_000
 MAX_CI_OUTPUT_BYTES = 256_000
+MAX_CI_LOG_OUTPUT_BYTES = 10_000_000
 MAX_REPAIR_ATTEMPTS = 5
 MAX_POLL_SECONDS = 86_400
 REPAIR_ARTIFACT = "ci-repair.json"
@@ -218,32 +219,36 @@ def _run_gh_command(
     *,
     run_command: Callable[..., Any] | None,
 ) -> Any:
-    """Run GitHub CLI with a pre-parse output bound on the default path."""
+    """Run GitHub CLI with bounds matched to the output's intended use."""
     argv = ["gh", *args]
     environment = {**os.environ, "GH_HOST": github_host}
+    max_output_bytes = (
+        MAX_CI_LOG_OUTPUT_BYTES if "--log-failed" in args else MAX_CI_OUTPUT_BYTES
+    )
     if run_command is not None:
         return run_command(
-            argv, repo, env=environment, max_output_bytes=MAX_CI_OUTPUT_BYTES,
+            argv, repo, env=environment, max_output_bytes=max_output_bytes,
         )
     from .worktrees import command
     return command(
-        argv, repo, env=environment, max_output_bytes=MAX_CI_OUTPUT_BYTES,
+        argv, repo, env=environment, max_output_bytes=max_output_bytes,
     )
 
 
 def _bounded_stdout(result: Any, label: str) -> str:
     """Read command output only when it fits before parsing or copying it."""
     value = getattr(result, "stdout", "")
+    limit = MAX_CI_LOG_OUTPUT_BYTES if "failed-run log" in label else MAX_CI_OUTPUT_BYTES
     if isinstance(value, bytes):
         size = len(value)
-        if size > MAX_CI_OUTPUT_BYTES:
-            raise RuntimeError(f"{label} exceeded the {MAX_CI_OUTPUT_BYTES}-byte safety limit")
+        if size > limit:
+            raise RuntimeError(f"{label} exceeded the {limit}-byte safety limit")
         return value.decode("utf-8", errors="replace")
     else:
         text = str(value or "")
         size = len(text.encode("utf-8"))
-    if size > MAX_CI_OUTPUT_BYTES:
-        raise RuntimeError(f"{label} exceeded the {MAX_CI_OUTPUT_BYTES}-byte safety limit")
+    if size > limit:
+        raise RuntimeError(f"{label} exceeded the {limit}-byte safety limit")
     return text
 
 
@@ -513,13 +518,18 @@ def record_event(folder: Path, event: dict[str, Any], *, extra_values: Iterable[
     atomic_write_json(path, {"events": _bounded_events(history)})
 
 
-def validate_repair_limits(value: Any) -> dict[str, int]:
+def validate_repair_limits(value: Any) -> dict[str, Any]:
     """Validate the bounded CI-repair policy used by the orchestration layer."""
     if value is None:
         value = {}
     if not isinstance(value, dict):
         raise ValueError("ci_repair must be an object")
-    defaults = {"max_attempts": 2, "poll_interval_seconds": 15, "poll_timeout_seconds": 900}
+    defaults = {
+        "max_attempts": 2,
+        "poll_interval_seconds": 15,
+        "poll_timeout_seconds": 900,
+        "auto_confirm_non_code_failures": False,
+    }
     unknown = sorted(set(value) - set(defaults))
     if unknown:
         raise ValueError("ci_repair contains unsupported field(s): " + ", ".join(unknown))
@@ -530,6 +540,8 @@ def validate_repair_limits(value: Any) -> dict[str, int]:
         raise ValueError("ci_repair.poll_interval_seconds must be an integer from 1 to 86400")
     if type(limits["poll_timeout_seconds"]) is not int or not 1 <= limits["poll_timeout_seconds"] <= MAX_POLL_SECONDS:
         raise ValueError("ci_repair.poll_timeout_seconds must be an integer from 1 to 86400")
+    if type(limits["auto_confirm_non_code_failures"]) is not bool:
+        raise ValueError("ci_repair.auto_confirm_non_code_failures must be a boolean")
     return limits
 
 

@@ -8,9 +8,11 @@ import unittest
 from unittest.mock import patch
 
 import tests  # noqa: F401
+from agentic_runner import cli as agentic_cli
 from agentic_runner.ci_repair import (
     CIEvidence,
     MAX_CI_OUTPUT_BYTES,
+    MAX_CI_LOG_OUTPUT_BYTES,
     classify_failure,
     fetch_ci_evidence,
     find_worktree_for_branch,
@@ -21,7 +23,7 @@ from agentic_runner.ci_repair import (
 )
 from agentic_runner.models import PullRequest
 from agentic_runner.config import load_config
-from agentic_runner.worktrees import command as run_bounded_command
+from agentic_runner.worktrees import command as run_bounded_command, get_pull_request
 
 
 class CIRepairTests(unittest.TestCase):
@@ -30,6 +32,53 @@ class CIRepairTests(unittest.TestCase):
             123, "Fix", "body", "OPEN", "main", "base", "agent/issue-1-abcd1234",
             "head", "owner/repo", "https://github.test/pull/123",
         )
+
+    def test_github_preflight_uses_the_active_cli_environment(self):
+        with patch("agentic_runner.cli.shutil.which", return_value="/usr/bin/gh") as which:
+            with patch(
+                "agentic_runner.cli._agentic_worktrees.probe",
+                return_value=(True, "authenticated"),
+            ) as probe:
+                agentic_cli._github_preflight(Path("."), "github.test")
+        which.assert_called_once_with("gh")
+        argv, cwd = probe.call_args.args[:2]
+        self.assertEqual(argv, ["/usr/bin/gh", "auth", "status", "--active"])
+        self.assertEqual(cwd, Path("."))
+        self.assertEqual(probe.call_args.kwargs["env"]["GH_HOST"], "github.test")
+
+    def test_github_preflight_distinguishes_auth_and_connectivity_failures(self):
+        with patch("agentic_runner.cli.shutil.which", return_value="/usr/bin/gh"):
+            with patch(
+                "agentic_runner.cli._agentic_worktrees.probe",
+                return_value=(False, "HTTP 401: Bad credentials"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "authentication failed"):
+                    agentic_cli._github_preflight(Path("."), "github.test")
+            with patch(
+                "agentic_runner.cli._agentic_worktrees.probe",
+                return_value=(False, "x509: certificate signed by unknown authority"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "connectivity check failed"):
+                    agentic_cli._github_preflight(Path("."), "github.test")
+
+    def test_pull_request_metadata_lookup_has_a_bounded_timeout(self):
+        payload = {
+            "number": 123, "title": "Fix", "body": "body", "state": "OPEN",
+            "baseRefName": "main", "baseRefOid": "base", "headRefName": "head",
+            "headRefOid": "head-sha", "headRepository": {"nameWithOwner": "owner/repo"},
+            "url": "https://github.test/pull/123",
+        }
+        calls = []
+
+        def fake_command(argv, cwd, **kwargs):
+            calls.append((argv, cwd, kwargs))
+            return SimpleNamespace(stdout=json.dumps(payload))
+
+        with patch("agentic_runner.worktrees.command", side_effect=fake_command):
+            result = get_pull_request(Path("."), "owner/repo", 123, "github.test")
+        self.assertEqual(result.number, 123)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][2]["timeout"], 30)
 
     def test_failure_classification_requires_confirmation_for_non_code_failures(self):
         self.assertEqual(classify_failure([{"bucket": "fail"}], ["assertion failed"]), "code/test")
@@ -145,7 +194,7 @@ class CIRepairTests(unittest.TestCase):
                     "status": "completed", "conclusion": "failure",
                 }]
             else:
-                payload = "x" * (MAX_CI_OUTPUT_BYTES + 1)
+                payload = "x" * (MAX_CI_LOG_OUTPUT_BYTES + 1)
             return SimpleNamespace(stdout=json.dumps(payload) if not isinstance(payload, str) else payload)
 
         with self.assertRaisesRegex(RuntimeError, "failed-run log.*safety limit"):
@@ -170,7 +219,10 @@ class CIRepairTests(unittest.TestCase):
         with patch("agentic_runner.worktrees.command", side_effect=fake_command):
             fetch_ci_evidence(Path('.'), 'owner/repo', self.pr)
         self.assertTrue(calls)
-        self.assertTrue(all(call.get("max_output_bytes") == MAX_CI_OUTPUT_BYTES for call in calls))
+        self.assertEqual(
+            [call.get("max_output_bytes") for call in calls],
+            [MAX_CI_OUTPUT_BYTES, MAX_CI_OUTPUT_BYTES, MAX_CI_LOG_OUTPUT_BYTES],
+        )
 
     def test_default_poll_commands_request_pre_parse_output_bound(self):
         calls = []
@@ -376,13 +428,22 @@ class CIRepairTests(unittest.TestCase):
             path.write_text(json.dumps({
                 "test_commands": [["true"]],
                 "ci_repair": {"max_attempts": 1, "poll_interval_seconds": 2,
-                               "poll_timeout_seconds": 3},
+                               "poll_timeout_seconds": 3,
+                               "auto_confirm_non_code_failures": True},
             }))
-            self.assertEqual(load_config(path)["ci_repair"]["max_attempts"], 1)
+            loaded = load_config(path)
+            self.assertEqual(loaded["ci_repair"]["max_attempts"], 1)
+            self.assertTrue(loaded["ci_repair"]["auto_confirm_non_code_failures"])
             path.write_text(json.dumps({
                 "test_commands": [["true"]], "ci_repair": {"unbounded": True},
             }))
             with self.assertRaisesRegex(ValueError, "unsupported field"):
+                load_config(path)
+            path.write_text(json.dumps({
+                "test_commands": [["true"]],
+                "ci_repair": {"auto_confirm_non_code_failures": "yes"},
+            }))
+            with self.assertRaisesRegex(ValueError, "auto_confirm_non_code_failures"):
                 load_config(path)
 
 

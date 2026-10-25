@@ -409,6 +409,71 @@ def _github_environment(host: str) -> dict[str, str]:
     return environment
 
 
+def _github_failure_kind(detail: str) -> str:
+    """Classify a GitHub CLI failure without exposing its output."""
+    lowered = detail.casefold()
+    if any(marker in lowered for marker in (
+        "tls handshake", "connection", "network", "timeout", "timed out",
+        "dial tcp", "no such host", "temporary failure", "certificate",
+        "x509", "unknown authority", "certificate verify failed",
+    )):
+        return "connectivity"
+    if any(marker in lowered for marker in (
+        "authentication", "not logged in", "bad credentials", "invalid token",
+        "unauthorized", "401",
+    )):
+        return "authentication"
+    return "github"
+
+
+def _github_preflight(repo: Path, github_host: str) -> None:
+    """Verify the active GitHub CLI credential before a repair starts."""
+    gh_path = shutil.which("gh")
+    if not gh_path:
+        raise RuntimeError(
+            "CI repair requires the GitHub CLI (`gh`), but it was not found on PATH"
+        )
+    authenticated, detail = _agentic_worktrees.probe(
+        [gh_path, "auth", "status", "--active"],
+        repo,
+        timeout=30,
+        env=_github_environment(github_host),
+    )
+    if authenticated:
+        return
+    kind = _github_failure_kind(detail)
+    if kind == "connectivity":
+        raise RuntimeError(
+            f"GitHub API connectivity check failed for {github_host}; "
+            "check the network, VPN, or proxy and retry"
+        )
+    if kind == "authentication":
+        raise RuntimeError(
+            f"GitHub CLI authentication failed for {github_host}; "
+            "run `gh auth login` or provide a valid GH_TOKEN and retry"
+        )
+    raise RuntimeError(
+        f"GitHub CLI authentication could not be verified for {github_host}; "
+        "run `gh auth status` for details"
+    )
+
+
+def _github_operation_error(action: str, github_host: str, exc: RuntimeError) -> RuntimeError:
+    """Turn a GitHub CLI failure into a bounded, actionable diagnostic."""
+    kind = _github_failure_kind(str(exc))
+    if kind == "connectivity":
+        return RuntimeError(
+            f"GitHub API connectivity failed while {action} on {github_host}; "
+            "check the network, VPN, or proxy and retry"
+        )
+    if kind == "authentication":
+        return RuntimeError(
+            f"GitHub CLI authentication failed while {action} on {github_host}; "
+            "run `gh auth status` or provide a valid GH_TOKEN and retry"
+        )
+    return exc
+
+
 def fetch_issues(
     repo: Path, github_repo: str, github_host: str = DEFAULT_GITHUB_HOST,
 ) -> list[Issue]:
@@ -483,7 +548,14 @@ def repair_ci(
     github_repo = github_repo_from_remote(repo, github_host)
     if not github_repo:
         raise RuntimeError("CI repair requires a GitHub origin remote for the target repository")
-    pull_request = get_pull_request(repo, github_repo, pr_number, github_host)
+    _github_preflight(repo, github_host)
+    _status_print(f"[CI-REPAIR] GitHub CLI authentication verified for {github_host}")
+    _status_print(f"[CI-REPAIR] Reading PR #{pr_number} metadata")
+    try:
+        pull_request = get_pull_request(repo, github_repo, pr_number, github_host)
+    except RuntimeError as exc:
+        raise _github_operation_error("reading PR metadata", github_host, exc) from exc
+    _status_print(f"[CI-REPAIR] PR #{pr_number} metadata loaded; verifying worktree")
     if pull_request.state.casefold() != "open":
         raise RuntimeError(f"Pull request #{pr_number} is not open; CI repair is blocked")
     run = find_worktree_for_branch(repo, pull_request.head)
@@ -512,16 +584,31 @@ def repair_ci(
     max_attempts = int(limits.get("max_attempts", 2))
     poll_interval = int(limits.get("poll_interval_seconds", 15))
     poll_timeout = int(limits.get("poll_timeout_seconds", 900))
+    auto_confirm_non_code_failures = limits.get("auto_confirm_non_code_failures", False) is True
     deadline = time.monotonic() + int(config.get("task_timeout_seconds", DEFAULT_TASK_TIMEOUT))
+    _status_print(f"[CI-REPAIR] Fetching failed CI evidence for PR #{pr_number}")
     evidence = fetch_ci_evidence(
         repo, github_repo, pull_request, github_host, extra_values=secret_values,
+    )
+    _status_print(
+        f"[CI-REPAIR] CI evidence collected; failure classified as {evidence.classification}"
     )
     record_event({
         "event": "ci_evidence", "attempt": 0, "classification": evidence.classification,
         "evidence": evidence.to_dict(),
     })
     if evidence.classification in {"infrastructure", "permission", "ambiguous"}:
-        if not _confirm_ci_repair(pr_number, evidence.classification):
+        if auto_confirm_non_code_failures:
+            _status_print(
+                f"[CI-REPAIR] Auto-confirming {evidence.classification} failure "
+                "per ci_repair.auto_confirm_non_code_failures"
+            )
+            record_event({
+                "event": "repair_confirmation_skipped",
+                "reason": "ci_repair.auto_confirm_non_code_failures",
+                "classification": evidence.classification,
+            })
+        elif not _confirm_ci_repair(pr_number, evidence.classification):
             record_event({
                 "event": "repair_blocked", "reason": "explicit confirmation not granted",
                 "classification": evidence.classification,
@@ -603,12 +690,16 @@ def repair_ci(
             "event": "ci_evidence", "attempt": attempt, "classification": evidence.classification,
             "evidence": evidence.to_dict(),
         })
-        if evidence.classification in {"infrastructure", "permission", "ambiguous"} and not _confirm_ci_repair(
-            pr_number, evidence.classification,
-        ):
-            raise RuntimeError(
-                f"Follow-up CI failure classified as {evidence.classification}; explicit confirmation is required"
-            )
+        if evidence.classification in {"infrastructure", "permission", "ambiguous"}:
+            if auto_confirm_non_code_failures:
+                _status_print(
+                    f"[CI-REPAIR] Auto-confirming follow-up {evidence.classification} failure "
+                    "per ci_repair.auto_confirm_non_code_failures"
+                )
+            elif not _confirm_ci_repair(pr_number, evidence.classification):
+                raise RuntimeError(
+                    f"Follow-up CI failure classified as {evidence.classification}; explicit confirmation is required"
+                )
     raise RuntimeError("CI repair ended without a terminal result")
 
 
@@ -929,6 +1020,7 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
             "max_attempts": 2,
             "poll_interval_seconds": 15,
             "poll_timeout_seconds": 900,
+            "auto_confirm_non_code_failures": False,
         },
         "max_files": None,
         "test_timeout_seconds": DEFAULT_TEST_TIMEOUT,
