@@ -46,11 +46,16 @@ def option_value(flags: Sequence[str], option: str) -> str | None:
     return None
 
 
-def parse_repair_pr_command(parts: list[str]) -> str:
-    """Validate ``/repair-pr N`` and return the numeric PR value."""
-    if len(parts) != 2 or not parts[1].isdigit() or int(parts[1]) <= 0:
-        raise ValueError("usage: /repair-pr PR_NUMBER")
-    return parts[1]
+def parse_repair_pr_command(parts: list[str]) -> tuple[str, bool]:
+    """Validate ``/repair-pr N [--clean]`` and return its PR and mode."""
+    if (
+        len(parts) not in {2, 3}
+        or not parts[1].isdigit()
+        or int(parts[1]) <= 0
+        or (len(parts) == 3 and parts[2] != "--clean")
+    ):
+        raise ValueError("usage: /repair-pr PR_NUMBER [--clean]")
+    return parts[1], len(parts) == 3
 
 
 def parse_job_command(parts: list[str]) -> tuple[str | None, list[str]]:

@@ -279,14 +279,22 @@ CI repair is explicitly opt-in:
 
 ```bash
 agentic --pr 123 --repair-ci
+# Start fresh while preserving the current dirty patch in a Git stash:
+agentic --pr 123 --repair-ci --clean
 ```
 
-The interactive shell provides `/repair-pr 123` and runs it in the foreground
+The interactive shell provides `/repair-pr 123 [--clean]` and runs it in the foreground
 so confirmation prompts remain available. Agentic reads failed check summaries
 and bounded failed-run log excerpts as untrusted evidence, classifies
-the failure, and uses only the exact existing worktree for the PR branch. The
-worktree must exist, be clean, and have `HEAD` equal to the current PR head;
-missing, dirty, ambiguous, or stale worktrees stop with an actionable blocker.
+the failure, and uses only the exact existing worktree for the PR branch. A
+new repair requires a clean worktree and `HEAD` equal to the current PR head.
+If a previous Agentic repair exhausted its developer attempts, a later repair
+can continue its preserved patch only when durable PR, branch, head, worktree,
+and failed-attempt records match; unrelated dirty, missing, ambiguous, or
+stale worktrees still stop with an actionable blocker. Pass `--clean` to
+stash the current dirty changes, including untracked files, and start a fresh
+repair; the stash remains recoverable with Git. Repair records from older
+Agentic versions without content fingerprints require `--clean` once.
 Before reading the PR, Agentic verifies the active `gh` authentication using
 the same `GH_TOKEN` and `GH_HOST` environment that repair commands receive.
 Authentication failures and GitHub API connectivity failures are reported

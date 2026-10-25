@@ -596,7 +596,7 @@ _HELP_SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
                 "local mode: use an existing task file",
             ),
             (
-                "/repair-pr PR_NUMBER",
+                "/repair-pr PR_NUMBER [--clean]",
                 "inspect failed CI and repair an existing pull request",
             ),
         ),

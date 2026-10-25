@@ -8,9 +8,11 @@ developer/reviewer and publication boundaries stay in one place.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 import re
+import stat
 import time
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -27,6 +29,7 @@ MAX_TOTAL_LOG_CHARS = 50_000
 MAX_EVENT_HISTORY = 8
 MAX_REPAIR_EVENT_BYTES = 32_000
 MAX_REPAIR_ARTIFACT_BYTES = 256_000
+MAX_REPAIR_FINGERPRINT_INPUT_BYTES = 4_000_000
 MAX_CI_OUTPUT_BYTES = 256_000
 MAX_CI_LOG_OUTPUT_BYTES = 10_000_000
 MAX_REPAIR_ATTEMPTS = 5
@@ -374,8 +377,14 @@ def find_worktree_for_branch(repo: Path, branch: str, *, run_git: Callable[..., 
     return Run(None, branch, matches[0])
 
 
-def verify_worktree_for_pr(run: Run, pull_request: PullRequest, *, run_git: Callable[..., str] | None = None) -> None:
-    """Require the exact PR branch and head in a clean worktree."""
+def verify_worktree_for_pr(
+    run: Run,
+    pull_request: PullRequest,
+    *,
+    run_git: Callable[..., str] | None = None,
+    allow_dirty: bool = False,
+) -> None:
+    """Require the exact PR branch and head, optionally resuming its patch."""
     if run_git is None:
         from .worktrees import git as run_git
     try:
@@ -397,11 +406,169 @@ def verify_worktree_for_pr(run: Run, pull_request: PullRequest, *, run_git: Call
             "refresh it explicitly before retrying"
         )
     dirty = run_git(run.worktree, "status", "--porcelain", "--untracked-files=all")
-    if dirty:
+    if dirty and not allow_dirty:
         raise RuntimeError(
             "PR worktree is dirty; refusing to mix CI repair with existing changes. "
             "Review or preserve those changes, then retry"
         )
+
+
+def stash_dirty_worktree_for_repair(
+    run: Run,
+    pr_number: int,
+    *,
+    run_git: Callable[..., str] | None = None,
+) -> None:
+    """Move dirty PR changes to a recoverable stash before a fresh repair."""
+    if run_git is None:
+        from .worktrees import git as run_git
+    run_git(
+        run.worktree,
+        "stash", "push", "--include-untracked",
+        "--message", f"Agentic CI repair --clean PR #{pr_number}",
+    )
+    remaining = run_git(
+        run.worktree, "status", "--porcelain", "--untracked-files=all",
+    )
+    if remaining:
+        raise RuntimeError(
+            "Could not clean the PR worktree after stashing; refusing to start CI repair"
+        )
+
+
+def _untracked_file_fingerprint(
+    path: Path, root: Path, *, max_bytes: int,
+) -> tuple[str, int] | None:
+    """Hash one safe regular untracked file within the remaining byte budget."""
+    try:
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(root.resolve(strict=True))
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        if os.name != "nt":
+            flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        descriptor = os.open(path, flags)
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                return None
+            digest = hashlib.sha256()
+            total = 0
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    return None
+                digest.update(chunk)
+            return digest.hexdigest(), total
+        finally:
+            os.close(descriptor)
+    except (OSError, ValueError):
+        return None
+
+
+def worktree_change_fingerprint(
+    worktree: Path,
+    *,
+    run_git: Callable[..., str] | None = None,
+) -> str | None:
+    """Fingerprint tracked and untracked changes without modifying the index."""
+    if run_git is None:
+        from .worktrees import git as run_git
+    try:
+        status = run_git(
+            worktree, "status", "--porcelain=v1", "--untracked-files=all",
+        )
+        if not status:
+            return None
+        diff = run_git(
+            worktree, "diff", "HEAD", "--binary", "--no-ext-diff", "--no-textconv",
+        )
+        diff_size = len(diff.encode("utf-8"))
+        if diff_size > MAX_REPAIR_FINGERPRINT_INPUT_BYTES:
+            return None
+        untracked = run_git(
+            worktree, "ls-files", "--others", "--exclude-standard", "-z",
+        )
+        if len(untracked.encode("utf-8")) > MAX_REPAIR_FINGERPRINT_INPUT_BYTES:
+            return None
+        names = sorted(name for name in untracked.split("\x00") if name)
+        remaining_bytes = MAX_REPAIR_FINGERPRINT_INPUT_BYTES - diff_size
+        digest = hashlib.sha256()
+        for value in (status, diff):
+            digest.update(value.encode("utf-8"))
+            digest.update(b"\0")
+        for name in names:
+            fingerprint = _untracked_file_fingerprint(
+                worktree / name, worktree, max_bytes=remaining_bytes,
+            )
+            if fingerprint is None:
+                return None
+            content_hash, content_size = fingerprint
+            remaining_bytes -= content_size
+            digest.update(name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(content_hash.encode("ascii"))
+            digest.update(b"\0")
+        return digest.hexdigest()
+    except (OSError, RuntimeError, UnicodeError, ValueError):
+        return None
+
+
+def can_resume_dirty_worktree(
+    folder: Path,
+    pr_number: int,
+    branch: str,
+    head_sha: str,
+    worktree: Path,
+    *,
+    current_fingerprint: str | None,
+) -> bool:
+    """Authorize a dirty PR worktree only when Agentic previously left it there.
+
+    A failed repair deliberately preserves the developer's patch.  The durable
+    repair artifact binds that patch to the exact PR branch, head, and
+    worktree, so a later repair can continue it without accepting unrelated
+    edits. Older artifacts without a content fingerprint fail closed and can
+    be handled with the explicit ``--clean`` path.
+    """
+    if not current_fingerprint:
+        return False
+    try:
+        raw = read_text_bounded(folder / REPAIR_ARTIFACT, MAX_REPAIR_ARTIFACT_BYTES)
+        value = json.loads(raw) if raw else None
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(value, dict) or not isinstance(value.get("events"), list):
+        return False
+    matching_start = False
+    for item in value["events"]:
+        if not isinstance(item, dict):
+            continue
+        if item.get("event") == "repair_started":
+            raw_pr: object = item.get("pr")
+            if isinstance(raw_pr, bool) or not isinstance(raw_pr, (int, str)):
+                matching_start = False
+                continue
+            try:
+                matching_start = (
+                    int(raw_pr) == pr_number
+                    and item.get("branch") == branch
+                    and item.get("head_sha") == head_sha
+                    and Path(str(item.get("worktree"))).expanduser().resolve() == worktree.resolve()
+                )
+            except (OSError, TypeError, ValueError):
+                matching_start = False
+            continue
+        if (
+            matching_start
+            and item.get("event") == "repair_attempt"
+            and item.get("completed") is False
+        ):
+            if item.get("dirty_fingerprint") == current_fingerprint:
+                return True
+    return False
 
 
 def poll_ci(
@@ -547,5 +714,8 @@ def validate_repair_limits(value: Any) -> dict[str, Any]:
 
 __all__ = [
     "CIEvidence", "classify_failure", "fetch_ci_evidence", "find_worktree_for_branch",
-    "verify_worktree_for_pr", "poll_ci", "record_event", "validate_repair_limits",
+    "MAX_REPAIR_FINGERPRINT_INPUT_BYTES", "can_resume_dirty_worktree",
+    "stash_dirty_worktree_for_repair", "verify_worktree_for_pr",
+    "worktree_change_fingerprint",
+    "poll_ci", "record_event", "validate_repair_limits",
 ]

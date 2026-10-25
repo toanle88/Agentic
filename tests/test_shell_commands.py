@@ -10,9 +10,14 @@ from agentic_runner.shell_commands import (
 
 class ShellCommandTests(unittest.TestCase):
     def test_repair_pr_requires_positive_numeric_pull_request(self):
-        self.assertEqual(parse_repair_pr_command(['/repair-pr', '123']), '123')
+        self.assertEqual(parse_repair_pr_command(['/repair-pr', '123']), ('123', False))
+        self.assertEqual(
+            parse_repair_pr_command(['/repair-pr', '123', '--clean']),
+            ('123', True),
+        )
         for parts in (['/repair-pr'], ['/repair-pr', '0'], ['/repair-pr', '-1'],
-                      ['/repair-pr', '123', '--verbose']):
+                      ['/repair-pr', '123', '--verbose'],
+                      ['/repair-pr', '123', '--clean', '--clean']):
             with self.subTest(parts=parts), self.assertRaises(ValueError):
                 parse_repair_pr_command(parts)
 

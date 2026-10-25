@@ -1050,9 +1050,11 @@ class AgenticShell:
             self._launch(argv, run_token=uuid.uuid4().hex)
 
     def run_repair_pr(self, parts: list[str]) -> None:
-        pr_number = _parse_repair_pr_command(parts)
+        pr_number, clean = _parse_repair_pr_command(parts)
         self.active_task = f"CI repair for PR #{pr_number}"
         argv = self._runner_args(None, ["--pr", pr_number, "--repair-ci"])
+        if clean:
+            argv.append("--clean")
         _shell_print("[CI-REPAIR] Running in the foreground so confirmation can be entered")
         self._run_foreground(argv)
 
