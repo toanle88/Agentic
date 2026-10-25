@@ -586,7 +586,7 @@ def _main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 0
     repo = args.repo.resolve()
-    state_dir = (args.state_dir or default_state_dir()).expanduser().resolve()
+    state_dir = (args.state_dir or default_state_dir()).expanduser()
     logs_argument = args.logs.resolve() if args.logs is not None else None
     token: str | None = None
     if args.serve:

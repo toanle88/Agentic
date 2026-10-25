@@ -7,7 +7,7 @@ this facade retains job lifecycle, command dispatch, and public CLI behavior.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import json
 import math
 import os
@@ -33,6 +33,7 @@ from .output import (
     untag_system_prefix,
 )
 from .persistence import atomic_write_text
+from .security import sensitive_environment_values
 from .shell_input import (  # noqa: F401
     COMMAND_DESCRIPTIONS,
     HELP,
@@ -117,6 +118,32 @@ def _windows_path(path: Path) -> str:
         return str(path)
     converted = result.stdout.strip()
     return converted if result.returncode == 0 and converted else str(path)
+
+
+def _shell_redaction_values(config: Path | None, environment: Mapping[str, str]) -> list[str]:
+    """Include configured non-semantic credentials in shell-log redaction."""
+    values = sensitive_environment_values(environment)
+    if config is None:
+        return values
+    try:
+        raw = config.read_bytes()[:256_000]
+        data = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return values
+    names: set[str] = set()
+    if isinstance(data, dict):
+        for section in ("developer", "reviewer", "developer_agent", "reviewer_agent"):
+            settings = data.get(section)
+            if isinstance(settings, dict) and isinstance(settings.get("api_key_env"), str):
+                names.add(settings["api_key_env"])
+        sandbox = data.get("sandbox")
+        if isinstance(sandbox, dict):
+            names.update(name for name in sandbox.get("pass_env", ()) if isinstance(name, str))
+    values.extend(
+        environment[name] for name in names
+        if name in environment and len(environment[name]) >= 8
+    )
+    return sorted(set(values), key=len, reverse=True)
 
 
 def _open_dashboard(path: Path) -> None:
@@ -228,11 +255,13 @@ class AgenticShell:
         if state_dir is None:
             from .cli import default_state_dir
             state_dir = default_state_dir()
-        self.state_dir = state_dir.expanduser().resolve()
+        self.state_dir = state_dir.expanduser()
         if session_dir is None:
             from .cli import state_paths
             session_dir = state_paths(self.repo, self.state_dir).shell
-        self.session_dir = session_dir.resolve()
+        self.session_dir = session_dir.expanduser()
+        from .worktrees import _validate_state_directory
+        _validate_state_directory(self.session_dir, label="shell session directory")
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self.session_id = uuid.uuid4().hex[:12]
         self.jobs: dict[int, Job] = {}
@@ -387,12 +416,17 @@ class AgenticShell:
         self.next_number += 1
         log_path = self.session_dir / f"job-{number:03d}.log"
         record_path = self._record_path(number)
-        log_writer = BoundedLogWriter(log_path)
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
         environment = None
         if run_token:
             environment = os.environ.copy()
             environment["AGENTIC_SHELL_JOB_ID"] = run_token
+        log_writer = BoundedLogWriter(
+            log_path,
+            redaction_values=_shell_redaction_values(
+                self.config, environment or os.environ,
+            ),
+        )
         try:
             process = subprocess.Popen(
                 argv,

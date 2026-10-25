@@ -1424,7 +1424,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
         preflight_agent_settings(
             config["developer_agent"], config["reviewer_agent"], sandbox=config["sandbox"]
         )
-    state_dir = Path(args.state_dir).expanduser().resolve() if args.state_dir else default_state_dir()
+    state_dir = Path(args.state_dir).expanduser() if args.state_dir else default_state_dir()
     if args.repair_ci:
         pr_number = args.pr_number
         if not isinstance(pr_number, int) or isinstance(pr_number, bool):
@@ -1799,7 +1799,7 @@ def _main(argv: list[str] | None = None) -> int:
             root = _absolute_path(Path(git(repo, "rev-parse", "--show-toplevel")))
             if not _paths_equal(repo, root):
                 raise RuntimeError("Run cleanup from the project root or pass --repo pointing to that root")
-            cleanup_state_dir = Path(args.state_dir).expanduser().resolve() if args.state_dir else default_state_dir()
+            cleanup_state_dir = Path(args.state_dir).expanduser() if args.state_dir else default_state_dir()
             with repository_lock(repo, cleanup_state_dir):
                 return cleanup(
                     repo, issue=args.issue, all_runs=args.all_runs,
@@ -1835,7 +1835,7 @@ def _main(argv: list[str] | None = None) -> int:
                 parser.error("--interactive cannot be combined with a task, issue, list, runs, new, review, or publish option")
             from .shell import run_shell
             config = Path(args.config).resolve() if args.config else None
-            state_dir = Path(args.state_dir).expanduser().resolve() if args.state_dir else default_state_dir()
+            state_dir = Path(args.state_dir).expanduser() if args.state_dir else default_state_dir()
             runner = SCRIPT_DIR / "agentic.py"
             if not runner.is_file():
                 runner = Path(sys.executable)

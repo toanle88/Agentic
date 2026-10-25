@@ -23,7 +23,7 @@ from .execution import (
     _short,
 )
 from .guidance import guidance_phase, guidance_prompt
-from .persistence import atomic_write_text
+from .persistence import BoundedAppendWriter, atomic_write_text
 from .openrouter_tools import (
     _openrouter_request,
     _openrouter_tool_call,
@@ -138,8 +138,24 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
     started_at = datetime.datetime.now(datetime.timezone.utc)
     last_message = ""
     usage_records: list[dict[str, Any]] = []
-    atomic_write_text(log_file, "")
-    atomic_write_text(raw_file, "")
+    raw_writer = BoundedAppendWriter(
+        raw_file, max_bytes=OPENROUTER_RAW_LOG_BYTES,
+        truncation_marker=json.dumps({
+            "event": "agentic_stream_truncated",
+            "stream": "openrouter_jsonl",
+            "reason": "artifact_size_limit",
+        }) + "\n",
+        redaction_values=redaction_values,
+    )
+    try:
+        log_writer = BoundedAppendWriter(
+            log_file, max_bytes=OPENROUTER_LOG_BYTES,
+            truncation_marker=_TRUNCATION_MARKER,
+            redaction_values=redaction_values,
+        )
+    except BaseException:
+        raw_writer.close()
+        raise
     raw_bytes = 0
     raw_truncated = False
     log_bytes = 0
@@ -181,31 +197,20 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
         marker_bytes = marker.encode("utf-8")
         if raw_bytes + len(encoded) > OPENROUTER_RAW_LOG_BYTES - len(marker_bytes):
             if raw_bytes + len(marker_bytes) <= OPENROUTER_RAW_LOG_BYTES:
-                with raw_file.open("a", encoding="utf-8") as handle:
-                    handle.write(marker)
-                raw_bytes += len(marker_bytes)
+                raw_writer.write(marker)
+                raw_bytes = raw_writer.written_bytes
             raw_truncated = True
             return
-        with raw_file.open("a", encoding="utf-8") as handle:
-            handle.write(serialized)
-        raw_bytes += len(encoded)
+        raw_writer.write(serialized)
+        raw_bytes = raw_writer.written_bytes
 
     def write_log(line: str) -> None:
         nonlocal log_bytes, log_truncated
         if log_truncated:
             return
-        marker = _TRUNCATION_MARKER
-        encoded = (line + "\n").encode("utf-8")
-        marker_bytes = marker.encode("utf-8")
-        if log_bytes + len(encoded) > OPENROUTER_LOG_BYTES - len(marker_bytes):
-            with log_file.open("a", encoding="utf-8") as handle:
-                handle.write(marker)
-            log_bytes += len(marker_bytes)
-            log_truncated = True
-            return
-        with log_file.open("a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
-        log_bytes += len(encoded)
+        log_writer.write(line + "\n")
+        log_bytes = log_writer.written_bytes
+        log_truncated = log_writer.truncated
 
     def clear_live_status() -> None:
         nonlocal live_status
@@ -252,8 +257,8 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
         if verbose or not transient:
             write_log(line)
 
-    emit(f"Started (OpenRouter/{model})", style_status_tokens=True)
     try:
+        emit(f"Started (OpenRouter/{model})", style_status_tokens=True)
         deadline = started + timeout if timeout is not None else None
         for turn in range(max_tool_turns):
             if deadline is not None and time.monotonic() >= deadline:
@@ -350,7 +355,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
             redact_secrets(last_message or str(exc), extra_values=redaction_values)
         )
         emit("ERROR: " + message, generated_status="ERROR")
-        atomic_write_text(output, message)
+        atomic_write_text(output, message, extra_values=redaction_values)
         usage = combine_usage(usage_records, provider="openrouter")
         _record_provider_usage(
             output, readonly, usage, model=model, prompt_chars=len(prompt),
@@ -367,13 +372,19 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
             duration_seconds=time.monotonic() - started,
             status="failed", exit_code=1,
         )
+        raw_writer.close()
+        log_writer.close()
         return False, message
+    except BaseException:
+        raw_writer.close()
+        log_writer.close()
+        raise
     seconds = int(time.monotonic() - started)
     emit(f"Finished in {seconds}s (exit 0)", style_status_tokens=True)
     last_message = bounded_final_message(
         redact_secrets(last_message, extra_values=redaction_values)
     )
-    atomic_write_text(output, last_message)
+    atomic_write_text(output, last_message, extra_values=redaction_values)
     usage = combine_usage(usage_records, provider="openrouter")
     _record_provider_usage(
         output, readonly, usage, model=model, prompt_chars=len(prompt),
@@ -390,4 +401,6 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
         duration_seconds=time.monotonic() - started,
         status="completed", exit_code=0,
     )
+    raw_writer.close()
+    log_writer.close()
     return True, last_message

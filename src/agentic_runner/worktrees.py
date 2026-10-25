@@ -60,7 +60,10 @@ def default_state_dir() -> Path:
     """Return the user-level state root, overridable for shared WSL/Windows storage."""
     configured = os.environ.get("AGENTIC_STATE_DIR")
     if configured:
-        return Path(configured).expanduser().resolve()
+        # Keep the lexical path until state_paths() can reject symlinked or
+        # attacker-writable roots. Resolving here would silently bless a
+        # replaceable AGENTIC_STATE_DIR before the security check runs.
+        return Path(configured).expanduser()
     if os.name == "nt":
         local = os.environ.get("LOCALAPPDATA")
         return (Path(local) if local else Path.home() / "AppData" / "Local") / "Agentic"
@@ -92,8 +95,68 @@ def repository_state_key(repo: Path) -> str:
     return f"{slug}-{digest}"
 
 
+def _validate_state_path_components(path: Path, *, label: str) -> None:
+    """Reject symlinked components before a state path is resolved."""
+    current = path
+    if current.is_symlink():
+        raise ValueError(f"{label} must not contain symbolic links: {path}")
+    while not current.exists():
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    while True:
+        if current.is_symlink():
+            raise ValueError(f"{label} must not contain symbolic links: {path}")
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+
+
+def _validate_state_directory(path: Path, *, label: str) -> None:
+    """Reject attacker-writable POSIX state directories.
+
+    Missing state roots are allowed for read-only callers. Existing roots must
+    be owned by the current user and must not be group/other writable. A
+    sticky temporary parent such as ``/tmp`` remains compatible with the
+    documented disposable/shared-path use when a writer creates the root.
+    Windows does not expose a portable stdlib ownership/mode contract here;
+    descriptor-level log checks still apply there.
+    """
+    if os.name == "nt":
+        return
+    _validate_state_path_components(path, label=label)
+    if path.is_symlink():
+        raise ValueError(f"{label} must not be a symbolic link: {path}")
+    try:
+        metadata = path.stat()
+    except FileNotFoundError:
+        # Read-only dashboard and diagnostics paths may legitimately point at
+        # a state namespace that has not been created yet. The first writer
+        # creates it; existing namespaces are validated before use.
+        return
+    if not metadata or not path.is_dir():
+        raise ValueError(f"{label} must be a directory: {path}")
+    current_uid = getattr(os, "getuid", lambda: metadata.st_uid)()
+    if metadata.st_uid != current_uid:
+        raise ValueError(f"{label} must be owned by the current user: {path}")
+    if metadata.st_mode & 0o022:
+        raise ValueError(f"{label} must not be group/other writable: {path}")
+
+
 def state_paths(repo: Path, state_dir: Path | None = None) -> StatePaths:
-    root = (state_dir or default_state_dir()).expanduser().resolve() / repository_state_key(repo)
+    base = (state_dir or default_state_dir()).expanduser()
+    if os.name != "nt":
+        _validate_state_path_components(base, label="state directory")
+    base = base.resolve()
+    _validate_state_directory(base, label="state directory")
+    root = base / repository_state_key(repo)
+    _validate_state_directory(root, label="repository state directory")
+    for name in ("worktrees", "runs", "shell", "dashboards", "diagnostics"):
+        child = root / name
+        if child.exists() or child.is_symlink():
+            _validate_state_directory(child, label=f"repository {name} directory")
     return StatePaths(
         root, root / "worktrees", root / "runs", root / "shell", root / "dashboards",
         root / "diagnostics",

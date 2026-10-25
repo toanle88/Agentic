@@ -73,22 +73,29 @@ def generate_corpus(
             (folder / f"artifact-{artifact_number:03d}.log").write_bytes(b"x\n")
 
 
-def sample(logs: Path, *, cold: bool) -> tuple[float, int | None]:
+def sample(logs: Path, *, cold: bool, baseline_peak: int | None = None) -> tuple[float, int | None]:
     if cold:
         with dashboard_data._RUN_SNAPSHOT_CACHE_LOCK:
             dashboard_data._RUN_SNAPSHOT_CACHE.clear()
     started = time.perf_counter()
     dashboard_data.collect_runs(logs)
-    return time.perf_counter() - started, peak_rss_bytes()
+    peak = peak_rss_bytes()
+    if peak is not None and baseline_peak is not None:
+        # ru_maxrss is a process high-water mark. Subtract the value observed
+        # before this benchmark so repeated samples do not report unrelated
+        # memory retained by earlier work in the harness process.
+        peak = max(0, peak - baseline_peak)
+    return time.perf_counter() - started, peak
 
 
 def measure(logs: Path, repetitions: int) -> dict[str, Any]:
     cold: list[float] = []
     warm: list[float] = []
     peak_values: list[int] = []
+    baseline_peak = peak_rss_bytes()
     for _ in range(repetitions):
-        cold_seconds, cold_peak = sample(logs, cold=True)
-        warm_seconds, warm_peak = sample(logs, cold=False)
+        cold_seconds, cold_peak = sample(logs, cold=True, baseline_peak=baseline_peak)
+        warm_seconds, warm_peak = sample(logs, cold=False, baseline_peak=baseline_peak)
         cold.append(cold_seconds)
         warm.append(warm_seconds)
         peak_values.extend(value for value in (cold_peak, warm_peak) if value is not None)

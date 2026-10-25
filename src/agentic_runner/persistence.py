@@ -8,11 +8,337 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from .security import redact_secrets
+
+
+def _validate_log_descriptor(descriptor: int, path: Path) -> os.stat_result:
+    """Validate an already-open durable log without a path/open race."""
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise OSError(f"durable log is not a regular file: {path}")
+    if metadata.st_nlink != 1:
+        raise OSError(f"durable log must not be hard-linked: {path}")
+    return metadata
+
+
+def _validate_log_parent(path: Path) -> None:
+    """Reject symlinked components in the directory used for a durable log."""
+    parent = path.parent
+    if parent.is_symlink():
+        raise OSError(f"durable log parent is a symbolic link: {parent}")
+    while not parent.exists():
+        next_parent = parent.parent
+        if next_parent == parent:
+            break
+        parent = next_parent
+    while True:
+        if parent.is_symlink():
+            raise OSError(f"durable log parent is a symbolic link: {parent}")
+        next_parent = parent.parent
+        if next_parent == parent:
+            break
+        parent = next_parent
+
+
+def _supports_anchored_log_open() -> bool:
+    return (
+        os.name != "nt"
+        and hasattr(os, "O_DIRECTORY")
+        and hasattr(os, "O_NOFOLLOW")
+        and os.open in getattr(os, "supports_dir_fd", set())
+        and os.mkdir in getattr(os, "supports_dir_fd", set())
+    )
+
+
+def _open_log_directory_at(parent: int, name: str) -> int:
+    """Open one directory component without following a replacement link."""
+    return os.open(
+        name,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        dir_fd=parent,
+    )
+
+
+def _open_log_parent(path: Path) -> tuple[int, str]:
+    """Return an anchored parent descriptor and final filename on POSIX."""
+    absolute = Path(os.path.abspath(path))
+    parts = absolute.parts
+    if not parts or parts[-1] in {"", os.path.sep}:
+        raise ValueError(f"durable log path must name a file: {path}")
+    descriptor = os.open(
+        os.path.sep,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    try:
+        for component in parts[1:-1]:
+            try:
+                child = _open_log_directory_at(descriptor, component)
+            except FileNotFoundError:
+                os.mkdir(component, 0o700, dir_fd=descriptor)
+                child = _open_log_directory_at(descriptor, component)
+            os.close(descriptor)
+            descriptor = child
+        return descriptor, parts[-1]
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _open_log_descriptor_legacy(path: Path, *, truncate: bool) -> int:
+    """Open a log on platforms without an ``openat``-style stdlib API."""
+    _validate_log_parent(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _validate_log_parent(path)
+    parent_metadata = os.stat(path.parent, follow_symlinks=False)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    append = 0 if truncate else getattr(os, "O_APPEND", 0)
+    binary = getattr(os, "O_BINARY", 0)
+    base_flags = (
+        os.O_WRONLY | getattr(os, "O_NONBLOCK", 0) | nofollow | append | binary
+    )
+    try:
+        descriptor = os.open(path, base_flags | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        descriptor = os.open(path, base_flags)
+    try:
+        _validate_log_parent(path)
+        current_parent = os.stat(path.parent, follow_symlinks=False)
+        if (parent_metadata.st_dev, parent_metadata.st_ino) != (
+            current_parent.st_dev, current_parent.st_ino,
+        ):
+            raise OSError(f"durable log parent changed during open: {path.parent}")
+        metadata = _validate_log_descriptor(descriptor, path)
+        target_metadata = os.stat(path, follow_symlinks=False)
+        if (metadata.st_dev, metadata.st_ino) != (
+            target_metadata.st_dev, target_metadata.st_ino,
+        ):
+            raise OSError(f"durable log target changed during open: {path}")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _open_log_descriptor(path: Path, *, truncate: bool) -> int:
+    """Open a single-link regular log, rejecting replaceable final symlinks.
+
+    Creation uses ``O_EXCL`` and existing files use ``O_NOFOLLOW`` where the
+    platform provides it.  The returned descriptor is the object that is
+    subsequently written; callers never reopen the predictable pathname.
+    """
+    parent_descriptor = -1
+    if _supports_anchored_log_open():
+        parent_descriptor, name = _open_log_parent(path)
+        nofollow = os.O_NOFOLLOW
+        append = 0 if truncate else getattr(os, "O_APPEND", 0)
+        binary = getattr(os, "O_BINARY", 0)
+        base_flags = (
+            os.O_WRONLY | getattr(os, "O_NONBLOCK", 0) | nofollow | append | binary
+        )
+        try:
+            try:
+                descriptor = os.open(
+                    name, base_flags | os.O_CREAT | os.O_EXCL, 0o600,
+                    dir_fd=parent_descriptor,
+                )
+            except FileExistsError:
+                descriptor = os.open(name, base_flags, dir_fd=parent_descriptor)
+        finally:
+            os.close(parent_descriptor)
+            parent_descriptor = -1
+    else:
+        descriptor = _open_log_descriptor_legacy(path, truncate=truncate)
+    try:
+        _validate_log_descriptor(descriptor, path)
+        if truncate:
+            os.ftruncate(descriptor, 0)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+        else:
+            os.lseek(descriptor, 0, os.SEEK_END)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def rotate_bounded_log(path: Path, backups: int) -> None:
+    """Rotate a log using an anchored parent directory when available."""
+    if backups < 1:
+        return
+    if _supports_anchored_log_open():
+        parent_descriptor, name = _open_log_parent(path)
+        try:
+            oldest = f"{name}.{backups}"
+            try:
+                os.unlink(oldest, dir_fd=parent_descriptor)
+            except FileNotFoundError:
+                pass
+            for index in range(backups - 1, 0, -1):
+                try:
+                    os.replace(
+                        f"{name}.{index}", f"{name}.{index + 1}",
+                        src_dir_fd=parent_descriptor, dst_dir_fd=parent_descriptor,
+                    )
+                except FileNotFoundError:
+                    pass
+            try:
+                os.replace(
+                    name, f"{name}.1",
+                    src_dir_fd=parent_descriptor, dst_dir_fd=parent_descriptor,
+                )
+            except FileNotFoundError:
+                pass
+        finally:
+            os.close(parent_descriptor)
+        return
+
+    # Older platforms lack the directory-descriptor operations above. Keep
+    # the compatibility path conservative: validate the parent before and
+    # after the short rotation sequence and refuse a changed directory.
+    _validate_log_parent(path)
+    try:
+        before = os.stat(path.parent, follow_symlinks=False)
+    except OSError:
+        before = None
+    oldest_path = path.with_name(f"{path.name}.{backups}")
+    try:
+        oldest_path.unlink()
+    except FileNotFoundError:
+        pass
+    for index in range(backups - 1, 0, -1):
+        source = path.with_name(f"{path.name}.{index}")
+        target = path.with_name(f"{path.name}.{index + 1}")
+        if source.exists():
+            os.replace(source, target)
+    if path.exists():
+        os.replace(path, path.with_name(f"{path.name}.1"))
+    _validate_log_parent(path)
+    if before is not None:
+        after = os.stat(path.parent, follow_symlinks=False)
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+            raise OSError(f"durable log parent changed during rotation: {path.parent}")
+
+
+class BoundedAppendWriter:
+    """Write one bounded, redacted durable log through one safe descriptor.
+
+    ``retain_suffix`` preserves the shell's historical tail behavior. The
+    default retains a prefix and writes one explicit marker when the byte
+    budget is reached. The descriptor remains owned by this object for the
+    entire invocation, so later appends cannot follow a replaced pathname.
+    """
+
+    def __init__(self, path: Path, *, max_bytes: int, truncation_marker: str = "",
+                 retain_suffix: bool = False, redaction_values: Iterable[str] = (),
+                 encoding: str = "utf-8", truncate: bool = True) -> None:
+        if max_bytes < 0:
+            raise ValueError("max_bytes must not be negative")
+        self.path = path
+        self.max_bytes = max_bytes
+        self.retain_suffix = retain_suffix
+        self.encoding = encoding
+        self._redaction_values = tuple(redaction_values)
+        self._marker = redact_secrets(
+            truncation_marker, self._redaction_values,
+        ).encode(encoding)
+        self._retained = bytearray()
+        self._truncated = False
+        self._closed = False
+        self._descriptor = _open_log_descriptor(path, truncate=truncate)
+        self._written_bytes = os.fstat(self._descriptor).st_size
+
+    @property
+    def truncated(self) -> bool:
+        return self._truncated
+
+    @property
+    def written_bytes(self) -> int:
+        return self._written_bytes
+
+    def _redact(self, data: bytes | str) -> bytes:
+        if isinstance(data, bytes):
+            text = data.decode(self.encoding, errors="replace")
+        else:
+            text = data
+        return redact_secrets(text, self._redaction_values).encode(self.encoding)
+
+    def _write_all(self, payload: bytes) -> None:
+        _validate_log_descriptor(self._descriptor, self.path)
+        view = memoryview(payload)
+        while view:
+            written = os.write(self._descriptor, view)
+            if written <= 0:
+                raise OSError("durable log write made no progress")
+            view = view[written:]
+        _validate_log_descriptor(self._descriptor, self.path)
+
+    def _rewrite_suffix(self) -> None:
+        payload = bytes(self._retained)
+        if self._truncated:
+            payload = self._marker + payload
+        os.lseek(self._descriptor, 0, os.SEEK_SET)
+        os.ftruncate(self._descriptor, 0)
+        self._write_all(payload[:self.max_bytes])
+        self._written_bytes = min(len(payload), self.max_bytes)
+
+    def write(self, data: bytes | str) -> int:
+        """Redact and write *data*, returning its original byte length."""
+        if self._closed:
+            raise ValueError("I/O operation on closed durable log")
+        payload = self._redact(data)
+        original_length = len(data.encode(self.encoding) if isinstance(data, str) else data)
+        if not payload:
+            return original_length
+        if self.retain_suffix:
+            if not self._truncated and self._written_bytes + len(payload) <= self.max_bytes:
+                self._write_all(payload)
+                self._written_bytes += len(payload)
+                self._retained.extend(payload)
+                return original_length
+            self._truncated = True
+            capacity = max(0, self.max_bytes - len(self._marker))
+            self._retained = bytearray((bytes(self._retained) + payload)[-capacity:])
+            self._rewrite_suffix()
+            return original_length
+        if self._truncated:
+            return original_length
+        available = self.max_bytes - len(self._marker) - self._written_bytes
+        if len(payload) <= max(0, available):
+            self._write_all(payload)
+            self._written_bytes += len(payload)
+            return original_length
+        if self._written_bytes + len(self._marker) <= self.max_bytes:
+            self._write_all(self._marker)
+            self._written_bytes += len(self._marker)
+        self._truncated = True
+        return original_length
+
+    def flush(self, *, sync: bool = False) -> None:
+        if self._closed:
+            return
+        _validate_log_descriptor(self._descriptor, self.path)
+        if sync:
+            os.fsync(self._descriptor)
+
+    def close(self, *, sync: bool = False) -> None:
+        if self._closed:
+            return
+        try:
+            self.flush(sync=sync)
+        finally:
+            os.close(self._descriptor)
+            self._closed = True
+
+    def __enter__(self) -> "BoundedAppendWriter":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.close()
 
 
 def _fsync_parent_directory(path: Path) -> None:
@@ -28,8 +354,11 @@ def _fsync_parent_directory(path: Path) -> None:
 
 
 def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8",
-                      redact: bool = True) -> None:
+                      redact: bool = True, extra_values: Iterable[str] = ()) -> None:
     """Optionally redact, then replace *path* after the complete write succeeds.
+
+    ``extra_values`` carries selected credentials whose environment names are
+    intentionally non-semantic and therefore cannot be inferred safely.
 
     A failed write or replacement leaves an existing destination untouched and
     removes the same-directory temporary file. This is the persistence
@@ -41,7 +370,7 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8",
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     if redact:
-        text = redact_secrets(text)
+        text = redact_secrets(text, extra_values=extra_values)
     temporary: str | None = None
     try:
         with tempfile.NamedTemporaryFile(

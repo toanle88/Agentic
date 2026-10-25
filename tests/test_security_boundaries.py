@@ -14,6 +14,9 @@ from agentic_runner import dashboard_data as agentic_dashboard_data
 from agentic_runner import openrouter as agentic_openrouter
 import agentic_runner.sandbox as agentic_sandbox
 import agentic_runner.execution_stream as execution_stream
+from agentic_runner import application_diagnostics as application_diagnostics
+from agentic_runner import persistence as persistence
+from agentic_runner import shell as agentic_shell
 from agentic_runner.openrouter_tools import _openrouter_tool_call
 from agentic_runner.execution_providers import (
     _read_provider_result,
@@ -25,13 +28,229 @@ from agentic_runner.config import PROVIDER_API_KEY_ENV, provider_process_environ
 from agentic_runner.sandbox import sandbox_command, validate_sandbox
 from agentic_runner.security import redact_secrets
 from agentic_runner.execution_stream import streamed_command
-from agentic_runner.persistence import atomic_write_text
+from agentic_runner.persistence import BoundedAppendWriter, atomic_write_text
+from agentic_runner.worktrees import default_state_dir, state_paths
 from agentic_runner.telemetry import record_issue_metadata, record_run_instruction, record_usage
 from agentic_runner.review import record_review_findings
 from agentic_runner.models import Issue, Run
 
 
 class ReadOnlyBoundaryTests(unittest.TestCase):
+    def test_bounded_append_writer_rejects_replaceable_log_targets(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            outside = root / "outside.log"
+            outside.write_text("outside\n", encoding="utf-8")
+            link = root / "link.log"
+            try:
+                link.symlink_to(outside)
+            except OSError as exc:
+                self.skipTest(f"symbolic links unavailable: {exc}")
+            with self.assertRaises(OSError):
+                BoundedAppendWriter(link, max_bytes=100)
+            hard_link = root / "hard-link.log"
+            hard_link.hardlink_to(outside)
+            with self.assertRaises(OSError):
+                BoundedAppendWriter(hard_link, max_bytes=100)
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside\n")
+
+    def test_bounded_append_writer_revalidates_descriptor_before_append(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = root / "output.log"
+            writer = BoundedAppendWriter(path, max_bytes=100)
+            try:
+                try:
+                    (root / "other.log").hardlink_to(path)
+                except OSError as exc:
+                    self.skipTest(f"hard links unavailable: {exc}")
+                with self.assertRaisesRegex(OSError, "hard-linked"):
+                    writer.write("must not append\n")
+            finally:
+                (root / "other.log").unlink(missing_ok=True)
+                writer.close()
+
+    def test_bounded_append_writer_is_nonblocking_for_special_files(self):
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("FIFO creation is unavailable")
+        with tempfile.TemporaryDirectory() as temp:
+            fifo = Path(temp) / "output.log"
+            os.mkfifo(fifo)
+            with self.assertRaises(OSError):
+                BoundedAppendWriter(fifo, max_bytes=100)
+
+    def test_bounded_append_writer_rejects_symlinked_parent_directory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            outside = root / "outside"
+            outside.mkdir()
+            redirected = root / "redirected"
+            try:
+                redirected.symlink_to(outside, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"directory symlinks unavailable: {exc}")
+            with self.assertRaises(OSError):
+                BoundedAppendWriter(redirected / "output.log", max_bytes=100)
+            self.assertFalse((outside / "output.log").exists())
+
+    def test_bounded_append_writer_anchors_parent_before_path_replacement(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            nested = base / "nested"
+            nested.mkdir()
+            outside = base / "outside"
+            outside.mkdir()
+            target = nested / "output.log"
+            original = persistence._open_log_directory_at
+
+            def replace_after_open(parent, name):
+                descriptor = original(parent, name)
+                if name == nested.name:
+                    nested.rename(base / "nested-original")
+                    try:
+                        nested.symlink_to(outside, target_is_directory=True)
+                    except OSError as exc:
+                        self.skipTest(f"directory symlinks unavailable: {exc}")
+                return descriptor
+
+            with patch.object(
+                persistence, "_open_log_directory_at", side_effect=replace_after_open,
+            ):
+                writer = BoundedAppendWriter(target, max_bytes=100)
+                writer.write("anchored\n")
+                writer.close()
+
+            self.assertEqual(
+                (base / "nested-original" / "output.log").read_text(encoding="utf-8"),
+                "anchored\n",
+            )
+            self.assertFalse((outside / "output.log").exists())
+
+    def test_legacy_log_open_rejects_parent_replacement_before_write(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            nested = base / "nested"
+            nested.mkdir()
+            outside = base / "outside"
+            outside.mkdir()
+            (outside / "output.log").write_text("outside\n", encoding="utf-8")
+            target = nested / "output.log"
+            original_open = persistence.os.open
+
+            def replace_before_open(path, flags, *args, **kwargs):
+                if Path(path) == target:
+                    nested.rename(base / "nested-original")
+                    try:
+                        nested.symlink_to(outside, target_is_directory=True)
+                    except OSError as exc:
+                        self.skipTest(f"directory symlinks unavailable: {exc}")
+                return original_open(path, flags, *args, **kwargs)
+
+            with patch.object(persistence, "_supports_anchored_log_open", return_value=False), \
+                 patch.object(persistence.os, "open", side_effect=replace_before_open):
+                with self.assertRaises(OSError):
+                    BoundedAppendWriter(target, max_bytes=100)
+
+            self.assertEqual(
+                (outside / "output.log").read_text(encoding="utf-8"),
+                "outside\n",
+            )
+
+    def test_diagnostic_rotation_does_not_follow_replaceable_backup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            outside = root / "outside.log"
+            outside.write_text("outside\n", encoding="utf-8")
+            diagnostic = root / "agentic.log"
+            diagnostic.write_text("old\n" * 200, encoding="utf-8")
+            backup = root / "agentic.log.1"
+            try:
+                backup.symlink_to(outside)
+            except OSError as exc:
+                self.skipTest(f"symbolic links unavailable: {exc}")
+
+            with patch.object(application_diagnostics, "DIAGNOSTIC_MAX_BYTES", 700):
+                application_diagnostics._append_line(diagnostic, "new")
+
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside\n")
+            self.assertEqual(
+                diagnostic.with_name("agentic.log.1").read_text(encoding="utf-8"),
+                "old\n" * 200,
+            )
+            self.assertEqual(diagnostic.read_text(encoding="utf-8"), "new\n")
+
+    def test_bounded_append_writer_redacts_configured_nonsemantic_credentials(self):
+        value = "service-value-secret-123456"
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "output.log"
+            writer = BoundedAppendWriter(
+                path, max_bytes=200, redaction_values=[value],
+            )
+            writer.write(f"token={value}\n")
+            writer.close()
+            saved = path.read_text(encoding="utf-8")
+        self.assertNotIn(value, saved)
+        self.assertIn("[REDACTED]", saved)
+
+    def test_bounded_append_writer_uses_binary_open_flags_for_byte_bounds(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "output.log"
+            real_open = os.open
+            binary_flag = 1 << 60
+            observed_flags = []
+
+            def open_without_synthetic_binary(path_arg, flags, *args, **kwargs):
+                observed_flags.append(flags)
+                return real_open(path_arg, flags & ~binary_flag, *args, **kwargs)
+
+            with patch.object(persistence.os, "O_BINARY", binary_flag, create=True), \
+                 patch.object(
+                     persistence.os, "open", side_effect=open_without_synthetic_binary,
+                 ):
+                writer = BoundedAppendWriter(path, max_bytes=3)
+                writer.write("a\n")
+                writer.write("b\n")
+                writer.close()
+
+            self.assertTrue(any(flags & binary_flag for flags in observed_flags))
+            self.assertLessEqual(len(path.read_bytes()), 3)
+
+    def test_state_directory_rejects_group_writable_posix_roots(self):
+        if os.name == "nt":
+            self.skipTest("POSIX ownership and mode policy is not portable on Windows")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "state"
+            root.mkdir(mode=0o700)
+            root.chmod(0o777)
+            with self.assertRaisesRegex(ValueError, "group/other writable"):
+                state_paths(Path(temp), root)
+
+    def test_state_directory_accepts_a_private_state_root(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "state"
+            root.mkdir(mode=0o700)
+            paths = state_paths(Path(temp), root)
+            self.assertFalse(paths.root.exists())
+            if os.name != "nt":
+                self.assertEqual(root.stat().st_mode & 0o077, 0)
+
+    def test_state_directory_rejects_configured_symlink_root(self):
+        if os.name == "nt":
+            self.skipTest("symlink policy is not portable on Windows")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target"
+            target.mkdir()
+            configured = root / "configured"
+            try:
+                configured.symlink_to(target, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"directory symlinks unavailable: {exc}")
+            with patch.dict("os.environ", {"AGENTIC_STATE_DIR": str(configured)}, clear=False):
+                self.assertEqual(default_state_dir(), configured)
+                with self.assertRaisesRegex(ValueError, "symbolic link"):
+                    state_paths(root, None)
+
     def test_provider_result_reader_stays_on_open_parent_when_directory_is_replaced(self):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
@@ -147,6 +366,90 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
             self.assertNotIn(value, message)
             for path in (root / "review.txt", root / "review.log", root / "review.jsonl"):
                 self.assertNotIn(value, path.read_text(encoding="utf-8"))
+
+    def test_configured_service_value_is_redacted_across_durable_artifacts(self):
+        value = "service-value-cross-artifact-123456"
+        with tempfile.TemporaryDirectory() as temp, patch.dict(
+            "os.environ", {"SERVICE_VALUE": value}, clear=True
+        ):
+            root = Path(temp)
+            config = root / "agent_config.json"
+            config.write_text(
+                json.dumps({"developer_agent": {"api_key_env": "SERVICE_VALUE"}}),
+                encoding="utf-8",
+            )
+
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), config=config,
+                session_dir=root / "shell", state_dir=root / "state",
+            )
+            with patch.object(agentic_shell, "_shell_print"):
+                job = shell._launch([
+                    sys.executable, "-c",
+                    "import os; print('shell-token=' + os.environ['SERVICE_VALUE'])",
+                ])
+            job.process.wait(timeout=10)
+            if job.log_thread is not None:
+                job.log_thread.join(timeout=10)
+
+            provider_script = root / "provider.py"
+            provider_script.write_text(
+                "import json, os\n"
+                "print(json.dumps({'type': 'message', 'content': "
+                "'provider-token=' + os.environ['ANTHROPIC_API_KEY']}), flush=True)\n",
+                encoding="utf-8",
+            )
+            with patch(
+                "agentic_execution.cli_provider_command",
+                return_value=([sys.executable, str(provider_script)], True),
+            ):
+                ok, provider_message = agentic_execution.run_cli_provider(
+                    root, "review", output=root / "provider.txt", provider="claude",
+                    readonly=False, api_key_env="SERVICE_VALUE", timeout=10,
+                )
+            self.assertTrue(ok)
+            self.assertNotIn(value, provider_message)
+
+            with (
+                patch.dict(agentic.os.environ, {"SERVICE_VALUE": value}, clear=True),
+                patch(
+                    "agentic_openrouter._openrouter_request",
+                    return_value={"choices": [{"message": {
+                        "role": "assistant", "content": f"router-token={value}",
+                    }}]},
+                ),
+            ):
+                ok, message = agentic.run_openrouter(
+                    root, "prompt", output=root / "router.txt", model="openai/test",
+                    api_key_env="SERVICE_VALUE",
+                )
+            self.assertTrue(ok)
+            self.assertNotIn(value, message)
+
+            diagnostic = application_diagnostics.record_diagnostic(
+                "handled_error", argv=[
+                    "--config", str(config), "--repo", str(root),
+                    "--state-dir", str(root / "state"),
+                ], entrypoint=f"diagnostic-token={value}",
+                repo=root, state_dir=root / "state",
+            )
+            self.assertEqual(diagnostic, application_diagnostics.diagnostic_path(
+                root, root / "state",
+            ))
+
+            artifact_paths = [
+                job.log_path,
+                root / "provider.txt",
+                root / "provider.log",
+                root / "provider.jsonl",
+                root / "router.txt",
+                root / "router.log",
+                root / "router.jsonl",
+                diagnostic,
+            ]
+            for path in artifact_paths:
+                self.assertTrue(path.exists(), path)
+                self.assertNotIn(value, path.read_text(encoding="utf-8"), path)
 
     def test_native_readonly_providers_use_a_protected_file_free_view(self):
         value = 'native-review-secret-123456'

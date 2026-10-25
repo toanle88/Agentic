@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import Issue, Run
+from .persistence import BoundedAppendWriter
 from .output import (
     is_transient_progress,
     paint,
@@ -73,22 +74,17 @@ def _stop_process_tree(process: subprocess.Popen[Any]) -> None:
 
 def _append_bounded_human_log(path: Path, text: str) -> bool:
     """Append one human-log entry without exceeding the durable byte budget."""
-    encoded = text.encode("utf-8")
-    marker = HUMAN_LOG_TRUNCATION_MARKER.encode("utf-8")
     try:
-        current = path.stat().st_size
-        if current >= MAX_HUMAN_LOG_BYTES:
-            return False
-        if current + len(encoded) <= MAX_HUMAN_LOG_BYTES - len(marker):
-            with path.open("ab") as stream:
-                stream.write(encoded)
-                stream.flush()
-            return True
-        if current + len(marker) <= MAX_HUMAN_LOG_BYTES:
-            with path.open("ab") as stream:
-                stream.write(marker)
-                stream.flush()
-        return False
+        writer = BoundedAppendWriter(
+            path, max_bytes=MAX_HUMAN_LOG_BYTES,
+            truncation_marker=HUMAN_LOG_TRUNCATION_MARKER, truncate=False,
+        )
+        try:
+            before = writer.written_bytes
+            writer.write(text)
+            return writer.written_bytes > before
+        finally:
+            writer.close()
     except OSError:
         return False
 
@@ -608,13 +604,29 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
             pass
         else:
             raise ValueError("provider output directory must be outside durable run state")
-    raw_file = None
+    raw_writer = None
     human_log = None
     proc = None
     try:
         raw_path = log_file.with_suffix(".jsonl") if codex_json else None
-        raw_file = raw_path.open("w", encoding="utf-8") if raw_path else None
-        human_log = log_file.open("w", encoding="utf-8", buffering=1)
+        values = redaction_values or ()
+        raw_writer = (
+            BoundedAppendWriter(
+                raw_path, max_bytes=MAX_RAW_LOG_BYTES,
+                truncation_marker=json.dumps({
+                    "type": "agentic_stream_truncated",
+                    "stream": "provider_jsonl",
+                    "reason": "artifact_size_limit",
+                }) + "\n",
+                redaction_values=values,
+            )
+            if raw_path else None
+        )
+        human_log = BoundedAppendWriter(
+            log_file, max_bytes=MAX_HUMAN_LOG_BYTES,
+            truncation_marker=HUMAN_LOG_TRUNCATION_MARKER,
+            redaction_values=values,
+        )
         process_argv = sandbox_command(
             argv, cwd, sandbox, output_root=output_root, read_only=sandbox_read_only,
             pass_env=sandbox_pass_env, env=env,
@@ -627,16 +639,16 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
     except OSError as exc:
         if human_log is not None:
             human_log.close()
-        if raw_file is not None:
-            raw_file.close()
+        if raw_writer is not None:
+            raw_writer.close()
         if invocation_temp is not None:
             invocation_temp.cleanup()
         raise RuntimeError(f"Could not start {argv[0]!r}: {exc}") from exc
     except Exception:
         if human_log is not None:
             human_log.close()
-        if raw_file is not None:
-            raw_file.close()
+        if raw_writer is not None:
+            raw_writer.close()
         if invocation_temp is not None:
             invocation_temp.cleanup()
         raise
@@ -716,29 +728,21 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                     _console_print(rendered, flush=True)
                 if persist:
                     entry = formatted + "\n"
-                    encoded = entry.encode("utf-8")
-                    marker = HUMAN_LOG_TRUNCATION_MARKER.encode("utf-8")
                     if not human_log_truncated:
-                        if human_log.tell() + len(encoded) <= MAX_HUMAN_LOG_BYTES - len(marker):
-                            human_log.write(entry)
-                            human_log.flush()
-                        else:
-                            human_log.write(HUMAN_LOG_TRUNCATION_MARKER)
-                            human_log.flush()
-                            human_log_truncated = True
+                        human_log.write(entry)
+                        human_log_truncated = human_log.truncated
                 last_notice = time.monotonic()
 
             def write_raw(line: str) -> None:
                 nonlocal raw_bytes, raw_log_truncated
-                if raw_file is None or raw_log_truncated:
+                if raw_writer is None or raw_log_truncated:
                     return
                 encoded = line.encode("utf-8")
                 if raw_bytes + len(encoded) > MAX_RAW_LOG_BYTES - MAX_RAW_TRUNCATION_MARKER_BYTES:
                     raw_log_truncated = True
                     return
-                raw_file.write(line)
-                raw_file.flush()
-                raw_bytes += len(encoded)
+                raw_writer.write(line)
+                raw_bytes = raw_writer.written_bytes
 
             display(f"Started (PID {proc.pid}); progress log: {log_file}", style_status_tokens=True)
             while True:
@@ -809,12 +813,9 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                     "raw_log_truncated": raw_log_truncated,
                     "human_log_truncated": human_log_truncated,
                 }) + "\n"
-                if raw_file:
-                    encoded = marker.encode("utf-8")
-                    if raw_bytes + len(encoded) <= MAX_RAW_LOG_BYTES:
-                        raw_file.write(marker)
-                        raw_file.flush()
-                        raw_bytes += len(encoded)
+                if raw_writer:
+                    raw_writer.write(marker)
+                    raw_bytes = raw_writer.written_bytes
                 display(
                     "Output truncated: "
                     f"{dropped_lines} queued line(s) dropped"
@@ -864,8 +865,8 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
         reader_thread.join(timeout=STREAM_READER_JOIN_TIMEOUT)
         if human_log:
             human_log.close()
-        if raw_file:
-            raw_file.close()
+        if raw_writer:
+            raw_writer.close()
         if invocation_temp is not None:
             invocation_temp.cleanup()
     return subprocess.CompletedProcess(argv, proc.returncode if not timed_out else 124, stdout=tail)
