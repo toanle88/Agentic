@@ -35,6 +35,46 @@ ruff check .
 pyright
 ```
 
+## CI verification and branch protection
+
+The CI workflow has a weekly scheduled run (`17 3 * * 1`) in addition to
+pull-request, `main`, and manual triggers. Every job has an explicit timeout.
+The hosted runner labels remain `ubuntu-latest` and `windows-latest`; this is an
+intentional, accepted image-drift policy because GitHub maintains those labels.
+The weekly run is the drift detector for the runner image, Python, and tooling
+updates. Pinning a runner image should be reconsidered when the supported
+Python or Git behavior requires it.
+
+CI installs the following exact tool versions. The build backend is pinned in
+`[build-system]`, and the remaining tools are pinned in the `dev` optional
+dependency group in `pyproject.toml`:
+
+- `setuptools==84.0.0` for the package build backend;
+- `build==1.6.1` for wheel and source-distribution builds;
+- `coverage==7.6.10` for measurement and reporting;
+- `ruff==0.17.2` and `pyright==1.1.414` for static checks.
+
+Coverage measures only `src/agentic_runner` and fails below the approved 70%
+line-coverage baseline (`coverage report --fail-under=70`). The baseline is the
+initial guardrail established for Issue #243; any increase should be based on a
+successful scheduled-run measurement and recorded in the same pull request.
+The coverage job uploads `coverage.xml` and the HTML report for 14 days, even
+when the threshold check fails.
+
+Configure branch protection to require these exact CI and CodeQL check names:
+
+- `Test (Python 3.10)`, `Test (Python 3.11)`, `Test (Python 3.12)`,
+  `Test (Python 3.13)`, and `Test (Python 3.14)`;
+- `Native Windows (Python 3.12)`;
+- `Build package`, `Lint (Ruff)`, `Coverage (Python 3.12)`,
+  `Docker sandbox integration`; and
+- `Analyze Python`.
+
+The release workflow is protected separately by its `release` environment and
+is not a pull-request branch-protection check. Repository administrators must
+confirm these names in the branch-protection UI after workflow changes because
+GitHub stores required checks as repository settings, not in this repository.
+
 Build the source distribution and wheel:
 
 ```bash

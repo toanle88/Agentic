@@ -5,6 +5,8 @@ on:
     branches: [main]
   push:
     branches: [main]
+  schedule:
+    - cron: "17 3 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -17,6 +19,7 @@ concurrency:
 jobs:
   test:
     name: Test (Python ${{ matrix.python-version }})
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -38,6 +41,7 @@ jobs:
 
   windows:
     name: Native Windows (Python 3.12)
+    timeout-minutes: 30
     runs-on: windows-latest
     steps:
       - name: Check out source
@@ -84,6 +88,7 @@ jobs:
 
   package:
     name: Build package
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
@@ -93,7 +98,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install build tooling
-        run: python -m pip install --upgrade build
+        run: python -m pip install --upgrade "build==1.6.1"
       - name: Build sdist and wheel
         run: python -m build
       - name: Install wheel in a clean environment
@@ -110,9 +115,25 @@ jobs:
             "$RUNNER_TEMP/agentic-smoke/bin/agentic" doctor --help
             "$RUNNER_TEMP/agentic-smoke/bin/python" -c 'import agentic_runner; print(agentic_runner.__version__)'
           )
+      - name: Install sdist in a clean environment
+        run: |
+          python -m venv "$RUNNER_TEMP/agentic-sdist-smoke"
+          "$RUNNER_TEMP/agentic-sdist-smoke/bin/python" -m pip install --upgrade "setuptools==84.0.0"
+          "$RUNNER_TEMP/agentic-sdist-smoke/bin/python" -m pip install --no-deps --no-build-isolation dist/*.tar.gz
+          (
+            cd "$RUNNER_TEMP"
+            "$RUNNER_TEMP/agentic-sdist-smoke/bin/agentic" --version
+            "$RUNNER_TEMP/agentic-sdist-smoke/bin/agentic" --help
+            "$RUNNER_TEMP/agentic-sdist-smoke/bin/agentic-shell" --help
+            "$RUNNER_TEMP/agentic-sdist-smoke/bin/agentic-dashboard" --help
+            "$RUNNER_TEMP/agentic-sdist-smoke/bin/agentic" init --help
+            "$RUNNER_TEMP/agentic-sdist-smoke/bin/agentic" doctor --help
+            "$RUNNER_TEMP/agentic-sdist-smoke/bin/python" -c 'import agentic_runner; print(agentic_runner.__version__)'
+          )
 
   lint:
     name: Lint (Ruff)
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
@@ -122,7 +143,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install static checkers
-        run: python -m pip install --upgrade "ruff>=0.8" "pyright>=1.1.390"
+        run: python -m pip install --upgrade "ruff==0.17.2" "pyright==1.1.414"
       - name: Run Ruff
         run: ruff check .
       - name: Run Pyright
@@ -130,6 +151,7 @@ jobs:
 
   coverage:
     name: Coverage (Python 3.12)
+    timeout-minutes: 25
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
@@ -139,14 +161,27 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install coverage
-        run: python -m pip install --upgrade coverage
+        run: python -m pip install --upgrade "coverage==7.6.10"
       - name: Run tests with coverage
         run: |
           coverage run --source=src/agentic_runner -m unittest discover -s tests -q
-          coverage report -m
+          coverage xml -o coverage.xml
+          coverage html -d htmlcov
+          coverage report --fail-under=70 -m
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-report
+          path: |
+            coverage.xml
+            htmlcov/
+          if-no-files-found: ignore
+          retention-days: 14
 
   sandbox:
     name: Docker sandbox integration
+    timeout-minutes: 25
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
