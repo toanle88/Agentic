@@ -547,9 +547,13 @@ def can_resume_dirty_worktree(
         if not isinstance(item, dict):
             continue
         if item.get("event") == "repair_started":
+            raw_pr: object = item.get("pr")
+            if isinstance(raw_pr, bool) or not isinstance(raw_pr, (int, str)):
+                matching_start = False
+                continue
             try:
                 matching_start = (
-                    int(item.get("pr")) == pr_number
+                    int(raw_pr) == pr_number
                     and item.get("branch") == branch
                     and item.get("head_sha") == head_sha
                     and Path(str(item.get("worktree"))).expanduser().resolve() == worktree.resolve()
