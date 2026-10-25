@@ -434,42 +434,55 @@ class GitTest(_GitRepositoryTestCase):
         self.assertIn('an Agentic job is still active', output.getvalue())
 
 
-    def test_discard_fails_closed_when_active_job_is_older_than_record_bound(self):
+    def test_discard_removes_dirty_worktree_with_more_than_256_finished_job_records(self):
         state_dir = self.repo.parent / 'old-job-state'
         run = agentic.create_worktree(self.repo, 'main', 24, state_dir)
         (run.worktree / 'dirty.txt').write_text('keep me\n')
-        folder = agentic.logs_path(self.repo, run, state_dir)
-        token = 'old-active-job-token'
-        (folder / 'run.json').write_text(json.dumps({'shell_job_id': token}) + '\n')
         shell_dir = agentic.state_paths(self.repo, state_dir).shell
-        old_record = {
-            'argv': ['agentic', '--issue', '24'],
-            'pid': os.getpid(),
-            'state': 'running',
-            'identity': process_identity(os.getpid()),
-            'shell_job_id': token,
-        }
-        (shell_dir / 'job-001.json').write_text(json.dumps(old_record) + '\n')
-        for number in range(2, agentic._CLEANUP_JOB_RECORD_LIMIT + 2):
+        for number in range(1, 258):
             (shell_dir / f'job-{number:03d}.json').write_text(
                 json.dumps({'state': 'finished'}) + '\n'
             )
 
-        with patch('sys.stdout', new_callable=StringIO) as output:
-            self.assertEqual(
-                agentic.cleanup(
-                    self.repo, issue=24, confirm=True, discard=True, state_dir=state_dir,
-                ),
-                0,
-            )
-        self.assertTrue(run.worktree.is_dir())
-        self.assertIn('an Agentic job is still active', output.getvalue())
+        self.assertEqual(
+            agentic.cleanup(
+                self.repo, issue=24, confirm=True, discard=True, state_dir=state_dir,
+            ),
+            0,
+        )
+        self.assertFalse(run.worktree.exists())
+
+
+    def test_discard_ignores_an_unrelated_active_persisted_shell_job(self):
+        state_dir = self.repo.parent / 'unrelated-job-state'
+        run = agentic.create_worktree(self.repo, 'main', 27, state_dir)
+        (run.worktree / 'dirty.txt').write_text('discard me\n')
+        shell_dir = agentic.state_paths(self.repo, state_dir).shell
+        (shell_dir / 'job-001.json').write_text(json.dumps({
+            'argv': ['agentic', '--issue', '999'],
+            'pid': os.getpid(),
+            'state': 'running',
+            'identity': process_identity(os.getpid()),
+            'shell_job_id': 'unrelated-active-job-token',
+        }) + '\n')
+
+        self.assertEqual(
+            agentic.cleanup(
+                self.repo, issue=27, confirm=True, discard=True, state_dir=state_dir,
+            ),
+            0,
+        )
+        self.assertFalse(run.worktree.exists())
 
 
     def test_discard_fails_closed_when_persisted_job_record_is_unreadable(self):
         state_dir = self.repo.parent / 'unreadable-job-state'
         run = agentic.create_worktree(self.repo, 'main', 25, state_dir)
         (run.worktree / 'dirty.txt').write_text('keep me\n')
+        folder = agentic.logs_path(self.repo, run, state_dir)
+        (folder / 'run.json').write_text(json.dumps({
+            'shell_job_id': 'unreadable-active-job-token',
+        }) + '\n')
         shell_dir = agentic.state_paths(self.repo, state_dir).shell
         (shell_dir / 'job-001.json').write_text('{incomplete\n')
 
