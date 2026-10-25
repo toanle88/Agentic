@@ -1085,6 +1085,10 @@ class InteractiveInputTests(unittest.TestCase):
             ['--json'],
         )
         self.assertEqual(
+            agentic_shell._completion_candidates('/cleanup --d'),
+            ['--discard'],
+        )
+        self.assertEqual(
             agentic_shell._completion_candidates('/stop '),
             ['--all'],
         )

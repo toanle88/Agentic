@@ -64,7 +64,7 @@ class PackagingTests(unittest.TestCase):
                 self.assertIn("agentic_runner/__init__.py", names)
                 self.assertIn("agentic_runner/cli.py", names)
                 metadata = archive.read(next(name for name in names if name.endswith("METADATA"))).decode()
-            self.assertIn("Version: 1.1.106", metadata)
+            self.assertIn("Version: 1.1.107", metadata)
 
             extracted = folder / "installed"
             with zipfile.ZipFile(wheels[0]) as archive:
@@ -112,7 +112,7 @@ class PackagingTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(probe.returncode, 0, probe.stderr)
-        self.assertEqual(probe.stdout.strip(), "1.1.106")
+        self.assertEqual(probe.stdout.strip(), "1.1.107")
 
 
 if __name__ == "__main__":
