@@ -589,6 +589,15 @@ provider filters apply across the views. Severity options are BLOCKER, CRITICAL,
 MAJOR, HIGH, MEDIUM, MINOR, LOW, UNSPECIFIED, and no finding. Token usage
 additionally supports all-time, 24-hour, 7-day, and 30-day periods.
 
+Runs, Logs, Token usage, and Issues use bounded client-side pages of 25
+matching records. Each view initially renders its newest page and shows a
+Load more control with the current/total count when older matches exist.
+Global filters and search apply before paging and reset the view to its first
+page, so older matching records remain reachable without rendering the entire
+history. The generated HTML still contains the bounded,
+self-contained snapshot required for file:// dashboards; --serve continues
+to regenerate that snapshot on refresh.
+
 The Issues view groups the locally recorded issue/task runs, shows the persisted
 GitHub issue title and state when available, plus latest derived run status,
 branch, and linked Agentic worktree. New runs persist bounded issue metadata at

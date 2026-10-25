@@ -762,6 +762,20 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("state.tokenSort===\"newest\"?-1:1", html)
         self.assertIn("document.querySelector(\"#token-sort\").addEventListener", html)
 
+    def test_dashboard_token_alignment_and_bounded_view_pagination_contract(self):
+        html = agentic_dashboard.render_dashboard([], "demo", ".demo-agent-runs")
+        self.assertIn(".numeric{font-variant-numeric:tabular-nums;text-align:right}", html)
+        self.assertIn('<th class="numeric">Tokens</th>', html)
+        self.assertIn('<td class="numeric">', html)
+        self.assertIn("var PAGE_SIZE=25", html)
+        self.assertIn("function pageItems(items,view)", html)
+        self.assertIn("function pagination(view,total,shown)", html)
+        self.assertIn("data-load-more=\"'+view+'\"", html)
+        for view in ("runs", "logs", "tokens", "issues"):
+            self.assertIn(f'pagination("{view}"', html)
+        self.assertIn("resetPages()", html)
+        self.assertIn('state.pages[loadMore.getAttribute("data-load-more")]+=1', html)
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for the dashboard JavaScript regression")
     def test_dashboard_token_sort_orders_newest_and_ties_by_run_id(self):
         html = agentic_dashboard.render_dashboard([], "demo", ".demo-agent-runs")
