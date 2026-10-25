@@ -1162,21 +1162,27 @@ class AgenticShell:
                 patch_stream = PatchSummaryStream()
                 concise = ConciseLogStream() if not verbose else None
                 noninteractive_status_emitted = False
+                interactive = _is_interactive_terminal()
 
                 def show_progress(progress: str | None) -> None:
                     """Keep one live status visible when no TTY can replace it."""
                     nonlocal noninteractive_status_emitted
                     if not progress:
                         return
-                    if _is_interactive_terminal():
+                    if interactive:
                         _shell_write_transient(progress)
                     elif not noninteractive_status_emitted:
                         _shell_print(progress, style_status_tokens=False, flush=True)
                         noninteractive_status_emitted = True
 
+                def take_progress() -> str | None:
+                    if interactive:
+                        return concise.take_transient() if concise is not None else None
+                    return concise.take_first_transient() if concise is not None else None
+
                 if concise is not None:
                     initial = concise.feed(initial)
-                    show_progress(concise.take_transient())
+                    show_progress(take_progress())
                 _shell_print(
                     _tail_from_text(initial, lines, verbose=True),
                     style_status_tokens=False,
@@ -1193,7 +1199,7 @@ class AgenticShell:
                     if chunk:
                         if concise is not None:
                             chunk = concise.feed(chunk)
-                            show_progress(concise.take_transient())
+                            show_progress(take_progress())
                         if not chunk:
                             continue
                         _shell_write_log(chunk, patch_stream=patch_stream)
@@ -1207,7 +1213,7 @@ class AgenticShell:
                 chunk = stream.read()
                 if concise is not None:
                     chunk = concise.feed(chunk) + concise.flush()
-                    show_progress(concise.take_transient())
+                    show_progress(take_progress())
                 _shell_clear_transient()
                 if chunk:
                     _shell_write_log(chunk, patch_stream=patch_stream, final=True)
