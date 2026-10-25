@@ -13,15 +13,18 @@ from agentic_runner.ci_repair import (
     CIEvidence,
     MAX_CI_OUTPUT_BYTES,
     MAX_CI_LOG_OUTPUT_BYTES,
+    can_resume_dirty_worktree,
     classify_failure,
     fetch_ci_evidence,
     find_worktree_for_branch,
     poll_ci,
     record_event,
+    stash_dirty_worktree_for_repair,
     validate_repair_limits,
     verify_worktree_for_pr,
+    worktree_change_fingerprint,
 )
-from agentic_runner.models import PullRequest
+from agentic_runner.models import PullRequest, Run
 from agentic_runner.config import load_config
 from agentic_runner.worktrees import command as run_bounded_command, get_pull_request
 
@@ -291,6 +294,114 @@ class CIRepairTests(unittest.TestCase):
             values = iter([self.pr.head, "head", " M unrelated.py"])
             with self.assertRaisesRegex(RuntimeError, "dirty"):
                 verify_worktree_for_pr(run, self.pr, run_git=lambda *_: next(values))
+            values = iter([self.pr.head, "head", " M agentic.py"])
+            verify_worktree_for_pr(
+                run, self.pr, allow_dirty=True, run_git=lambda *_: next(values),
+            )
+
+    def test_dirty_worktree_resume_requires_matching_previous_failed_repair(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / "run"
+            folder.mkdir()
+            worktree = Path(temp) / "worktree"
+            worktree.mkdir()
+            record_event(folder, {
+                "event": "repair_started", "pr": self.pr.number,
+                "branch": self.pr.head, "head_sha": self.pr.head_sha,
+                "worktree": str(worktree),
+            })
+            record_event(folder, {
+                "event": "repair_attempt", "attempt": 1, "completed": False,
+                "dirty_fingerprint": "fingerprint-1",
+            })
+            self.assertTrue(can_resume_dirty_worktree(
+                folder, self.pr.number, self.pr.head, self.pr.head_sha, worktree,
+                current_fingerprint="fingerprint-1",
+            ))
+            self.assertFalse(can_resume_dirty_worktree(
+                folder, self.pr.number, self.pr.head, self.pr.head_sha, worktree,
+                current_fingerprint="fingerprint-2",
+            ))
+            self.assertFalse(can_resume_dirty_worktree(
+                folder, self.pr.number + 1, self.pr.head, self.pr.head_sha, worktree,
+                current_fingerprint="fingerprint-1",
+            ))
+
+    def test_dirty_worktree_resume_rejects_legacy_failed_repair_records(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / "run"
+            folder.mkdir()
+            worktree = Path(temp) / "worktree"
+            worktree.mkdir()
+            record_event(folder, {
+                "event": "repair_started", "pr": self.pr.number,
+                "branch": self.pr.head, "head_sha": self.pr.head_sha,
+                "worktree": str(worktree),
+            })
+            record_event(folder, {
+                "event": "repair_attempt", "attempt": 1, "completed": False,
+            })
+            self.assertFalse(can_resume_dirty_worktree(
+                folder, self.pr.number, self.pr.head, self.pr.head_sha, worktree,
+                current_fingerprint="fingerprint-1",
+            ))
+
+    def test_worktree_change_fingerprint_includes_untracked_content(self):
+        with tempfile.TemporaryDirectory() as temp:
+            worktree = Path(temp) / "worktree"
+            worktree.mkdir()
+            untracked = worktree / "new.py"
+            untracked.write_text("one\n")
+            responses = {
+                ("status", "--porcelain=v1", "--untracked-files=all"): "?? new.py",
+                ("diff", "HEAD", "--binary", "--no-ext-diff", "--no-textconv"): "",
+                ("ls-files", "--others", "--exclude-standard", "-z"): "new.py\0",
+            }
+
+            def fake_git(path, *args, **kwargs):
+                return responses[args]
+
+            first = worktree_change_fingerprint(worktree, run_git=fake_git)
+            untracked.write_text("two\n")
+            second = worktree_change_fingerprint(worktree, run_git=fake_git)
+            self.assertIsNotNone(first)
+            self.assertNotEqual(first, second)
+
+    def test_worktree_change_fingerprint_bounds_total_untracked_content(self):
+        with tempfile.TemporaryDirectory() as temp, patch(
+            "agentic_runner.ci_repair.MAX_REPAIR_FINGERPRINT_INPUT_BYTES", 5,
+        ):
+            worktree = Path(temp) / "worktree"
+            worktree.mkdir()
+            (worktree / "a").write_text("1234")
+            (worktree / "b").write_text("5678")
+            responses = {
+                ("status", "--porcelain=v1", "--untracked-files=all"): "?? a\n?? b",
+                ("diff", "HEAD", "--binary", "--no-ext-diff", "--no-textconv"): "",
+                ("ls-files", "--others", "--exclude-standard", "-z"): "a\0b\0",
+            }
+
+            def fake_git(path, *args, **kwargs):
+                return responses[args]
+
+            self.assertIsNone(worktree_change_fingerprint(worktree, run_git=fake_git))
+
+    def test_clean_repair_stashes_changes_and_requires_clean_result(self):
+        worktree = Path("/tmp/pr-repair-worktree")
+        run = Run(None, self.pr.head, worktree)
+        calls = []
+
+        def fake_git(path, *args, **kwargs):
+            calls.append((path, args, kwargs))
+            return ""
+
+        stash_dirty_worktree_for_repair(run, 123, run_git=fake_git)
+        self.assertEqual(calls[0][0], worktree)
+        self.assertEqual(
+            calls[0][1],
+            ("stash", "push", "--include-untracked", "--message", "Agentic CI repair --clean PR #123"),
+        )
+        self.assertEqual(calls[1][1], ("status", "--porcelain", "--untracked-files=all"))
 
     def test_poll_ci_is_bounded_and_reports_pass_fail_timeout(self):
         responses = iter([

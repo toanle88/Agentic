@@ -203,6 +203,7 @@ agentic --issue 119 --mark-done                     # optional reason is recorde
 agentic --issue 119 --mark-done --reason "Human reviewed; remaining finding is out of scope"
 agentic --issue 119 --publish             # offer draft-PR publication for the approved patch
 agentic --pr 123 --repair-ci              # repair failed CI on an existing PR
+agentic --pr 123 --repair-ci --clean      # stash the dirty patch and start fresh
 agentic --issue 119 --new                 # explicitly create a second worktree
 agentic audit                              # read-only audit with durable logs/report
 agentic audit --resume                      # reuse an existing audit report
@@ -216,11 +217,16 @@ publication skips offline runs, missing GitHub targets/access, and incomplete
 durable state. Existing remote objects and a local publication record make
 retries idempotent; failures retain the run for manual `--publish` retry.
 
-CI repair is opt-in and reuses only the existing PR worktree. It requires a
-clean worktree at the current PR head, runs configured checks and read-only
-review before pushing, and records bounded CI evidence and outcomes. The
-default `automation.auto_publish: false` asks before committing and pushing;
-`true` also authorizes an eligible guarded same-branch CI-repair push.
+CI repair is opt-in and reuses only the existing PR worktree. A new repair
+requires a clean worktree at the current PR head; a later invocation can
+resume a patch preserved by a previous failed Agentic repair when its durable
+PR, branch, head, and worktree records match. Use `--clean` when a fresh
+repair is wanted; it moves the dirty changes, including untracked files, to a
+Git stash before continuing. Repair records created before content fingerprints
+were added must use `--clean` once. It runs configured checks and read-only review
+before pushing, and records bounded CI evidence and outcomes.
+The default `automation.auto_publish: false` asks before committing and
+pushing; `true` also authorizes an eligible guarded same-branch CI-repair push.
 
 GitHub issues are the default task source. To use manually pasted requirements,
 set `"task_source": "local"` in the target's ignored `agent_config.json`, then

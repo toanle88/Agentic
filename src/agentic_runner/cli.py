@@ -99,11 +99,14 @@ from .execution import (  # noqa: F401
 )
 from .github_comments import post_terminal_comment
 from .ci_repair import (
+    can_resume_dirty_worktree,
     fetch_ci_evidence,
     find_worktree_for_branch,
     poll_ci,
     record_event as record_ci_repair_event,
+    stash_dirty_worktree_for_repair,
     verify_worktree_for_pr,
+    worktree_change_fingerprint,
 )
 from .output import style_system_text, style_text
 from .persistence import read_text_bounded, read_text_tail
@@ -545,6 +548,7 @@ def repair_ci(
     *,
     state_dir: Path | None = None,
     verbose: bool = False,
+    clean: bool = False,
 ) -> int:
     """Repair failed CI in the exact existing PR worktree, with bounded retries."""
     if not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number <= 0:
@@ -564,8 +568,31 @@ def repair_ci(
     if pull_request.state.casefold() != "open":
         raise RuntimeError(f"Pull request #{pr_number} is not open; CI repair is blocked")
     run = find_worktree_for_branch(repo, pull_request.head)
-    verify_worktree_for_pr(run, pull_request)
     folder = logs_path(repo, run, state_dir)
+    # Keep validation, fingerprinting, and optional stashing in one critical
+    # section so another Agentic operation cannot interleave a worktree change.
+    with worktree_lock(repo, run, state_dir):
+        verify_worktree_for_pr(run, pull_request, allow_dirty=True)
+        dirty_status = git(
+            run.worktree, "status", "--porcelain=v1", "--untracked-files=all", check=False,
+        )
+        cleaned = bool(clean and dirty_status)
+        if cleaned:
+            stash_dirty_worktree_for_repair(run, pr_number)
+            _status_print(
+                "[CI-REPAIR] Stashed the previous dirty worktree; starting a fresh repair"
+            )
+            verify_worktree_for_pr(run, pull_request)
+        dirty_fingerprint = worktree_change_fingerprint(run.worktree)
+        resume_dirty = can_resume_dirty_worktree(
+            folder, pr_number, pull_request.head, pull_request.head_sha, run.worktree,
+            current_fingerprint=dirty_fingerprint,
+        )
+        verify_worktree_for_pr(run, pull_request, allow_dirty=resume_dirty)
+    if resume_dirty:
+        _status_print(
+            "[CI-REPAIR] Resuming the preserved patch from the previous repair attempt"
+        )
     record_issue_metadata(
         folder, number=pr_number, title=f"PR #{pr_number}: {pull_request.title}",
         state=pull_request.state, source="github-pr", body=pull_request.body,
@@ -580,6 +607,7 @@ def repair_ci(
     record_event({
         "event": "repair_started", "pr": pr_number, "branch": pull_request.head,
         "head_sha": pull_request.head_sha, "worktree": str(run.worktree),
+        "resumed": resume_dirty, "cleaned": cleaned,
     })
     issue = Issue(
         pr_number, f"Repair CI for PR #{pr_number}: {pull_request.title}",
@@ -633,10 +661,15 @@ def repair_ci(
                 test_commands=test_commands_for_profile(config, "fast"),
                 deadline=deadline, verbose=verbose,
             )
-        record_event({
+        attempt_event = {
             "event": "repair_attempt", "attempt": attempt, "completed": completed,
             "classification": evidence.classification,
-        })
+        }
+        if not completed:
+            attempt_event["dirty_fingerprint"] = worktree_change_fingerprint(run.worktree)
+            if attempt_event["dirty_fingerprint"] is None:
+                attempt_event["dirty_fingerprint_unavailable"] = True
+        record_event(attempt_event)
         if not completed:
             raise RuntimeError(
                 f"CI repair attempt {attempt}/{max_attempts} did not pass local checks and review; "
@@ -1272,6 +1305,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Inspect failed CI and repair an existing pull request in its worktree",
     )
     parser.add_argument(
+        "--clean", action="store_true",
+        help="With --repair-ci, stash dirty worktree changes before a fresh repair",
+    )
+    parser.add_argument(
         "--instruction", default=None,
         help="Optional untrusted instruction preserved for this run and its resumes",
     )
@@ -1376,6 +1413,8 @@ def execute(args: argparse.Namespace) -> int:
 
 
 def execute_locked(args: argparse.Namespace, repo: Path) -> int:
+    if args.clean and not args.repair_ci:
+        raise RuntimeError("--clean is only available with --repair-ci")
     if args.repair_ci and args.pr_number is None:
         raise RuntimeError("--repair-ci requires --pr N")
     if args.pr_number is not None and not args.repair_ci:
@@ -1434,7 +1473,10 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
         pr_number = args.pr_number
         if not isinstance(pr_number, int) or isinstance(pr_number, bool):
             raise RuntimeError("--repair-ci requires --pr N")
-        return repair_ci(repo, pr_number, config, state_dir=state_dir, verbose=args.verbose)
+        return repair_ci(
+            repo, pr_number, config, state_dir=state_dir,
+            verbose=args.verbose, clean=args.clean,
+        )
     task_deadline = time.monotonic() + config["task_timeout_seconds"]
 
     task_source = config["task_source"]

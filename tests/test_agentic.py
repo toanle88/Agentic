@@ -1155,6 +1155,10 @@ class PureTests(unittest.TestCase):
         repair = agentic.build_parser().parse_args(['--pr', '123', '--repair-ci'])
         self.assertEqual(repair.pr_number, 123)
         self.assertTrue(repair.repair_ci)
+        clean_repair = agentic.build_parser().parse_args([
+            '--pr', '123', '--repair-ci', '--clean',
+        ])
+        self.assertTrue(clean_repair.clean)
         manual = agentic.build_parser().parse_args([
             '--issue', '42', '--mark-done', '--reason', 'human reviewed',
         ])

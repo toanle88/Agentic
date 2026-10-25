@@ -1854,6 +1854,17 @@ class ShellTests(unittest.TestCase):
             self.assertIn('123', argv)
             self.assertIn('--repair-ci', argv)
 
+    def test_shell_runs_clean_repair_pr_foreground_with_explicit_flag(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), session_dir=root / 'logs'
+            )
+            with patch.object(shell, '_run_foreground') as run_foreground:
+                shell.run_repair_pr(['/repair-pr', '123', '--clean'])
+            argv = run_foreground.call_args.args[0]
+            self.assertIn('--clean', argv)
+
 
     def test_shell_runs_publish_in_foreground_for_confirmation(self):
         with tempfile.TemporaryDirectory() as temp:

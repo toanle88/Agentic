@@ -1033,6 +1033,14 @@ class InteractiveInputTests(unittest.TestCase):
             agentic_shell._completion_candidates('/logs --v', job_numbers=(2, 1)),
             ['--verbose'],
         )
+        self.assertEqual(
+            agentic_shell._completion_candidates('/repair-pr 123 '),
+            ['--clean'],
+        )
+        self.assertEqual(
+            agentic_shell._completion_candidates('/repair-pr 123 --c'),
+            ['--clean'],
+        )
         jobs = {
             1: type('JobState', (), {'running': False, 'pid': 101, 'exit_code': 0})(),
             2: type('JobState', (), {'running': True, 'pid': 102, 'exit_code': None})(),

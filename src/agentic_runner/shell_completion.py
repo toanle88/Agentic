@@ -15,6 +15,7 @@ SHELL_OPTIONS = {
     "/logs": ("--verbose",), "/ps": ("--all",), "/runs": ("--json",),
     "/status": ("--json",), "/doctor": ("--json", "--commands", "--profile", "--worktree"),
     "/cleanup": ("--issue", "--all", "--yes", "--remove-logs"), "/stop": ("--all",),
+    "/repair-pr": ("--clean",),
     "/init": ("--provider", "--reviewer-provider", "--security-mode", "--sandbox-image", "--agents", "--force"),
 }
 COMMAND_DESCRIPTIONS: dict[str, str] = {
@@ -38,6 +39,7 @@ OPTION_DESCRIPTIONS: dict[str, str] = {
     "--commands": "run configured doctor checks (may mutate the worktree)", "--worktree": "worktree used by doctor checks",
     "--task-file": "use an existing task file", "--issue": "select one issue worktree",
     "--remove-logs": "also remove matching run logs", "--yes": "confirm cleanup changes",
+    "--clean": "stash dirty PR changes before a fresh repair",
     "--provider": "developer provider for initialization", "--reviewer-provider": "independent reviewer provider",
     "--sandbox-image": "container image for isolated execution", "--agents": "create a starter AGENTS.md",
     "--force": "replace generated setup files", "fast": "run the configured fast checks",
@@ -70,6 +72,8 @@ def completion_candidates(line: str, cursor: int | None = None,
     if command in {"/audit", "/run", "/doctor"} and previous == "--profile":
         return [value for value in ("fast", "slow") if value.startswith(current)]
     if command == "/repair-pr":
+        if current.startswith("-") or trailing_space:
+            return [option for option in SHELL_OPTIONS[command] if option.startswith(current)]
         return []
     if command == "/stop" and (current.startswith("-") or not job_numbers):
         return [option for option in SHELL_OPTIONS["/stop"] if option.startswith(current)]
