@@ -1214,7 +1214,6 @@ def _run_log_folder(repo: Path, run: Run, state_dir: Path | None = None) -> Path
 
 _CLEANUP_STATUS_MAX_BYTES = 256_000
 _CLEANUP_JOB_RECORD_MAX_BYTES = 64_000
-_CLEANUP_JOB_RECORD_LIMIT = 256
 
 
 def _cleanup_job_record_is_active(record: Any) -> bool:
@@ -1264,12 +1263,11 @@ def _cleanup_job_matches_run(record: dict[str, Any], run: Run, token: str | None
 def _cleanup_has_active_job(
     repo: Path, run: Run, folder: Path, state_dir: Path | None,
 ) -> bool:
-    """Check bounded persisted shell records for a live job using this run.
+    """Check persisted shell records for a live job using this run.
 
-    An incomplete bounded view is unsafe here: an older persisted record may
-    still represent the process using this worktree.  If the record set does
-    not fit the inspection bound, report the worktree as active so cleanup
-    fails closed instead of silently discarding it.
+    Every record is classified so completed or unrelated history cannot block
+    cleanup. Records that cannot be read or parsed remain fail-closed because
+    their state and target cannot be established safely.
     """
     token: str | None = None
     raw_run = read_text_bounded(folder / "run.json", _CLEANUP_JOB_RECORD_MAX_BYTES)
@@ -1283,8 +1281,6 @@ def _cleanup_has_active_job(
     try:
         shell_dir = state_paths(repo, state_dir).shell
         record_paths = sorted(shell_dir.glob("job-*.json"))
-        if len(record_paths) > _CLEANUP_JOB_RECORD_LIMIT:
-            return True
     except (OSError, RuntimeError, ValueError):
         return True
     for record_path in record_paths:
