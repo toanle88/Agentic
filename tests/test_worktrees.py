@@ -33,6 +33,20 @@ class _GitRepositoryTestCase(unittest.TestCase):
 
 
 class GitTest(_GitRepositoryTestCase):
+    def test_missing_worktree_lock_is_an_infrastructure_error(self):
+        run = agentic.Run(42, 'agent/issue-42-missing', self.repo / 'missing-worktree')
+        with self.assertRaisesRegex(RuntimeError, 'worktree is missing.*retries skipped'):
+            with agentic_worktrees.worktree_lock(self.repo, run):
+                self.fail('a missing worktree must not be locked')
+
+    def test_unregistered_worktree_lock_is_an_infrastructure_error(self):
+        invalid = self.repo / 'invalid-worktree'
+        invalid.mkdir()
+        run = agentic.Run(42, 'agent/issue-42-invalid', invalid)
+        with self.assertRaisesRegex(RuntimeError, 'worktree is invalid or not registered.*retries skipped'):
+            with agentic_worktrees.worktree_lock(self.repo, run):
+                self.fail('an unregistered directory must not be locked')
+
     def test_github_remote_matching_uses_configured_enterprise_host(self):
         with patch('agentic_worktrees.git', return_value='ssh://git@github.example.com/owner/repo.git'):
             self.assertEqual(

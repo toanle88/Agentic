@@ -599,6 +599,7 @@ class ConciseLogStream:
         self._pending = ""
         self._modified_paths: set[str] = set()
         self._modified_count = 0
+        self._first_transient: str | None = None
         self._last_transient: str | None = None
         self._test_diagnostics: list[str] = []
         self._test_diagnostic_chars = 0
@@ -608,7 +609,10 @@ class ConciseLogStream:
     @staticmethod
     def _test_body(line: str) -> str | None:
         match = _TESTS_PREFIX_RE.match(line.strip())
-        return match.group("body").strip() if match else None
+        if match is None:
+            return None
+        body = match.group("body")
+        return body.strip() if body is not None else ""
 
     def _remember_test_output(self, line: str) -> None:
         """Keep only a bounded tail for a later failed test command."""
@@ -697,6 +701,8 @@ class ConciseLogStream:
             self._record_modified_files(body)
             return diagnostics
         if is_routine_log_progress(body):
+            if self._first_transient is None:
+                self._first_transient = body.strip()
             self._last_transient = body.strip()
             return diagnostics
         return diagnostics + line
@@ -704,6 +710,14 @@ class ConciseLogStream:
     def take_transient(self) -> str | None:
         """Return the latest routine status observed since the previous call."""
         transient = self._last_transient
+        self._first_transient = None
+        self._last_transient = None
+        return transient
+
+    def take_first_transient(self) -> str | None:
+        """Return the first routine status observed since the previous call."""
+        transient = self._first_transient
+        self._first_transient = None
         self._last_transient = None
         return transient
 

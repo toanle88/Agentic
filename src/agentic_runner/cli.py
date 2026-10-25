@@ -381,6 +381,15 @@ def configure_relative_worktree_paths(repo: Path) -> bool:
 
 
 def repair_relative_worktree(repo: Path, worktree: Path) -> bool:
+    if not worktree.is_dir():
+        return False
+    if _agentic_worktrees.is_registered_worktree(
+        repo, worktree, git_runner=git
+    ) is False:
+        raise RuntimeError(
+            f"Git worktree is invalid or not registered: {worktree}; "
+            "infrastructure failure, retries skipped"
+        )
     if not configure_relative_worktree_paths(repo):
         return False
     git(repo, "worktree", "repair", "--relative-paths", str(worktree))
@@ -854,6 +863,9 @@ def preflight_test_commands(*args, **kwargs):
 
 def retryable_test_failure(*args, **kwargs):
     return _workflow_call("retryable_test_failure", *args, **kwargs)
+
+def test_failure_fingerprint(*args, **kwargs):
+    return _workflow_call("test_failure_fingerprint", *args, **kwargs)
 
 def pending_files(*args, **kwargs):
     return _workflow_call("pending_files", *args, **kwargs)
@@ -1595,7 +1607,15 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
         fresh = False
         with repository_lock(repo, state_dir):
             refresh_base(repo, base)
-            repaired = repair_relative_worktree(repo, run.worktree)
+            # Git worktree records can outlive a temporary or externally
+            # removed checkout.  Metadata repair only accepts an existing
+            # worktree path; let the normal resume path report any later
+            # checkout failure instead of turning this boundary into a
+            # repeated test failure.
+            repaired = (
+                repair_relative_worktree(repo, run.worktree)
+                if run.worktree.is_dir() else False
+            )
         if repaired:
             _status_print(f"[GIT] Repaired worktree metadata: {run.worktree}")
     else:

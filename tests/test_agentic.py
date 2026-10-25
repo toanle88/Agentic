@@ -223,15 +223,48 @@ class PureTests(unittest.TestCase):
 
 
     def test_existing_worktree_repair_uses_relative_paths_when_supported(self):
-        repo = Path('/repo')
-        worktree = Path('/repo/../.repo-agent-worktrees/issue-7-abcd1234')
-        with (patch('agentic.relative_worktree_paths_supported', return_value=True),
-              patch('agentic.git') as git_mock):
-            self.assertTrue(agentic.repair_relative_worktree(repo, worktree))
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp) / 'repo'
+            worktree = repo / 'worktree'
+            repo.mkdir()
+            (repo / '.git').mkdir()
+            worktree.mkdir()
+            def fake_git(_repo, *args, **_kwargs):
+                if args == ('worktree', 'list', '--porcelain'):
+                    return f'worktree {worktree}\n'
+                return ''
+            with (patch('agentic.relative_worktree_paths_supported', return_value=True),
+                  patch('agentic.git', side_effect=fake_git) as git_mock):
+                self.assertTrue(agentic.repair_relative_worktree(repo, worktree))
         self.assertEqual(git_mock.call_args_list, [
+            call(repo, 'worktree', 'list', '--porcelain'),
             call(repo, 'config', 'worktree.useRelativePaths', 'true'),
             call(repo, 'worktree', 'repair', '--relative-paths', str(worktree)),
         ])
+
+
+    def test_missing_worktree_repair_is_a_noop(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp) / 'repo'
+            repo.mkdir()
+            with (patch('agentic.relative_worktree_paths_supported', return_value=True),
+                  patch('agentic.git') as git_mock):
+                self.assertFalse(agentic.repair_relative_worktree(
+                    repo, repo / 'missing-worktree',
+                ))
+        git_mock.assert_not_called()
+
+
+    def test_invalid_worktree_repair_is_non_retryable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp) / 'repo'
+            worktree = repo / 'invalid-worktree'
+            repo.mkdir()
+            (repo / '.git').mkdir()
+            worktree.mkdir()
+            with patch('agentic.git', return_value=f'worktree {repo}\n'):
+                with self.assertRaisesRegex(RuntimeError, 'invalid or not registered.*retries skipped'):
+                    agentic.repair_relative_worktree(repo, worktree)
 
 
     def test_refresh_base_fetches_remote_branch(self):
@@ -611,9 +644,32 @@ class PureTests(unittest.TestCase):
     def test_environment_test_failures_are_not_retryable(self):
         self.assertFalse(agentic.retryable_test_failure('No module named pytest'))
         self.assertFalse(agentic.retryable_test_failure('listen tcp: address already in use'))
+        self.assertFalse(agentic.retryable_test_failure(
+            "error: not a valid path: /tmp/project/worktree"
+        ))
         self.assertTrue(agentic.retryable_test_failure('AssertionError: expected 2, got 3'))
 
 
+    def test_test_failure_fingerprint_ignores_runtime_metadata(self):
+        first = (
+            "[13:50:19] Ran 835 tests in 53.395s\n"
+            "AssertionError: expected 2, got 3\n"
+            "Started (PID 1234)\n"
+        )
+        second = (
+            "[13:51:07] Ran 835 tests in 44.609s\n"
+            "AssertionError: expected 2, got 3\n"
+            "Started (PID 5678)\n"
+        )
+        different = second.replace('expected 2, got 3', 'expected 2, got 4')
+        self.assertEqual(
+            agentic.test_failure_fingerprint(first),
+            agentic.test_failure_fingerprint(second),
+        )
+        self.assertNotEqual(
+            agentic.test_failure_fingerprint(first),
+            agentic.test_failure_fingerprint(different),
+        )
     def test_review_summary_is_compact_and_actionable(self):
         from io import StringIO
         with patch('sys.stdout', new_callable=StringIO) as out:

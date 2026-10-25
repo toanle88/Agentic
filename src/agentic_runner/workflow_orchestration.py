@@ -75,8 +75,10 @@ def develop(
     finding_texts = runtime.finding_texts
     _review_reason = runtime._review_reason
     record_blocked = runtime.record_blocked
+    record_test_failure_blocked = runtime.record_test_failure_blocked
     _compact_feedback = runtime._compact_feedback
     retryable_test_failure = runtime.retryable_test_failure
+    test_failure_fingerprint = runtime.test_failure_fingerprint
     git = runtime.git
     if instruction is None:
         instruction = read_run_instruction(folder)
@@ -155,6 +157,7 @@ def develop(
     maximum_attempts = config["max_retries"] + 1
     latest_reason = "No retryable failure summary was recorded."
     review_findings_seen = 0
+    last_test_failure_digest: str | None = None
     for attempt in range(maximum_attempts):
         if deadline is not None and time.monotonic() >= deadline:
             _status_print("[TIMEOUT] Overall task deadline reached")
@@ -336,6 +339,40 @@ def develop(
                     "Tests failed because of an environment or infrastructure problem; "
                     f"retries skipped.\n{test_output[-2500:]}"
                 )
+            failure_digest = test_failure_fingerprint(test_output)
+            if failure_digest == last_test_failure_digest:
+                try:
+                    _, patch_digest, _ = prepare_patch(
+                        run.worktree, base, config["max_files"],
+                    )
+                except NoCodeChangesError:
+                    patch_digest = ""
+                reason = "Repeated identical test failure: " + _result_text(
+                    test_output[-2_500:]
+                )
+                record_workflow_outcome(
+                    folder, approved=False, attempts=attempt + 1,
+                    first_pass=False, review_findings=review_findings_seen,
+                )
+                record_test_failure_blocked(
+                    folder, failure_digest, test_output,
+                    patch_digest=patch_digest,
+                    attempts=attempt + 1, max_retries=config["max_retries"],
+                    issue_digest=issue_fingerprint(issue),
+                )
+                next_action = _resume_action(issue, folder)
+                record_result(
+                    folder, "BLOCKED", attempts=attempt + 1,
+                    max_retries=config["max_retries"], reason=reason,
+                    worktree=run.worktree, next_action=next_action,
+                )
+                print_run_summary(
+                    run, "BLOCKED", next_action,
+                    attempts=attempt + 1, max_retries=config["max_retries"],
+                    reason=_result_text(reason), logs_path=folder,
+                )
+                return True
+            last_test_failure_digest = failure_digest
         _status_print("[RETRY] Returning evidence to developer (if retries remain)")
         # Preserve all files, only unstage to make subsequent git diff easier to inspect.
         git(run.worktree, "reset", "--quiet")

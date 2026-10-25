@@ -91,6 +91,7 @@ from .workflow_state import (
     next_log,
     record_blocked,
     record_no_code_changes_blocked,
+    record_test_failure_blocked,
     record_result,
     record_review_approval,
     result_text as _result_text,
@@ -703,8 +704,28 @@ def retryable_test_failure(report: str) -> bool:
         "address already in use",
         "cannot bind",
         "no such file or directory",
+        "not a valid path",
     )
     return not any(marker in lower for marker in environment_markers)
+
+
+def test_failure_fingerprint(report: str) -> str:
+    """Return a stable digest for comparing consecutive test failures."""
+    normalized_lines: list[str] = []
+    for raw_line in strip_ansi(report).splitlines():
+        line = re.sub(r"^\s*\[\d{2}:\d{2}:\d{2}\]\s*", "", raw_line)
+        line = re.sub(r"\bPID\s+\d+\b", "PID <pid>", line, flags=re.IGNORECASE)
+        line = re.sub(
+            r"\b(Ran\s+\d+\s+tests?\s+in\s+)\d+(?:\.\d+)?s\b",
+            r"\1<duration>", line, flags=re.IGNORECASE,
+        )
+        line = re.sub(
+            r"\b(Finished\s+in\s+)\d+(?:\.\d+)?s\b",
+            r"\1<duration>", line, flags=re.IGNORECASE,
+        )
+        normalized_lines.append(line.rstrip())
+    normalized = "\n".join(normalized_lines).strip()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def pending_files(worktree: Path) -> list[str]:
@@ -1698,7 +1719,10 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
     atomic_write_text(next_log(folder, "tests"), report)
     if not passed:
         _status_print("[TESTS] Failed")
-        _console_print(strip_ansi(report[-2500:]))
+        bounded_report = strip_ansi(report[-2500:])
+        _console_print("\n".join(
+            f"[TESTS] {line}" for line in bounded_report.splitlines()
+        ) or "[TESTS] (no diagnostic output)")
         return False, report, {}, "", ""
     base_sha, digest, summary = prepare_patch(run.worktree, base, config["max_files"])
     _status_print(
@@ -2242,8 +2266,10 @@ def _orchestration_runtime() -> WorkflowRuntime:
         "finding_texts": finding_texts,
         "_review_reason": _review_reason,
         "record_blocked": record_blocked,
+        "record_test_failure_blocked": record_test_failure_blocked,
         "_compact_feedback": _compact_feedback,
         "retryable_test_failure": retryable_test_failure,
+        "test_failure_fingerprint": test_failure_fingerprint,
         "git": git,
     })
 
