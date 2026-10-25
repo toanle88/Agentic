@@ -16,7 +16,7 @@ from .models import DEFAULT_GITHUB_HOST, Issue, Run
 from .output import strip_ansi
 from .persistence import atomic_write_json, read_text_tail
 from .security import redact_secrets
-from .telemetry import read_run_usage
+from .telemetry import read_issue_history, read_run_usage
 from .workflow_state import latest_numbered_log
 from .worktrees import command
 
@@ -203,8 +203,14 @@ def _next_action(issue: Issue, terminal: str) -> str:
     return f"inspect the run logs and resume with `agentic --issue {issue.number}`"
 
 
-def _marker(run: Run, terminal: str) -> str:
-    digest = hashlib.sha256(f"{run.branch}\0{terminal}".encode("utf-8")).hexdigest()[:20]
+def _marker(run: Run, issue: Issue, terminal: str) -> str:
+    issue_payload = json.dumps(
+        [issue.reference, issue.title, issue.body, issue.state, issue.source, issue.audit_key],
+        ensure_ascii=False,
+    )
+    digest = hashlib.sha256(
+        f"{run.branch}\0{terminal}\0{issue_payload}".encode("utf-8")
+    ).hexdigest()[:20]
     return f"<!-- agentic:completion:{digest} -->"
 
 
@@ -219,6 +225,13 @@ def format_completion_comment(
     result_label = _status_label(terminal)
     tests_label = _status_label(_test_status(result, usage, terminal))
     review_label = _status_label(_review_status(result, usage, folder, terminal))
+    issue_changes = read_issue_history(folder)
+    issue_update = []
+    if issue_changes:
+        latest_change = issue_changes[-1]
+        summary = latest_change.get("summary") if isinstance(latest_change, dict) else None
+        if isinstance(summary, str) and summary.strip():
+            issue_update = ["### Issue update", "", _clean(summary, 500), ""]
     stages = [
         ("Developer", *_stage_values(usage, "developer")),
         ("Tests", *_stage_values(usage, "tests")),
@@ -228,9 +241,10 @@ def format_completion_comment(
     stage_rows = [f"| {label} | {tokens} | {cost} |" for label, tokens, cost in stages]
     heading_icon = _STATUS_PRESENTATION.get(terminal, _STATUS_PRESENTATION["unknown"])[0]
     body = "\n".join([
-        _marker(run, terminal),
+        _marker(run, issue, terminal),
         f"## {heading_icon} Agentic run completed",
         "",
+        *issue_update,
         "| Check | Status |",
         "|---|---|",
         f"| Result | {result_label} |",
@@ -254,7 +268,7 @@ def format_completion_comment(
         "---",
         f"Branch: `{_branch(run)}`",
     ])
-    return _marker(run, terminal), _clean(body, MAX_COMMENT_CHARS)
+    return _marker(run, issue, terminal), _clean(body, MAX_COMMENT_CHARS)
 
 
 def _github_environment(host: str) -> dict[str, str]:

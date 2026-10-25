@@ -29,6 +29,9 @@ MAX_INVOCATION_RECORDS = 100
 MAX_POLICY_HISTORY_RECORDS = 50
 MAX_GUIDANCE_RECORDS = 100
 MAX_GUIDANCE_STATS = 100
+ISSUE_HISTORY_FILENAME = "issue-history.json"
+MAX_ISSUE_HISTORY_BYTES = 256_000
+MAX_ISSUE_HISTORY_ENTRIES = 20
 
 _RETENTION_LIMITS = {
     "usage_by_invocation": MAX_INVOCATION_RECORDS,
@@ -364,11 +367,115 @@ def record_run_instruction(folder: Path, instruction: str) -> None:
     _write_run_record(path, data)
 
 
+def issue_snapshot(*, number: int | None, title: str, body: str, state: str,
+                   source: str = "github", audit_key: str | None = None,
+                   issue_digest: str | None = None) -> dict[str, Any]:
+    """Build the bounded, redacted issue snapshot used by a run."""
+    snapshot: dict[str, Any] = {
+        "number": number,
+        "title": _bounded_text(redact_secrets(title), 280),
+        "body": _bounded_text(redact_secrets(body), 12_000),
+        "state": _bounded_text(state, 40).upper() or "UNKNOWN",
+        "source": _bounded_text(source, 40) or "github",
+    }
+    if audit_key:
+        snapshot["audit_key"] = _bounded_text(audit_key, 32)
+    if isinstance(issue_digest, str) and issue_digest.strip():
+        snapshot["issue_digest"] = _bounded_text(issue_digest, 128)
+    return snapshot
+
+
+def describe_issue_change(previous: dict[str, Any] | None,
+                         current: dict[str, Any], *,
+                         previous_digest: str | None = None,
+                         current_digest: str | None = None) -> dict[str, Any] | None:
+    """Return bounded evidence when a persisted issue snapshot has changed."""
+    if not isinstance(previous, dict):
+        return None
+    fields = ("number", "title", "body", "state", "source", "audit_key")
+    changed_fields = [field for field in fields if previous.get(field) != current.get(field)]
+    old_digest = previous_digest or previous.get("issue_digest")
+    digest_changed = (
+        isinstance(old_digest, str) and bool(old_digest)
+        and isinstance(current_digest, str) and bool(current_digest)
+        and old_digest != current_digest
+    )
+    if not changed_fields and not digest_changed:
+        return None
+    requirement_fields = [field for field in ("title", "body") if field in changed_fields]
+    details: list[str] = []
+    if requirement_fields:
+        details.append(" and ".join(requirement_fields))
+        for field in requirement_fields:
+            before = previous.get(field)
+            after = current.get(field)
+            before_length = len(before) if isinstance(before, str) else 0
+            after_length = len(after) if isinstance(after, str) else 0
+            details.append(f"{field} length {before_length}->{after_length}")
+    other_fields = [field for field in changed_fields if field not in {"title", "body"}]
+    if other_fields:
+        details.append("metadata: " + ", ".join(other_fields))
+    if not details:
+        details.append("issue content")
+    summary = _bounded_text(
+        "Issue requirements changed (" + "; ".join(details) + ").",
+        500,
+    )
+    event: dict[str, Any] = {
+        "event": "issue_changed",
+        "recorded_at": _timestamp(),
+        "summary": summary,
+        "changed_fields": changed_fields or ["content"],
+        "previous_snapshot": {
+            key: value for key, value in previous.items()
+            if key != "issue_digest"
+        },
+        "current_snapshot": {
+            key: value for key, value in current.items()
+            if key != "issue_digest"
+        },
+    }
+    if isinstance(old_digest, str) and old_digest:
+        event["previous_digest"] = _bounded_text(old_digest, 128)
+    if isinstance(current_digest, str) and current_digest:
+        event["current_digest"] = _bounded_text(current_digest, 128)
+    return event
+
+
+def _read_issue_history(folder: Path) -> list[dict[str, Any]]:
+    try:
+        raw = read_text_bounded(folder / ISSUE_HISTORY_FILENAME, MAX_ISSUE_HISTORY_BYTES)
+        value = json.loads(redact_secrets(raw)) if raw is not None else None
+    except (OSError, TypeError, json.JSONDecodeError):
+        return []
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)][-MAX_ISSUE_HISTORY_ENTRIES:]
+
+
+def read_issue_history(folder: Path) -> list[dict[str, Any]]:
+    """Read bounded issue-change evidence, preserving legacy absence."""
+    return _read_issue_history(folder)
+
+
+def _record_issue_change(folder: Path, event: dict[str, Any]) -> None:
+    history = _read_issue_history(folder)
+    history.append(event)
+    history = history[-MAX_ISSUE_HISTORY_ENTRIES:]
+    while len(json.dumps(history, ensure_ascii=False).encode("utf-8")) > MAX_ISSUE_HISTORY_BYTES:
+        if len(history) <= 1:
+            break
+        history.pop(0)
+    atomic_write_json(folder / ISSUE_HISTORY_FILENAME, history)
+
+
 def record_issue_metadata(folder: Path, *, number: int | None, title: str,
                           state: str, source: str = "github",
                           body: str = "", audit_key: str | None = None,
-                          shell_job_id: str | None = None) -> None:
-    """Persist bounded issue identity for read-only dashboards and resumes."""
+                          shell_job_id: str | None = None,
+                          issue_digest: str | None = None,
+                          issue_change: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Persist bounded issue identity and any detected change evidence."""
     path, data = _load_run_record(folder)
     data["issue_metadata"] = {
         "number": number,
@@ -383,15 +490,18 @@ def record_issue_metadata(folder: Path, *, number: int | None, title: str,
     # Keep a bounded, redacted task snapshot so an existing run can be resumed
     # during a GitHub outage.  It is intentionally separate from run.json and
     # excluded from dashboard log listings.
-    atomic_write_json(folder / "issue-snapshot.json", {
-        "number": number,
-        "title": _bounded_text(redact_secrets(title), 280),
-        "body": _bounded_text(redact_secrets(body), 12_000),
-        "state": _bounded_text(state, 40).upper() or "UNKNOWN",
-        "source": _bounded_text(source, 40) or "github",
-        **({"audit_key": _bounded_text(audit_key, 32)} if audit_key else {}),
-    })
+    current = issue_snapshot(
+        number=number, title=title, body=body, state=state, source=source,
+        audit_key=audit_key, issue_digest=issue_digest,
+    )
+    detected = issue_change or describe_issue_change(
+        read_issue_snapshot(folder), current, current_digest=issue_digest,
+    )
+    if detected is not None:
+        _record_issue_change(folder, detected)
+    atomic_write_json(folder / "issue-snapshot.json", current)
     _write_run_record(path, data)
+    return detected
 
 
 def read_issue_snapshot(folder: Path) -> dict[str, Any] | None:

@@ -130,6 +130,61 @@ class WorkflowTests(_GitRepositoryTestCase):
         self.assertEqual(develop.call_args.args[1].title, "Cached issue")
         self.assertEqual(develop.call_args.args[1].body, "Implement the offline resume path.")
 
+    def test_online_resume_reports_changed_issue_and_invalidates_stale_approvals(self):
+        config_path = self.repo / "changed-issue-agent-config.json"
+        config_path.write_text(json.dumps({
+            "test_commands": [[sys.executable, "-c", "print('ok')"]],
+            "developer_agent": {"provider": "codex"},
+            "reviewer_agent": {"provider": "codex"},
+        }))
+        state_dir = Path(self.tmp.name) / "agentic-state"
+        fake_run = agentic.Run(247, "agent/issue-247-aabbccdd", self.repo / "worktree")
+        folder = agentic.logs_path(self.repo, fake_run, state_dir)
+        agentic.record_issue_metadata(
+            folder, number=247, title="Original requirement", state="OPEN",
+            body="Implement the original behavior.",
+        )
+        for name in ("manual-approval.json", "review-approval.json"):
+            (folder / name).write_text(json.dumps({
+                "status": "approved", "issue_digest": "old-issue",
+                "patch_digest": "old-patch", "branch": fake_run.branch,
+            }))
+        args = agentic.build_parser().parse_args([
+            "--repo", str(self.repo), "--config", str(config_path),
+            "--state-dir", str(state_dir), "--issue", "247",
+        ])
+        changed_issue = agentic.Issue(
+            247, "Updated requirement", "Implement the updated behavior.", state="OPEN",
+        )
+        with (
+            patch("agentic.preflight_test_commands"),
+            patch("agentic.preflight_agent_settings"),
+            patch("agentic.github_metadata", return_value=("owner/repo", "main")),
+            patch("agentic.default_base_branch", return_value="main"),
+            patch("agentic.get_issue", return_value=changed_issue),
+            patch("agentic.runs_for_issue", return_value=[fake_run]),
+            patch("agentic.choose_existing", return_value=fake_run),
+            patch("agentic.repository_lock", return_value=contextlib.nullcontext()),
+            patch("agentic.refresh_base"),
+            patch("agentic.worktree_lock", return_value=contextlib.nullcontext()),
+            patch("agentic._run_investigation", return_value={"summary": "updated", "findings": []}),
+            patch("agentic.check_existing_pr", return_value=None),
+            patch("agentic.develop", return_value=True) as develop,
+            patch("agentic.post_terminal_comment", return_value=True),
+            patch("agentic._attempt_auto_publication"),
+            patch("sys.stdout", new_callable=StringIO) as output,
+        ):
+            self.assertEqual(agentic.execute_locked(args, self.repo), 0)
+
+        develop.assert_called_once()
+        self.assertEqual(develop.call_args.args[1], changed_issue)
+        self.assertIn("[ISSUE] Issue requirements changed", output.getvalue())
+        self.assertFalse((folder / "manual-approval.json").exists())
+        self.assertFalse((folder / "review-approval.json").exists())
+        history = json.loads((folder / "issue-history.json").read_text())
+        self.assertEqual(history[-1]["previous_snapshot"]["title"], "Original requirement")
+        self.assertEqual(history[-1]["current_snapshot"]["title"], "Updated requirement")
+
     def test_resume_skips_relative_repair_for_missing_worktree(self):
         config_path = self.repo / "agent-config.json"
         config_path.write_text(json.dumps({

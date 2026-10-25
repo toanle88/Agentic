@@ -255,6 +255,16 @@ Run the same issue again to resume its existing worktree:
 agentic --issue 119
 ```
 
+When an online resume finds that the GitHub issue title, body, or state changed,
+Agentic prints a bounded change summary and starts a new investigation,
+development, test, and review pass. Previous manual or automated publication
+approvals are removed before any publication decision and an invalidation event
+is retained in the run logs. The previous and current bounded issue snapshots,
+their non-secret digests, and the changed fields are retained in
+`issue-history.json`; the current snapshot remains the source for offline
+resume. A changed issue's terminal completion comment uses a new marker and
+includes the concise change summary, so the update is visible on GitHub.
+
 If GitHub is temporarily unavailable, resume an existing GitHub run from the
 bounded issue snapshot recorded at the start of an earlier run:
 

@@ -11,10 +11,14 @@ from agentic_runner.telemetry import (
     MAX_GUIDANCE_RECORDS,
     MAX_GUIDANCE_STATS,
     MAX_INVOCATION_RECORDS,
+    MAX_ISSUE_HISTORY_BYTES,
     MAX_OPERATION_RECORDS,
     MAX_POLICY_HISTORY_RECORDS,
     MAX_RUN_RECORD_BYTES,
     read_run_usage,
+    describe_issue_change,
+    issue_snapshot,
+    read_issue_history,
     read_run_instruction,
     record_operation,
     record_issue_metadata,
@@ -140,6 +144,61 @@ class TelemetryTests(unittest.TestCase):
             self.assertNotIn("issue-secret-value", json.dumps(snapshot))
             self.assertLessEqual(len(snapshot["body"]), 12_000)
             self.assertNotIn("issue-snapshot.json", json.dumps(read_run_usage(folder)))
+
+    def test_issue_change_history_preserves_previous_snapshot_and_bounded_summary(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            old = issue_snapshot(
+                number=73, title="Original requirement", body="Keep the old behavior.",
+                state="OPEN", issue_digest="old-digest",
+            )
+            new = issue_snapshot(
+                number=73, title="Updated requirement", body="Add the new behavior.",
+                state="OPEN", issue_digest="new-digest",
+            )
+            change = describe_issue_change(
+                old, new, current_digest="new-digest",
+            )
+            self.assertIsNotNone(change)
+            self.assertEqual(change["changed_fields"], ["title", "body"])
+            self.assertIn("title and body", change["summary"])
+            record_issue_metadata(
+                folder, number=73, title=new["title"], body=new["body"],
+                state="OPEN", issue_digest="new-digest", issue_change=change,
+            )
+            history = read_issue_history(folder)
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["previous_snapshot"]["title"], "Original requirement")
+            self.assertEqual(history[0]["current_snapshot"]["body"], "Add the new behavior.")
+            self.assertEqual(read_issue_snapshot(folder)["title"], "Updated requirement")
+
+    def test_legacy_issue_snapshot_without_digest_still_records_field_changes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            record_issue_metadata(
+                folder, number=74, title="Before", body="Original", state="OPEN",
+            )
+            record_issue_metadata(
+                folder, number=74, title="After", body="Original", state="OPEN",
+            )
+            history = read_issue_history(folder)
+            self.assertEqual(history[-1]["changed_fields"], ["title"])
+
+    def test_issue_change_history_is_redacted_and_bounded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            record_issue_metadata(
+                folder, number=75, title="api_key=old-secret", body="old body", state="OPEN",
+                issue_digest="old",
+            )
+            record_issue_metadata(
+                folder, number=75, title="api_key=new-secret", body="new body", state="OPEN",
+                issue_digest="new",
+            )
+            raw = (folder / "issue-history.json").read_text(encoding="utf-8")
+            self.assertNotIn("old-secret", raw)
+            self.assertNotIn("new-secret", raw)
+            self.assertLessEqual(len(raw.encode("utf-8")), MAX_ISSUE_HISTORY_BYTES)
 
     def test_run_instruction_is_optional_bounded_and_replaceable(self):
         with tempfile.TemporaryDirectory() as temp:
