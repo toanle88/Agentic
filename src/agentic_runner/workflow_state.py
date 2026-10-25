@@ -27,8 +27,10 @@ from .worktrees import issue_fingerprint
 
 MANUAL_APPROVAL_FILENAME = "manual-approval.json"
 REVIEW_APPROVAL_FILENAME = "review-approval.json"
+APPROVAL_EVENTS_FILENAME = "approval-events.json"
 MAX_DURABLE_JSON_BYTES = 256_000
 MAX_DEVELOPER_REPORT_BYTES = 24_000
+MAX_APPROVAL_EVENTS = 50
 
 
 def next_log(folder: Path, kind: str, ext: str = "txt") -> Path:
@@ -69,6 +71,10 @@ def manual_approval_path(folder: Path) -> Path:
 
 def review_approval_path(folder: Path) -> Path:
     return folder / REVIEW_APPROVAL_FILENAME
+
+
+def approval_events_path(folder: Path) -> Path:
+    return folder / APPROVAL_EVENTS_FILENAME
 
 
 def _blocked_path(folder: Path) -> Path:
@@ -329,6 +335,57 @@ def load_publication_approval(
     return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
 
+def invalidate_publication_approvals(folder: Path, *, previous_digest: str = "",
+                                     current_digest: str = "",
+                                     reason: str = "Issue requirements changed") -> list[str]:
+    """Remove approvals made for an earlier issue and preserve the evidence."""
+    invalidated: list[dict[str, Any]] = []
+    for kind, path in (
+        ("manual", manual_approval_path(folder)),
+        ("automated", review_approval_path(folder)),
+    ):
+        if not path.is_file():
+            continue
+        entry: dict[str, Any] = {"kind": kind, "file": path.name}
+        try:
+            raw = read_text_bounded(path, MAX_DURABLE_JSON_BYTES)
+            value = json.loads(redact_secrets(raw)) if raw is not None else None
+        except (OSError, TypeError, json.JSONDecodeError):
+            value = None
+        if isinstance(value, dict):
+            for key in ("issue_digest", "patch_digest", "branch", "marked_at", "approved_at"):
+                candidate = value.get(key)
+                if isinstance(candidate, str):
+                    entry[key] = result_text(candidate, 256)
+        invalidated.append(entry)
+
+    if not invalidated:
+        return []
+    event = {
+        "event": "publication_approvals_invalidated",
+        "reason": result_text(reason, 500),
+        "previous_issue_digest": result_text(previous_digest, 128),
+        "current_issue_digest": result_text(current_digest, 128),
+        "approvals": invalidated,
+        "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    try:
+        raw_events = read_text_bounded(approval_events_path(folder), MAX_DURABLE_JSON_BYTES)
+        existing = json.loads(redact_secrets(raw_events)) if raw_events is not None else []
+    except (OSError, TypeError, json.JSONDecodeError):
+        existing = []
+    events = [item for item in existing if isinstance(item, dict)] if isinstance(existing, list) else []
+    events.append(event)
+    atomic_write_json(approval_events_path(folder), events[-MAX_APPROVAL_EVENTS:])
+    for item in invalidated:
+        filename = item.get("file")
+        if filename == MANUAL_APPROVAL_FILENAME:
+            manual_approval_path(folder).unlink(missing_ok=True)
+        elif filename == REVIEW_APPROVAL_FILENAME:
+            review_approval_path(folder).unlink(missing_ok=True)
+    return [str(item["kind"]) for item in invalidated]
+
+
 def record_manual_approval(run: Run, issue: Issue, base: str, base_sha: str,
                            patch_digest: str, folder: Path, reason: str) -> dict[str, Any]:
     """Persist a human completion decision tied to the exact current patch."""
@@ -377,6 +434,7 @@ __all__ = [
     "load_publication_approval", "load_review_approval",
     "local_resume_task_file", "next_log", "record_blocked", "record_no_code_changes_blocked",
     "record_manual_approval", "record_result", "record_review_approval", "result_text",
-    "manual_approval_path", "review_approval_path",
+    "manual_approval_path", "review_approval_path", "approval_events_path",
+    "invalidate_publication_approvals",
     "review_reason", "resume_action",
 ]

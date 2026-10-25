@@ -45,6 +45,29 @@ class PublicationTests(_GitRepositoryTestCase):
         )
         self.assertTrue(agentic._automatic_candidate_eligible(issue, folder))
 
+    def test_changed_issue_invalidates_both_approval_kinds_with_durable_evidence(self):
+        folder = Path(self.tmp.name) / "approval-invalidation"
+        folder.mkdir()
+        for name, kind in (("manual-approval.json", "manual"), ("review-approval.json", "automated")):
+            (folder / name).write_text(json.dumps({
+                "status": "approved", "issue_digest": "old-issue",
+                "patch_digest": f"{kind}-patch", "branch": "agent/issue-247-test",
+            }), encoding="utf-8")
+
+        invalidated = agentic.invalidate_publication_approvals(
+            folder, previous_digest="old-issue", current_digest="new-issue",
+        )
+
+        self.assertEqual(invalidated, ["manual", "automated"])
+        self.assertFalse((folder / "manual-approval.json").exists())
+        self.assertFalse((folder / "review-approval.json").exists())
+        events = json.loads((folder / "approval-events.json").read_text(encoding="utf-8"))
+        self.assertEqual(events[0]["event"], "publication_approvals_invalidated")
+        self.assertEqual(
+            {item["kind"] for item in events[0]["approvals"]},
+            {"manual", "automated"},
+        )
+
     def test_manual_approval_records_exact_patch_and_reason(self):
         run = agentic.create_worktree(self.repo, 'main', 19)
         (run.worktree / 'fix.py').write_text('fixed=True\n')

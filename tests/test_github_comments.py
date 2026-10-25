@@ -81,6 +81,26 @@ class GithubCommentTests(unittest.TestCase):
         self.assertIn("| Tests | ❔ Unknown |", unknown_body)
         self.assertIn("| Review | ⏭️ Not reached |", unknown_body)
 
+    def test_changed_issue_summary_is_included_and_changes_comment_marker(self):
+        result = self._result("APPROVED", tests="passed", review="approved")
+        original_marker, original_body = format_completion_comment(
+            self.run, self.issue, self.folder, result,
+        )
+        (self.folder / "issue-history.json").write_text(json.dumps([{
+            "event": "issue_changed",
+            "summary": "Issue requirements changed (title and body; title length 4->8).",
+        }]), encoding="utf-8")
+
+        changed_issue = Issue(119, "Updated title", "updated requirements")
+        changed_marker, changed_body = format_completion_comment(
+            self.run, changed_issue, self.folder, result,
+        )
+
+        self.assertNotEqual(original_marker, changed_marker)
+        self.assertIn("### Issue update", changed_body)
+        self.assertIn("title and body", changed_body)
+        self.assertNotIn("### Issue update", original_body)
+
     def test_result_status_fields_reject_multiline_or_arbitrary_text(self):
         result = self._result(
             "BLOCKED",

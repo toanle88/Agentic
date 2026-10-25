@@ -20,7 +20,7 @@ from typing import Any, Iterable
 
 from .review import finding_severity
 from .persistence import read_text_bounded
-from .telemetry import read_run_usage
+from .telemetry import read_issue_history, read_run_usage
 
 
 RUN_NAME = re.compile(
@@ -735,6 +735,7 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
         "status": status, "investigation": investigation, "attempts": developer["attempts"],
         "stage": stage, "severity": severity, "providers": providers, "models": models,
         "issue_metadata": issue_metadata,
+        "issue_changes": read_issue_history(folder),
         "last_activity": _timestamp(last_activity) if last_activity else "unknown",
         "review": review, "blocked": blocked, "result": result, "tests": tests,
         "audit_report": audit,

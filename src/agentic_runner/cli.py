@@ -61,6 +61,7 @@ from .context import (  # noqa: F401
 )
 from .workflow_state import (  # noqa: F401
     clear_blocked,
+    invalidate_publication_approvals,
     latest_numbered_log as _latest_numbered_log,
     load_blocked,
     load_latest_developer_report,
@@ -122,6 +123,8 @@ from .review import (  # noqa: F401
 from .sandbox import DEFAULT_SANDBOX_IMAGE, SUPPORTED_LANGUAGES, validate_sandbox
 from .security import redact_secrets  # noqa: F401
 from .telemetry import (
+    describe_issue_change,
+    issue_snapshot,
     read_run_instruction,
     record_run_instruction,
     record_issue_metadata,
@@ -1634,6 +1637,36 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
             run = create_worktree(repo, base, issue_number, state_dir)
         fresh = True
     folder = logs_path(repo, run, state_dir)
+    previous_issue_snapshot = read_issue_snapshot(folder) if not fresh else None
+    current_issue_digest = issue_fingerprint(issue)
+    current_issue_snapshot = issue_snapshot(
+        number=issue.number, title=issue.title, body=issue.body,
+        state=issue.state, source=issue.source, audit_key=issue.audit_key,
+        issue_digest=current_issue_digest,
+    )
+    issue_change = (
+        describe_issue_change(
+            previous_issue_snapshot,
+            current_issue_snapshot,
+            current_digest=current_issue_digest,
+        )
+        if not issue.is_local else None
+    )
+    if issue_change is not None:
+        invalidated = invalidate_publication_approvals(
+            folder,
+            previous_digest=str(issue_change.get("previous_digest", "")),
+            current_digest=current_issue_digest,
+        )
+        _status_print(f"[ISSUE] {issue_change['summary']}", flush=True)
+        _status_print(
+            "[ISSUE] Starting a fresh investigation, development, test, and review pass; "
+            + (
+                "invalidated stale " + ", ".join(invalidated) + " approval(s)."
+                if invalidated else "previous approvals are no longer eligible."
+            ),
+            flush=True,
+        )
     requested_instruction = getattr(args, "instruction", None)
     if requested_instruction is not None:
         record_run_instruction(folder, requested_instruction)
@@ -1644,6 +1677,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
         state=issue.state, source=issue.source, body=issue.body,
         audit_key=issue.audit_key,
         shell_job_id=os.environ.get("AGENTIC_SHELL_JOB_ID"),
+        issue_digest=current_issue_digest, issue_change=issue_change,
     )
     record_security_policy(folder, config)
     manual_approval = load_publication_approval(folder)
