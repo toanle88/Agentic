@@ -332,7 +332,9 @@ from .worktrees import (  # noqa: E402, F401
     create_worktree,
     default_base_branch,
     default_state_dir,
+    ensure_state_directory,
     discover_runs,
+    ensure_state_paths,
     eligible,
     github_metadata,
     github_repo_from_remote,
@@ -498,9 +500,12 @@ def get_issue(
 
 def logs_path(repo: Path, run: Run, state_dir: Path | None = None) -> Path:
     """Return preferred run logs, falling back to the pre-centralized location."""
-    preferred = (state_paths(repo, state_dir).runs if state_dir else legacy_runs_dir(repo)) / run.branch.replace("/", "-")
+    paths = state_paths(repo, state_dir) if state_dir else None
+    preferred = (paths.runs if paths else legacy_runs_dir(repo)) / run.branch.replace("/", "-")
     legacy = legacy_runs_dir(repo) / run.branch.replace("/", "-")
     folder = legacy if state_dir and legacy.is_dir() and not preferred.exists() else preferred
+    if folder == preferred and state_dir:
+        ensure_state_paths(repo, state_dir)
     folder.mkdir(parents=True, exist_ok=True)
     return folder
 
@@ -1424,7 +1429,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
         preflight_agent_settings(
             config["developer_agent"], config["reviewer_agent"], sandbox=config["sandbox"]
         )
-    state_dir = Path(args.state_dir).expanduser().resolve() if args.state_dir else default_state_dir()
+    state_dir = Path(args.state_dir).expanduser() if args.state_dir else default_state_dir()
     if args.repair_ci:
         pr_number = args.pr_number
         if not isinstance(pr_number, int) or isinstance(pr_number, bool):
@@ -1799,7 +1804,7 @@ def _main(argv: list[str] | None = None) -> int:
             root = _absolute_path(Path(git(repo, "rev-parse", "--show-toplevel")))
             if not _paths_equal(repo, root):
                 raise RuntimeError("Run cleanup from the project root or pass --repo pointing to that root")
-            cleanup_state_dir = Path(args.state_dir).expanduser().resolve() if args.state_dir else default_state_dir()
+            cleanup_state_dir = Path(args.state_dir).expanduser() if args.state_dir else default_state_dir()
             with repository_lock(repo, cleanup_state_dir):
                 return cleanup(
                     repo, issue=args.issue, all_runs=args.all_runs,
@@ -1835,7 +1840,7 @@ def _main(argv: list[str] | None = None) -> int:
                 parser.error("--interactive cannot be combined with a task, issue, list, runs, new, review, or publish option")
             from .shell import run_shell
             config = Path(args.config).resolve() if args.config else None
-            state_dir = Path(args.state_dir).expanduser().resolve() if args.state_dir else default_state_dir()
+            state_dir = Path(args.state_dir).expanduser() if args.state_dir else default_state_dir()
             runner = SCRIPT_DIR / "agentic.py"
             if not runner.is_file():
                 runner = Path(sys.executable)

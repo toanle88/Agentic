@@ -197,7 +197,7 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
         message = _bound_provider_message(
             redact_secrets(message, extra_values=redaction_values),
         )
-        atomic_write_text(output, message)
+        atomic_write_text(output, message, extra_values=redaction_values)
         usage_path = output.with_suffix(".jsonl")
         usage = extract_jsonl_usage(
             read_text_tail(usage_path, MAX_PROVIDER_STREAM_BYTES) if usage_path.exists() else "",
@@ -394,7 +394,7 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
             + message
         )
     message = _bound_provider_message(message)
-    atomic_write_text(output, message)
+    atomic_write_text(output, message, extra_values=redaction_values)
     usage = extract_jsonl_usage(raw, provider=provider)
     _record_provider_usage(
         output, readonly, usage, model=model, prompt_chars=len(prompt),

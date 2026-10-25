@@ -1,6 +1,7 @@
 """Focused workflow tests."""
 import json
 import contextlib
+import os
 import shlex
 import subprocess
 import sys
@@ -14,10 +15,34 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner import cli as agentic
 from agentic_runner import workflow as agentic_workflow
+from agentic_runner import worktrees as agentic_worktrees
 from test_worktrees import _GitRepositoryTestCase
 
 
 class WorkflowTests(_GitRepositoryTestCase):
+    def test_git_operations_override_repository_controlled_helpers(self):
+        captured = {}
+
+        def fake_command(argv, cwd, **kwargs):
+            captured.update(argv=argv, cwd=cwd, kwargs=kwargs)
+            return CompletedProcess(argv, 0, stdout="ok\n", stderr="")
+
+        with patch.object(agentic_worktrees, "command", side_effect=fake_command):
+            self.assertEqual(agentic_worktrees.git(self.repo, "status"), "ok")
+
+        argv = captured["argv"]
+        for setting in (
+            "core.fsmonitor=false", f"core.hooksPath={os.devnull}",
+            "credential.helper=", "core.sshCommand=ssh",
+            "core.gitProxy=none", "protocol.ext.allow=never",
+            "remote.origin.uploadpack=git-upload-pack",
+            "remote.origin.receivepack=git-receive-pack", "diff.external=",
+        ):
+            self.assertIn(setting, argv)
+        environment = captured["kwargs"]["env"]
+        self.assertEqual(environment["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertNotIn("GIT_EXTERNAL_DIFF", environment)
+
     def test_auto_publish_selects_first_eligible_completed_candidate(self):
         issue = agentic.Issue(222, "Automatic publication", "Apply the approved change")
         root = Path(self.tmp.name) / "automatic-publication"

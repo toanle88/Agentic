@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, TextIO
 
 from .output import ConciseLogStream
+from .persistence import BoundedAppendWriter
 from .shell_input import _KeyReader
 
 
@@ -26,39 +27,15 @@ MAX_LOG_BYTES = 200_000
 LOG_TRUNCATION_MARKER = "[... earlier output omitted; log capped at 200,000 bytes ...]\n"
 
 
-class BoundedLogWriter:
+class BoundedLogWriter(BoundedAppendWriter):
     """Persist only a bounded suffix of one background job's output."""
 
-    def __init__(self, path: Path, *, max_bytes: int = MAX_LOG_BYTES) -> None:
-        self.path = path
-        self.max_bytes = max_bytes
-        self._marker = LOG_TRUNCATION_MARKER.encode("utf-8")
-        self._retained = bytearray()
-        self._truncated = False
-        self._stream = path.open("wb")
-
-    def _rewrite(self) -> None:
-        payload = bytes(self._retained)
-        if self._truncated:
-            payload = self._marker + payload
-        self._stream.seek(0)
-        self._stream.write(payload)
-        self._stream.truncate()
-        self._stream.flush()
-
-    def write(self, data: bytes) -> int:
-        if not data:
-            return 0
-        if not self._truncated and len(self._retained) + len(data) <= self.max_bytes:
-            self._retained.extend(data)
-            self._stream.write(data)
-            self._stream.flush()
-            return len(data)
-        self._truncated = True
-        capacity = max(0, self.max_bytes - len(self._marker))
-        self._retained = bytearray((bytes(self._retained) + data)[-capacity:])
-        self._rewrite()
-        return len(data)
+    def __init__(self, path: Path, *, max_bytes: int = MAX_LOG_BYTES,
+                 redaction_values: Iterable[str] = ()) -> None:
+        super().__init__(
+            path, max_bytes=max_bytes, truncation_marker=LOG_TRUNCATION_MARKER,
+            retain_suffix=True, redaction_values=redaction_values,
+        )
 
     def copy_from(self, source: Any) -> None:
         try:
@@ -79,10 +56,6 @@ class BoundedLogWriter:
             except (AttributeError, OSError, ValueError):
                 pass
             self.close()
-
-    def close(self) -> None:
-        if not self._stream.closed:
-            self._stream.close()
 
 
 @dataclass

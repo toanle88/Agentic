@@ -72,6 +72,14 @@ class BenchmarkTests(unittest.TestCase):
             )
         self.assertIn("python", result["host"])
         self.assertEqual(percentile([1.0, 2.0, 4.0], 0.5), 2.0)
+        self.assertEqual(
+            set(result["cases"]),
+            {
+                "dashboard_collection", "dashboard_rendering",
+                "openrouter_file_tools", "git_operations",
+            },
+        )
+        self.assertEqual(result["cases"]["openrouter_file_tools"]["status"], "measured")
 
     def test_benchmark_facade_preserves_split_component_contract(self):
         self.assertIs(load_benchmark, load_benchmark_config)

@@ -4,11 +4,12 @@
 
 Issue execution performance is compared using the reproducible corpus and
 budgets in [`audits/2026-10-21-issue-73.md`](audits/2026-10-21-issue-73.md). Record p50, p95, p99,
-peak resident memory, Python version, operating system, CPU, filesystem type,
-and repetition count for dashboard collection/rendering, log processing,
-OpenRouter file tools and Git operations. Use three cold
+additional peak resident memory, Python version, operating system, CPU,
+filesystem type, and repetition count for dashboard collection and its bounded
+log processing. The harness also reports provider-free dashboard rendering,
+OpenRouter file-tool, and Git-operation fixture cases. Use three cold
 and three warm repetitions on the same host. A result is a regression when
-p95 is more than 20% slower or peak memory is more than 10% higher than the
+p95 is more than 20% slower or additional peak memory is more than 10% higher than the
 same-host baseline; investigate before changing a safety boundary.
 
 The quality benchmark below measures normalized workflow outcomes, not these
@@ -18,7 +19,10 @@ for the offline performance or schema checks.
 The dashboard corpus and measurement path are reproducible with the standard
 library helper below. It generates 500 run folders, 24 artifacts per folder,
 and one 8 MiB developer artifact per folder, then records three cold and three
-warm samples with p50, p95, p99, peak resident memory, and host metadata:
+warm samples with p50, p95, p99, additional peak resident memory, host metadata,
+and per-case timings. Memory is measured as the increase over the harness process's
+pre-sample high-water mark because the standard-library ``ru_maxrss`` value is
+process-lifetime state:
 
 ```bash
 python scripts/dashboard_benchmark.py --logs /tmp/agentic-dashboard-corpus \
@@ -26,8 +30,9 @@ python scripts/dashboard_benchmark.py --logs /tmp/agentic-dashboard-corpus \
 ```
 
 Use `--logs` without `--generate` to measure an existing corpus. The helper
-clears only the in-process dashboard snapshot cache between cold samples and
-does not invoke providers or network services. Filesystem type is reported as
+clears only the in-process dashboard snapshot cache between cold samples, uses
+disposable fixtures for file tools and Git, and does not invoke providers or
+network services. Filesystem type is reported as
 unknown when the standard library cannot identify it; record it from the host
 when comparing results across filesystems.
 
