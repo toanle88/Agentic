@@ -1,5 +1,8 @@
 import base64
+import csv
 from concurrent.futures import ThreadPoolExecutor
+import datetime as dt
+import io
 import json
 import math
 import os
@@ -849,6 +852,134 @@ console.log(JSON.stringify({{newest, oldest}}));
         self.assertEqual(
             [run["id"] for run in filter_runs(runs, query="not present")], [],
         )
+
+    def test_dashboard_extended_filters_sort_and_bounded_exports(self):
+        runs = [
+            {
+                "id": "slow", "repository": "repo-a", "workflow_mode": "standard",
+                "publication_state": "pending", "action_required": True,
+                "action_reasons": ["pending publication"], "last_activity": "2026-01-02T00:00:00+00:00",
+                "usage": {"total_tokens": 20, "estimated_cost_usd": 0.4,
+                          "metrics": {"duration_seconds": 8},
+                          "workflow_metrics": {"retries": 2, "review_findings": 3}},
+            },
+            {
+                "id": "fast", "repository": "repo-b", "workflow_mode": "quick",
+                "publication_state": "published", "action_required": False,
+                "last_activity": "2026-01-01T00:00:00+00:00",
+                "usage": {"total_tokens": 10, "estimated_cost_usd": 0.1,
+                          "metrics": {"duration_seconds": 2},
+                          "workflow_metrics": {"retries": 0, "review_findings": 0}},
+            },
+        ]
+        self.assertEqual(
+            [run["id"] for run in filter_runs(
+                runs, repository="repo-a", workflow_mode="standard",
+                publication_state="pending", action_required="yes",
+                date_from="2026-01-02", date_to="2026-01-02",
+            )],
+            ["slow"],
+        )
+        self.assertEqual(
+            [run["id"] for run in agentic_dashboard_data.sort_runs(runs, sort_by="duration")],
+            ["slow", "fast"],
+        )
+        exported = agentic_dashboard_data.export_summary_json(runs)
+        self.assertLessEqual(len(exported.encode("utf-8")), 256_000)
+        self.assertNotIn('"files"', exported)
+        self.assertNotIn('"instruction"', exported)
+        self.assertEqual(set(json.loads(exported)[0]), {
+            "id", "repository", "issue", "label", "status", "stage", "severity",
+            "action_required", "action_reasons", "workflow_mode", "publication_state",
+            "review_status", "tests_status", "last_activity", "duration_seconds",
+            "total_tokens", "estimated_cost_usd", "retries", "review_findings",
+            "first_pass_approval", "worktree_state",
+        })
+        csv_text = agentic_dashboard_data.export_summary_csv(runs)
+        self.assertIn("action_reasons", csv_text)
+        self.assertLessEqual(len(csv_text.encode("utf-8")), 256_000)
+
+    def test_dashboard_csv_budget_preserves_quoted_rows(self):
+        runs = [
+            {
+                "id": f"run-{index}",
+                "label": "x" * 240,
+                "action_reasons": ["reason " + ("y" * 240)],
+            }
+            for index in range(500)
+        ]
+        runs[140]["label"] = "line one\nline two"
+        csv_text = agentic_dashboard_data.export_summary_csv(runs)
+        rows = list(csv.reader(io.StringIO(csv_text, newline="")))
+        self.assertLessEqual(len(csv_text.encode("utf-8")), 256_000)
+        self.assertTrue(rows)
+        self.assertTrue(all(len(row) == len(rows[0]) for row in rows))
+
+    def test_dashboard_marks_stale_worktrees_as_action_required(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            logs = root / "logs"
+            logs.mkdir()
+            run = logs / "agent-issue-76-deadbeef"
+            run.mkdir()
+            activity = run / "developer-001.txt"
+            activity.write_text("Finished\n")
+            old_timestamp = (dt.datetime.now().timestamp() - (31 * 24 * 60 * 60))
+            os.utime(activity, (old_timestamp, old_timestamp))
+            worktrees = root / "worktrees"
+            (worktrees / "issue-76-deadbeef").mkdir(parents=True)
+            state = StatePaths(root / "state", worktrees,
+                               root / "runs", root / "shell", root / "dashboards")
+
+            with (patch.object(agentic_dashboard, "state_paths", return_value=state),
+                  patch.object(agentic_dashboard, "legacy_worktrees_dir",
+                               return_value=root / "legacy-worktrees")):
+                runs, _ = agentic_dashboard._dashboard_snapshot(
+                    root, root / "state", logs, include_legacy=False,
+                )
+
+            self.assertEqual(runs[0]["worktree_state"], "stale")
+            self.assertTrue(runs[0]["action_required"])
+            self.assertIn("stale worktree", runs[0]["action_reasons"])
+
+    def test_dashboard_summary_handles_incomplete_legacy_nested_fields(self):
+        runs = [{
+            "id": "legacy", "tests": None, "review": None,
+            "usage": {"metrics": None, "workflow_metrics": None},
+        }]
+        row = agentic_dashboard_data.summary_row(runs[0])
+        self.assertEqual(row["review_status"], "unknown")
+        self.assertEqual(row["tests_status"], "unknown")
+        self.assertEqual(agentic_dashboard_data.export_summary_csv(iter(runs)).count("legacy"), 1)
+
+    def test_dashboard_records_action_and_publication_metadata(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            run = root / "agent-issue-75-deadbeef"
+            run.mkdir(parents=True)
+            (run / "review-001.json").write_text(json.dumps({
+                "approved": False, "summary": "Needs a fix", "findings": ["Fix it"],
+            }))
+            (run / "test-command-001.txt").write_text("FAILED exit 1\n")
+            (run / "run.json").write_text(json.dumps({
+                "workflow_mode": "quick", "usage": {"workflow_mode": "quick"},
+            }))
+            (run / "publication.json").write_text(json.dumps({"status": "failed"}))
+            snapshot = agentic_dashboard.collect_runs(root)[0]
+            self.assertEqual(snapshot["workflow_mode"], "quick")
+            self.assertEqual(snapshot["publication_state"], "failed")
+            self.assertTrue(snapshot["action_required"])
+            self.assertIn("failed checks", snapshot["action_reasons"])
+            self.assertIn("rejected review", snapshot["action_reasons"])
+
+    def test_dashboard_html_exposes_action_filters_compare_and_exports(self):
+        html = agentic_dashboard.render_dashboard([], "demo", ".demo-agent-runs")
+        for marker in (
+            'id="repository"', 'id="workflow-mode"', 'id="publication"',
+            'id="action"', 'id="date-from"', 'id="sort"', 'data-view="compare"',
+            'id="export-json"', 'id="export-csv"', 'Unavailable',
+        ):
+            self.assertIn(marker, html)
 
     def test_dashboard_preserves_issue_title_and_state_metadata(self):
         with tempfile.TemporaryDirectory() as temp:

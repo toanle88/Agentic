@@ -43,7 +43,7 @@ _KNOWN_RUN_FIELDS = {
     "schema_version", "usage_by_role", "usage_by_stage", "usage",
     "usage_by_invocation", "security_policy", "security_policy_history",
     "instruction", "issue_metadata", "metrics", "guidance_loads",
-    "guidance_stats", "workflow_metrics", "shell_job_id",
+    "guidance_stats", "workflow_metrics", "workflow_mode", "shell_job_id",
 }
 
 
@@ -671,6 +671,21 @@ def record_workflow_outcome(folder: Path, *, approved: bool, attempts: int,
     _write_run_record(path, data)
 
 
+def record_workflow_mode(folder: Path, mode: str) -> None:
+    """Persist the bounded workflow mode used by a run.
+
+    Older run records simply omit this optional field and remain readable.  The
+    value is configuration metadata, not prompt or provider output.
+    """
+    path, data = _load_run_record(folder)
+    bounded = str(mode).strip()[:40]
+    if bounded:
+        data["workflow_mode"] = bounded
+    else:
+        data.pop("workflow_mode", None)
+    _write_run_record(path, data)
+
+
 def read_run_usage(folder: Path) -> dict[str, Any]:
     data = _read_run_record(folder / "run.json")
     if not data:
@@ -702,6 +717,8 @@ def read_run_usage(folder: Path) -> dict[str, Any]:
             and isinstance(result.get("total_tokens"), int)
         ):
             result["tokens_per_approved_task"] = result["total_tokens"]
+    if isinstance(data.get("workflow_mode"), str) and data["workflow_mode"].strip():
+        result["workflow_mode"] = data["workflow_mode"].strip()[:40]
     if isinstance(data.get("issue_metadata"), dict):
         result["issue_metadata"] = data["issue_metadata"]
     if isinstance(data.get("shell_job_id"), str):
