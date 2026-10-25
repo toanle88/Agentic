@@ -165,15 +165,12 @@ def safe_command_context(
 
 
 def diagnostic_path(repo: Path | None = None, state_dir: Path | None = None) -> Path:
-    """Resolve the project-scoped diagnostic path, with an unscoped fallback."""
-    from .worktrees import default_state_dir, state_paths
+    """Resolve the project-scoped diagnostic path and fail closed on unsafe state."""
+    from .worktrees import state_paths
 
     repository = (repo or Path.cwd()).expanduser().resolve()
-    try:
-        paths = state_paths(repository, state_dir)
-        root = paths.diagnostics if paths.diagnostics is not None else paths.root / "diagnostics"
-    except (OSError, TypeError, ValueError, RuntimeError):
-        root = (state_dir or default_state_dir()).expanduser().resolve() / "unknown-repository" / "diagnostics"
+    paths = state_paths(repository, state_dir)
+    root = paths.diagnostics if paths.diagnostics is not None else paths.root / "diagnostics"
     return root / DIAGNOSTIC_FILENAME
 
 
@@ -225,6 +222,10 @@ def record_diagnostic(
         values = list(argv)
         configured_values = _diagnostic_redaction_values(values, redaction_values)
         resolved_repo = repo or _path_option(values, "--repo")
+        diagnostic_repo = (
+            Path(resolved_repo).expanduser().resolve()
+            if resolved_repo is not None else Path.cwd().resolve()
+        )
         resolved_state_dir = state_dir or _path_option(values, "--state-dir")
         safe_category = category if _SAFE_CATEGORY.fullmatch(category) else "unknown"
         event: dict[str, Any] = {
@@ -246,7 +247,9 @@ def record_diagnostic(
                 "type": _safe_exception_type(exc, redaction_values=configured_values),
                 "traceback": _safe_traceback(exc, redaction_values=configured_values),
             }
-        path = diagnostic_path(resolved_repo, resolved_state_dir)
+        from .worktrees import ensure_state_paths
+        ensure_state_paths(diagnostic_repo, resolved_state_dir)
+        path = diagnostic_path(diagnostic_repo, resolved_state_dir)
         _append_line(
             path, json.dumps(event, ensure_ascii=False, separators=(",", ":")),
             redaction_values=configured_values,

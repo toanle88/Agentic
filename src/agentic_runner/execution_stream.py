@@ -80,9 +80,8 @@ def _append_bounded_human_log(path: Path, text: str) -> bool:
             truncation_marker=HUMAN_LOG_TRUNCATION_MARKER, truncate=False,
         )
         try:
-            before = writer.written_bytes
             writer.write(text)
-            return writer.written_bytes > before
+            return not writer.truncated
         finally:
             writer.close()
     except OSError:

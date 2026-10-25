@@ -257,12 +257,11 @@ class AgenticShell:
             state_dir = default_state_dir()
         self.state_dir = state_dir.expanduser()
         if session_dir is None:
-            from .cli import state_paths
-            session_dir = state_paths(self.repo, self.state_dir).shell
+            from .worktrees import ensure_state_paths
+            session_dir = ensure_state_paths(self.repo, self.state_dir).shell
         self.session_dir = session_dir.expanduser()
-        from .worktrees import _validate_state_directory
-        _validate_state_directory(self.session_dir, label="shell session directory")
-        self.session_dir.mkdir(parents=True, exist_ok=True)
+        from .worktrees import ensure_state_directory
+        ensure_state_directory(self.session_dir, label="shell session directory")
         self.session_id = uuid.uuid4().hex[:12]
         self.jobs: dict[int, Job] = {}
         self._load_persisted_jobs()

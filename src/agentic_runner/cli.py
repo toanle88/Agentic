@@ -332,7 +332,9 @@ from .worktrees import (  # noqa: E402, F401
     create_worktree,
     default_base_branch,
     default_state_dir,
+    ensure_state_directory,
     discover_runs,
+    ensure_state_paths,
     eligible,
     github_metadata,
     github_repo_from_remote,
@@ -498,9 +500,12 @@ def get_issue(
 
 def logs_path(repo: Path, run: Run, state_dir: Path | None = None) -> Path:
     """Return preferred run logs, falling back to the pre-centralized location."""
-    preferred = (state_paths(repo, state_dir).runs if state_dir else legacy_runs_dir(repo)) / run.branch.replace("/", "-")
+    paths = state_paths(repo, state_dir) if state_dir else None
+    preferred = (paths.runs if paths else legacy_runs_dir(repo)) / run.branch.replace("/", "-")
     legacy = legacy_runs_dir(repo) / run.branch.replace("/", "-")
     folder = legacy if state_dir and legacy.is_dir() and not preferred.exists() else preferred
+    if folder == preferred and state_dir:
+        ensure_state_paths(repo, state_dir)
     folder.mkdir(parents=True, exist_ok=True)
     return folder
 

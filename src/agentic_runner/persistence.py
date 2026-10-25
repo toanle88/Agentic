@@ -89,7 +89,9 @@ def _open_log_parent(path: Path) -> tuple[int, str]:
         raise
 
 
-def _open_log_descriptor_legacy(path: Path, *, truncate: bool) -> int:
+def _open_log_descriptor_legacy(
+    path: Path, *, truncate: bool, readable: bool = False,
+) -> int:
     """Open a log on platforms without an ``openat``-style stdlib API."""
     _validate_log_parent(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -98,9 +100,8 @@ def _open_log_descriptor_legacy(path: Path, *, truncate: bool) -> int:
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     append = 0 if truncate else getattr(os, "O_APPEND", 0)
     binary = getattr(os, "O_BINARY", 0)
-    base_flags = (
-        os.O_WRONLY | getattr(os, "O_NONBLOCK", 0) | nofollow | append | binary
-    )
+    access = os.O_RDWR if readable else os.O_WRONLY
+    base_flags = access | getattr(os, "O_NONBLOCK", 0) | nofollow | append | binary
     try:
         descriptor = os.open(path, base_flags | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
@@ -124,7 +125,9 @@ def _open_log_descriptor_legacy(path: Path, *, truncate: bool) -> int:
         raise
 
 
-def _open_log_descriptor(path: Path, *, truncate: bool) -> int:
+def _open_log_descriptor(
+    path: Path, *, truncate: bool, readable: bool = False,
+) -> int:
     """Open a single-link regular log, rejecting replaceable final symlinks.
 
     Creation uses ``O_EXCL`` and existing files use ``O_NOFOLLOW`` where the
@@ -137,9 +140,8 @@ def _open_log_descriptor(path: Path, *, truncate: bool) -> int:
         nofollow = os.O_NOFOLLOW
         append = 0 if truncate else getattr(os, "O_APPEND", 0)
         binary = getattr(os, "O_BINARY", 0)
-        base_flags = (
-            os.O_WRONLY | getattr(os, "O_NONBLOCK", 0) | nofollow | append | binary
-        )
+        access = os.O_RDWR if readable else os.O_WRONLY
+        base_flags = access | getattr(os, "O_NONBLOCK", 0) | nofollow | append | binary
         try:
             try:
                 descriptor = os.open(
@@ -152,7 +154,9 @@ def _open_log_descriptor(path: Path, *, truncate: bool) -> int:
             os.close(parent_descriptor)
             parent_descriptor = -1
     else:
-        descriptor = _open_log_descriptor_legacy(path, truncate=truncate)
+        descriptor = _open_log_descriptor_legacy(
+            path, truncate=truncate, readable=readable,
+        )
     try:
         _validate_log_descriptor(descriptor, path)
         if truncate:
@@ -249,8 +253,28 @@ class BoundedAppendWriter:
         self._retained = bytearray()
         self._truncated = False
         self._closed = False
-        self._descriptor = _open_log_descriptor(path, truncate=truncate)
-        self._written_bytes = os.fstat(self._descriptor).st_size
+        self._descriptor = _open_log_descriptor(
+            path, truncate=truncate, readable=retain_suffix and not truncate,
+        )
+        try:
+            self._written_bytes = os.fstat(self._descriptor).st_size
+            if self.retain_suffix and not truncate:
+                capacity = max(0, self.max_bytes - len(self._marker))
+                if capacity:
+                    start = max(0, self._written_bytes - capacity)
+                    os.lseek(self._descriptor, start, os.SEEK_SET)
+                    remaining = min(capacity, self._written_bytes - start)
+                    while remaining:
+                        chunk = os.read(self._descriptor, remaining)
+                        if not chunk:
+                            break
+                        self._retained.extend(chunk)
+                        remaining -= len(chunk)
+                    os.lseek(self._descriptor, 0, os.SEEK_END)
+        except BaseException:
+            os.close(self._descriptor)
+            self._closed = True
+            raise
 
     @property
     def truncated(self) -> bool:

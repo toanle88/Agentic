@@ -24,12 +24,18 @@ from agentic_runner.execution_providers import (
     _stage_readonly_worktree,
 )
 from agentic_runner import file_boundaries
+from agentic_runner import worktrees as agentic_worktrees
 from agentic_runner.config import PROVIDER_API_KEY_ENV, provider_process_environment
 from agentic_runner.sandbox import sandbox_command, validate_sandbox
 from agentic_runner.security import redact_secrets
 from agentic_runner.execution_stream import streamed_command
 from agentic_runner.persistence import BoundedAppendWriter, atomic_write_text
-from agentic_runner.worktrees import default_state_dir, state_paths
+from agentic_runner.worktrees import (
+    default_state_dir,
+    ensure_state_paths,
+    repository_state_key,
+    state_paths,
+)
 from agentic_runner.telemetry import record_issue_metadata, record_run_instruction, record_usage
 from agentic_runner.review import record_review_findings
 from agentic_runner.models import Issue, Run
@@ -215,6 +221,34 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
             self.assertTrue(any(flags & binary_flag for flags in observed_flags))
             self.assertLessEqual(len(path.read_bytes()), 3)
 
+    def test_bounded_append_writer_retains_existing_suffix_before_overflow(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "output.log"
+            path.write_bytes(b"ABCDEFGH")
+            writer = BoundedAppendWriter(
+                path, max_bytes=12, truncation_marker="MARK", retain_suffix=True,
+                truncate=False,
+            )
+            writer.write(b"IJKLM")
+            writer.close()
+
+            saved = path.read_bytes()
+        self.assertEqual(saved, b"MARKFGHIJKLM")
+
+    def test_bounded_human_log_reports_marker_only_append_as_truncated(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(
+            execution_stream, "MAX_HUMAN_LOG_BYTES",
+            len(execution_stream.HUMAN_LOG_TRUNCATION_MARKER.encode("utf-8")) + 1,
+        ):
+            path = Path(temp) / "output.log"
+            self.assertFalse(
+                execution_stream._append_bounded_human_log(path, "too much output"),
+            )
+            self.assertIn(
+                execution_stream.HUMAN_LOG_TRUNCATION_MARKER,
+                path.read_text(encoding="utf-8"),
+            )
+
     def test_state_directory_rejects_group_writable_posix_roots(self):
         if os.name == "nt":
             self.skipTest("POSIX ownership and mode policy is not portable on Windows")
@@ -233,6 +267,107 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
             self.assertFalse(paths.root.exists())
             if os.name != "nt":
                 self.assertEqual(root.stat().st_mode & 0o077, 0)
+
+    def test_state_directory_rejects_attacker_writable_existing_ancestor(self):
+        if os.name == "nt":
+            self.skipTest("POSIX ownership and mode policy is not portable on Windows")
+        with tempfile.TemporaryDirectory() as temp:
+            ancestor = Path(temp) / "shared"
+            ancestor.mkdir(mode=0o700)
+            ancestor.chmod(0o777)
+            missing = ancestor / "state"
+            with self.assertRaisesRegex(ValueError, "group/other writable"):
+                state_paths(Path(temp), missing)
+
+    def test_state_directory_rejects_sticky_writable_non_system_ancestor(self):
+        if os.name == "nt":
+            self.skipTest("POSIX ownership and mode policy is not portable on Windows")
+        with tempfile.TemporaryDirectory() as temp:
+            ancestor = Path(temp) / "shared"
+            ancestor.mkdir(mode=0o700)
+            ancestor.chmod(0o1777)
+            with self.assertRaisesRegex(ValueError, "group/other writable"):
+                state_paths(Path(temp), ancestor / "state")
+
+    def test_state_directory_rejects_sticky_writable_state_root(self):
+        if os.name == "nt":
+            self.skipTest("POSIX ownership and mode policy is not portable on Windows")
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp) / "state"
+            state.mkdir(mode=0o700)
+            state.chmod(0o1777)
+            with self.assertRaisesRegex(ValueError, "group/other writable"):
+                state_paths(Path(temp), state)
+
+    def test_state_directory_initializer_revalidates_precreated_missing_root(self):
+        if os.name == "nt":
+            self.skipTest("POSIX ownership and mode policy is not portable on Windows")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "project"
+            repo.mkdir()
+            state = root / "state"
+            state.mkdir(mode=0o700)
+            state.chmod(0o777)
+            with self.assertRaisesRegex(ValueError, "group/other writable"):
+                ensure_state_paths(repo, state)
+
+    def test_state_directory_initializer_rejects_root_made_unsafe_during_creation(self):
+        if os.name == "nt":
+            self.skipTest("POSIX ownership and mode policy is not portable on Windows")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "project"
+            repo.mkdir()
+            state = root / "state"
+            repository_root_name = repository_state_key(repo)
+            real_mkdir = agentic_worktrees.os.mkdir
+            changed = False
+
+            def create_then_make_unsafe(name, mode=0o777, *, dir_fd=None):
+                nonlocal changed
+                real_mkdir(name, mode, dir_fd=dir_fd)
+                if name == repository_root_name and not changed:
+                    changed = True
+                    (state / repository_root_name).chmod(0o777)
+
+            with patch.object(
+                agentic_worktrees.os, "mkdir", side_effect=create_then_make_unsafe,
+            ) as mkdir_mock, patch.object(
+                agentic_worktrees.os, "supports_dir_fd",
+                set(agentic_worktrees.os.supports_dir_fd) | {mkdir_mock},
+            ):
+                with self.assertRaisesRegex(ValueError, "group/other writable"):
+                    ensure_state_paths(repo, state)
+            self.assertTrue(changed)
+
+    def test_state_directory_initializer_rejects_precreated_unsafe_repository_root(self):
+        if os.name == "nt":
+            self.skipTest("POSIX ownership and mode policy is not portable on Windows")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state = root / "state"
+            state.mkdir(mode=0o700)
+            repo = root / "project"
+            repo.mkdir()
+            unsafe = state / repository_state_key(repo)
+            unsafe.mkdir(mode=0o700)
+            unsafe.chmod(0o777)
+            with self.assertRaisesRegex(ValueError, "group/other writable"):
+                ensure_state_paths(repo, state)
+
+    def test_state_directory_initializer_creates_private_missing_hierarchy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "project"
+            repo.mkdir()
+            state = root / "missing" / "state"
+            paths = ensure_state_paths(repo, state)
+            self.assertTrue(paths.root.is_dir())
+            self.assertTrue(paths.runs.is_dir())
+            if os.name != "nt":
+                for directory in (state, paths.root, paths.runs):
+                    self.assertEqual(directory.stat().st_mode & 0o077, 0)
 
     def test_state_directory_rejects_configured_symlink_root(self):
         if os.name == "nt":

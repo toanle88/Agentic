@@ -61,7 +61,7 @@ With `--security-mode isolated` (or `--secure`), the sandbox is preflighted
 before discovery and both provider assistance and candidate checks run inside
 that sandbox; discovery fails closed if it cannot be applied.
 
-Runtime state is controlled separately from project configuration. Use `--state-dir PATH` or `AGENTIC_STATE_DIR` for worktrees, logs, shell records, and dashboards. This is especially useful in WSL when Windows Git must open the worktree from a shared mounted drive.
+Runtime state is controlled separately from project configuration. Use `--state-dir PATH` or `AGENTIC_STATE_DIR` for worktrees, logs, shell records, and dashboards. This is especially useful in WSL when Windows Git must open the worktree from a shared mounted drive. On POSIX systems, Agentic rejects symlinked, non-directory, or attacker-writable state ancestors and requires the configured state root to be private; writers create missing state hierarchy through an anchored, race-resistant path. Choose a shared mount with permissions that satisfy this policy, or keep runtime state in a private user directory and share only the worktree when necessary.
 
 ## Example
 

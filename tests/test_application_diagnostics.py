@@ -1,5 +1,6 @@
 """Regression coverage for Agentic's application-level diagnostic log."""
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -111,6 +112,25 @@ class ApplicationDiagnosticsTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn("expected failure", stderr.getvalue())
         self.assertNotIn("disk full", stderr.getvalue())
+
+    def test_diagnostic_path_rejects_unsafe_state_directory(self):
+        if os.name == "nt":
+            self.skipTest("POSIX ownership and mode policy is not portable on Windows")
+        unsafe = self.state / "unsafe"
+        unsafe.mkdir(parents=True)
+        unsafe.chmod(0o777)
+        with self.assertRaisesRegex(ValueError, "group/other writable"):
+            app_diagnostics.diagnostic_path(self.repo, unsafe)
+
+    def test_standalone_diagnostic_initializes_a_validated_state_hierarchy(self):
+        path = app_diagnostics.record_diagnostic(
+            "handled_error", exc=RuntimeError("standalone failure"),
+            state_dir=self.state,
+        )
+
+        self.assertIsNotNone(path)
+        self.assertTrue(path.is_file())
+        self.assertTrue(path.parent.is_dir())
 
     def test_diagnostic_log_rotates_at_bounded_size(self):
         with patch.object(app_diagnostics, "DIAGNOSTIC_MAX_BYTES", 700), \

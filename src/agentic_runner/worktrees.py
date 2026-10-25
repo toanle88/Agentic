@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 from threading import Thread
 import uuid
@@ -95,23 +96,72 @@ def repository_state_key(repo: Path) -> str:
     return f"{slug}-{digest}"
 
 
-def _validate_state_path_components(path: Path, *, label: str) -> None:
-    """Reject symlinked components before a state path is resolved."""
+def _absolute_state_path(path: Path) -> Path:
+    """Make a lexical absolute path without resolving symbolic links."""
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _state_metadata_is_safe(
+    metadata: os.stat_result, *, label: str, require_current_owner: bool,
+    path: Path | None = None,
+) -> None:
+    if stat.S_ISLNK(metadata.st_mode):
+        raise ValueError(f"{label} must not contain symbolic links")
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError(f"{label} must be a directory")
+    current_uid = getattr(os, "getuid", lambda: metadata.st_uid)()
+    trusted_shared_path = path in {
+        Path("/tmp"), Path("/var/tmp"), Path("/dev/shm"),
+    }
+    if require_current_owner:
+        if metadata.st_uid != current_uid:
+            raise ValueError(f"{label} must be owned by the current user")
+    # A system-managed sticky directory such as /tmp is safe as an ancestor:
+    # its owner cannot be an unprivileged attacker and sticky semantics protect
+    # entries created below it. Other writable ancestors are replaceable by an
+    # attacker. The configured state root itself must never be writable, even
+    # when the current user is root.
+    writable = metadata.st_mode & 0o022
+    if writable and (
+        require_current_owner
+        or (metadata.st_uid != 0 and not trusted_shared_path)
+        or not (metadata.st_mode & stat.S_ISVTX)
+    ):
+        raise ValueError(f"{label} must not be group/other writable")
+
+
+def _existing_state_components(path: Path) -> list[tuple[Path, os.stat_result]]:
+    """Return existing lexical components, without following a final link."""
+    components: list[tuple[Path, os.stat_result]] = []
     current = path
-    if current.is_symlink():
-        raise ValueError(f"{label} must not contain symbolic links: {path}")
-    while not current.exists():
-        parent = current.parent
-        if parent == current:
-            break
-        current = parent
     while True:
-        if current.is_symlink():
-            raise ValueError(f"{label} must not contain symbolic links: {path}")
-        parent = current.parent
-        if parent == current:
-            break
-        current = parent
+        try:
+            metadata = os.lstat(current)
+        except FileNotFoundError:
+            current = current.parent
+        else:
+            components.append((current, metadata))
+            current = current.parent
+        if current == current.parent:
+            try:
+                metadata = os.lstat(current)
+            except FileNotFoundError:
+                pass
+            else:
+                components.append((current, metadata))
+            return components
+
+
+def _validate_state_path_components(path: Path, *, label: str) -> None:
+    """Reject replaceable or unsafe existing ancestors of a state path."""
+    absolute = _absolute_state_path(path)
+    components = _existing_state_components(absolute)
+    for component, metadata in components:
+        _state_metadata_is_safe(
+            metadata, label=f"{label} ancestor {component}",
+            require_current_owner=False,
+            path=component,
+        )
 
 
 def _validate_state_directory(path: Path, *, label: str) -> None:
@@ -126,30 +176,69 @@ def _validate_state_directory(path: Path, *, label: str) -> None:
     """
     if os.name == "nt":
         return
+    path = _absolute_state_path(path)
     _validate_state_path_components(path, label=label)
-    if path.is_symlink():
-        raise ValueError(f"{label} must not be a symbolic link: {path}")
     try:
-        metadata = path.stat()
+        metadata = os.lstat(path)
     except FileNotFoundError:
         # Read-only dashboard and diagnostics paths may legitimately point at
-        # a state namespace that has not been created yet. The first writer
-        # creates it; existing namespaces are validated before use.
+        # a state namespace that has not been created yet. Writers must call
+        # ensure_state_directory/ensure_state_paths before creating artifacts.
         return
-    if not metadata or not path.is_dir():
-        raise ValueError(f"{label} must be a directory: {path}")
-    current_uid = getattr(os, "getuid", lambda: metadata.st_uid)()
-    if metadata.st_uid != current_uid:
-        raise ValueError(f"{label} must be owned by the current user: {path}")
-    if metadata.st_mode & 0o022:
-        raise ValueError(f"{label} must not be group/other writable: {path}")
+    _state_metadata_is_safe(
+        metadata, label=label, require_current_owner=True, path=path,
+    )
+
+
+def _ensure_state_directory(path: Path, *, label: str) -> Path:
+    """Create and validate a state directory through anchored descriptors."""
+    path = _absolute_state_path(path)
+    if os.name == "nt":
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    if not (
+        hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW")
+        and os.open in getattr(os, "supports_dir_fd", set())
+        and os.mkdir in getattr(os, "supports_dir_fd", set())
+    ):
+        raise OSError("anchored state-directory creation is unavailable")
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptor = os.open(path.anchor or os.path.sep, flags)
+    try:
+        parts = path.parts[1:] if path.anchor else path.parts
+        component_path = Path(path.anchor or os.path.sep)
+        for index, component in enumerate(parts):
+            try:
+                os.mkdir(component, 0o700, dir_fd=descriptor)
+            except FileExistsError:
+                pass
+            child = os.open(component, flags, dir_fd=descriptor)
+            try:
+                _state_metadata_is_safe(
+                    os.fstat(child), label=label,
+                    require_current_owner=index == len(parts) - 1,
+                    path=component_path.joinpath(*parts[:index + 1]),
+                )
+            except BaseException:
+                os.close(child)
+                raise
+            os.close(descriptor)
+            descriptor = child
+        if not parts:
+            _state_metadata_is_safe(
+                os.fstat(descriptor), label=label, require_current_owner=True,
+                path=path,
+            )
+    finally:
+        os.close(descriptor)
+    return path
 
 
 def state_paths(repo: Path, state_dir: Path | None = None) -> StatePaths:
-    base = (state_dir or default_state_dir()).expanduser()
+    base = _absolute_state_path((state_dir or default_state_dir()).expanduser())
     if os.name != "nt":
         _validate_state_path_components(base, label="state directory")
-    base = base.resolve()
     _validate_state_directory(base, label="state directory")
     root = base / repository_state_key(repo)
     _validate_state_directory(root, label="repository state directory")
@@ -157,6 +246,26 @@ def state_paths(repo: Path, state_dir: Path | None = None) -> StatePaths:
         child = root / name
         if child.exists() or child.is_symlink():
             _validate_state_directory(child, label=f"repository {name} directory")
+    return StatePaths(
+        root, root / "worktrees", root / "runs", root / "shell", root / "dashboards",
+        root / "diagnostics",
+    )
+
+
+def ensure_state_directory(path: Path, *, label: str = "state directory") -> Path:
+    """Create one writer-owned state directory with a race-resistant boundary."""
+    return _ensure_state_directory(path, label=label)
+
+
+def ensure_state_paths(repo: Path, state_dir: Path | None = None) -> StatePaths:
+    """Create the central state hierarchy before a writer uses its paths."""
+    base = _absolute_state_path((state_dir or default_state_dir()).expanduser())
+    _ensure_state_directory(base, label="state directory")
+    root = _ensure_state_directory(
+        base / repository_state_key(repo), label="repository state directory",
+    )
+    for name in ("worktrees", "runs", "shell", "dashboards", "diagnostics", "locks"):
+        _ensure_state_directory(root / name, label=f"repository {name} directory")
     return StatePaths(
         root, root / "worktrees", root / "runs", root / "shell", root / "dashboards",
         root / "diagnostics",
@@ -380,9 +489,10 @@ def _exclusive_lock(lock_path: Path, message: str):
 @contextmanager
 def repository_lock(repo: Path, state_dir: Path | None = None):
     """Serialize operations that mutate shared Git repository metadata."""
-    lock_path = state_paths(repo, state_dir).root / "locks" / "repository.lock"
+    paths = state_paths(repo, state_dir)
+    lock_path = paths.root / "locks" / "repository.lock"
     try:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_state_directory(lock_path.parent, label="repository locks directory")
     except OSError:
         # Read-only test sandboxes and locked-down hosts may not permit the
         # configured user state root. Keep the operation safe with a narrow
@@ -401,9 +511,10 @@ def repository_lock(repo: Path, state_dir: Path | None = None):
 def worktree_path_lock(repo: Path, worktree: Path, state_dir: Path | None = None):
     """Allow independent worktrees to run concurrently, but not one worktree twice."""
     identity = hashlib.sha256(str(worktree.resolve()).encode("utf-8")).hexdigest()[:16]
-    lock_path = state_paths(repo, state_dir).root / "locks" / f"worktree-{identity}.lock"
+    paths = state_paths(repo, state_dir)
+    lock_path = paths.root / "locks" / f"worktree-{identity}.lock"
     try:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_state_directory(lock_path.parent, label="worktree locks directory")
     except OSError:
         git_dir = Path(git(repo, "rev-parse", "--git-path", "agentic-worktree-locks"))
         if not git_dir.is_absolute():
@@ -650,7 +761,7 @@ def create_worktree(repo: Path, base: str, issue_number: int,
         branch = f"agent/issue-{issue_number}-{timestamp}-{ident}"
         # ``state_dir`` is supplied by the CLI. The legacy fallback keeps this
         # low-level helper compatible for callers that intentionally manage paths.
-        parent = state_paths(repo, state_dir).worktrees if state_dir else legacy_worktrees_dir(repo)
+        parent = ensure_state_paths(repo, state_dir).worktrees if state_dir else legacy_worktrees_dir(repo)
         parent.mkdir(parents=True, exist_ok=True)
         worktree = parent / f"issue-{issue_number}-{timestamp}-{ident}"
         git(repo, "worktree", "add", "-b", branch, str(worktree), f"origin/{base}")
@@ -678,7 +789,7 @@ def create_local_worktree(repo: Path, base: str, issue: Issue,
         timestamp = _utc_timestamp()
         ident = f"-{uuid.uuid4().hex[:8]}" if separate else ""
         branch = f"agent/task-{slug}-{issue.task_key}-{timestamp}{ident}"
-        parent = state_paths(repo, state_dir).worktrees if state_dir else legacy_worktrees_dir(repo)
+        parent = ensure_state_paths(repo, state_dir).worktrees if state_dir else legacy_worktrees_dir(repo)
         parent.mkdir(parents=True, exist_ok=True)
         worktree = parent / f"task-{slug}-{issue.task_key}-{timestamp}{ident}"
         git(repo, "worktree", "add", "-b", branch, str(worktree), f"origin/{base}")
@@ -701,7 +812,7 @@ def create_audit_worktree(repo: Path, base: str, issue: Issue,
         ident = f"-{uuid.uuid4().hex[:8]}" if separate else ""
         timestamp = _utc_timestamp()
         branch = f"agent/audit-{issue.audit_key}-{timestamp}{ident}"
-        parent = state_paths(repo, state_dir).worktrees if state_dir else legacy_worktrees_dir(repo)
+        parent = ensure_state_paths(repo, state_dir).worktrees if state_dir else legacy_worktrees_dir(repo)
         parent.mkdir(parents=True, exist_ok=True)
         worktree = parent / f"audit-{issue.audit_key}-{timestamp}{ident}"
         git(repo, "worktree", "add", "-b", branch, str(worktree), f"origin/{base}")

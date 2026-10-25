@@ -19,6 +19,8 @@ from urllib.parse import unquote, urlsplit
 
 from .cli import (
     default_state_dir,
+    ensure_state_paths,
+    ensure_state_directory,
     legacy_runs_dir,
     legacy_worktrees_dir,
     state_paths,
@@ -609,8 +611,12 @@ def _main(argv: list[str] | None = None) -> int:
                 raise RuntimeError(
                     "Remote dashboard serving requires --tls-certfile and --tls-keyfile"
                 )
-    output = (args.output or state_paths(repo, state_dir).dashboards / "dashboard.html").resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
+    if args.output is None:
+        output = ensure_state_paths(repo, state_dir).dashboards / "dashboard.html"
+    else:
+        output = args.output
+    output = output.resolve()
+    ensure_state_directory(output.parent, label="dashboard output directory")
     runs, logs_root = _dashboard_snapshot(repo, state_dir, logs_argument)
     atomic_write_text(output, render_dashboard(
         runs, repo.name, logs_root.name, settings=_dashboard_settings(repo, runs),
