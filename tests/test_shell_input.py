@@ -1027,7 +1027,7 @@ class InteractiveInputTests(unittest.TestCase):
         )
         self.assertEqual(
             agentic_shell._completion_candidates('/logs ', job_numbers=(2, 1)),
-            ['1', '2'],
+            ['2', '1'],
         )
         self.assertEqual(
             agentic_shell._completion_candidates('/logs --v', job_numbers=(2, 1)),
@@ -1042,6 +1042,35 @@ class InteractiveInputTests(unittest.TestCase):
                 '/logs ', job_numbers=(1, 2), jobs=jobs,
             )],
             ['2', '1'],
+        )
+        many_jobs = {
+            number: type(
+                'JobState', (),
+                {'running': number in {1, 30}, 'pid': 100 + number, 'exit_code': 0},
+            )()
+            for number in range(1, 31)
+        }
+        log_candidates = agentic_shell._completion_candidates(
+            '/logs ', job_numbers=tuple(many_jobs), jobs=many_jobs,
+        )
+        self.assertEqual(log_candidates[:2], ['1', '30'])
+        self.assertEqual(
+            log_candidates[2:], [str(number) for number in range(29, 9, -1)]
+        )
+        self.assertEqual(len(log_candidates), 22)
+        self.assertNotIn('2', log_candidates)
+        self.assertNotIn('5', log_candidates)
+        self.assertEqual(
+            agentic_shell._completion_candidates(
+                '/stop ', job_numbers=tuple(many_jobs), jobs=many_jobs,
+            ),
+            ['--all'] + [str(number) for number in (1, 30, *range(2, 30))],
+        )
+        self.assertEqual(
+            dict(agentic_shell._completion_items(
+                '/logs ', job_numbers=(1, 2), jobs=jobs,
+            ))['2'],
+            'RUNNING (PID 102)',
         )
         self.assertEqual(
             agentic_shell._completion_candidates('/status '),

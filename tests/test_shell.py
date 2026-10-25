@@ -2225,6 +2225,23 @@ class ShellTests(unittest.TestCase):
                 shell.show_logs(['/logs', '999'])
 
 
+    def test_logs_explicit_lookup_remains_available_for_older_completed_job(self):
+        from contextlib import redirect_stdout
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            job = shell._launch([sys.executable, '-c', 'print("older job", flush=True)'])
+            job.process.wait(timeout=5)
+            shell.refresh()
+
+            output = StringIO()
+            with redirect_stdout(output):
+                shell.show_logs(['/logs', str(job.number)])
+
+            self.assertIn('older job', output.getvalue())
+
+
     def test_shell_stop_all_requests_termination_for_running_jobs(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

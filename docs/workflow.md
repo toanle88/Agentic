@@ -123,7 +123,9 @@ Type `/` to open an interactive autocomplete dropdown showing available commands
 and their descriptions. Use the <kbd>↑</kbd> and <kbd>↓</kbd> arrow keys to navigate,
 <kbd>Enter</kbd> or <kbd>Tab</kbd> to select the highlighted item, and <kbd>Esc</kbd>
 to dismiss. Supported options such as `/run --profile` and known job IDs for
-`/logs` and `/stop` are completed dynamically. On interactive terminals, Agentic
+`/logs` and `/stop` are completed dynamically. `/logs` suggests the 20 newest
+completed jobs plus every running job; older completed IDs remain valid when
+entered explicitly. On interactive terminals, Agentic
 renders the dropdown with live filtering and command descriptions using standard ANSI
 escapes with zero third-party dependencies. The editable prompt is anchored to
 the terminal's bottom row, with status, command output, and completion rows above
