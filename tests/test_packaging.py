@@ -112,7 +112,7 @@ class PackagingTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(probe.returncode, 0, probe.stderr)
-        self.assertEqual(probe.stdout.strip(), "1.1.102")
+        self.assertEqual(probe.stdout.strip(), "1.1.103")
 
 
 if __name__ == "__main__":
