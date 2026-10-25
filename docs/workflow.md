@@ -612,12 +612,21 @@ refreshes to continue working.
 In the interactive shell, `/dashboard` generates the snapshot and opens it with
 the host operating system's default browser. Use `/dashboard PATH` to choose a
 specific output file. Regenerate the dashboard after a run to refresh its
-contents. The dashboard is organized into Dashboard, Runs, Logs, Token usage,
-Issues, and Settings views. Global search covers bounded run metadata, findings,
-errors, and embedded log text. Status, issue number, stage, severity, model, and
-provider filters apply across the views. Severity options are BLOCKER, CRITICAL,
-MAJOR, HIGH, MEDIUM, MINOR, LOW, UNSPECIFIED, and no finding. Token usage
-additionally supports all-time, 24-hour, 7-day, and 30-day periods.
+contents. The dashboard is organized into Dashboard, Runs, Compare, Logs, Token
+usage, Issues, and Settings views. Global search covers bounded run metadata,
+findings, errors, and embedded log text. Status, issue/task, repository, stage,
+severity, model, provider, workflow mode, publication state, action-required,
+and date-range filters apply across the views. Runs can be sorted by latest
+update, duration, tokens, estimated cost, retries, or review findings; missing
+telemetry is kept as unavailable and is not estimated.
+
+The Runs view highlights action reasons such as blocked runs, failed checks,
+rejected reviews, pending publication, and stale linked worktrees. Select two
+or more runs there to compare first-pass approval, retries, findings, duration,
+tokens, cost, tests, and review results. Export JSON or CSV from the header for
+the current filtered set; exports contain only bounded summary fields and never
+include prompts or log contents. Token usage additionally supports all-time,
+24-hour, 7-day, and 30-day periods.
 
 Runs, Logs, Token usage, and Issues use bounded client-side pages of 25
 matching records. Each view initially renders its newest page and shows a

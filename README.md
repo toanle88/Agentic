@@ -16,7 +16,7 @@ Agentic is designed for human-supervised development. It does not silently commi
 - Configurable project checks using safe argument arrays.
 - Independent read-only review before publication.
 - Interactive background shell with `/ps` and `/logs`.
-- Self-contained HTML dashboard for run history, per-invocation token usage, and a visual token chart.
+- Self-contained HTML dashboard with actionable filters, metric sorting, run comparison, and bounded JSON/CSV summaries.
 - Centralized user-level state so target repositories stay clean.
 - WSL/Windows Git worktree compatibility when supported by both Git installations.
 - Secret redaction in provider, test, and dashboard output.

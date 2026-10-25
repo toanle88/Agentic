@@ -129,6 +129,7 @@ from .telemetry import (
     read_run_instruction,
     record_run_instruction,
     record_issue_metadata,
+    record_workflow_mode,
     read_issue_snapshot,
     record_security_policy,
 )
@@ -1862,6 +1863,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
         shell_job_id=os.environ.get("AGENTIC_SHELL_JOB_ID"),
         issue_digest=current_issue_digest, issue_change=issue_change,
     )
+    record_workflow_mode(folder, config.get("workflow_mode", "standard"))
     record_security_policy(folder, config)
     manual_approval = load_publication_approval(folder)
     print_run_header(issue, run, fresh)

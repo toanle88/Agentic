@@ -6,7 +6,9 @@ preserving the optional fields used by older run records.
 """
 from __future__ import annotations
 
+import csv
 import datetime as dt
+import io
 import json
 import os
 if os.name == "nt":
@@ -38,6 +40,9 @@ MAX_REVIEW_HISTORY_ENTRIES = 50
 MAX_REVIEW_HISTORY_FINDINGS = 100
 MAX_REVIEW_HISTORY_FIELD = 4_000
 MAX_DURABLE_JSON_BYTES = 256_000
+MAX_EXPORT_ROWS = 500
+MAX_EXPORT_BYTES = 256_000
+WORKTREE_STALE_DAYS = 30
 SEVERITY_RANK = {
     "BLOCKER": 7,
     "CRITICAL": 6,
@@ -98,7 +103,10 @@ if os.name == "nt":
 def filter_runs(runs: Iterable[dict[str, Any]], *, query: str = "",
                 status: str = "all", issue: str = "all", stage: str = "all",
                 severity: str = "all", model: str = "all",
-                provider: str = "all") -> list[dict[str, Any]]:
+                provider: str = "all", repository: str = "all",
+                workflow_mode: str = "all", publication_state: str = "all",
+                action_required: str = "all", date_from: str = "",
+                date_to: str = "") -> list[dict[str, Any]]:
     """Apply the dashboard's global search and run filters to snapshots."""
     needle = str(query).casefold()
     visible: list[dict[str, Any]] = []
@@ -122,8 +130,172 @@ def filter_runs(runs: Iterable[dict[str, Any]], *, query: str = "",
             continue
         if provider != "all" and provider not in run.get("providers", []):
             continue
+        if repository != "all" and str(run.get("repository", "unknown")) != repository:
+            continue
+        if workflow_mode != "all" and run.get("workflow_mode", "unknown") != workflow_mode:
+            continue
+        if publication_state != "all" and run.get("publication_state", "unknown") != publication_state:
+            continue
+        if action_required != "all":
+            wants_action = action_required in {"yes", "true", "required"}
+            if bool(run.get("action_required", _derived_action_required(run))) != wants_action:
+                continue
+        timestamp = _parse_timestamp(run.get("last_activity"))
+        if date_from and (timestamp is None or timestamp.date() < _parse_date(date_from)):
+            continue
+        if date_to and (timestamp is None or timestamp.date() > _parse_date(date_to)):
+            continue
         visible.append(run)
     return visible
+
+
+def _parse_timestamp(value: Any) -> dt.datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.timezone.utc)
+
+
+def _parse_date(value: str) -> dt.date:
+    try:
+        return dt.date.fromisoformat(value)
+    except ValueError:
+        # Invalid UI input must fail closed for that bound rather than broaden
+        # the result set.
+        return dt.date.max if value else dt.date.min
+
+
+def _derived_action_required(run: dict[str, Any]) -> bool:
+    status = str(run.get("status", ""))
+    tests = _mapping_or_empty(run.get("tests"))
+    review = _mapping_or_empty(run.get("review"))
+    return bool(
+        run.get("blocked")
+        or status in {"blocked", "needs-fix", "tests-failed", "retry_exhausted"}
+        or tests.get("status") == "failed"
+        or review.get("status") == "rejected"
+        or run.get("publication_state") == "pending"
+        or run.get("worktree_state") == "stale"
+    )
+
+
+def _mapping_or_empty(value: Any) -> dict[str, Any]:
+    """Return a mapping for optional legacy fields, or an empty mapping."""
+    return value if isinstance(value, dict) else {}
+
+
+def sort_runs(runs: Iterable[dict[str, Any]], *, sort_by: str = "last_activity",
+              descending: bool = True) -> list[dict[str, Any]]:
+    """Sort snapshots by a bounded, allowlisted dashboard metric."""
+    aliases = {
+        "duration_seconds": "duration", "token_usage": "tokens",
+        "estimated_cost_usd": "cost", "review_findings": "findings",
+    }
+    allowed = {"last_activity", "duration", "tokens", "cost", "retries", "findings"}
+    field = aliases.get(sort_by, sort_by) if sort_by in (*allowed, *aliases) else "last_activity"
+
+    def value(run: dict[str, Any]) -> tuple[bool, Any]:
+        usage = _mapping_or_empty(run.get("usage"))
+        workflow = _mapping_or_empty(usage.get("workflow_metrics"))
+        metrics = _mapping_or_empty(usage.get("metrics"))
+        if field == "last_activity":
+            parsed = _parse_timestamp(run.get("last_activity"))
+            return parsed is not None, parsed or dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+        keys = {
+            "duration": metrics.get("duration_seconds"),
+            "tokens": usage.get("total_tokens"),
+            "cost": usage.get("estimated_cost_usd"),
+            "retries": workflow.get("retries"),
+            "findings": workflow.get("review_findings"),
+        }
+        raw = keys[field]
+        try:
+            return raw is not None, float(raw) if raw is not None else 0.0
+        except (TypeError, ValueError):
+            return False, 0.0
+
+    values = list(runs)
+    known = [run for run in values if value(run)[0]]
+    unknown = [run for run in values if not value(run)[0]]
+    known.sort(key=lambda run: (value(run)[1], str(run.get("id", ""))), reverse=descending)
+    unknown.sort(key=lambda run: str(run.get("id", "")))
+    return known + unknown
+
+
+def summary_row(run: dict[str, Any]) -> dict[str, Any]:
+    """Return the explicit, bounded allowlist used by dashboard exports."""
+    usage = _mapping_or_empty(run.get("usage"))
+    metrics = _mapping_or_empty(usage.get("metrics"))
+    workflow = _mapping_or_empty(usage.get("workflow_metrics"))
+    review = _mapping_or_empty(run.get("review"))
+    tests = _mapping_or_empty(run.get("tests"))
+    reasons = run.get("action_reasons", [])
+    if not isinstance(reasons, list):
+        reasons = []
+    return {
+        "id": str(run.get("id", ""))[:160],
+        "repository": str(run.get("repository", "unknown"))[:160],
+        "issue": (
+            run.get("issue") if isinstance(run.get("issue"), int)
+            and not isinstance(run.get("issue"), bool)
+            else str(run.get("issue", ""))[:80] if run.get("issue") is not None else None
+        ),
+        "label": str(run.get("label", "Run"))[:240],
+        "status": str(run.get("status", "unknown"))[:40],
+        "stage": str(run.get("stage", "unknown"))[:40],
+        "severity": str(run.get("severity", "NONE"))[:40],
+        "action_required": bool(run.get("action_required", _derived_action_required(run))),
+        "action_reasons": [str(item)[:240] for item in reasons[:8]],
+        "workflow_mode": str(run.get("workflow_mode", "unknown"))[:40],
+        "publication_state": str(run.get("publication_state", "unknown"))[:40],
+        "review_status": str(review.get("status", "unknown"))[:40],
+        "tests_status": str(tests.get("status", "unknown"))[:40],
+        "last_activity": str(run.get("last_activity", "unknown"))[:64],
+        "duration_seconds": metrics.get("duration_seconds"),
+        "total_tokens": usage.get("total_tokens"),
+        "estimated_cost_usd": usage.get("estimated_cost_usd"),
+        "retries": workflow.get("retries"),
+        "review_findings": workflow.get("review_findings"),
+        "first_pass_approval": workflow.get("first_pass_approval"),
+        "worktree_state": str(run.get("worktree_state", "unknown"))[:40],
+    }
+
+
+def export_summary_json(runs: Iterable[dict[str, Any]]) -> str:
+    rows = [summary_row(run) for run in list(runs)[:MAX_EXPORT_ROWS]]
+    for count in range(len(rows), -1, -1):
+        payload = json.dumps(rows[:count], ensure_ascii=False, separators=(",", ":"))
+        if len(payload.encode("utf-8")) <= MAX_EXPORT_BYTES:
+            return payload
+    return "[]"
+
+
+def export_summary_csv(runs: Iterable[dict[str, Any]]) -> str:
+    values = list(runs)
+    fieldnames = list(summary_row({}).keys())
+    header_output = io.StringIO(newline="")
+    csv.DictWriter(
+        header_output, fieldnames=fieldnames, lineterminator="\n",
+    ).writeheader()
+    chunks = [header_output.getvalue()]
+    output_bytes = len(chunks[0].encode("utf-8"))
+    for run in values[:MAX_EXPORT_ROWS]:
+        row = summary_row(run)
+        row["action_reasons"] = "; ".join(row["action_reasons"])
+        row_output = io.StringIO(newline="")
+        csv.DictWriter(
+            row_output, fieldnames=fieldnames, lineterminator="\n",
+        ).writerow(row)
+        row_text = row_output.getvalue()
+        row_bytes = len(row_text.encode("utf-8"))
+        if output_bytes + row_bytes > MAX_EXPORT_BYTES:
+            break
+        chunks.append(row_text)
+        output_bytes += row_bytes
+    return "".join(chunks)
 
 
 def _searchable_snapshot(value: Any) -> str:
@@ -441,6 +613,28 @@ def _result(folder: Path) -> dict[str, Any] | None:
     return value
 
 
+def _publication(folder: Path) -> dict[str, Any] | None:
+    """Read the optional publication record without treating it as approval."""
+    raw = read_text_bounded(folder / "publication.json", MAX_DURABLE_JSON_BYTES)
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(value, dict):
+        return None
+    status = str(value.get("status", "")).strip().lower()
+    if status not in {"pending", "published", "failed", "cancelled"}:
+        return None
+    return {
+        "status": status,
+        "kind": str(value.get("kind", ""))[:40],
+        "url": str(value.get("url", ""))[:500] if value.get("url") else "",
+        "published_at": str(value.get("published_at", ""))[:64],
+    }
+
+
 def _investigation(folder: Path, index: dict[str, list[Path]] | None = None) -> tuple[dict[str, Any], Path | None]:
     path = _latest(
         path for path in _indexed_files(index, folder, ["investigation"])
@@ -728,12 +922,43 @@ def _run_snapshot(folder: Path) -> dict[str, Any] | None:
             "number": issue_value, "title": "Title unavailable",
             "state": "UNKNOWN", "source": "github",
         }
+    publication = _publication(folder)
+    if publication is None and audit_issue is not None:
+        publication = {
+            "status": str(audit_issue.get("status", "published")).lower(),
+            "kind": "audit_issue", "url": audit_issue.get("url", ""),
+        }
+    publication_state = publication["status"] if publication else "not-published"
+    if publication is None and result is not None and result.get("status") == "APPROVED":
+        publication_state = "pending"
+    workflow_mode = usage.get("workflow_mode")
+    if not isinstance(workflow_mode, str) or not workflow_mode.strip():
+        workflow_mode = "unknown"
+    repository = usage.get("repository")
+    if not isinstance(repository, str) or not repository.strip():
+        repository = "unknown"
+    action_reasons: list[str] = []
+    if blocked is not None or status == "blocked":
+        action_reasons.append("blocked run")
+    if tests["status"] == "failed":
+        action_reasons.append("failed checks")
+    if review["status"] == "rejected":
+        action_reasons.append("rejected review")
+    if result is not None and result.get("status") == "RETRY_EXHAUSTED":
+        action_reasons.append("retries exhausted")
+    if result is not None and result.get("status") == "NO_CHANGES":
+        action_reasons.append("no code changes")
+    if publication_state == "pending":
+        action_reasons.append("pending publication")
     snapshot: dict[str, Any] = {
         "id": folder.name, "issue": issue_value, "label": label, "branch": branch,
         "audit": audit_key is not None, "audit_key": audit_key,
         "shell_job_id": usage.get("shell_job_id"),
         "status": status, "investigation": investigation, "attempts": developer["attempts"],
         "stage": stage, "severity": severity, "providers": providers, "models": models,
+        "repository": repository, "workflow_mode": workflow_mode,
+        "publication": publication, "publication_state": publication_state,
+        "action_required": bool(action_reasons), "action_reasons": action_reasons,
         "issue_metadata": issue_metadata,
         "issue_changes": read_issue_history(folder),
         "last_activity": _timestamp(last_activity) if last_activity else "unknown",

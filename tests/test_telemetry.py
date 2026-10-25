@@ -28,6 +28,7 @@ from agentic_runner.telemetry import (
     record_usage,
     normalize_usage,
     record_workflow_outcome,
+    record_workflow_mode,
 )
 
 
@@ -324,6 +325,14 @@ class TelemetryTests(unittest.TestCase):
             metrics = read_run_usage(folder)["workflow_metrics"]
             self.assertEqual(metrics["review_findings"], 3)
             self.assertEqual(metrics["retries"], 1)
+
+    def test_workflow_mode_is_optional_and_bounded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            record_workflow_mode(folder, "quick")
+            self.assertEqual(read_run_usage(folder)["workflow_mode"], "quick")
+            record_workflow_mode(folder, "")
+            self.assertNotIn("workflow_mode", read_run_usage(folder))
 
     def test_record_operation_persists_duration_and_status_without_command_text(self):
         with tempfile.TemporaryDirectory() as temp:
