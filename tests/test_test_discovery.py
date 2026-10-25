@@ -130,6 +130,47 @@ class TestDiscovery(unittest.TestCase):
         self.assertLessEqual(probe.call_args.kwargs["timeout"], 1)
         self.assertEqual(MAX_DISCOVERY_TIMEOUT_SECONDS, 86_400)
 
+    def test_unsandboxed_module_probe_receives_restricted_environment(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(
+            "os.environ",
+            {"OPENAI_API_KEY": "semantic-secret-123456", "SERVICE_VALUE": "custom-secret-123456"},
+            clear=True,
+        ):
+            repo = Path(temp)
+            with patch("agentic_runner.test_discovery.subprocess.run") as probe:
+                probe.return_value.returncode = 1
+                validate_test_candidates(
+                    repo,
+                    [{"argv": [sys.executable, "-m", "pytest"], "reason": "module"}],
+                    timeout=1,
+                    credential_names=["SERVICE_VALUE"],
+                )
+
+        environment = probe.call_args.kwargs["env"]
+        self.assertNotIn("OPENAI_API_KEY", environment)
+        self.assertNotIn("SERVICE_VALUE", environment)
+
+    def test_unsandboxed_candidate_does_not_inherit_credentials(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(
+            "os.environ",
+            {"OPENAI_API_KEY": "semantic-secret-123456", "SERVICE_VALUE": "custom-secret-123456"},
+            clear=True,
+        ):
+            repo = Path(temp)
+            script = (
+                "import os,sys; "
+                "sys.exit(0 if all(name not in os.environ for name in "
+                "('OPENAI_API_KEY', 'SERVICE_VALUE')) else 1)"
+            )
+            results = validate_test_candidates(
+                repo,
+                [{"argv": [sys.executable, "-c", script], "reason": "environment"}],
+                timeout=2,
+                credential_names=["SERVICE_VALUE"],
+            )
+
+        self.assertEqual(results[0]["status"], "passed")
+
     def test_windows_python_executable_runs_module_probe(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = Path(temp)
@@ -476,7 +517,7 @@ class TestDiscovery(unittest.TestCase):
                 events.append("preflight")
 
             def fake_discovery(*args, **kwargs):
-                events.append(("discovery", kwargs["sandbox"]))
+                events.append(("discovery", kwargs["sandbox"], kwargs["credential_names"]))
                 return discovery
 
             with (patch("agentic.preflight_security", side_effect=fake_preflight),
@@ -490,6 +531,7 @@ class TestDiscovery(unittest.TestCase):
         self.assertEqual(events[0], "preflight")
         self.assertEqual(events[1][0], "discovery")
         self.assertTrue(events[1][1]["enabled"])
+        self.assertIn("OPENAI_API_KEY", events[1][2])
 
 
 if __name__ == "__main__":

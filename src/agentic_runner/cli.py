@@ -959,6 +959,13 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
     })
     slow_commands: list[list[str]] = []
     discovery_result: DiscoveryResult | None = None
+    discovery_credential_names = list(sandbox.get("pass_env", []))
+    for settings in (developer_settings, reviewer_settings):
+        name = api_key_env_for_provider(
+            str(settings.get("provider", provider)), settings.get("api_key_env"),
+        )
+        if name and name not in discovery_credential_names:
+            discovery_credential_names.append(name)
     if discover_tests and (
         not isinstance(discovery_timeout, int)
         or isinstance(discovery_timeout, bool)
@@ -971,8 +978,8 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
     skip_protected_discovery = discover_tests and config_path.exists() and not force
     if discover_tests and not skip_protected_discovery:
         # Isolated discovery must fail closed before a provider or candidate
-        # command can run. Trusted discovery deliberately retains its host
-        # execution behavior; its sandbox is disabled by policy.
+        # command can run. Trusted discovery filters credential-like host
+        # variables before candidate validation; it is not full isolation.
         if security_mode == "isolated":
             preflight_security(security_mode, sandbox, repo=repo)
         if not _confirm_discovery_execution():
@@ -993,6 +1000,7 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
                 output=Path(temp) / "agent-message.txt",
                 timeout=discovery_timeout,
                 sandbox=sandbox,
+                credential_names=discovery_credential_names,
             )
         _print_discovery_results(discovery_result)
         if discovery_result.agent_status:

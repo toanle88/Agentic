@@ -42,11 +42,16 @@ suggestions are discarded. Provider failure does not make deterministic
 discovery fail.
 
 Only candidates that start successfully and exit zero are eligible to be
-saved. Missing executables, unavailable modules, dependency-related exit
-statuses, failed checks, and timeouts are never saved. The proposed
-configuration is printed and requires a second explicit `y` confirmation before
-`agent_config.json` is written; any other response leaves the repository
-unchanged. Use isolated mode when candidate execution should run inside the
+saved. In trusted mode, candidate processes receive a restricted copy of the
+host environment: credential-like variables and configured provider or
+`sandbox.pass_env` names are removed. This reduces accidental credential
+exposure but is not operating-system isolation, so use isolated mode for
+untrusted repositories or issue text. Missing executables, unavailable
+modules, dependency-related exit statuses, failed checks, and timeouts are
+never saved. The proposed configuration is printed and requires a second
+explicit `y` confirmation before `agent_config.json` is written; any other
+response leaves the repository unchanged. Use isolated mode when candidate
+execution should run inside the
 configured sandbox. An existing config is preserved without running discovery unless
 `--force` is supplied. Fast candidates become `test_commands`; slow candidates
 become `slow_test_commands` and run only with the slow test profile. Use
