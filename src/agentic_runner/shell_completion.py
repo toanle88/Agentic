@@ -43,6 +43,7 @@ OPTION_DESCRIPTIONS: dict[str, str] = {
     "--force": "replace generated setup files", "fast": "run the configured fast checks",
     "slow": "run fast checks plus configured slow checks",
 }
+LOG_COMPLETION_LIMIT = 20
 
 
 def completion_candidates(line: str, cursor: int | None = None,
@@ -77,9 +78,21 @@ def completion_candidates(line: str, cursor: int | None = None,
     if command == "/stop" and not job_numbers:
         return [option for option in SHELL_OPTIONS[command] if option.startswith(current)]
     if command in {"/logs", "/stop"}:
-        numbers = sorted(job_numbers, key=lambda number: (
-            not bool(jobs and number in jobs and jobs[number].running), number,
-        ))
+        if command == "/logs":
+            running = sorted(
+                number for number in job_numbers
+                if jobs and number in jobs and jobs[number].running
+            )
+            completed = sorted(
+                (number for number in job_numbers
+                 if not (jobs and number in jobs and jobs[number].running)),
+                reverse=True,
+            )
+            numbers = running + completed[:LOG_COMPLETION_LIMIT]
+        else:
+            numbers = sorted(job_numbers, key=lambda number: (
+                not bool(jobs and number in jobs and jobs[number].running), number,
+            ))
         values = [str(number) for number in numbers]
         if command == "/stop":
             values.insert(0, "--all")

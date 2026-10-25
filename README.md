@@ -271,7 +271,9 @@ Then run and monitor an issue:
 ```
 
 Typing `/` opens an interactive autocomplete dropdown with command descriptions,
-arrow key navigation, and live filtering.
+arrow key navigation, and live filtering. `/logs` suggests the 20 newest
+completed jobs plus every running job; older completed job IDs remain valid when
+entered explicitly.
 
 The shell shows a compact welcome banner with the repository, state directory,
 configuration, and job status. Interactive TTY output uses colors for provider
