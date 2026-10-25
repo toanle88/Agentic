@@ -369,7 +369,7 @@ termination for every running Agentic job.
 | `agentic init [--provider NAME] [--security-mode MODE] [--sandbox-image IMAGE] [--sandbox-dockerfile PATH]` | Create ignored target configuration and detect a starter check. |
 | `agentic doctor` | Diagnose repository, GitHub task access, and developer/reviewer agent prerequisites. |
 | `agentic --state-dir PATH ...` | Store worktrees and runtime artifacts in a chosen location. |
-| `agentic cleanup --issue N` | Preview removal of a clean issue worktree; add `--yes` to confirm. |
+| `agentic cleanup --issue N` | Preview removal of a clean issue worktree; add `--yes` to confirm. Use `--discard --yes` only when permanently deleting dirty files is intentional. |
 | `agentic dashboard` | Generate the HTML run dashboard. Add `--serve` for a loopback server that regenerates it for live polling. Remote serving requires `--allow-remote`, `AGENTIC_DASHBOARD_TOKEN`, and TLS certificate/key files. |
 | `agentic --help` | Show CLI help. |
 | `agentic --version` | Show the installed version. |

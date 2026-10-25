@@ -14,7 +14,7 @@ SHELL_OPTIONS = {
     "/run": ("--profile", "--instruction", "--review", "--publish", "--mark-done", "--reason", "--new", "--verbose", "--task-file"),
     "/logs": ("--verbose",), "/ps": ("--all",), "/runs": ("--json",),
     "/status": ("--json",), "/doctor": ("--json", "--commands", "--profile", "--worktree"),
-    "/cleanup": ("--issue", "--all", "--yes", "--remove-logs"), "/stop": ("--all",),
+    "/cleanup": ("--issue", "--all", "--discard", "--yes", "--remove-logs"), "/stop": ("--all",),
     "/repair-pr": ("--clean",),
     "/init": ("--provider", "--reviewer-provider", "--security-mode", "--sandbox-image", "--agents", "--force"),
 }
@@ -38,6 +38,7 @@ OPTION_DESCRIPTIONS: dict[str, str] = {
     "--all": "show jobs across all shell sessions", "--json": "output status in JSON format",
     "--commands": "run configured doctor checks (may mutate the worktree)", "--worktree": "worktree used by doctor checks",
     "--task-file": "use an existing task file", "--issue": "select one issue worktree",
+    "--discard": "permanently delete dirty worktree files (requires --yes)",
     "--remove-logs": "also remove matching run logs", "--yes": "confirm cleanup changes",
     "--clean": "stash dirty PR changes before a fresh repair",
     "--provider": "developer provider for initialization", "--reviewer-provider": "independent reviewer provider",

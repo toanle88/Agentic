@@ -1331,9 +1331,9 @@ class AgenticShell:
     def run_cleanup(self, parts: list[str]) -> None:
         flags = _parse_options(
             parts,
-            usage="/cleanup --issue N [--yes] [--remove-logs] | /cleanup --all [--yes] [--remove-logs]",
+            usage="/cleanup --issue N [--discard --yes] [--remove-logs] | /cleanup --all [--discard --yes] [--remove-logs]",
             value_options={"--issue"},
-            boolean_options={"--all", "--yes", "--remove-logs"},
+            boolean_options={"--all", "--yes", "--discard", "--remove-logs"},
         )
         issue = _option_value(flags, "--issue")
         if issue is None and "--all" not in flags:

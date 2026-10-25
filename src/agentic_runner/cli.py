@@ -122,6 +122,7 @@ from .review import (  # noqa: F401
 )
 from .sandbox import DEFAULT_SANDBOX_IMAGE, SUPPORTED_LANGUAGES, validate_sandbox
 from .security import redact_secrets  # noqa: F401
+from .shell_jobs import process_identity
 from .telemetry import (
     describe_issue_change,
     issue_snapshot,
@@ -345,6 +346,7 @@ from .worktrees import (  # noqa: E402, F401
     github_metadata,
     github_repo_from_remote,
     installed_git_version,
+    is_registered_worktree,
     issue_fingerprint,
     legacy_runs_dir,
     legacy_worktrees_dir,
@@ -402,13 +404,27 @@ def repair_relative_worktree(repo: Path, worktree: Path) -> bool:
 def command(
     argv: list[str], cwd: Path, *, timeout: int = 180,
     check: bool = True, env: dict[str, str] | None = None,
+    max_output_bytes: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Compatibility wrapper keeping command patching at the CLI boundary."""
-    return _agentic_worktrees.command(argv, cwd, timeout=timeout, check=check, env=env)
+    if max_output_bytes is None:
+        return _agentic_worktrees.command(
+            argv, cwd, timeout=timeout, check=check, env=env,
+        )
+    return _agentic_worktrees.command(
+        argv, cwd, timeout=timeout, check=check, env=env,
+        max_output_bytes=max_output_bytes,
+    )
 
 
-def git(repo: Path, *args: str, check: bool = True) -> str:
-    return command(["git", *args], repo, check=check).stdout.strip()
+def git(repo: Path, *args: str, check: bool = True,
+        max_output_bytes: int | None = None) -> str:
+    if max_output_bytes is None:
+        return command(["git", *args], repo, check=check).stdout.strip()
+    return command(
+        ["git", *args], repo, check=check,
+        max_output_bytes=max_output_bytes,
+    ).stdout.strip()
 
 
 def refresh_base(repo: Path, base: str) -> None:
@@ -1195,10 +1211,131 @@ def _run_log_folder(repo: Path, run: Run, state_dir: Path | None = None) -> Path
     return legacy if state_dir and legacy.is_dir() and not preferred.exists() else preferred
 
 
+_CLEANUP_STATUS_MAX_BYTES = 256_000
+_CLEANUP_JOB_RECORD_MAX_BYTES = 64_000
+_CLEANUP_JOB_RECORD_LIMIT = 256
+
+
+def _cleanup_job_record_is_active(record: Any) -> bool:
+    """Return whether a persisted shell record must block destructive cleanup.
+
+    A running record without a verifiable identity is treated as active.  The
+    shell can recover stale records when it starts, but cleanup must not turn
+    an old or partially written running record into permission to delete a
+    worktree that may still be in use.
+    """
+    if not isinstance(record, dict) or record.get("state") != "running":
+        return False
+    try:
+        pid = int(record.get("pid", 0))
+    except (TypeError, ValueError):
+        return True
+    identity = record.get("identity")
+    if not isinstance(identity, dict) or not identity.get("start_time"):
+        return True
+    current = process_identity(pid)
+    if current is None:
+        return True
+    if str(current.get("start_time")) != str(identity.get("start_time")):
+        return False
+    for key in ("command_hash", "process_group"):
+        if key in identity and current.get(key) != identity.get(key):
+            return False
+    return True
+
+
+def _cleanup_job_matches_run(record: dict[str, Any], run: Run, token: str | None) -> bool:
+    """Match a live shell job to a run without trusting arbitrary path text."""
+    if token and record.get("shell_job_id") == token:
+        return True
+    argv = record.get("argv")
+    if not isinstance(argv, list) or any(not isinstance(value, str) for value in argv):
+        return False
+    if run.issue_number is not None:
+        for index, value in enumerate(argv[:-1]):
+            if value == "--issue" and argv[index + 1] == str(run.issue_number):
+                return True
+            if value == f"--issue={run.issue_number}":
+                return True
+    return run.audit_key is not None and "audit" in argv
+
+
+def _cleanup_has_active_job(
+    repo: Path, run: Run, folder: Path, state_dir: Path | None,
+) -> bool:
+    """Check bounded persisted shell records for a live job using this run.
+
+    An incomplete bounded view is unsafe here: an older persisted record may
+    still represent the process using this worktree.  If the record set does
+    not fit the inspection bound, report the worktree as active so cleanup
+    fails closed instead of silently discarding it.
+    """
+    token: str | None = None
+    raw_run = read_text_bounded(folder / "run.json", _CLEANUP_JOB_RECORD_MAX_BYTES)
+    if raw_run:
+        try:
+            run_record = json.loads(raw_run)
+        except (TypeError, ValueError):
+            run_record = None
+        if isinstance(run_record, dict) and isinstance(run_record.get("shell_job_id"), str):
+            token = run_record["shell_job_id"]
+    try:
+        shell_dir = state_paths(repo, state_dir).shell
+        record_paths = sorted(shell_dir.glob("job-*.json"))
+        if len(record_paths) > _CLEANUP_JOB_RECORD_LIMIT:
+            return True
+    except (OSError, RuntimeError, ValueError):
+        return True
+    for record_path in record_paths:
+        raw_record = read_text_bounded(record_path, _CLEANUP_JOB_RECORD_MAX_BYTES)
+        if raw_record is None or not raw_record:
+            # A record that cannot be read safely may be the only evidence of
+            # a live process. Do not discard the worktree from a partial view.
+            return True
+        try:
+            record = json.loads(raw_record)
+        except (TypeError, ValueError):
+            return True
+        if not isinstance(record, dict):
+            return True
+        if _cleanup_job_record_is_active(record) and _cleanup_job_matches_run(record, run, token):
+            return True
+    return False
+
+
+def _cleanup_status_counts(worktree: Path) -> tuple[int, int, int]:
+    """Return modified, untracked, and ignored entry counts for one worktree."""
+    raw = git(
+        worktree,
+        "status", "--porcelain=v1", "--untracked-files=all", "--ignored", "-z",
+        max_output_bytes=_CLEANUP_STATUS_MAX_BYTES,
+    )
+    modified = untracked = ignored = 0
+    entries = raw.split("\0")
+    index = 0
+    while index < len(entries):
+        entry = entries[index]
+        index += 1
+        if not entry:
+            continue
+        status = entry[:2]
+        if status == "??":
+            untracked += 1
+        elif status == "!!":
+            ignored += 1
+        else:
+            modified += 1
+        # Porcelain -z emits the old path as a second NUL-delimited entry for
+        # renames and copies. It is one changed entry, not two.
+        if status[:1] in {"R", "C"} and index < len(entries):
+            index += 1
+    return modified, untracked, ignored
+
+
 def cleanup(repo: Path, *, issue: int | None = None, all_runs: bool = False,
             confirm: bool = False, remove_logs: bool = False,
-            state_dir: Path | None = None) -> int:
-    """Preview or remove clean Agentic worktrees while preserving dirty ones."""
+            discard: bool = False, state_dir: Path | None = None) -> int:
+    """Preview or remove Agentic worktrees, optionally discarding dirty files."""
     if issue is None and not all_runs:
         raise RuntimeError("cleanup requires --issue N or --all")
     if remove_logs and not confirm:
@@ -1211,18 +1348,58 @@ def cleanup(repo: Path, *, issue: int | None = None, all_runs: bool = False,
         return 0
     removed = 0
     for run in runs:
-        dirty = bool(git(run.worktree, "status", "--porcelain", "--untracked-files=all", "--ignored"))
         folder = _run_log_folder(repo, run, state_dir)
-        if dirty:
-            _status_print(f"[SKIP] {run.branch}: worktree has uncommitted changes ({run.worktree})")
-            continue
-        if not confirm:
-            _status_print(f"[DRY RUN] would remove clean worktree: {run.worktree}")
-            if remove_logs:
-                _status_print(f"[DRY RUN] would remove logs: {folder}")
-            continue
         try:
-            git(repo, "worktree", "remove", str(run.worktree))
+            with worktree_path_lock(repo, run.worktree, state_dir):
+                if _cleanup_has_active_job(repo, run, folder, state_dir):
+                    _status_print(
+                        f"[SKIP] {run.branch}: an Agentic job is still active ({run.worktree})"
+                    )
+                    continue
+                modified, untracked, ignored = _cleanup_status_counts(run.worktree)
+                dirty = bool(modified or untracked or ignored)
+                if dirty and not discard:
+                    _status_print(
+                        f"[SKIP] {run.branch}: worktree has uncommitted changes ({run.worktree})"
+                    )
+                    continue
+                if not confirm:
+                    if discard:
+                        _status_print(
+                            f"[DRY RUN] would permanently delete worktree: {run.worktree}"
+                        )
+                        _status_print(
+                            f"[DRY RUN] {run.branch}: modified={modified}, "
+                            f"untracked={untracked}, ignored={ignored}"
+                        )
+                        _status_print(
+                            "WARNING: uncommitted, untracked, and ignored worktree files "
+                            "will be permanently deleted. Re-run with --discard --yes to proceed."
+                        )
+                    else:
+                        _status_print(f"[DRY RUN] would remove clean worktree: {run.worktree}")
+                    if remove_logs:
+                        _status_print(f"[DRY RUN] would remove logs: {folder}")
+                    continue
+                if discard:
+                    _status_print(
+                        f"[DISCARD] {run.branch}: modified={modified}, "
+                        f"untracked={untracked}, ignored={ignored} ({run.worktree})"
+                    )
+                    _status_print(
+                        "WARNING: uncommitted, untracked, and ignored worktree files "
+                        "will be permanently deleted."
+                    )
+                target = run.worktree.resolve()
+                if not is_registered_worktree(repo, target):
+                    _status_print(
+                        f"[SKIP] {run.branch}: worktree is no longer registered ({target})"
+                    )
+                    continue
+                remove_args = ["worktree", "remove"]
+                if discard:
+                    remove_args.append("--force")
+                git(repo, *remove_args, str(target))
         except RuntimeError as exc:
             _status_print(f"[SKIP] {run.branch}: {exc}")
             continue
@@ -1233,6 +1410,8 @@ def cleanup(repo: Path, *, issue: int | None = None, all_runs: bool = False,
         removed += 1
     if not confirm:
         _status_print("Nothing removed. Re-run with --yes after inspecting the list.")
+    elif discard:
+        _status_print(f"Removed {removed} worktree(s); discarded files were permanently deleted.")
     else:
         _status_print(f"Removed {removed} worktree(s); uncommitted work was preserved.")
     return 0
@@ -1397,7 +1576,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--yes", action="store_true", help="Confirm a cleanup operation")
     parser.add_argument("--remove-logs", action="store_true", help="With cleanup, also delete matching run logs")
-    parser.add_argument("--all", dest="all_runs", action="store_true", help="With cleanup, select all clean Agentic worktrees")
+    parser.add_argument(
+        "--discard", action="store_true",
+        help="With cleanup, permanently delete dirty worktree files (requires --yes)",
+    )
+    parser.add_argument("--all", dest="all_runs", action="store_true", help="With cleanup, select all Agentic worktrees")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--review", action="store_true", help="Rerun tests + fresh review; do not code")
     mode.add_argument(
@@ -1904,7 +2087,7 @@ def _main(argv: list[str] | None = None) -> int:
             with repository_lock(repo, cleanup_state_dir):
                 return cleanup(
                     repo, issue=args.issue, all_runs=args.all_runs,
-                    confirm=args.yes, remove_logs=args.remove_logs,
+                    confirm=args.yes, remove_logs=args.remove_logs, discard=args.discard,
                     state_dir=cleanup_state_dir,
                 )
         if (

@@ -1206,6 +1206,9 @@ class PureTests(unittest.TestCase):
         self.assertTrue(agentic.build_parser().parse_args([
             '--issue', '42', '--verbose',
         ]).verbose)
+        self.assertTrue(agentic.build_parser().parse_args([
+            'cleanup', '--all', '--discard', '--yes',
+        ]).discard)
         with self.assertRaises(SystemExit):
             agentic.build_parser().parse_args(['--chat', '--issue', '42'])
         repair = agentic.build_parser().parse_args(['--pr', '123', '--repair-ci'])

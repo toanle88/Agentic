@@ -620,7 +620,7 @@ _HELP_SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
                 "/doctor [--json] [--commands]",
                 "diagnose prerequisites; optionally run checks",
             ),
-            ("/cleanup --issue N [OPTIONS]", "preview or remove clean worktrees"),
+            ("/cleanup --issue N [OPTIONS]", "preview or remove worktrees; --discard deletes dirty files"),
             ("/version", "show the Agentic version"),
         ),
     ),

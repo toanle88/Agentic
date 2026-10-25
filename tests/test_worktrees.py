@@ -1,13 +1,16 @@
 """Git worktree lifecycle and resume integration tests."""
 import json
+import os
 import subprocess
 import tempfile
 import unittest
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
 import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner import cli as agentic
+from agentic_runner.shell_jobs import process_identity
 from agentic_runner import worktrees as agentic_worktrees
 
 
@@ -325,6 +328,186 @@ class GitTest(_GitRepositoryTestCase):
         self.assertTrue(run.worktree.is_dir())
         self.assertEqual(agentic.cleanup(self.repo, issue=18, confirm=True), 0)
         self.assertFalse(run.worktree.exists())
+
+
+    def test_discard_preview_requires_confirmation(self):
+        run = agentic.create_worktree(self.repo, 'main', 19)
+        (run.worktree / 'readme.md').write_text('tracked change\n')
+        (run.worktree / '.gitignore').write_text('ignored.txt\n')
+        (run.worktree / 'ignored.txt').write_text('ignored\n')
+        (run.worktree / 'untracked.txt').write_text('untracked\n')
+        with patch('sys.stdout', new_callable=StringIO) as output:
+            self.assertEqual(agentic.cleanup(self.repo, issue=19, discard=True), 0)
+        self.assertTrue(run.worktree.is_dir())
+        self.assertTrue((run.worktree / 'untracked.txt').exists())
+        rendered = output.getvalue()
+        self.assertIn('[DRY RUN] would permanently delete worktree', rendered)
+        self.assertIn('modified=1, untracked=2, ignored=1', rendered)
+        self.assertIn('will be permanently deleted', rendered)
+        self.assertIn('--discard --yes', rendered)
+
+
+    def test_discard_removes_dirty_files_and_preserves_logs(self):
+        state_dir = self.repo.parent / 'discard-state'
+        run = agentic.create_worktree(self.repo, 'main', 20, state_dir)
+        (run.worktree / 'readme.md').write_text('tracked change\n')
+        (run.worktree / 'untracked.txt').write_text('untracked\n')
+        (run.worktree / '.gitignore').write_text('ignored.txt\n')
+        (run.worktree / 'ignored.txt').write_text('ignored\n')
+        folder = agentic.logs_path(self.repo, run, state_dir)
+        (folder / 'run.json').write_text('{"evidence": "keep"}\n')
+
+        with patch('sys.stdout', new_callable=StringIO) as output:
+            self.assertEqual(
+                agentic.cleanup(
+                    self.repo, issue=20, confirm=True, discard=True, state_dir=state_dir,
+                ),
+                0,
+            )
+
+        rendered = output.getvalue()
+        self.assertIn('modified=1, untracked=2, ignored=1', rendered)
+        self.assertIn('permanently deleted', rendered)
+        self.assertFalse(run.worktree.exists())
+        self.assertTrue((folder / 'run.json').exists())
+
+
+    def test_discard_can_remove_logs_only_after_worktree_removal(self):
+        state_dir = self.repo.parent / 'discard-log-state'
+        run = agentic.create_worktree(self.repo, 'main', 21, state_dir)
+        (run.worktree / 'dirty.txt').write_text('discard me\n')
+        folder = agentic.logs_path(self.repo, run, state_dir)
+        (folder / 'run.json').write_text('{}\n')
+
+        self.assertEqual(
+            agentic.cleanup(
+                self.repo, issue=21, confirm=True, discard=True,
+                remove_logs=True, state_dir=state_dir,
+            ),
+            0,
+        )
+        self.assertFalse(run.worktree.exists())
+        self.assertFalse(folder.exists())
+
+
+    def test_discard_skips_worktrees_with_an_active_operation_lock(self):
+        state_dir = self.repo.parent / 'active-state'
+        run = agentic.create_worktree(self.repo, 'main', 22, state_dir)
+        (run.worktree / 'dirty.txt').write_text('keep me\n')
+        with agentic.worktree_path_lock(self.repo, run.worktree, state_dir):
+            with patch('sys.stdout', new_callable=StringIO) as output:
+                self.assertEqual(
+                    agentic.cleanup(
+                        self.repo, issue=22, confirm=True, discard=True,
+                        state_dir=state_dir,
+                    ),
+                    0,
+                )
+        self.assertTrue(run.worktree.is_dir())
+        self.assertIn('already active for worktree', output.getvalue())
+
+
+    def test_discard_skips_worktrees_with_an_active_persisted_shell_job(self):
+        state_dir = self.repo.parent / 'job-state'
+        run = agentic.create_worktree(self.repo, 'main', 23, state_dir)
+        (run.worktree / 'dirty.txt').write_text('keep me\n')
+        folder = agentic.logs_path(self.repo, run, state_dir)
+        token = 'active-job-token'
+        (folder / 'run.json').write_text(json.dumps({'shell_job_id': token}) + '\n')
+        shell_dir = agentic.state_paths(self.repo, state_dir).shell
+        (shell_dir / 'job-001.json').write_text(json.dumps({
+            'argv': ['agentic', '--issue', '23'],
+            'pid': os.getpid(),
+            'state': 'running',
+            'identity': process_identity(os.getpid()),
+            'shell_job_id': token,
+        }) + '\n')
+
+        with patch('sys.stdout', new_callable=StringIO) as output:
+            self.assertEqual(
+                agentic.cleanup(
+                    self.repo, issue=23, confirm=True, discard=True, state_dir=state_dir,
+                ),
+                0,
+            )
+        self.assertTrue(run.worktree.is_dir())
+        self.assertIn('an Agentic job is still active', output.getvalue())
+
+
+    def test_discard_fails_closed_when_active_job_is_older_than_record_bound(self):
+        state_dir = self.repo.parent / 'old-job-state'
+        run = agentic.create_worktree(self.repo, 'main', 24, state_dir)
+        (run.worktree / 'dirty.txt').write_text('keep me\n')
+        folder = agentic.logs_path(self.repo, run, state_dir)
+        token = 'old-active-job-token'
+        (folder / 'run.json').write_text(json.dumps({'shell_job_id': token}) + '\n')
+        shell_dir = agentic.state_paths(self.repo, state_dir).shell
+        old_record = {
+            'argv': ['agentic', '--issue', '24'],
+            'pid': os.getpid(),
+            'state': 'running',
+            'identity': process_identity(os.getpid()),
+            'shell_job_id': token,
+        }
+        (shell_dir / 'job-001.json').write_text(json.dumps(old_record) + '\n')
+        for number in range(2, agentic._CLEANUP_JOB_RECORD_LIMIT + 2):
+            (shell_dir / f'job-{number:03d}.json').write_text(
+                json.dumps({'state': 'finished'}) + '\n'
+            )
+
+        with patch('sys.stdout', new_callable=StringIO) as output:
+            self.assertEqual(
+                agentic.cleanup(
+                    self.repo, issue=24, confirm=True, discard=True, state_dir=state_dir,
+                ),
+                0,
+            )
+        self.assertTrue(run.worktree.is_dir())
+        self.assertIn('an Agentic job is still active', output.getvalue())
+
+
+    def test_discard_fails_closed_when_persisted_job_record_is_unreadable(self):
+        state_dir = self.repo.parent / 'unreadable-job-state'
+        run = agentic.create_worktree(self.repo, 'main', 25, state_dir)
+        (run.worktree / 'dirty.txt').write_text('keep me\n')
+        shell_dir = agentic.state_paths(self.repo, state_dir).shell
+        (shell_dir / 'job-001.json').write_text('{incomplete\n')
+
+        with patch('sys.stdout', new_callable=StringIO) as output:
+            self.assertEqual(
+                agentic.cleanup(
+                    self.repo, issue=25, confirm=True, discard=True, state_dir=state_dir,
+                ),
+                0,
+            )
+        self.assertTrue(run.worktree.is_dir())
+        self.assertIn('an Agentic job is still active', output.getvalue())
+
+
+    def test_discard_fails_closed_when_matching_running_job_identity_is_missing(self):
+        state_dir = self.repo.parent / 'legacy-job-state'
+        run = agentic.create_worktree(self.repo, 'main', 26, state_dir)
+        (run.worktree / 'dirty.txt').write_text('keep me\n')
+        folder = agentic.logs_path(self.repo, run, state_dir)
+        token = 'legacy-active-job-token'
+        (folder / 'run.json').write_text(json.dumps({'shell_job_id': token}) + '\n')
+        shell_dir = agentic.state_paths(self.repo, state_dir).shell
+        (shell_dir / 'job-001.json').write_text(json.dumps({
+            'argv': ['agentic', '--issue', '26'],
+            'pid': os.getpid(),
+            'state': 'running',
+            'shell_job_id': token,
+        }) + '\n')
+
+        with patch('sys.stdout', new_callable=StringIO) as output:
+            self.assertEqual(
+                agentic.cleanup(
+                    self.repo, issue=26, confirm=True, discard=True, state_dir=state_dir,
+                ),
+                0,
+            )
+        self.assertTrue(run.worktree.is_dir())
+        self.assertIn('an Agentic job is still active', output.getvalue())
 
 
     def test_sensitive_files_refused_before_index(self):

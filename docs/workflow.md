@@ -661,6 +661,7 @@ Preview clean, no-longer-needed issue worktrees before removing them:
 ```bash
 agentic cleanup --issue 119
 agentic cleanup --issue 119 --yes
+agentic cleanup --all --discard --yes
 ```
 
-Cleanup skips worktrees with uncommitted changes and keeps run logs by default. Add `--remove-logs` only when the evidence is no longer needed. Use `--all` carefully to select every clean Agentic worktree.
+Cleanup skips worktrees with uncommitted changes and keeps run logs by default. Add `--remove-logs` only when the evidence is no longer needed. Use `--all` carefully to select every clean Agentic worktree. The explicit `--discard` mode previews modified, untracked, and ignored-file counts, warns that those files will be permanently deleted, and requires `--discard --yes` for removal of dirty worktrees. It skips active worktrees and preserves run logs unless `--remove-logs` is also supplied.

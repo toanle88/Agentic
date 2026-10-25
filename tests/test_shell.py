@@ -1190,6 +1190,11 @@ class ShellTests(unittest.TestCase):
                 self.assertIn('--issue', cleanup_argv)
                 self.assertIn('12', cleanup_argv)
 
+                shell.run_cleanup(['/cleanup', '--all', '--discard', '--yes'])
+                cleanup_argv = run.call_args.args[0]
+                self.assertIn('--all', cleanup_argv)
+                self.assertIn('--discard', cleanup_argv)
+
                 shell.show_version(['/version'])
                 self.assertEqual(run.call_args.args[0][-1], '--version')
 
