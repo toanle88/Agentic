@@ -716,6 +716,7 @@ class ShellTests(unittest.TestCase):
         from contextlib import redirect_stdout
 
         lines = [
+            '[TESTS]',
             '[TESTS] Running: <configured test command: 2 argv values>',
             '[TESTS] Started (PID 123); progress log: /tmp/tests.log',
             '[TESTS] test_first_case ... PASSED',
@@ -879,6 +880,33 @@ class ShellTests(unittest.TestCase):
             self.assertTrue(
                 any('Command finished (exit 0)' in call.args[0] for call in transient.call_args_list)
             )
+
+    def test_running_logs_show_one_transient_status_without_a_tty(self):
+        from contextlib import redirect_stdout
+
+        script = (
+            'import time; '
+            'print("[DEVELOPER] Agent is working", flush=True); '
+            'time.sleep(.15); '
+            'print("[DEVELOPER] Still running (1s elapsed)...", flush=True); '
+            'time.sleep(.15); '
+            'print("[DEVELOPER] Finished in 1s (exit 0)", flush=True)'
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=root / 'logs')
+            job = shell._launch([sys.executable, '-c', script])
+            output = StringIO()
+            with patch('agentic_shell._is_interactive_terminal', return_value=False), \
+                 redirect_stdout(output):
+                shell.show_logs(['/logs', str(job.number)])
+
+            job.process.wait(timeout=5)
+            rendered = output.getvalue()
+            lines = rendered.splitlines()
+            self.assertIn('[DEVELOPER] Agent is working', lines)
+            self.assertNotIn('[DEVELOPER] Still running (1s elapsed)...', lines)
+            self.assertIn('[DEVELOPER] Finished in 1s (exit 0)', lines)
 
 
     def test_log_replay_colors_patch_diff_stat_only_on_a_terminal(self):

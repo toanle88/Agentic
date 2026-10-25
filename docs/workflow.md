@@ -373,6 +373,17 @@ resume action uses a durable `resume-task.md` copy in the run log directory
 and emits a shell-safe `--task-file` invocation, so task text is not copied
 into terminal summaries or `result.json`.
 
+Failures caused by unavailable infrastructure, missing dependencies, or invalid
+Git paths are not retried as code repairs. They stop the developer loop with
+the original diagnostic so the environment or preserved worktree can be fixed;
+the reviewer is not invoked because validation did not pass.
+If the same retryable test failure is reported on consecutive validation
+attempts, the run is marked `BLOCKED` immediately with its failure digest and
+diagnostic, instead of consuming the remaining retries. Test diagnostics are
+rendered with a `[TESTS]` prefix, including when their content contains text
+such as `[REVIEW]`, so nested test output is distinct from the outer review
+stage.
+
 For an online GitHub issue run, Agentic automatically posts one concise final
 comment after a terminal `result.json` is recorded. The GitHub-native Markdown
 uses a heading, compact result/test/review/duration status table, collapsible
@@ -541,7 +552,8 @@ result, and duration but omits successful test-case/output lines. Failed and
 timed-out commands include a bounded diagnostic tail of at most 80 lines and
 12,000 characters, followed by the full-log pointer; use `--verbose` to replay
 the complete captured output. The same filtering applies while following a
-running job.
+running job; when that follow is non-interactive, the latest transient status
+is emitted once so the output still shows that the job is active.
 Structured providers keep the complete redacted event stream in the adjacent
 `.jsonl` file; the human log is not a replacement for that trace.
 

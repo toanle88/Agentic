@@ -468,8 +468,44 @@ def configure_relative_worktree_paths(repo: Path) -> bool:
     return True
 
 
+def is_registered_worktree(
+    repo: Path, worktree: Path, *, git_runner=None,
+) -> bool:
+    """Return whether a directory is registered in the repository's worktree list.
+    """
+    if not worktree.is_dir():
+        return False
+    if not (repo / ".git").exists():
+        return False
+    runner = git if git_runner is None else git_runner
+    try:
+        raw = runner(repo, "worktree", "list", "--porcelain")
+    except RuntimeError:
+        return False
+    if not isinstance(raw, str):
+        return False
+    target = worktree.resolve()
+    for line in raw.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        candidate = Path(line.removeprefix("worktree "))
+        try:
+            if candidate.resolve() == target:
+                return True
+        except (OSError, RuntimeError):
+            continue
+    return False
+
+
 def repair_relative_worktree(repo: Path, worktree: Path) -> bool:
     """Convert an existing worktree's Git links to relative paths when safe."""
+    if not worktree.is_dir():
+        return False
+    if is_registered_worktree(repo, worktree) is False:
+        raise RuntimeError(
+            f"Git worktree is invalid or not registered: {worktree}; "
+            "infrastructure failure, retries skipped"
+        )
     if not configure_relative_worktree_paths(repo):
         return False
     git(repo, "worktree", "repair", "--relative-paths", str(worktree))
@@ -561,6 +597,16 @@ def worktree_path_lock(repo: Path, worktree: Path, state_dir: Path | None = None
 @contextmanager
 def worktree_lock(repo: Path, run: Run, state_dir: Path | None = None):
     """Allow independent worktrees to run concurrently, but not one worktree twice."""
+    if not run.worktree.is_dir():
+        raise RuntimeError(
+            f"Git worktree is missing: {run.worktree}; "
+            "infrastructure failure, retries skipped"
+        )
+    if is_registered_worktree(repo, run.worktree) is False:
+        raise RuntimeError(
+            f"Git worktree is invalid or not registered: {run.worktree}; "
+            "infrastructure failure, retries skipped"
+        )
     with worktree_path_lock(repo, run.worktree, state_dir):
         yield
 

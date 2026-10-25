@@ -222,6 +222,33 @@ def record_no_code_changes_blocked(folder: Path, developer_report: str, *,
     })
 
 
+def record_test_failure_blocked(folder: Path, failure_digest: str, report: str, *,
+                                patch_digest: str = "",
+                                attempts: int | None = None,
+                                max_retries: int | None = None,
+                                issue_digest: str = "") -> None:
+    """Persist a terminal blocker caused by the same test failure repeating."""
+    diagnostic = result_text(report, 2_000)
+    atomic_write_json(_blocked_path(folder), {
+        "status": "blocked",
+        "result_status": "BLOCKED",
+        "kind": "test-failure",
+        "reason": "Repeated identical test failure",
+        "summary": (
+            "Repeated identical test failure. "
+            f"Diagnostic: {diagnostic}"
+            if diagnostic else "Repeated identical test failure; see the test logs."
+        ),
+        "patch_digest": patch_digest,
+        "issue_digest": issue_digest,
+        "failure_digest": failure_digest,
+        "attempts": attempts,
+        "max_retries": max_retries,
+        "logs_path": str(folder),
+        "blocked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    })
+
+
 def clear_blocked(folder: Path) -> None:
     _blocked_path(folder).unlink(missing_ok=True)
 

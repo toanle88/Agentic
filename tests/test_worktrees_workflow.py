@@ -130,6 +130,41 @@ class WorkflowTests(_GitRepositoryTestCase):
         self.assertEqual(develop.call_args.args[1].title, "Cached issue")
         self.assertEqual(develop.call_args.args[1].body, "Implement the offline resume path.")
 
+    def test_resume_skips_relative_repair_for_missing_worktree(self):
+        config_path = self.repo / "agent-config.json"
+        config_path.write_text(json.dumps({
+            "test_commands": [[sys.executable, "-c", "print('ok')"]],
+            "developer_agent": {"provider": "codex"},
+            "reviewer_agent": {"provider": "codex"},
+        }))
+        state_dir = Path(self.tmp.name) / "agentic-state"
+        fake_run = agentic.Run(89, "agent/issue-89-aabbccdd", self.repo / "missing-worktree")
+        args = agentic.build_parser().parse_args([
+            "--repo", str(self.repo), "--config", str(config_path),
+            "--state-dir", str(state_dir), "--issue", "89",
+        ])
+        issue = agentic.Issue(89, "Cached issue", "Implement the resume path.")
+        with (
+            patch("agentic.preflight_test_commands"),
+            patch("agentic.preflight_agent_settings"),
+            patch("agentic.github_metadata", return_value=("owner/repo", "main")),
+            patch("agentic.default_base_branch", return_value="main"),
+            patch("agentic.get_issue", return_value=issue),
+            patch("agentic.runs_for_issue", return_value=[fake_run]),
+            patch("agentic.choose_existing", return_value=fake_run),
+            patch("agentic.repository_lock", return_value=contextlib.nullcontext()),
+            patch("agentic.refresh_base"),
+            patch("agentic.repair_relative_worktree") as repair,
+            patch("agentic.worktree_lock", return_value=contextlib.nullcontext()),
+            patch("agentic.check_existing_pr", return_value=None),
+            patch("agentic._run_investigation", return_value={"summary": "cached", "findings": []}),
+            patch("agentic.develop", return_value=True),
+            patch("agentic.post_terminal_comment", return_value=True),
+            patch("agentic._attempt_auto_publication"),
+        ):
+            self.assertEqual(agentic.execute_locked(args, self.repo), 0)
+        repair.assert_not_called()
+
     def test_local_resume_action_materializes_task_file_invocation(self):
         task_file = self.repo / "task.md"
         task_file.write_text("Implement the local task.\n")
@@ -431,6 +466,7 @@ class WorkflowTests(_GitRepositoryTestCase):
         review.assert_not_called()
         rendered = console.getvalue()
         self.assertIn('\033[31m[TESTS]\033[0m \033[31mFailed\033[0m', rendered)
+        self.assertIn('[TESTS] [REVIEW] AssertionError', rendered)
         self.assertNotIn('\033[31mFAILED\033[0m', rendered)
         self.assertNotIn('\033[32mPASSED\033[0m', rendered)
         self.assertNotIn('\033[35m[REVIEW]\033[0m', rendered)
@@ -586,10 +622,16 @@ class WorkflowTests(_GitRepositoryTestCase):
             'max_files': None,
             'developer_agent': {'provider': 'codex'},
         }
+        failures = [
+            (
+                False,
+                f'AssertionError: expected a changed result (attempt {attempt})',
+                {}, '', '',
+            )
+            for attempt in range(1, 7)
+        ]
         with (patch('agentic.run_agent', return_value=(True, 'implemented')) as run_agent,
-              patch('agentic.verify_and_review', return_value=(
-                  False, 'AssertionError: expected a changed result', {}, '', '',
-              )),
+              patch('agentic.verify_and_review', side_effect=failures),
               patch('sys.stdout', new_callable=StringIO) as output):
             self.assertFalse(agentic.develop(run, issue, 'main', config, folder))
 
@@ -599,7 +641,10 @@ class WorkflowTests(_GitRepositoryTestCase):
             self.assertIn(f'attempt {attempt}/6', rendered)
         self.assertIn('[RESULT] RETRY_EXHAUSTED', rendered)
         self.assertIn('Attempts: 6/6 (configured retries: 5)', rendered)
-        self.assertIn('Reason:   Tests failed: AssertionError: expected a changed result', rendered)
+        self.assertIn(
+            'Reason:   Tests failed: AssertionError: expected a changed result (attempt 6)',
+            rendered,
+        )
         self.assertIn(f'Logs:     {folder}', rendered)
         self.assertIn('then python agentic.py --issue 38', rendered)
         result = json.loads((folder / 'result.json').read_text(encoding='utf-8'))
@@ -698,6 +743,42 @@ class WorkflowTests(_GitRepositoryTestCase):
             with self.assertRaisesRegex(RuntimeError, 'environment or infrastructure'):
                 agentic.develop(run, issue, 'main', config, folder)
         run_agent.assert_called_once()
+
+
+    def test_develop_blocks_repeated_identical_test_failures(self):
+        run = agentic.create_worktree(self.repo, 'main', 38)
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(38, 'Repeated test failure', 'Implement the fix')
+        config = {
+            'max_retries': 5,
+            'max_files': None,
+            'developer_agent': {'provider': 'codex'},
+        }
+        (run.worktree / 'fix.py').write_text('fixed = True\n')
+        failure = 'AssertionError: expected 2, got 3\n'
+        with (patch('agentic.run_agent', side_effect=[
+                  (True, 'implemented'), (True, 'implemented again'),
+              ]) as run_agent,
+              patch('agentic.verify_and_review', side_effect=[
+                  (False, failure, {}, '', ''),
+                  (False, failure, {}, '', ''),
+              ]),
+              patch('sys.stdout', new_callable=StringIO) as output):
+            self.assertTrue(agentic.develop(run, issue, 'main', config, folder))
+
+        self.assertEqual(run_agent.call_count, 2)
+        blocked = json.loads((folder / 'blocked.json').read_text())
+        self.assertEqual(blocked['kind'], 'test-failure')
+        self.assertEqual(blocked['result_status'], 'BLOCKED')
+        self.assertEqual(blocked['attempts'], 2)
+        self.assertIn('Repeated identical test failure', blocked['summary'])
+        self.assertTrue(blocked['patch_digest'])
+        self.assertIn('[RESULT] BLOCKED', output.getvalue())
+        self.assertNotIn('[RESULT] RETRY_EXHAUSTED', output.getvalue())
+
+        with patch('agentic.run_agent') as resumed_agent:
+            self.assertTrue(agentic.develop(run, issue, 'main', config, folder))
+        resumed_agent.assert_not_called()
 
 
     def test_develop_blocks_passing_checks_without_code_changes(self):
@@ -974,10 +1055,13 @@ class WorkflowTests(_GitRepositoryTestCase):
             '--task', 'Add CSV export\nAdd regression tests.',
             '--instruction', 'Preserve the CSV header order',
         ])
-        fake_run = agentic.Run(None, 'agent/task-csv-aabbccddeeff', Path('/tmp/fake-worktree'))
+        fake_worktree = self.repo / 'fake-worktree'
+        fake_worktree.mkdir()
+        fake_run = agentic.Run(None, 'agent/task-csv-aabbccddeeff', fake_worktree)
         with (patch('agentic.preflight_test_commands'),
               patch('agentic.preflight_agent_settings'),
               patch('agentic.create_local_worktree', return_value=fake_run) as create,
+              patch('agentic.worktree_lock', return_value=contextlib.nullcontext()),
               patch('agentic._run_investigation', return_value={
                   'summary': 'Valid local task', 'findings': [],
               }),
@@ -1018,7 +1102,9 @@ class WorkflowTests(_GitRepositoryTestCase):
             '--repo', str(self.repo), '--config', str(config_path),
             '--state-dir', str(state_dir), '--task-file', str(task_file),
         ])
-        fake_run = agentic.Run(None, 'agent/task-local-aabbccddeeff', Path('/tmp/fake-worktree'))
+        fake_worktree = self.repo / 'fake-worktree'
+        fake_worktree.mkdir()
+        fake_run = agentic.Run(None, 'agent/task-local-aabbccddeeff', fake_worktree)
         run_folder = agentic.logs_path(self.repo, fake_run, state_dir)
         command = shlex.join([
             'python', 'agentic.py', '--task-file', str(task_file.resolve()),
@@ -1035,6 +1121,7 @@ class WorkflowTests(_GitRepositoryTestCase):
         with (patch('agentic.preflight_test_commands'),
               patch('agentic.preflight_agent_settings'),
               patch('agentic.create_local_worktree', return_value=fake_run),
+              patch('agentic.worktree_lock', return_value=contextlib.nullcontext()),
               patch('agentic._run_investigation', return_value={
                   'summary': 'Valid local task', 'findings': [],
               }),
@@ -1058,10 +1145,13 @@ class WorkflowTests(_GitRepositoryTestCase):
             '--state-dir', str(Path(self.tmp.name) / 'agentic-state'),
             '--task', 'Investigate before implementing.',
         ])
-        fake_run = agentic.Run(None, 'agent/task-investigate-aabbccddeeff', Path('/tmp/fake-worktree'))
+        fake_worktree = self.repo / 'fake-worktree'
+        fake_worktree.mkdir()
+        fake_run = agentic.Run(None, 'agent/task-investigate-aabbccddeeff', fake_worktree)
         with (patch('agentic.preflight_test_commands'),
               patch('agentic.preflight_agent_settings'),
               patch('agentic.create_local_worktree', return_value=fake_run),
+              patch('agentic.worktree_lock', return_value=contextlib.nullcontext()),
               patch('agentic._run_investigation', return_value={
                   'summary': 'Not actionable', 'findings': [],
               }),

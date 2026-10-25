@@ -1106,12 +1106,15 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
     def test_worktree_lock_rejects_duplicate_worker(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            run = agentic.Run(None, "agent/task-demo-abcdef123456", root / "worktree", "abcdef123456")
+            worktree = root / "worktree"
+            worktree.mkdir()
+            run = agentic.Run(None, "agent/task-demo-abcdef123456", worktree, "abcdef123456")
             state = root / "state"
-            with agentic.worktree_lock(root, run, state):
-                with self.assertRaisesRegex(RuntimeError, "already active"):
-                    with agentic.worktree_lock(root, run, state):
-                        pass
+            with patch.object(agentic_worktrees, "is_registered_worktree", return_value=True):
+                with agentic.worktree_lock(root, run, state):
+                    with self.assertRaisesRegex(RuntimeError, "already active"):
+                        with agentic.worktree_lock(root, run, state):
+                            pass
 
     def test_sandbox_rewrites_nested_output_paths(self):
         with tempfile.TemporaryDirectory() as temp:

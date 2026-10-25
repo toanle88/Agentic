@@ -608,7 +608,10 @@ class ConciseLogStream:
     @staticmethod
     def _test_body(line: str) -> str | None:
         match = _TESTS_PREFIX_RE.match(line.strip())
-        return match.group("body").strip() if match else None
+        if match is None:
+            return None
+        body = match.group("body")
+        return body.strip() if body is not None else ""
 
     def _remember_test_output(self, line: str) -> None:
         """Keep only a bounded tail for a later failed test command."""
