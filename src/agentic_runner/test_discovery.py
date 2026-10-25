@@ -17,6 +17,7 @@ from typing import Any, Callable
 
 from .config import SAFE_GIT_DIFF_CHECK
 from .sandbox import sandbox_command
+from .security import restricted_test_environment
 
 
 DISCOVERY_TIMEOUT_SECONDS = 60
@@ -483,7 +484,9 @@ def _executable_available(argv: list[str], repo: Path) -> bool:
     return shutil.which(executable) is not None
 
 
-def _python_module_available(argv: list[str], repo: Path, timeout: float) -> tuple[bool, bool]:
+def _python_module_available(
+    argv: list[str], repo: Path, timeout: float, *, env: dict[str, str] | None = None,
+) -> tuple[bool, bool]:
     executable_name = Path(argv[0]).name.lower()
     if executable_name.endswith(".exe"):
         executable_name = executable_name[:-4]
@@ -495,7 +498,7 @@ def _python_module_available(argv: list[str], repo: Path, timeout: float) -> tup
         result = subprocess.run(
             [argv[0], "-c", "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec(sys.argv[1]) else 1)", argv[2]],
             cwd=repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            timeout=min(10, timeout), check=False,
+            timeout=min(10, timeout), check=False, env=env,
         )
     except OSError:
         return False, False
@@ -560,6 +563,7 @@ def _kill_process_group(process: subprocess.Popen[Any]) -> None:
 def _run_candidate(
     argv: list[str], repo: Path, timeout: float,
     sandbox: dict[str, Any] | None = None,
+    *, env: dict[str, str] | None = None,
 ) -> tuple[int, str, bool]:
     """Run one candidate with argv execution and bounded output retention."""
     process_argv = sandbox_command(argv, repo, sandbox)
@@ -570,7 +574,7 @@ def _run_candidate(
         popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     process = subprocess.Popen(
         process_argv, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        **popen_kwargs,
+        env=env, **popen_kwargs,
     )
     chunks: deque[bytes] = deque()
     total = [0]
@@ -606,6 +610,7 @@ def validate_test_candidates(
     *,
     timeout: int = DISCOVERY_TIMEOUT_SECONDS,
     sandbox: dict[str, Any] | None = None,
+    credential_names: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Run candidates with bounded argv execution and return safe evidence."""
     if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= MAX_DISCOVERY_TIMEOUT_SECONDS:
@@ -614,6 +619,9 @@ def validate_test_candidates(
         )
     results: list[dict[str, Any]] = []
     sandbox_enabled = bool((sandbox or {}).get("enabled"))
+    restricted_environment, _ = restricted_test_environment(
+        blocked_names=credential_names or (),
+    )
     for item in candidates[:MAX_CANDIDATES]:
         argv = list(item["argv"])
         started = time.monotonic()
@@ -630,6 +638,7 @@ def validate_test_candidates(
         if not sandbox_enabled:
             module_available, module_timed_out = _python_module_available(
                 argv, repo, max(0.0, min(timeout, deadline - time.monotonic())),
+                env=restricted_environment,
             )
             if module_timed_out:
                 results.append({**base, "status": "timeout", "detail": f"exceeded {timeout}s", "duration_seconds": timeout})
@@ -642,7 +651,10 @@ def validate_test_candidates(
             results.append({**base, "status": "timeout", "detail": f"exceeded {timeout}s", "duration_seconds": timeout})
             continue
         try:
-            returncode, output, timed_out = _run_candidate(argv, repo, remaining, sandbox)
+            returncode, output, timed_out = _run_candidate(
+                argv, repo, remaining, sandbox,
+                env=None if sandbox_enabled else restricted_environment,
+            )
         except subprocess.TimeoutExpired:
             results.append({**base, "status": "timeout", "detail": f"exceeded {timeout}s", "duration_seconds": timeout})
             continue
@@ -684,6 +696,7 @@ def discover_and_validate(
     output: Path | None = None,
     timeout: int = DISCOVERY_TIMEOUT_SECONDS,
     sandbox: dict[str, Any] | None = None,
+    credential_names: list[str] | None = None,
 ) -> DiscoveryResult:
     """Discover deterministic checks, optionally ask a read-only agent, then validate."""
     deterministic = discover_test_candidates(repo)
@@ -696,7 +709,10 @@ def discover_and_validate(
     seen = {_command_key(item["argv"]) for item in all_candidates}
     for item in assisted:
         _add_candidate(all_candidates, seen, item)
-    results = validate_test_candidates(repo, all_candidates, timeout=timeout, sandbox=sandbox)
+    results = validate_test_candidates(
+        repo, all_candidates, timeout=timeout, sandbox=sandbox,
+        credential_names=credential_names,
+    )
     fast = [item["argv"] for item in results if item["status"] == "passed" and item["profile"] == "fast"]
     slow = [item["argv"] for item in results if item["status"] == "passed" and item["profile"] == "slow"]
     return DiscoveryResult(results, fast, slow, agent_status)

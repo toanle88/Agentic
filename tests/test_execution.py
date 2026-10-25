@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
 from pathlib import Path
 from subprocess import CompletedProcess
-from threading import Lock
+from threading import Lock, enumerate as enumerate_threads
 from unittest.mock import patch
 
 import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
@@ -986,6 +986,28 @@ class StreamingTests(unittest.TestCase):
                     timeout=1, heartbeat=0)
             self.assertEqual(result.returncode, 124)
             self.assertIn('Time limit', (root / 'tests.log').read_text())
+
+    def test_stream_timeout_joins_reader_when_output_queue_is_full(self):
+        from io import StringIO
+        with tempfile.TemporaryDirectory() as dirname, patch.object(
+            execution_stream, 'MAX_STREAM_QUEUE', 1
+        ):
+            root = Path(dirname)
+            script = (
+                'import sys,time; '
+                '[print("output", flush=True) for _ in range(100000)]; '
+                'time.sleep(10)'
+            )
+            with patch('sys.stdout', new_callable=StringIO):
+                result = agentic.streamed_command(
+                    [sys.executable, '-c', script], root, label='TESTS',
+                    log_file=root / 'tests.log', timeout=1, heartbeat=0,
+                )
+
+        self.assertEqual(result.returncode, 124)
+        self.assertFalse(
+            any(thread.name == 'agentic-stream-reader' for thread in enumerate_threads())
+        )
 
     def test_stream_timeout_terminates_descendants(self):
         from io import StringIO

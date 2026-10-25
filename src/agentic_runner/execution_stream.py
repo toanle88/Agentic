@@ -35,6 +35,7 @@ MAX_STREAM_QUEUE = 256
 MAX_RAW_LOG_BYTES = 2_000_000
 MAX_RAW_TRUNCATION_MARKER_BYTES = 256
 MAX_HUMAN_LOG_BYTES = 200_000
+STREAM_READER_JOIN_TIMEOUT = 1.0
 HUMAN_LOG_TRUNCATION_MARKER = (
     "[AGENTIC] agentic_stream_truncated: human-readable log limit reached.\n"
 )
@@ -642,25 +643,32 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
 
     lines: queue.Queue[str | None] = queue.Queue(maxsize=MAX_STREAM_QUEUE)
     dropped_lines = 0
+    reader_stop = threading.Event()
 
     def reader() -> None:
         nonlocal dropped_lines
         assert proc.stdout is not None
         try:
             for raw in proc.stdout:
+                if reader_stop.is_set():
+                    break
                 try:
                     lines.put_nowait(raw)
                 except queue.Full:
                     dropped_lines += 1
+        except (OSError, ValueError):
+            # Cleanup closes the pipe to unblock a reader after cancellation.
+            return
         finally:
-            while True:
+            while not reader_stop.is_set():
                 try:
                     lines.put(None, timeout=0.1)
                     break
                 except queue.Full:
                     continue
 
-    threading.Thread(target=reader, daemon=True).start()
+    reader_thread = threading.Thread(target=reader, name="agentic-stream-reader", daemon=True)
+    reader_thread.start()
     started = time.monotonic()
     started_at = datetime.datetime.now(datetime.timezone.utc)
     last_notice = started
@@ -738,6 +746,7 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                 if timeout is not None and now - started > timeout:
                     timed_out = True
                     display(f"Time limit reached ({timeout}s). Stopping process.", style_status_tokens=True)
+                    reader_stop.set()
                     _stop_process_tree(proc)
                     proc.wait()
                     break
@@ -846,10 +855,13 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
         raise
     finally:
         if proc.poll() is None:
+            reader_stop.set()
             _stop_process_tree(proc)
             proc.wait()
+        reader_stop.set()
         if proc.stdout:
             proc.stdout.close()
+        reader_thread.join(timeout=STREAM_READER_JOIN_TIMEOUT)
         if human_log:
             human_log.close()
         if raw_file:
