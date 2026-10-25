@@ -100,6 +100,8 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
             self.assertFalse((outside / "output.log").exists())
 
     def test_bounded_append_writer_anchors_parent_before_path_replacement(self):
+        if not persistence._supports_anchored_log_open():
+            self.skipTest("anchored directory-descriptor opens are unavailable")
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
             nested = base / "nested"

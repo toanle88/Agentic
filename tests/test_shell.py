@@ -2266,6 +2266,36 @@ class ShellTests(unittest.TestCase):
             shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=session)
             self.assertEqual(shell.jobs, {})
 
+    def test_shell_ignores_oversized_persisted_argv(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            session = root / 'logs'
+            session.mkdir()
+            base = {
+                'number': 1, 'pid': 0, 'started': 1.0,
+                'finished': 2.0, 'state': 'finished',
+                'log_path': str(session / 'job-001.log'),
+            }
+            too_many = dict(base, argv=['x'] * (agentic_shell.MAX_PERSISTED_JOB_ARGV + 1))
+            (session / 'job-001.json').write_text(json.dumps(too_many), encoding='utf-8')
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=session)
+            self.assertEqual(shell.jobs, {})
+
+            too_long = dict(base, argv=['x' * (agentic_shell.MAX_PERSISTED_JOB_ARG_CHARS + 1)])
+            (session / 'job-001.json').write_text(json.dumps(too_long), encoding='utf-8')
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=session)
+            self.assertEqual(shell.jobs, {})
+
+    def test_shell_ignores_oversized_persisted_record_without_unbounded_read(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            session = root / 'logs'
+            session.mkdir()
+            record = session / 'job-001.json'
+            record.write_text('x' * (agentic_shell.MAX_SHELL_RECORD_BYTES + 1), encoding='utf-8')
+            shell = agentic_shell.AgenticShell(root, Path(sys.executable), session_dir=session)
+            self.assertEqual(shell.jobs, {})
+
 
 def _capture_ps(shell, parts=None):
     from contextlib import redirect_stdout

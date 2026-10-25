@@ -10,7 +10,10 @@ import argparse
 import datetime as dt
 import json
 import platform
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -21,10 +24,10 @@ except ImportError:  # pragma: no cover - native Windows has no resource module.
     resource = None
 
 try:
-    from agentic_runner import dashboard_data
+    from agentic_runner import dashboard, dashboard_data, openrouter, worktrees
 except ModuleNotFoundError:  # Direct source-checkout execution.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-    from agentic_runner import dashboard_data
+    from agentic_runner import dashboard, dashboard_data, openrouter, worktrees
 
 
 def percentile(values: list[float], fraction: float) -> float:
@@ -88,29 +91,128 @@ def sample(logs: Path, *, cold: bool, baseline_peak: int | None = None) -> tuple
     return time.perf_counter() - started, peak
 
 
+def _summary(values: list[float]) -> dict[str, float]:
+    return {
+        "p50_seconds": percentile(values, 0.50),
+        "p95_seconds": percentile(values, 0.95),
+        "p99_seconds": percentile(values, 0.99),
+    }
+
+
+def _prepare_git_fixture(root: Path) -> Path | None:
+    """Create a disposable repository for local, provider-free Git samples."""
+    if shutil.which("git") is None:
+        return None
+    root.mkdir()
+    result = subprocess.run(
+        ["git", "init", "-q"], cwd=root, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True, check=False,
+    )
+    if result.returncode:
+        raise RuntimeError("could not initialize the benchmark Git fixture")
+    for index in range(12):
+        (root / f"tracked-{index:02d}.txt").write_text(
+            f"benchmark content {index}\n", encoding="utf-8",
+        )
+    result = subprocess.run(
+        ["git", "add", "."], cwd=root, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True, check=False,
+    )
+    if result.returncode:
+        raise RuntimeError("could not stage the benchmark Git fixture")
+    return root
+
+
+def _sample_openrouter_tools(worktree: Path) -> None:
+    openrouter._openrouter_tool_call(
+        worktree, "list_files", {"path": "."}, readonly=True,
+    )
+    openrouter._openrouter_tool_call(
+        worktree, "read_file", {"path": "notes.txt"}, readonly=True,
+    )
+
+
+def _sample_git_operations(repo: Path) -> None:
+    worktrees.git(repo, "status", "--short")
+    worktrees.git(repo, "diff", "--cached", "--name-only")
+    worktrees.git(repo, "ls-files")
+
+
 def measure(logs: Path, repetitions: int) -> dict[str, Any]:
     cold: list[float] = []
     warm: list[float] = []
     peak_values: list[int] = []
     baseline_peak = peak_rss_bytes()
-    for _ in range(repetitions):
-        cold_seconds, cold_peak = sample(logs, cold=True, baseline_peak=baseline_peak)
-        warm_seconds, warm_peak = sample(logs, cold=False, baseline_peak=baseline_peak)
-        cold.append(cold_seconds)
-        warm.append(warm_seconds)
-        peak_values.extend(value for value in (cold_peak, warm_peak) if value is not None)
+    case_samples: dict[str, dict[str, list[float]]] = {
+        name: {"cold": [], "warm": []}
+        for name in (
+            "dashboard_collection", "dashboard_rendering",
+            "openrouter_file_tools", "git_operations",
+        )
+    }
+    with tempfile.TemporaryDirectory(prefix="agentic-dashboard-benchmark-") as temp:
+        fixture_root = Path(temp)
+        tool_root = fixture_root / "openrouter-worktree"
+        tool_root.mkdir()
+        (tool_root / "notes.txt").write_text(
+            "provider-free benchmark fixture\n", encoding="utf-8",
+        )
+        (tool_root / "nested").mkdir()
+        (tool_root / "nested" / "detail.txt").write_text("detail\n", encoding="utf-8")
+        git_repo = _prepare_git_fixture(fixture_root / "git-worktree")
+        for _ in range(repetitions):
+            for phase, is_cold in (("cold", True), ("warm", False)):
+                collection_seconds, collection_peak = sample(
+                    logs, cold=is_cold, baseline_peak=baseline_peak,
+                )
+                case_samples["dashboard_collection"][phase].append(collection_seconds)
+                if phase == "cold":
+                    cold.append(collection_seconds)
+                else:
+                    warm.append(collection_seconds)
+                peak_values.extend(
+                    value for value in (collection_peak,) if value is not None
+                )
 
-    def summary(values: list[float]) -> dict[str, float]:
-        return {
-            "p50_seconds": percentile(values, 0.50),
-            "p95_seconds": percentile(values, 0.95),
-            "p99_seconds": percentile(values, 0.99),
-        }
+                runs = dashboard_data.collect_runs(logs)
+                started = time.perf_counter()
+                dashboard.render_dashboard(runs, "benchmark", logs.name)
+                case_samples["dashboard_rendering"][phase].append(
+                    time.perf_counter() - started,
+                )
+
+                started = time.perf_counter()
+                _sample_openrouter_tools(tool_root)
+                case_samples["openrouter_file_tools"][phase].append(
+                    time.perf_counter() - started,
+                )
+
+                if git_repo is not None:
+                    started = time.perf_counter()
+                    _sample_git_operations(git_repo)
+                    case_samples["git_operations"][phase].append(
+                        time.perf_counter() - started,
+                    )
+
+    cases: dict[str, dict[str, Any]] = {}
+    for name, values in case_samples.items():
+        if values["cold"]:
+            cases[name] = {
+                "status": "measured",
+                "cold": _summary(values["cold"]),
+                "warm": _summary(values["warm"]),
+            }
+        else:
+            cases[name] = {
+                "status": "unavailable",
+                "reason": "Git executable unavailable",
+            }
 
     return {
         "repetitions": repetitions,
-        "cold": summary(cold),
-        "warm": summary(warm),
+        "cold": _summary(cold),
+        "warm": _summary(warm),
+        "cases": cases,
         "peak_resident_memory_bytes": max(peak_values) if peak_values else None,
         "host": {
             "python": platform.python_version(),

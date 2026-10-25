@@ -43,6 +43,17 @@ AUDIT_BRANCH_RE = re.compile(
 AUDIT_KEY = hashlib.sha256(b"agentic-repository-audit-v1").hexdigest()[:12]
 MAX_SELECTION_RUNS = 5
 RELATIVE_WORKTREE_GIT = (2, 48, 0)
+_GIT_SAFETY_CONFIG = (
+    "-c", "core.fsmonitor=false",
+    "-c", f"core.hooksPath={os.devnull}",
+    "-c", "credential.helper=",
+    "-c", "core.sshCommand=ssh",
+    "-c", "core.gitProxy=none",
+    "-c", "protocol.ext.allow=never",
+    "-c", "remote.origin.uploadpack=git-upload-pack",
+    "-c", "remote.origin.receivepack=git-receive-pack",
+    "-c", "diff.external=",
+)
 
 
 class UserCancelled(RuntimeError):
@@ -376,7 +387,23 @@ def command(argv: list[str], cwd: Path, *, timeout: int = 180,
 
 
 def git(repo: Path, *args: str, check: bool = True) -> str:
-    return command(["git", *args], repo, check=check).stdout.strip()
+    # Repository-local Git configuration is untrusted input. These overrides
+    # prevent status/diff/fetch/worktree operations from starting configured
+    # fsmonitor, external-diff, credential, proxy, SSH, or transport helpers.
+    # Keep the environment explicit as well: Git gives several environment
+    # variables precedence over configuration files.
+    environment = os.environ.copy()
+    environment.update({
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_TERMINAL_PROMPT": "0",
+    })
+    for name in ("GIT_EXTERNAL_DIFF", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND"):
+        environment.pop(name, None)
+    return command(
+        ["git", *_GIT_SAFETY_CONFIG, *args], repo,
+        check=check, env=environment,
+    ).stdout.strip()
 
 
 def installed_git_version(executable: str = "git") -> tuple[int, int, int] | None:

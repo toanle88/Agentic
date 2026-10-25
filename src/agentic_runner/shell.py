@@ -32,7 +32,7 @@ from .output import (
     sanitize_terminal_text,
     untag_system_prefix,
 )
-from .persistence import atomic_write_text
+from .persistence import atomic_write_text, read_text_bounded
 from .security import sensitive_environment_values
 from .shell_input import (  # noqa: F401
     COMMAND_DESCRIPTIONS,
@@ -100,6 +100,11 @@ from .shell_jobs import (
     tail as _tail,
     tail_from_text as _tail_from_text,
 )
+
+MAX_SHELL_RECORD_BYTES = 256_000
+MAX_PERSISTED_JOB_ARGV = 128
+MAX_PERSISTED_JOB_ARG_CHARS = 16_384
+MAX_PERSISTED_JOB_PATH_CHARS = 4_096
 
 def _windows_path(path: Path) -> str:
     """Return a Windows spelling when WSL can provide one."""
@@ -374,14 +379,47 @@ class AgenticShell:
     def _load_persisted_jobs(self) -> None:
         for record_path in sorted(self.session_dir.glob("job-*.json")):
             try:
-                record = json.loads(record_path.read_text(encoding="utf-8"))
+                raw_record = read_text_bounded(record_path, MAX_SHELL_RECORD_BYTES)
+                if raw_record is None:
+                    continue
+                record = json.loads(raw_record)
+                if not isinstance(record, dict):
+                    continue
+                raw_argv = record["argv"]
+                if (
+                    not isinstance(raw_argv, list)
+                    or len(raw_argv) > MAX_PERSISTED_JOB_ARGV
+                    or any(
+                        not isinstance(value, str)
+                        or len(value) > MAX_PERSISTED_JOB_ARG_CHARS
+                        for value in raw_argv
+                    )
+                ):
+                    continue
+                raw_log_path = record["log_path"]
+                if (
+                    not isinstance(raw_log_path, str)
+                    or len(raw_log_path) > MAX_PERSISTED_JOB_PATH_CHARS
+                ):
+                    continue
                 number = int(record["number"])
-                argv = [str(value) for value in record["argv"]]
+                argv = list(raw_argv)
                 pid = int(record.get("pid", 0))
                 started = float(record["started"])
-                log_path = Path(record["log_path"])
+                log_path = Path(raw_log_path)
                 state = record.get("state", "finished")
                 identity = record.get("identity")
+                if identity is not None and not isinstance(identity, dict):
+                    identity = None
+                session_id = record.get("session_id", "unknown")
+                if not isinstance(session_id, str) or len(session_id) > MAX_PERSISTED_JOB_PATH_CHARS:
+                    session_id = "unknown"
+                shell_job_id = record.get("shell_job_id")
+                if shell_job_id is not None and (
+                    not isinstance(shell_job_id, str)
+                    or len(shell_job_id) > MAX_PERSISTED_JOB_PATH_CHARS
+                ):
+                    shell_job_id = None
             except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
                 continue
             if state == "running" and _process_identity_matches(pid, identity):
@@ -390,19 +428,19 @@ class AgenticShell:
                           persisted_pid=pid, notified=False,
                           stop_requested=bool(record.get("stop_requested", False)),
                           identity=identity,
-                          shell_job_id=(str(record["shell_job_id"]) if record.get("shell_job_id") else None))
+                          shell_job_id=shell_job_id)
                 self.jobs[number] = job
                 continue
             finished = record.get("finished")
             job = Job(
                 number, argv, log_path, None, started, None, record_path,
-                str(record.get("session_id", "unknown")), persisted_pid=pid,
+                session_id, persisted_pid=pid,
                 finished=float(finished) if finished is not None else time.time(),
                 exit_code=record.get("exit_code") if state != "running" else -1,
                 notified=True,
                 stop_requested=bool(record.get("stop_requested", False)),
                 identity=identity if isinstance(identity, dict) else None,
-                shell_job_id=(str(record["shell_job_id"]) if record.get("shell_job_id") else None),
+                shell_job_id=shell_job_id,
             )
             self.jobs[number] = job
             if state == "running":
