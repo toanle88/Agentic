@@ -261,6 +261,8 @@ class AgenticShell:
             from .cli import default_state_dir
             state_dir = default_state_dir()
         self.state_dir = state_dir.expanduser()
+        if os.name == "nt":
+            self.state_dir = self.state_dir.resolve()
         if session_dir is None:
             from .worktrees import ensure_state_paths
             session_dir = ensure_state_paths(self.repo, self.state_dir).shell

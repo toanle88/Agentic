@@ -1,6 +1,7 @@
 """Focused workflow tests."""
 import json
 import contextlib
+import os
 import shlex
 import subprocess
 import sys
@@ -31,7 +32,7 @@ class WorkflowTests(_GitRepositoryTestCase):
 
         argv = captured["argv"]
         for setting in (
-            "core.fsmonitor=false", "core.hooksPath=/dev/null",
+            "core.fsmonitor=false", f"core.hooksPath={os.devnull}",
             "credential.helper=", "core.sshCommand=ssh",
             "core.gitProxy=none", "protocol.ext.allow=never",
             "remote.origin.uploadpack=git-upload-pack",

@@ -108,8 +108,12 @@ def repository_state_key(repo: Path) -> str:
 
 
 def _absolute_state_path(path: Path) -> Path:
-    """Make a lexical absolute path without resolving symbolic links."""
-    return Path(os.path.abspath(os.fspath(path)))
+    """Make an absolute state path, canonicalizing Windows spellings only."""
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    # Windows commonly returns short 8.3 spellings from temporary-directory
+    # helpers. Canonicalize there so state paths compare consistently with
+    # Path.resolve() and child processes receive the same spelling.
+    return absolute.resolve() if os.name == "nt" else absolute
 
 
 def _state_metadata_is_safe(
