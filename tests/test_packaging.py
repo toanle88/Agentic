@@ -64,7 +64,7 @@ class PackagingTests(unittest.TestCase):
                 self.assertIn("agentic_runner/__init__.py", names)
                 self.assertIn("agentic_runner/cli.py", names)
                 metadata = archive.read(next(name for name in names if name.endswith("METADATA"))).decode()
-            self.assertIn("Version: 1.1.114", metadata)
+            self.assertIn("Version: 1.1.115", metadata)
 
             extracted = folder / "installed"
             with zipfile.ZipFile(wheels[0]) as archive:
@@ -84,12 +84,30 @@ class PackagingTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(probe.returncode, 0, probe.stderr)
-            self.assertEqual(probe.stdout.strip(), "1.1.114")
+            self.assertEqual(probe.stdout.strip(), "1.1.115")
 
     def test_root_command_wrappers_remain_thin_compatibility_entrypoints(self):
         wrapper = (ROOT / "agentic.py").read_text(encoding="utf-8")
         self.assertIn("from agentic_runner import cli as _implementation", wrapper)
         self.assertNotIn("def main", wrapper)
+
+    def test_root_runner_wrapper_executes_from_source_checkout(self):
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "agentic.py"), "--version"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = result.stdout.strip()
+        self.assertIn(
+            output,
+            {
+                "agentic.py 1.1.115",
+                f"{Path(sys.executable).name} -m agentic_runner.cli 1.1.115",
+            },
+        )
 
     def test_runtime_modules_import_without_repository_root(self):
         environment = os.environ.copy()
@@ -112,7 +130,7 @@ class PackagingTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(probe.returncode, 0, probe.stderr)
-        self.assertEqual(probe.stdout.strip(), "1.1.114")
+        self.assertEqual(probe.stdout.strip(), "1.1.115")
 
 
 if __name__ == "__main__":
