@@ -20,6 +20,44 @@ from test_worktrees import _GitRepositoryTestCase
 
 
 class WorkflowTests(_GitRepositoryTestCase):
+    def test_run_agent_passes_self_hosted_projection_permission_only_when_allowed(self):
+        output = self.repo / "developer.txt"
+        with patch.object(
+            agentic_workflow, "_runner_source_change_allowed", return_value=True,
+        ), patch.object(
+            agentic_workflow, "run_codex", return_value=(True, "done"),
+        ) as run_codex:
+            self.assertEqual(
+                agentic_workflow.run_agent(
+                    self.repo, "prompt", output=output,
+                    settings={"provider": "codex"},
+                ),
+                (True, "done"),
+            )
+        self.assertTrue(run_codex.call_args.kwargs["allow_self_hosted_sources"])
+
+        with patch.object(
+            agentic_workflow, "_runner_source_change_allowed", return_value=False,
+        ), patch.object(
+            agentic_workflow, "run_codex", return_value=(True, "done"),
+        ) as run_codex:
+            agentic_workflow.run_agent(
+                self.repo, "prompt", output=output,
+                settings={"provider": "codex"},
+            )
+        self.assertNotIn("allow_self_hosted_sources", run_codex.call_args.kwargs)
+
+        with patch.object(
+            agentic_workflow, "_runner_source_change_allowed", return_value=True,
+        ), patch.object(
+            agentic_workflow, "run_openrouter", return_value=(True, "done"),
+        ) as run_openrouter:
+            agentic_workflow.run_agent(
+                self.repo, "prompt", output=output,
+                settings={"provider": "openrouter", "model": "test-model"},
+            )
+        self.assertTrue(run_openrouter.call_args.kwargs["allow_runner_source"])
+
     def test_git_operations_override_repository_controlled_helpers(self):
         captured = {}
 

@@ -375,6 +375,11 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
     if selected.get("timeout_seconds") is not None:
         timeout = selected["timeout_seconds"]
     progress_kwargs = {"verbose": True} if verbose else {}
+    allow_self_hosted_sources = _runner_source_change_allowed(worktree, "agentic.py")
+    projection_kwargs = (
+        {"allow_self_hosted_sources": True}
+        if allow_self_hosted_sources else {}
+    )
     if provider == "codex":
         return run_codex(
             worktree, prompt, output=output, readonly=readonly, schema=schema,
@@ -383,6 +388,7 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
             **progress_kwargs,
             **policy_kwargs,
             **({"sandbox": provider_sandbox} if provider_sandbox is not None else {}),
+            **projection_kwargs,
         )
     if provider == "openrouter":
         router_kwargs: dict[str, Any] = {
@@ -409,6 +415,7 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
             **progress_kwargs,
             **router_kwargs,
             **policy_kwargs,
+            **({"allow_runner_source": True} if allow_self_hosted_sources else {}),
         )
     cli_kwargs: dict[str, Any] = {}
     if selected.get("executable_path") is not None:
@@ -430,6 +437,7 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
         **policy_kwargs,
         **cli_kwargs,
         **({"sandbox": provider_sandbox} if provider_sandbox is not None else {}),
+        **projection_kwargs,
     )
 
 

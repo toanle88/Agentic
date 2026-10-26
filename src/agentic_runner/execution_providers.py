@@ -30,7 +30,7 @@ from .guidance import guidance_phase, guidance_prompt
 from .config import PROVIDER_API_KEY_ENV, provider_process_environment
 from .persistence import atomic_write_text
 from .persistence import read_text_tail
-from .policy import forbidden
+from .policy import provider_forbidden
 from .providers import (
     cli_provider_command,
     codex_command,
@@ -228,7 +228,9 @@ def _stage_worktree(
     return baseline
 
 
-def _stage_readonly_worktree(source: Path, destination: Path) -> Path:
+def _stage_readonly_worktree(
+    source: Path, destination: Path, *, allow_self_hosted_sources: bool = False,
+) -> Path:
     """Create an allowlisted read-only provider view of a worktree.
 
     Native CLIs do not share a path-deny policy.  Staging the visible tree
@@ -237,7 +239,13 @@ def _stage_readonly_worktree(source: Path, destination: Path) -> Path:
     policy are never copied into the provider's cwd.
     """
     try:
-        _stage_worktree(source, destination, skip=forbidden, read_only=True)
+        _stage_worktree(
+            source, destination,
+            skip=lambda filename: provider_forbidden(
+                filename, allow_self_hosted_sources=allow_self_hosted_sources,
+            ),
+            read_only=True,
+        )
     except RuntimeError as exc:
         raise RuntimeError("Could not stage the complete read-only worktree") from exc
     return destination
@@ -375,14 +383,19 @@ def _validate_missing_projection_path(root: Path, relative: str) -> None:
 
 
 def _sync_provider_worktree(
-    source: Path, projection: Path, baseline: dict[str, _ProjectionFile],
+    source: Path, projection: Path, baseline: dict[str, _ProjectionFile], *,
+    allow_self_hosted_sources: bool = False,
 ) -> None:
     """Apply only safe provider changes back to the original worktree."""
     current: dict[str, tuple[_ProjectionFile, bytes]] = {}
     current_files = 0
     current_bytes = 0
     for kind, relative, _ in iter_safe_regular_files(
-        projection, skip=forbidden, fail_on_error=True,
+        projection,
+        skip=lambda filename: provider_forbidden(
+            filename, allow_self_hosted_sources=allow_self_hosted_sources,
+        ),
+        fail_on_error=True,
         max_entries=MAX_PROVIDER_STAGE_ENTRIES,
         max_directories=MAX_PROVIDER_STAGE_DIRECTORIES,
     ):
@@ -464,7 +477,8 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
               api_key_env: str | None = None,
               permission_policy: dict[str, bool] | None = None,
               verbose: bool = False,
-              sandbox: dict[str, Any] | None = None) -> tuple[bool, str]:
+              sandbox: dict[str, Any] | None = None,
+              allow_self_hosted_sources: bool = False) -> tuple[bool, str]:
     # Each invocation creates a fresh session. The repository is the memory.
     prompt = guidance_prompt(
         worktree, prompt, readonly=readonly, audit_folder=output.parent,
@@ -481,11 +495,16 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
         if readonly:
             provider_worktree = _stage_readonly_worktree(
                 worktree, invocation_output / "review-worktree",
+                allow_self_hosted_sources=allow_self_hosted_sources,
             )
         else:
             provider_worktree = invocation_output / "developer-worktree"
             developer_baseline = _stage_worktree(
-                worktree, provider_worktree, skip=forbidden, read_only=False,
+                worktree, provider_worktree,
+                skip=lambda filename: provider_forbidden(
+                    filename, allow_self_hosted_sources=allow_self_hosted_sources,
+                ),
+                read_only=False,
             )
         temporary_output = invocation_output / "result.txt"
         staged_schema: Path | None = None
@@ -514,7 +533,10 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
             redaction_values=redaction_values,
         )
         if developer_baseline is not None:
-            _sync_provider_worktree(worktree, provider_worktree, developer_baseline)
+            _sync_provider_worktree(
+                worktree, provider_worktree, developer_baseline,
+                allow_self_hosted_sources=allow_self_hosted_sources,
+            )
         message = _read_provider_result(invocation_output, "result.txt")
         if message is None:
             message = result.stdout[-4000:]
@@ -642,7 +664,8 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
                      host: str | None = None,
                      api_key_env: str | None = None,
                      verbose: bool = False,
-                     sandbox: dict[str, Any] | None = None) -> tuple[bool, str]:
+                     sandbox: dict[str, Any] | None = None,
+                     allow_self_hosted_sources: bool = False) -> tuple[bool, str]:
     """Run a locally installed coding CLI in its non-interactive mode."""
     prompt = guidance_prompt(
         worktree, prompt, readonly=readonly, audit_folder=output.parent,
@@ -686,11 +709,16 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
         if readonly:
             provider_worktree = _stage_readonly_worktree(
                 worktree, invocation_root / "review-worktree",
+                allow_self_hosted_sources=allow_self_hosted_sources,
             )
         else:
             provider_worktree = invocation_root / "developer-worktree"
             developer_baseline = _stage_worktree(
-                worktree, provider_worktree, skip=forbidden, read_only=False,
+                worktree, provider_worktree,
+                skip=lambda filename: provider_forbidden(
+                    filename, allow_self_hosted_sources=allow_self_hosted_sources,
+                ),
+                read_only=False,
             )
         args, structured = cli_provider_command(
             provider, prompt, readonly=readonly, model=model,
@@ -709,7 +737,10 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
             output_root=output_root,
         )
         if developer_baseline is not None:
-            _sync_provider_worktree(worktree, provider_worktree, developer_baseline)
+            _sync_provider_worktree(
+                worktree, provider_worktree, developer_baseline,
+                allow_self_hosted_sources=allow_self_hosted_sources,
+            )
     raw_path = output.with_suffix(".jsonl") if structured else None
     raw = read_text_tail(raw_path, MAX_PROVIDER_STREAM_BYTES) if raw_path and raw_path.exists() else result.stdout
     message = redact_secrets(
