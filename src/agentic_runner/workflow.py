@@ -1811,7 +1811,8 @@ def validate_developer_review_actions(report: str, findings: list[Any]) -> str:
     missing_ids = [
         identifier for identifier in expected_ids
         if not re.search(
-            rf"(?im)^\s*(?:[-*]\s*)?Finding\s*:\s*{re.escape(identifier)}\b",
+            rf"(?im)^\s*(?:[-*]\s*)?Finding\s*:\s*"
+            rf"(?:{re.escape(identifier)}|`{re.escape(identifier)}`)(?![\w-])",
             report,
         )
     ]
