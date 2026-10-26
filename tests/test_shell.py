@@ -1356,12 +1356,16 @@ class ShellTests(unittest.TestCase):
             (run_folder / 'test-command-001.txt').write_text(
                 '[TESTS] Finished in 4s (exit 0)\n', encoding='utf-8',
             )
+            (run_folder / 'tests-001.txt').write_text(
+                'fixture output: FAILED (exit 1)\n', encoding='utf-8',
+            )
             (run_folder / 'review-001.json').write_text(json.dumps({
                 'approved': True, 'summary': 'Approved', 'findings': [], 'skipped': [],
             }), encoding='utf-8')
             (run_folder / 'run.json').write_text(json.dumps({
                 'usage': {'total_tokens': 5677495},
                 'metrics': {'duration_seconds': 868},
+                'test_result': {'status': 'passed'},
             }), encoding='utf-8')
             job = shell._launch([
                 sys.executable, '-c', 'print("successful job detail", flush=True)',

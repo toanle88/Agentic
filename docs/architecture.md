@@ -141,6 +141,12 @@ Git worktrees are the source of truth for code state. Durable run logs are store
 
 The interactive shell keeps a separate terminal-output copy for each background job. The dashboard reads these artifacts without modifying the repository or running tests. Job records contain the PID, command, timestamps, and log path so a later shell can display or stop jobs from an earlier session with `/ps --all`. `/logs` can identify a job by number or PID and follows appended output while the job is running.
 
+Run metadata records the latest terminal test result in the optional
+`test_result` field. New snapshots use that status before reading text; older
+runs remain readable through their recorded test operations or bounded
+`test-command-*` logs, while aggregate `tests-*` reports are not treated as
+authoritative status.
+
 ## Filesystem layout
 
 For a repository named `my-project`, Agentic uses a per-repository namespace under the user-level state root:
