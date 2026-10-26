@@ -16,10 +16,64 @@ import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner import cli as agentic
 from agentic_runner import workflow as agentic_workflow
 from agentic_runner import worktrees as agentic_worktrees
+from agentic_runner.telemetry import record_test_result
 from test_worktrees import _GitRepositoryTestCase
 
 
 class WorkflowTests(_GitRepositoryTestCase):
+    def test_unavailable_local_validation_blocks_development_with_terminal_result(self):
+        run = agentic.create_worktree(self.repo, 'main', 274)
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(274, 'Unavailable local validation', 'Keep the gate hard')
+        config = {
+            'max_retries': 5,
+            'max_files': 10,
+            'developer_agent': {'provider': 'codex'},
+        }
+
+        def fake_developer(worktree, _prompt, *, output, **_kwargs):
+            (worktree / 'fix.py').write_text('fixed = True\n', encoding='utf-8')
+            output.write_text('implemented', encoding='utf-8')
+            return True, 'implemented'
+
+        with patch('agentic.run_agent', side_effect=fake_developer):
+            self.assertFalse(agentic.develop(
+                run, issue, 'main', config, folder,
+                test_commands=[['agentic-required-tool-that-is-missing']],
+            ))
+
+        blocked = json.loads((folder / 'blocked.json').read_text(encoding='utf-8'))
+        self.assertEqual(blocked['kind'], 'validation-unavailable')
+        result = json.loads((folder / 'result.json').read_text(encoding='utf-8'))
+        self.assertEqual(result['status'], 'BLOCKED')
+        self.assertIn('Required local validation is unavailable', result['reason'])
+
+    def test_manual_completion_requires_local_gate_and_records_blocked_result(self):
+        run = agentic.create_worktree(self.repo, 'main', 273)
+        (run.worktree / 'fix.py').write_text('fixed = True\n')
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(273, 'Local validation gate', 'Complete the fix')
+        (folder / 'manual-approval.json').write_text('{}', encoding='utf-8')
+        (folder / 'review-approval.json').write_text('{}', encoding='utf-8')
+        report = (
+            'Validation check 1 — passed\n'
+            'Validation check 2 — unavailable (required command unavailable)'
+        )
+        config = {'max_retries': 1, 'max_files': 10}
+
+        with patch.object(agentic, 'run_tests', return_value=(False, report)):
+            with self.assertRaisesRegex(RuntimeError, 'Local validation failed'):
+                agentic._require_manual_completion_validation(
+                    run, issue, config, folder,
+                    [['python', '-m', 'ok'], ['missing-tool']], None,
+                )
+
+        self.assertFalse((folder / 'manual-approval.json').exists())
+        self.assertFalse((folder / 'review-approval.json').exists())
+        result = json.loads((folder / 'result.json').read_text(encoding='utf-8'))
+        self.assertEqual(result['status'], 'BLOCKED')
+        self.assertIn('Validation check 2 — unavailable', result['reason'])
+
     def test_run_agent_passes_self_hosted_projection_permission_only_when_allowed(self):
         output = self.repo / "developer.txt"
         with patch.object(
@@ -113,6 +167,7 @@ class WorkflowTests(_GitRepositoryTestCase):
         newer = agentic.Run(222, "agent/issue-222-newer", self.repo / "newer-worktree")
         older = agentic.Run(222, "agent/issue-222-older", self.repo / "older-worktree")
         for run, folder in ((newer, newer_folder), (older, older_folder)):
+            record_test_result(folder, passed=True)
             agentic.record_review_approval(
                 run, issue, "main", "base-sha", "patch-digest",
                 {"approved": True, "summary": "Approved", "findings": [], "skipped": []},
@@ -855,9 +910,10 @@ class WorkflowTests(_GitRepositoryTestCase):
               patch('agentic.verify_and_review', return_value=(
                   False, 'No module named pytest', {}, '', ''
               ))):
-            with self.assertRaisesRegex(RuntimeError, 'environment or infrastructure'):
-                agentic.develop(run, issue, 'main', config, folder)
+            self.assertFalse(agentic.develop(run, issue, 'main', config, folder))
         run_agent.assert_called_once()
+        result = json.loads((folder / 'result.json').read_text(encoding='utf-8'))
+        self.assertEqual(result['status'], 'BLOCKED')
 
 
     def test_develop_blocks_repeated_identical_test_failures(self):

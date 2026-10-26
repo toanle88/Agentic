@@ -413,8 +413,9 @@ into terminal summaries or `result.json`.
 
 Failures caused by unavailable infrastructure, missing dependencies, or invalid
 Git paths are not retried as code repairs. They stop the developer loop with
-the original diagnostic so the environment or preserved worktree can be fixed;
-the reviewer is not invoked because validation did not pass.
+the original diagnostic, record a durable `BLOCKED` result, and preserve the
+environment or worktree for correction; the reviewer is not invoked because
+validation did not pass.
 If the same retryable test failure is reported on consecutive validation
 attempts, the run is marked `BLOCKED` immediately with its failure digest and
 diagnostic, instead of consuming the remaining retries. Test diagnostics are
@@ -503,14 +504,16 @@ agentic --issue 119 --publish
 ```
 
 `--mark-done` does not close the GitHub issue and does not publish anything. It
-records the current patch digest outside the repository. The `--reason` option
-is optional; when omitted, Agentic records `Manually marked done by user`.
+runs every configured local check first, including reporting failures or
+unavailable required commands, and records a non-approved blocked result when
+the readiness gate does not pass. Only a successful gate records the current
+patch digest outside the repository. The `--reason` option is optional; when
+omitted, Agentic records `Manually marked done by user`.
 Publication uses the recorded approval, refuses any patch changed after the
 approval, asks for the safe default-no confirmation described above, and opens
-only a draft PR.
-It does not run tests or an automated review. If the code or issue changes,
-rerun development or `--review` first; for a manual completion, mark it done
-again with a new reason.
+only a draft PR. It does not run an automated review. If the code or issue
+changes, rerun development or `--review` first; for a manual completion, mark
+it done again with a new reason.
 
 In the interactive shell, `/run ... --publish` runs in the foreground so the
 shell can receive the exact publication confirmation. Other `/run` operations

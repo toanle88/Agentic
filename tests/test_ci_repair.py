@@ -120,6 +120,64 @@ class CIRepairTests(unittest.TestCase):
             self.assertNotIn("Unrelated stale review requirement", prompt)
             self.assertNotIn("body", prompt)
 
+    def test_failed_remote_repair_replaces_approval_with_failed_result(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            worktree = root / "worktree"
+            folder = root / "run"
+            repo.mkdir()
+            worktree.mkdir()
+            folder.mkdir()
+            (folder / "review-approval.json").write_text(
+                json.dumps({"status": "approved"}), encoding="utf-8",
+            )
+            (folder / "result.json").write_text(
+                json.dumps({"status": "APPROVED"}), encoding="utf-8",
+            )
+            config = {
+                "max_retries": 0,
+                "max_files": None,
+                "task_timeout_seconds": 60,
+                "test_commands": [["true"]],
+                "developer_agent": {"provider": "codex"},
+                "reviewer_agent": {"provider": "codex"},
+                "sandbox": {},
+                "ci_repair": {"max_attempts": 1, "poll_timeout_seconds": 1},
+            }
+
+            with (
+                patch.object(agentic_cli, "github_repo_from_remote", return_value="owner/repo"),
+                patch.object(agentic_cli, "_github_preflight"),
+                patch.object(agentic_cli, "get_pull_request", return_value=self.pr),
+                patch.object(agentic_cli, "find_worktree_for_branch",
+                             return_value=Run(None, self.pr.head, worktree)),
+                patch.object(agentic_cli, "logs_path", return_value=folder),
+                patch.object(agentic_cli, "worktree_lock", return_value=nullcontext()),
+                patch.object(agentic_cli, "verify_worktree_for_pr"),
+                patch.object(agentic_cli, "git", return_value=""),
+                patch.object(agentic_cli, "worktree_change_fingerprint", return_value="clean"),
+                patch.object(agentic_cli, "can_resume_dirty_worktree", return_value=False),
+                patch.object(agentic_cli, "record_issue_metadata"),
+                patch.object(agentic_cli, "record_security_policy"),
+                patch.object(agentic_cli, "fetch_ci_evidence", return_value=CIEvidence(
+                    "code/test", (), (), self.pr.head_sha,
+                )),
+                patch.object(agentic_cli, "test_commands_for_profile", return_value=[["true"]]),
+                patch.object(agentic_cli, "develop", return_value=True),
+                patch.object(agentic_cli, "_auto_publish_enabled", return_value=True),
+                patch.object(agentic_cli, "push_existing_pr", return_value="pushed-head"),
+                patch.object(agentic_cli, "poll_ci", return_value="failed"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "CI still failed after 1"):
+                    agentic_cli.repair_ci(repo, self.pr.number, config)
+
+            result = json.loads((folder / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["status"], "RETRY_EXHAUSTED")
+            self.assertFalse((folder / "review-approval.json").exists())
+            usage = json.loads((folder / "run.json").read_text(encoding="utf-8"))
+            self.assertFalse(usage["workflow_metrics"]["approved"])
+
     def test_github_preflight_uses_the_active_cli_environment(self):
         with patch("agentic_runner.cli.shutil.which", return_value="/usr/bin/gh") as which:
             with patch(
