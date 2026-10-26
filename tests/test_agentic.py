@@ -618,6 +618,21 @@ class PureTests(unittest.TestCase):
                     Path(dirname), [[sys.executable, '-m', 'module_that_is_not_installed']]
                 )
 
+    def test_preflight_module_probe_receives_restricted_environment(self):
+        with tempfile.TemporaryDirectory() as dirname, patch.dict(
+            agentic.os.environ,
+            {'OPENAI_API_KEY': 'semantic-secret-123456', 'SERVICE_VALUE': 'custom-secret-123456'},
+            clear=True,
+        ), patch('agentic.command', return_value=CompletedProcess([], 0)) as command:
+            agentic.preflight_test_commands(
+                Path(dirname), [[sys.executable, '-m', 'unittest']],
+                credential_names=['SERVICE_VALUE'],
+            )
+
+        environment = command.call_args.kwargs['env']
+        self.assertNotIn('OPENAI_API_KEY', environment)
+        self.assertNotIn('SERVICE_VALUE', environment)
+
 
     def test_preflight_rejects_missing_test_executable(self):
         with tempfile.TemporaryDirectory() as dirname, patch(
@@ -925,6 +940,29 @@ class PureTests(unittest.TestCase):
             self.assertEqual(captured['env']['COPILOT_GH_HOST'], 'copilot.example.com')
             self.assertIn("Copilot model 'gpt-5.6-luna' is unavailable", message)
             self.assertIn("'copilot.example.com'", message)
+
+    def test_copilot_host_does_not_restore_host_environment_when_provider_env_is_empty(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            captured = {}
+
+            def fake_stream(argv, cwd, **kwargs):
+                captured.update(kwargs)
+                return CompletedProcess(argv, 0, stdout='done')
+
+            with (patch.dict(agentic.os.environ, {'HOST_TOKEN': 'must-not-leak'}, clear=True),
+                  patch.object(
+                      agentic_execution._providers,
+                      'provider_process_environment', return_value={},
+                  ),
+                  patch('agentic_execution.streamed_command', side_effect=fake_stream)):
+                ok, _ = agentic.run_cli_provider(
+                    root, 'implement', output=root / 'copilot-dev.txt', provider='copilot',
+                    host='copilot.example.com', executable_path='/tmp/copilot',
+                )
+
+        self.assertTrue(ok)
+        self.assertEqual(captured['env'], {'COPILOT_GH_HOST': 'copilot.example.com'})
 
 
     def test_provider_output_parsing_handles_mixed_events_and_copilot_text(self):

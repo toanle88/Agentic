@@ -31,7 +31,7 @@ from .openrouter_tools import (
 )
 from .policy import default_permission_policy
 from .output import is_transient_progress, strip_ansi, style_text
-from .security import redact_secrets
+from .security import redact_secrets, restricted_test_environment
 from .telemetry import combine_usage, normalize_usage, record_operation
 
 
@@ -91,6 +91,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                    allow_network: bool = False,
                    permission_policy: dict[str, bool] | None = None,
                    check_commands: list[list[str]] | None = None,
+                   credential_names: list[str] | None = None,
                    allow_runner_source: bool = False,
                    json_mode: bool = False,
                    verbose: bool = False,
@@ -113,7 +114,13 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
     api_key = os.environ.get(api_key_env)
     if not api_key:
         raise RuntimeError(f"OpenRouter API key is missing; set ${api_key_env}")
-    redaction_values = [api_key]
+    sandbox_credential_names = list((sandbox or {}).get("pass_env", []))
+    restricted_environment, removed_values = restricted_test_environment(
+        blocked_names=(api_key_env, *(credential_names or ()), *sandbox_credential_names),
+    )
+    redaction_values = sorted(
+        set([api_key, *removed_values]), key=len, reverse=True,
+    )
     prompt = guidance_prompt(
         worktree, prompt, readonly=readonly, audit_folder=output.parent,
         phase=guidance_phase(output, readonly=readonly),
@@ -338,6 +345,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                     check_commands=check_commands,
                     sandbox=sandbox, allow_runner_source=allow_runner_source,
                     redaction_values=redaction_values,
+                    env=restricted_environment,
                 )
                 record_raw({
                     "event": "tool_result", "turn": turn + 1,

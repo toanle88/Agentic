@@ -57,6 +57,11 @@ configured sandbox. An existing config is preserved without running discovery un
 become `slow_test_commands` and run only with the slow test profile. Use
 `--discovery-timeout SECONDS` to change the per-candidate limit (1 through
 86,400 seconds).
+
+Configured checks run by the normal workflow and by `agentic doctor --commands`
+use the same restricted host environment. This includes the Python module
+availability preflight; ordinary variables such as `PATH` remain available,
+while provider credential names and `sandbox.pass_env` names are removed.
 With `--security-mode isolated` (or `--secure`), the sandbox is preflighted
 before discovery and both provider assistance and candidate checks run inside
 that sandbox; discovery fails closed if it cannot be applied.

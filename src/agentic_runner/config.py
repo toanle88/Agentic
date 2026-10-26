@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -698,5 +699,24 @@ def sandbox_env_for_providers(*providers: str) -> list[str]:
     for provider in providers:
         for name in PROVIDER_SANDBOX_ENV.get(provider, ()):
             if name not in names:
+                names.append(name)
+    return names
+
+
+def credential_environment_names(config: Mapping[str, Any]) -> list[str]:
+    """Return configured provider and sandbox credential environment names."""
+    names: list[str] = []
+    for role in ("developer_agent", "reviewer_agent"):
+        settings = config.get(role)
+        if not isinstance(settings, Mapping):
+            continue
+        provider = str(settings.get("provider", "codex"))
+        name = api_key_env_for_provider(provider, settings.get("api_key_env"))
+        if name and name not in names:
+            names.append(name)
+    sandbox = config.get("sandbox")
+    if isinstance(sandbox, Mapping):
+        for name in sandbox.get("pass_env", ()):
+            if isinstance(name, str) and name not in names:
                 names.append(name)
     return names

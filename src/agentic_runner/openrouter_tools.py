@@ -32,7 +32,7 @@ from .git_policy import (
     git_log_option_exposes_history,
 )
 from .sandbox import sandbox_command
-from .security import redact_secrets
+from .security import redact_secrets, restricted_test_environment
 from .policy import default_permission_policy, forbidden, sensitive_read
 
 _DEFAULT_URL_OPEN = urllib.request.urlopen
@@ -976,6 +976,7 @@ def _stop_command_process(process: subprocess.Popen[Any]) -> None:
 
 def _bounded_command_capture(
     process_argv: list[str], worktree: Path, timeout: int | None,
+    *, env: dict[str, str] | None = None,
 ) -> tuple[int, str, bool, bool]:
     """Run a command while retaining only a bounded decoded output tail."""
     popen_kwargs: dict[str, Any] = {
@@ -984,6 +985,7 @@ def _bounded_command_capture(
         "stdout": subprocess.PIPE,
         "stderr": subprocess.STDOUT,
         "bufsize": 0,
+        "env": env,
     }
     if os.name != "nt":
         popen_kwargs["start_new_session"] = True
@@ -1110,8 +1112,14 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                           check_commands: list[list[str]] | None = None,
                           sandbox: dict[str, Any] | None = None,
                           allow_runner_source: bool = False,
-                          redaction_values: list[str] | None = None) -> str:
+                          redaction_values: list[str] | None = None,
+                          env: dict[str, str] | None = None) -> str:
     try:
+        if env is None:
+            env, removed_values = restricted_test_environment()
+            redaction_values = [
+                *removed_values, *(redaction_values or ()),
+            ]
         policy = default_permission_policy("reviewer" if readonly else "developer")
         if permission_policy is None:
             policy["network"] = bool(allow_network)
@@ -1230,10 +1238,10 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                 return "ERROR: " + reason
             process_argv = sandbox_command(
                 _safe_readonly_git_argv(argv), worktree, sandbox, read_only=readonly,
-                pass_env=[], restricted=not allow_network,
+                pass_env=[], restricted=not allow_network, env=env,
             )
             returncode, output, truncated, timed_out = _bounded_command_capture(
-                process_argv, worktree, command_timeout,
+                process_argv, worktree, command_timeout, env=env,
             )
             if timed_out:
                 return f"ERROR: command timed out after {command_timeout}s"

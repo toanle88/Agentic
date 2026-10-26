@@ -18,6 +18,7 @@ from typing import Callable, ContextManager
 from .config import (
     api_key_env_for_provider,
     auth_mode_for_settings,
+    credential_environment_names,
     load_config,
     preflight_security,
     sandbox_env_for_provider,
@@ -30,6 +31,7 @@ from .providers import (
     resolve_provider_executable,
 )
 from .sandbox import sandbox_command
+from .security import restricted_test_environment
 
 
 AGENT_CONFIG_FILENAME = "agent_config.json"
@@ -53,10 +55,12 @@ PROVIDER_AUTH_STATUS_ARGS = {
 
 def _run_configured_command(
     argv: list[str], cwd: Path, *, timeout: int | None,
-    sandbox: dict[str, object] | None,
+    sandbox: dict[str, object] | None, env: dict[str, str] | None = None,
 ) -> dict[str, object]:
     """Run one doctor command without exposing its output in doctor JSON."""
     started = time.monotonic()
+    if env is None:
+        env, _ = restricted_test_environment()
     try:
         process = subprocess.run(
             sandbox_command(argv, cwd, sandbox, pass_env=[]),
@@ -65,6 +69,7 @@ def _run_configured_command(
             stderr=subprocess.STDOUT,
             timeout=timeout,
             check=False,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         return {
@@ -320,6 +325,7 @@ def run_doctor(
                 command_worktree if run_commands and command_worktree.is_dir() else repo,
                 loaded["test_commands"] + loaded["slow_test_commands"],
                 sandbox=loaded.get("sandbox"),
+                credential_names=credential_environment_names(loaded),
             )
             add_check("repository", "Agentic config", True, str(target_config))
             add_check(
@@ -574,6 +580,9 @@ def run_doctor(
                     sandbox_passed=sandbox_passed,
                 )
             if run_commands and worktree_ok:
+                command_environment, _ = restricted_test_environment(
+                    blocked_names=credential_environment_names(loaded),
+                )
                 commands = list(loaded["test_commands"])
                 if profile == "slow":
                     commands.extend(loaded["slow_test_commands"])
@@ -593,6 +602,7 @@ def run_doctor(
                                 command_worktree,
                                 timeout=loaded["effective_test_timeout_seconds"],
                                 sandbox=loaded.get("sandbox"),
+                                env=command_environment,
                             ))
                 except RuntimeError as exc:
                     add_check("repository", "Command worktree lock", False, str(exc))

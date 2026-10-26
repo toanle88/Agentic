@@ -72,6 +72,44 @@ class ConfigurationTests(unittest.TestCase):
             self.assertNotIn('\033[', plain_output.getvalue())
             self.assertIn('[FAILED     ]', plain_output.getvalue())
 
+    def test_doctor_configured_commands_receive_a_restricted_environment(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(
+            os.environ,
+            {'OPENAI_API_KEY': 'semantic-secret-123456', 'SERVICE_VALUE': 'custom-secret-123456'},
+            clear=True,
+        ):
+            repo = Path(temp)
+            config = repo / 'agent_config.json'
+            script = (
+                "import os,sys; "
+                "sys.exit(0 if all(name not in os.environ for name in "
+                "('OPENAI_API_KEY', 'SERVICE_VALUE')) else 1)"
+            )
+            config.write_text(json.dumps({
+                'test_commands': [[sys.executable, '-c', script]],
+                'developer': {
+                    'provider': 'codex', 'auth': 'api_key',
+                    'api_key_env': 'SERVICE_VALUE',
+                },
+            }))
+
+            def fake_probe(argv, cwd, **kwargs):
+                if argv[:2] == ['git', 'rev-parse']:
+                    return True, str(repo)
+                return False, 'unavailable'
+
+            with (patch('agentic.installed_git_version', return_value=(2, 48, 0)),
+                  patch('agentic.probe', side_effect=fake_probe),
+                  patch('agentic.shutil.which', return_value='/usr/bin/tool'),
+                  patch('agentic.worktree_path_lock', return_value=nullcontext()),
+                  patch('sys.stdout', new=io.StringIO()) as output):
+                result = agentic.doctor(repo, config, json_output=True, run_commands=True)
+
+            report = json.loads(output.getvalue())
+
+        self.assertEqual(result, 1)
+        self.assertEqual(report['command_results'][0]['status'], 'passed')
+
     def test_init_detects_go_and_ignores_personal_config(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = Path(temp)
