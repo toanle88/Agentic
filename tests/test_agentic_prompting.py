@@ -131,6 +131,13 @@ class PromptTests(unittest.TestCase):
             ),
             '',
         )
+        self.assertEqual(
+            agentic.validate_developer_review_actions(
+                'Finding: `F-1`\nAction: fixed\nEvidence: added coverage\n',
+                [{'id': 'F-1', 'requirement': 'Fix the defect'}],
+            ),
+            '',
+        )
         self.assertIn(
             'missing Action',
             agentic.validate_developer_review_actions(
