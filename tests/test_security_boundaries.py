@@ -23,6 +23,7 @@ from agentic_runner.openrouter_tools import _openrouter_tool_call
 from agentic_runner.execution_providers import (
     _read_projection_file,
     _read_provider_result,
+    _remove_staging_tree,
     _stage_provider_input,
     _stage_worktree,
     _stage_readonly_worktree,
@@ -772,6 +773,30 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
                     _stage_readonly_worktree(root, destination)
             self.assertFalse(destination.exists())
 
+    def test_provider_staging_cleanup_retries_after_clearing_read_only(self):
+        with tempfile.TemporaryDirectory() as temp:
+            destination = Path(temp) / "review-worktree"
+            destination.mkdir()
+            partial = destination / "partial.py"
+            partial.write_text("partial\n", encoding="utf-8")
+            partial.chmod(0o444)
+            attempts = []
+
+            def remove_after_cleanup(path):
+                attempts.append(path)
+                self.assertTrue(Path(path).stat().st_mode & 0o200)
+                Path(path).unlink()
+
+            with patch(
+                "agentic_runner.execution_providers.shutil.rmtree",
+            ) as rmtree:
+                _remove_staging_tree(destination)
+                onerror = rmtree.call_args.kwargs["onerror"]
+                onerror(remove_after_cleanup, str(partial), None)
+
+            self.assertEqual(attempts, [str(partial)])
+            self.assertFalse(partial.exists())
+
     def test_provider_staging_counts_bytes_written_after_metadata_validation(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "worktree"
@@ -887,6 +912,25 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
 
             self.assertEqual(observed, ["acquire", "release"])
             self.assertEqual(target.read_text(encoding="utf-8"), "provider change\n")
+
+    def test_provider_write_opens_new_files_read_write_for_cross_platform_locking(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "worktree"
+            root.mkdir()
+            with patch(
+                "agentic_runner.execution_providers.open_relative_regular",
+                wraps=file_boundaries.open_relative_regular,
+            ) as open_relative:
+                _write_projection_file(
+                    root, "new.py", b"provider change\n", 0o644, None,
+                )
+
+            flags = open_relative.call_args.args[2]
+            self.assertEqual(flags & os.O_RDWR, os.O_RDWR)
+            self.assertEqual(
+                (root / "new.py").read_text(encoding="utf-8"),
+                "provider change\n",
+            )
 
     def test_provider_delete_revalidates_digest_before_unlink(self):
         with tempfile.TemporaryDirectory() as temp:

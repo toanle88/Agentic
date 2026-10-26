@@ -180,6 +180,20 @@ def _copy_projection_file(
     )
 
 
+def _remove_staging_tree(destination: Path) -> None:
+    """Remove a partial projection, including read-only files on Windows."""
+    def _retry_after_clearing_read_only(
+        function: Callable[..., Any], path: str, _exc_info: Any,
+    ) -> None:
+        try:
+            os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:
+            pass
+        function(path)
+
+    shutil.rmtree(destination, onerror=_retry_after_clearing_read_only)
+
+
 def _stage_worktree(
     source: Path, destination: Path, *, skip: Callable[[str], bool], read_only: bool,
 ) -> dict[str, _ProjectionFile]:
@@ -209,7 +223,7 @@ def _stage_worktree(
             baseline[relative] = metadata
     except (OSError, RuntimeError, ValueError) as exc:
         if not destination_preexisted:
-            shutil.rmtree(destination, ignore_errors=True)
+            _remove_staging_tree(destination)
         raise RuntimeError("Could not stage the complete provider worktree") from exc
     return baseline
 
@@ -277,7 +291,10 @@ def _write_projection_file(
     expected: _ProjectionFile | None,
 ) -> None:
     """Write a changed safe file only after validating its original target."""
-    flags = os.O_RDWR if expected is not None else os.O_WRONLY
+    # Windows' byte-range locking requires a read/write descriptor even for
+    # newly created files.  Use the same descriptor mode for both paths so a
+    # provider-created file can be validated and synchronized there too.
+    flags = os.O_RDWR
     descriptor = -1
     created = False
     try:
@@ -322,7 +339,14 @@ def _write_projection_file(
                 if written <= 0:
                     raise OSError("provider worktree write made no progress")
                 view = view[written:]
-            os.fchmod(descriptor, stat.S_IMODE(mode))
+            # Windows Python builds do not all expose fchmod, and Windows
+            # does not preserve POSIX executable bits in the same way.  The
+            # projection content and descriptor identity remain authoritative
+            # there; apply mode-only changes where the descriptor primitive is
+            # available.
+            fchmod = getattr(os, "fchmod", None)
+            if fchmod is not None:
+                fchmod(descriptor, stat.S_IMODE(mode))
             os.fsync(descriptor)
     except FileExistsError:
         raise RuntimeError(f"Provider worktree file appeared during sync: {relative}")
