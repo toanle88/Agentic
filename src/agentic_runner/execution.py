@@ -4,6 +4,7 @@ Streaming/process concerns live in agentic_execution_stream; provider message
 and command adapters live in agentic_execution_providers. Historical imports
 remain available from this module.
 """
+import re
 import threading
 
 from . import execution_providers as _providers
@@ -38,6 +39,9 @@ from .execution_stream import (  # noqa: F401
 # concurrent callers cannot observe a partially patched adapter. It is
 # deliberately non-reentrant; adapters must not call this facade recursively.
 _COMPATIBILITY_LOCK = threading.Lock()
+_UNEXPECTED_KEYWORD_RE = re.compile(
+    r"^(?:[\w.<>]+(?:\(\))? )?got an unexpected keyword argument ['\"]([^'\"]+)['\"]$"
+)
 
 
 def run_codex(*args, **kwargs):
@@ -66,6 +70,7 @@ def run_cli_provider(*args, **kwargs):
                 try:
                     return cli_provider_command(*command_args, **command_kwargs)
                 except TypeError as exc:
+                    match = _UNEXPECTED_KEYWORD_RE.fullmatch(str(exc))
                     unsupported = next(
                         (
                             name for name in (
@@ -73,7 +78,11 @@ def run_cli_provider(*args, **kwargs):
                                 "sandbox_allow_network", "check_commands",
                                 "permission_policy",
                             )
-                            if name in command_kwargs and name in str(exc)
+                            if (
+                                name in command_kwargs
+                                and match is not None
+                                and match.group(1) == name
+                            )
                         ),
                         None,
                     )

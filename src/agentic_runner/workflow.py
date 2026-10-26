@@ -508,6 +508,63 @@ def _whitespace_check(worktree: Path, timeout: int) -> str:
     return ""
 
 
+_EOF_REPAIR_READ_SIZE = 64 * 1024
+
+
+def _reverse_file_bytes(fd: int, end: int):
+    """Yield bytes backwards using bounded buffers."""
+    position = end
+    while position > 0:
+        start = max(0, position - _EOF_REPAIR_READ_SIZE)
+        os.lseek(fd, start, os.SEEK_SET)
+        chunk = os.read(fd, position - start)
+        if not chunk:
+            return
+        if len(chunk) < position - start:
+            raise OSError("short read during EOF repair")
+        for offset in range(len(chunk) - 1, -1, -1):
+            yield chunk[offset]
+        position = start
+
+
+def _read_file_bytes(fd: int, offset: int, size: int) -> bytes:
+    """Read a small file range without retaining the complete file."""
+    os.lseek(fd, offset, os.SEEK_SET)
+    return os.read(fd, size)
+
+
+def _eof_repair_size(fd: int, size: int) -> tuple[int, bool]:
+    """Return the repaired size and whether a final CRLF needs conversion."""
+    trailing_lf = 0
+    for value in _reverse_file_bytes(fd, size):
+        if value != ord("\n"):
+            break
+        trailing_lf += 1
+
+    repaired_size = size
+    if trailing_lf >= 2:
+        repaired_size -= trailing_lf - 1
+    elif trailing_lf == 1:
+        pairs = 0
+        expect_cr = True
+        for value in _reverse_file_bytes(fd, size - trailing_lf):
+            expected = ord("\r") if expect_cr else ord("\n")
+            if value != expected:
+                break
+            if expect_cr:
+                pairs += 1
+            expect_cr = not expect_cr
+        if pairs >= 2:
+            repaired_size -= 2 * (pairs - 1)
+
+    convert_crlf = False
+    if os.name == "nt" and repaired_size >= 2:
+        convert_crlf = _read_file_bytes(fd, repaired_size - 2, 2) == b"\r\n"
+        if convert_crlf:
+            repaired_size -= 1
+    return repaired_size, convert_crlf
+
+
 def _repair_eof_blank_lines(worktree: Path, diagnostics: str) -> list[str]:
     """Remove only the extra final line breaks rejected by Git."""
     root = worktree.resolve()
@@ -578,29 +635,16 @@ def _repair_eof_blank_lines(worktree: Path, diagnostics: str) -> list[str]:
             ):
                 continue
             try:
-                data = b""
-                while True:
-                    chunk = os.read(fd, 1024 * 1024)
-                    if not chunk:
-                        break
-                    data += chunk
-                original = data
-                while data.endswith(b"\r\n\r\n"):
-                    data = data[:-2]
-                while data.endswith(b"\n\n"):
-                    data = data[:-1]
-                if os.name == "nt" and data.endswith(b"\r\n"):
-                    data = data[:-2] + b"\n"
-                if data == original:
+                current_size = current.st_size
+                repaired_size, convert_crlf = _eof_repair_size(fd, current_size)
+                if repaired_size == current_size:
                     continue
-                os.lseek(fd, 0, os.SEEK_SET)
-                os.ftruncate(fd, 0)
-                remaining = memoryview(data)
-                while remaining:
-                    written = os.write(fd, remaining)
-                    if written <= 0:
+                os.ftruncate(fd, repaired_size)
+                if convert_crlf:
+                    os.lseek(fd, repaired_size - 1, os.SEEK_SET)
+                    written = os.write(fd, b"\n")
+                    if written != 1:
                         raise OSError("short write during EOF repair")
-                    remaining = remaining[written:]
             finally:
                 os.close(fd)
                 fd = -1

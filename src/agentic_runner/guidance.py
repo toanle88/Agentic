@@ -7,6 +7,7 @@ their contents are never written to run metadata.
 """
 from __future__ import annotations
 
+import bisect
 import hashlib
 import os
 from pathlib import Path
@@ -135,6 +136,21 @@ def _read_guidance(root: Path, relative: str) -> GuidanceFile | None:
     )
 
 
+def _bounded_decision_paths(decisions: Path) -> list[Path]:
+    """Select the lexical first decision files with bounded selection state."""
+    selected: list[tuple[str, Path]] = []
+    try:
+        for path in decisions.iterdir():
+            if path.suffix.lower() not in {".md", ".markdown"}:
+                continue
+            bisect.insort(selected, (path.name, path))
+            if len(selected) > MAX_DECISION_RECORDS:
+                selected.pop()
+    except (OSError, ValueError):
+        return []
+    return [path for _, path in selected]
+
+
 def discover_guidance(worktree: Path, *, phase: str | None = None) -> list[GuidanceFile]:
     """Discover standardized and compatible legacy guidance files.
 
@@ -151,13 +167,7 @@ def discover_guidance(worktree: Path, *, phase: str | None = None) -> list[Guida
 
     paths: list[str] = list(GUIDANCE_FILES)
     decisions = root / "docs" / "decisions"
-    try:
-        decision_paths = sorted(
-            path for path in decisions.iterdir()
-            if path.suffix.lower() in {".md", ".markdown"}
-        )
-    except (OSError, ValueError):
-        decision_paths = []
+    decision_paths = _bounded_decision_paths(decisions)
     paths.extend(
         str(path.relative_to(root)).replace(os.sep, "/")
         for path in decision_paths[:MAX_DECISION_RECORDS]

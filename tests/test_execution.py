@@ -463,6 +463,24 @@ class StreamingTests(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertFalse(is_transient_progress(line))
 
+    def test_provider_compatibility_does_not_mask_implementation_type_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            calls = []
+
+            def broken_command(provider, prompt, *, readonly=False, model=None, **kwargs):
+                calls.append(kwargs)
+                raise TypeError("provider implementation failed while handling worktree")
+
+            with patch.object(
+                agentic_execution, 'cli_provider_command', side_effect=broken_command,
+            ), self.assertRaisesRegex(TypeError, 'provider implementation failed'):
+                agentic_execution.run_cli_provider(
+                    root, 'prompt', output=root / 'provider.txt', provider='gemini',
+                )
+
+            self.assertEqual(len(calls), 1)
+
     def test_style_text_preserves_bounded_status_and_incoming_ansi(self):
         class TTYBuffer(StringIO):
             def isatty(self):
@@ -994,6 +1012,28 @@ class StreamingTests(unittest.TestCase):
 
             self.assertEqual(repaired, ['new.txt'])
             self.assertEqual(target.read_bytes(), b'value\r\n')
+
+    def test_eof_repair_reads_only_bounded_tail_of_large_file(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            target = root / 'large.txt'
+            prefix = b'value = 1\n' + (b'x' * (3 * 1024 * 1024))
+            target.write_bytes(prefix + b'\n\n')
+            original_read = agentic_workflow.os.read
+            requested_sizes = []
+
+            def tracked_read(fd, size):
+                requested_sizes.append(size)
+                return original_read(fd, size)
+
+            with patch.object(agentic_workflow.os, 'read', side_effect=tracked_read):
+                repaired = agentic_workflow._repair_eof_blank_lines(
+                    root, 'large.txt:2: new blank line at EOF.'
+                )
+
+            self.assertEqual(repaired, ['large.txt'])
+            self.assertEqual(target.read_bytes(), prefix + b'\n')
+            self.assertLessEqual(max(requested_sizes), agentic_workflow._EOF_REPAIR_READ_SIZE)
 
     def test_eof_repair_works_without_no_follow_open_primitive(self):
         with tempfile.TemporaryDirectory() as dirname:

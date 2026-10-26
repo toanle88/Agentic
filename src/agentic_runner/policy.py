@@ -147,11 +147,4 @@ def sensitive_read(filename: str) -> bool:
     """Identify files an API-backed agent should not exfiltrate to a model."""
     if not isinstance(filename, str):
         return False
-    parts, base = _protected_path(filename)
-    return (
-        _protected_basename(parts, base)
-        or "secrets" in parts
-        or ".git" in parts
-        or ".codex" in parts
-        or ".aws" in parts
-    )
+    return forbidden(filename)
