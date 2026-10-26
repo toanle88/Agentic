@@ -873,6 +873,53 @@ class StreamingTests(unittest.TestCase):
                 'failed',
             )
 
+    def test_test_runner_runs_all_commands_and_reports_mixed_statuses(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            sh('git', 'init', cwd=root)
+            commands = [
+                [sys.executable, '-c', "open('first.marker', 'w').write('ran')"],
+                [sys.executable, '-c', 'raise SystemExit(3)'],
+                [sys.executable, '-c', "open('third.marker', 'w').write('ran')"],
+            ]
+            passed, report = agentic.run_tests(root, commands, folder=root)
+            first_ran = (root / 'first.marker').is_file()
+            third_ran = (root / 'third.marker').is_file()
+
+        self.assertFalse(passed)
+        self.assertTrue(first_ran)
+        self.assertTrue(third_ran)
+        self.assertIn('Validation check 1 — passed', report)
+        self.assertIn('Validation check 2 — failed', report)
+        self.assertIn('Validation check 3 — passed', report)
+
+    def test_test_runner_marks_unavailable_commands_without_skipping_other_checks(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            sh('git', 'init', cwd=root)
+            missing = 'agentic-command-that-is-not-installed'
+            real_which = shutil.which
+
+            def fake_which(value):
+                return None if value == missing else real_which(value)
+
+            with patch.object(agentic_workflow.shutil, 'which', side_effect=fake_which):
+                passed, report = agentic.run_tests(
+                    root,
+                    [
+                        [missing, '--required'],
+                        [sys.executable, '-m', 'module_that_is_not_installed'],
+                        [sys.executable, '-c', 'print("available")'],
+                    ],
+                    folder=root,
+                )
+
+        self.assertFalse(passed)
+        self.assertIn('Validation check 1 — unavailable', report)
+        self.assertIn('Validation check 2 — unavailable', report)
+        self.assertIn('Validation check 3 — passed', report)
+        self.assertIn('available', report)
+
     def test_test_runner_reports_command_and_diff_check_failures(self):
         with tempfile.TemporaryDirectory() as dirname:
             root = Path(dirname)
@@ -976,7 +1023,27 @@ class StreamingTests(unittest.TestCase):
                 )
             self.assertFalse(passed)
             self.assertIn('deadline', report.lower())
+            self.assertIn('Validation check 1 — passed', report)
+            self.assertIn('Validation check 2 — unavailable', report)
             streamed.assert_called_once()
+
+    def test_test_runner_reports_each_command_when_deadline_expires_after_loop(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            sh('git', 'init', cwd=root)
+            with patch('agentic.streamed_command', return_value=CompletedProcess([], 0, stdout='ok')), \
+                 patch('agentic.time.monotonic', side_effect=[100, 100, 100, 100, 102]):
+                passed, report = agentic.run_tests(
+                    root,
+                    [[sys.executable, '-c', 'print("one")'], [sys.executable, '-c', 'print("two")']],
+                    timeout=300,
+                    deadline=101,
+                )
+
+        self.assertFalse(passed)
+        self.assertIn('Task deadline reached before git diff --check', report)
+        self.assertIn('Validation check 1 — passed', report)
+        self.assertIn('Validation check 2 — passed', report)
 
     def test_cli_provider_uses_provider_defaults_and_explicit_policy_override(self):
         with tempfile.TemporaryDirectory() as temp:

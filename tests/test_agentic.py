@@ -643,6 +643,9 @@ class PureTests(unittest.TestCase):
 
     def test_environment_test_failures_are_not_retryable(self):
         self.assertFalse(agentic.retryable_test_failure('No module named pytest'))
+        self.assertFalse(agentic.retryable_test_failure(
+            'Validation check 1 — unavailable (required command unavailable)'
+        ))
         self.assertFalse(agentic.retryable_test_failure('listen tcp: address already in use'))
         self.assertFalse(agentic.retryable_test_failure(
             "error: not a valid path: /tmp/project/worktree"

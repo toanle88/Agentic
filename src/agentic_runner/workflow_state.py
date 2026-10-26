@@ -255,6 +255,33 @@ def record_test_failure_blocked(folder: Path, failure_digest: str, report: str, 
     })
 
 
+def record_validation_blocked(folder: Path, report: str, *,
+                              patch_digest: str = "",
+                              attempts: int | None = None,
+                              max_retries: int | None = None,
+                              issue_digest: str = "") -> None:
+    """Persist a terminal blocker caused by unavailable local validation."""
+    diagnostic = result_text(report, 2_000)
+    atomic_write_json(_blocked_path(folder), {
+        "status": "blocked",
+        "result_status": "BLOCKED",
+        "kind": "validation-unavailable",
+        "reason": "Required local validation is unavailable",
+        "summary": (
+            "Required local validation is unavailable. "
+            f"Diagnostic: {diagnostic}"
+            if diagnostic else
+            "Required local validation is unavailable; see the test logs."
+        ),
+        "patch_digest": patch_digest,
+        "issue_digest": issue_digest,
+        "attempts": attempts,
+        "max_retries": max_retries,
+        "logs_path": str(folder),
+        "blocked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    })
+
+
 def clear_blocked(folder: Path) -> None:
     _blocked_path(folder).unlink(missing_ok=True)
 
@@ -433,6 +460,7 @@ __all__ = [
     "load_blocked", "load_latest_developer_report", "load_manual_approval",
     "load_publication_approval", "load_review_approval",
     "local_resume_task_file", "next_log", "record_blocked", "record_no_code_changes_blocked",
+    "record_validation_blocked",
     "record_manual_approval", "record_result", "record_review_approval", "result_text",
     "manual_approval_path", "review_approval_path", "approval_events_path",
     "invalidate_publication_approvals",

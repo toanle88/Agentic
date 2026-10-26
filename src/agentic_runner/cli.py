@@ -61,6 +61,7 @@ from .context import (  # noqa: F401
 )
 from .workflow_state import (  # noqa: F401
     clear_blocked,
+    clear_result,
     invalidate_publication_approvals,
     latest_numbered_log as _latest_numbered_log,
     load_blocked,
@@ -68,6 +69,8 @@ from .workflow_state import (  # noqa: F401
     next_log,
     record_blocked,
     record_no_code_changes_blocked,
+    record_result,
+    resume_action as _resume_action,
 )
 from .prompts import (  # noqa: F401
     _developer_prompt_context,
@@ -126,10 +129,12 @@ from .shell_jobs import process_identity
 from .telemetry import (
     describe_issue_change,
     issue_snapshot,
+    read_run_usage,
     read_run_instruction,
     record_run_instruction,
     record_issue_metadata,
     record_workflow_mode,
+    record_workflow_outcome,
     read_issue_snapshot,
     record_security_policy,
 )
@@ -210,6 +215,10 @@ def _automatic_candidate_eligible(issue: Issue, folder: Path) -> bool:
     except (OSError, RuntimeError, ValueError):
         return False
     if approval is None or load_blocked(folder) is not None:
+        return False
+    usage = read_run_usage(folder)
+    test_result = usage.get("test_result")
+    if not isinstance(test_result, dict) or test_result.get("status") != "passed":
         return False
     if _approved_result(folder):
         return True
@@ -508,6 +517,33 @@ def _github_operation_error(action: str, github_host: str, exc: RuntimeError) ->
     return exc
 
 
+def _record_failed_ci_repair(
+    run: Run, issue: Issue, folder: Path, *, attempt: int,
+    max_attempts: int, reason: str,
+) -> None:
+    """Replace stale approval with a failed terminal repair result."""
+    clear_blocked(folder)
+    clear_result(folder)
+    review_approval_path(folder).unlink(missing_ok=True)
+    try:
+        record_workflow_outcome(
+            folder, approved=False, attempts=attempt, first_pass=False,
+        )
+    except (OSError, ValueError, TypeError):
+        # The user-facing result remains the authoritative failure marker even
+        # when optional telemetry cannot be updated.
+        pass
+    record_result(
+        folder, "RETRY_EXHAUSTED", attempts=attempt, max_retries=max_attempts,
+        reason=reason, worktree=run.worktree,
+        next_action=_resume_action(issue, folder),
+    )
+    _status_print(
+        f"[RESULT] RETRY_EXHAUSTED: {_short(reason, 800)}",
+        system_prefix="RESULT",
+    )
+
+
 def fetch_issues(
     repo: Path, github_repo: str, github_host: str = DEFAULT_GITHUB_HOST,
 ) -> list[Issue]:
@@ -555,6 +591,51 @@ def _confirm_ci_repair(pr_number: int, classification: str) -> bool:
     except (EOFError, KeyboardInterrupt):
         return False
     return answer.strip().casefold() in {"y", "yes", "repair"}
+
+
+def _require_manual_completion_validation(
+    run: Run, issue: Issue, config: dict[str, Any], folder: Path,
+    test_commands: list[list[str]], deadline: float | None,
+    verbose: bool = False,
+) -> str:
+    """Require the local readiness gate before recording manual approval."""
+    passed, report = run_tests(
+        run.worktree, test_commands, folder,
+        timeout=_remaining_timeout(
+            deadline,
+            config.get(
+                "effective_test_timeout_seconds",
+                config.get("test_timeout_seconds"),
+            ),
+        ),
+        sandbox=config.get("sandbox"),
+        deadline=deadline,
+        verbose=verbose,
+    )
+    if passed:
+        return report
+
+    # A failed gate must also invalidate older approvals.  Otherwise a stale
+    # automated or manual marker could still be selected by a later publish.
+    invalidate_publication_approvals(
+        folder,
+        reason="Local validation failed before manual completion",
+    )
+    clear_result(folder)
+    reason = (
+        "Local validation failed before manual completion; publication is blocked.\n"
+        + report[-2_500:]
+    ).strip()
+    next_action = _resume_action(issue, folder)
+    record_result(
+        folder, "BLOCKED", attempts=0,
+        max_retries=config.get("max_retries", 0), reason=reason,
+        worktree=run.worktree, next_action=next_action,
+    )
+    print_run_summary(
+        run, "BLOCKED", next_action, reason=reason, logs_path=folder,
+    )
+    raise RuntimeError(reason)
 
 
 def _ci_repair_secret_values(config: dict[str, Any]) -> tuple[str, ...]:
@@ -714,18 +795,29 @@ def repair_ci(
             "event": "push_authorized", "attempt": attempt,
             "automatic": _auto_publish_enabled(config),
         })
-        with worktree_lock(repo, run, state_dir):
-            pushed_head_sha = push_existing_pr(
-                run, issue, github_repo, pull_request.base, config, folder, pull_request,
+        try:
+            with worktree_lock(repo, run, state_dir):
+                pushed_head_sha = push_existing_pr(
+                    run, issue, github_repo, pull_request.base, config, folder, pull_request,
+                )
+            if not isinstance(pushed_head_sha, str) or not pushed_head_sha:
+                raise RuntimeError(
+                    "Publication did not return the pushed PR head; refusing to monitor unbound CI"
+                )
+            outcome = poll_ci(
+                repo, github_repo, pull_request, github_host,
+                timeout_seconds=min(poll_timeout, max(1, int(deadline - time.monotonic()))),
+                interval_seconds=poll_interval,
+                expected_head_sha=pushed_head_sha,
             )
-        if not isinstance(pushed_head_sha, str) or not pushed_head_sha:
-            raise RuntimeError("Publication did not return the pushed PR head; refusing to monitor unbound CI")
-        outcome = poll_ci(
-            repo, github_repo, pull_request, github_host,
-            timeout_seconds=min(poll_timeout, max(1, int(deadline - time.monotonic()))),
-            interval_seconds=poll_interval,
-            expected_head_sha=pushed_head_sha,
-        )
+        except RuntimeError as exc:
+            reason = f"CI repair failed after attempt {attempt}: {exc}"
+            record_event({"event": "repair_failed", "attempt": attempt, "reason": reason})
+            _record_failed_ci_repair(
+                run, issue, folder, attempt=attempt,
+                max_attempts=max_attempts, reason=reason,
+            )
+            raise
         record_event({
             "event": "ci_outcome", "attempt": attempt, "outcome": outcome,
             "head_sha": pushed_head_sha,
@@ -733,28 +825,60 @@ def repair_ci(
         if outcome == "passed":
             _status_print(f"[CI-REPAIR] PR #{pr_number} CI passed after attempt {attempt}")
             return 0
+        # A failed remote check invalidates the local approval while another
+        # bounded repair attempt is pending; it must never look publishable.
+        clear_result(folder)
+        review_approval_path(folder).unlink(missing_ok=True)
         if outcome == "timeout":
-            raise RuntimeError(
-                f"CI remained pending beyond the configured polling bound; inspect PR #{pr_number} and logs at {folder}"
+            reason = (
+                f"CI remained pending beyond the configured polling bound; "
+                f"inspect PR #{pr_number} and logs at {folder}"
             )
+            record_event({"event": "repair_failed", "attempt": attempt, "reason": reason})
+            _record_failed_ci_repair(
+                run, issue, folder, attempt=attempt,
+                max_attempts=max_attempts, reason=reason,
+            )
+            raise RuntimeError(reason)
         if outcome == "head_changed":
-            raise RuntimeError(
-                f"PR #{pr_number} no longer reports the pushed head; refusing to accept unrelated CI results"
+            reason = (
+                f"PR #{pr_number} no longer reports the pushed head; "
+                "refusing to accept unrelated CI results"
             )
+            record_event({"event": "repair_failed", "attempt": attempt, "reason": reason})
+            _record_failed_ci_repair(
+                run, issue, folder, attempt=attempt,
+                max_attempts=max_attempts, reason=reason,
+            )
+            raise RuntimeError(reason)
         if attempt >= max_attempts:
-            raise RuntimeError(
-                f"CI still failed after {max_attempts} bounded repair attempt(s); logs: {folder}"
+            reason = f"CI still failed after {max_attempts} bounded repair attempt(s); logs: {folder}"
+            record_event({"event": "repair_failed", "attempt": attempt, "reason": reason})
+            _record_failed_ci_repair(
+                run, issue, folder, attempt=attempt,
+                max_attempts=max_attempts, reason=reason,
             )
-        updated = get_pull_request(repo, github_repo, pr_number, github_host)
-        if updated.head_sha != pushed_head_sha:
-            raise RuntimeError(
-                f"PR #{pr_number} changed after the monitored push; refusing to repair an unrelated head"
+            raise RuntimeError(reason)
+        try:
+            updated = get_pull_request(repo, github_repo, pr_number, github_host)
+            if updated.head_sha != pushed_head_sha:
+                raise RuntimeError(
+                    f"PR #{pr_number} changed after the monitored push; "
+                    "refusing to repair an unrelated head"
+                )
+            pull_request = updated
+            verify_worktree_for_pr(run, pull_request)
+            evidence = fetch_ci_evidence(
+                repo, github_repo, pull_request, github_host, extra_values=secret_values,
             )
-        pull_request = updated
-        verify_worktree_for_pr(run, pull_request)
-        evidence = fetch_ci_evidence(
-            repo, github_repo, pull_request, github_host, extra_values=secret_values,
-        )
+        except RuntimeError as exc:
+            reason = f"CI repair could not continue after attempt {attempt}: {exc}"
+            record_event({"event": "repair_failed", "attempt": attempt, "reason": reason})
+            _record_failed_ci_repair(
+                run, issue, folder, attempt=attempt,
+                max_attempts=max_attempts, reason=reason,
+            )
+            raise
         record_event({
             "event": "ci_evidence", "attempt": attempt, "classification": evidence.classification,
             "evidence": evidence.to_dict(),
@@ -766,10 +890,22 @@ def repair_ci(
                     "per ci_repair.auto_confirm_non_code_failures"
                 )
             elif not _confirm_ci_repair(pr_number, evidence.classification):
-                raise RuntimeError(
-                    f"Follow-up CI failure classified as {evidence.classification}; explicit confirmation is required"
+                reason = (
+                    f"Follow-up CI failure classified as {evidence.classification}; "
+                    "explicit confirmation is required"
                 )
-    raise RuntimeError("CI repair ended without a terminal result")
+                record_event({"event": "repair_failed", "attempt": attempt, "reason": reason})
+                _record_failed_ci_repair(
+                    run, issue, folder, attempt=attempt,
+                    max_attempts=max_attempts, reason=reason,
+                )
+                raise RuntimeError(reason)
+    reason = "CI repair ended without a terminal result"
+    _record_failed_ci_repair(
+        run, issue, folder, attempt=max_attempts,
+        max_attempts=max_attempts, reason=reason,
+    )
+    raise RuntimeError(reason)
 
 
 MANUAL_APPROVAL_FILENAME = _agentic_workflow_state.MANUAL_APPROVAL_FILENAME
@@ -1658,7 +1794,11 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
     )
     preflight_security(config["security_mode"], config["sandbox"], repo=repo)
     if not args.publish:
-        preflight_test_commands(repo, test_commands, sandbox=config["sandbox"])
+        # Let the workflow record every unavailable required check alongside
+        # the checks that did run.  The aggregate result remains a hard gate.
+        preflight_test_commands(
+            repo, test_commands, sandbox=config["sandbox"], fail_fast=False,
+        )
     # Manual completion and publication use recorded state and do not need
     # provider credentials. The normal development/review path still does.
     if not args.mark_done and not args.publish:
@@ -1919,6 +2059,10 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
         if not eligible(issue):
             raise RuntimeError("Issue is closed; manual completion is blocked")
         with worktree_lock(repo, run, state_dir):
+            _require_manual_completion_validation(
+                run, issue, config, folder, test_commands,
+                task_deadline, verbose=args.verbose,
+            )
             record_manual_approval(
                 run, issue, base, config, folder,
                 (args.reason or "Manually marked done by user").strip()

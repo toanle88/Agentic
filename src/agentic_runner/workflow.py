@@ -70,7 +70,12 @@ from .review import (
     record_review_findings,
 )
 from .security import redact_secrets, restricted_test_environment
-from .telemetry import read_run_instruction, record_test_result, record_workflow_outcome
+from .telemetry import (
+    read_run_instruction,
+    read_run_usage,
+    record_test_result,
+    record_workflow_outcome,
+)
 from .worktrees import (
     AUDIT_BRANCH_RE,
     AUDIT_KEY,
@@ -97,6 +102,7 @@ from .workflow_state import (
     record_blocked,
     record_no_code_changes_blocked,
     record_test_failure_blocked,
+    record_validation_blocked,
     record_result,
     record_review_approval,
     result_text as _result_text,
@@ -624,6 +630,9 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
         blocked_names=credential_names or (),
     )
     results: list[str] = []
+    command_statuses: list[str] = []
+    reported_commands: set[int] = set()
+    all_passed = True
     report_chars = 0
 
     def append_report(value: str) -> None:
@@ -632,31 +641,87 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
         report_chars += len(value)
         while report_chars > MAX_TEST_REPORT_CHARS and results:
             report_chars -= len(results.pop(0))
-    for argv in test_commands:
+
+    def report_text(suffix: str = "") -> str:
+        """Keep every bounded status while limiting command evidence."""
+        statuses = "\n\n".join(command_statuses)
+        evidence = "\n\n".join(results)
+        suffix_chars = len(suffix)
+        available = max(0, MAX_TEST_REPORT_CHARS - len(statuses) - suffix_chars - 4)
+        if len(evidence) > available:
+            evidence = evidence[-available:] if available else ""
+        parts = [item for item in (statuses, evidence, suffix.strip()) if item]
+        return "\n\n".join(parts)
+
+    def mark_unavailable(index: int, reason: str) -> None:
+        """Record a terminal status for a check that could not be reached."""
+        nonlocal all_passed
+        if index in reported_commands:
+            return
+        all_passed = False
+        reported_commands.add(index)
+        command_statuses.append(
+            f"Validation check {index} — unavailable ({reason})"
+        )
+
+    for index, argv in enumerate(test_commands, start=1):
         if deadline is not None and time.monotonic() >= deadline:
-            report = "\n\n".join(results) + "\nTask deadline reached before the next test command"
+            for remaining in range(index, len(test_commands) + 1):
+                mark_unavailable(remaining, "task deadline reached")
+            report = report_text()
             _status_print("[TESTS] Overall task deadline reached", flush=True)
             if folder is not None:
                 record_test_result(folder, passed=False)
             return False, report.strip()
         display_command = safe_command_label(argv)
+        unavailable = preflight_test_commands(
+            worktree, [argv], sandbox=sandbox, fail_fast=False,
+        )
+        if unavailable:
+            mark_unavailable(index, "required command unavailable")
+            append_report(
+                f"$ {display_command}\n"
+                f"Validation check {index} — unavailable (required command unavailable)"
+            )
+            _status_print("[TESTS] UNAVAILABLE (required command unavailable)", flush=True)
+            continue
         _status_print(f"[TESTS] Running: {display_command}", flush=True)
         log = next_log(folder, "test-command") if folder else (Path(tempfile.gettempdir()) / f"agentic-tests-{os.getpid()}.log")
-        result = streamed_command(argv, worktree, label="TESTS", log_file=log,
-                                  timeout=_remaining_timeout(deadline, timeout),
-                                  heartbeat=15, sandbox=sandbox, sandbox_pass_env=[],
-                                  metrics_folder=folder, verbose=verbose,
-                                  env=test_environment,
-                                  redaction_values=redaction_values)
-        append_report(f"$ {display_command}\n{result.stdout[-6000:]}")
+        try:
+            result = streamed_command(argv, worktree, label="TESTS", log_file=log,
+                                      timeout=_remaining_timeout(deadline, timeout),
+                                      heartbeat=15, sandbox=sandbox, sandbox_pass_env=[],
+                                      metrics_folder=folder, verbose=verbose,
+                                      env=test_environment,
+                                      redaction_values=redaction_values)
+        except RuntimeError:
+            mark_unavailable(index, "required command could not start")
+            append_report(
+                f"$ {display_command}\n"
+                f"Validation check {index} — unavailable (required command could not start)"
+            )
+            _status_print("[TESTS] UNAVAILABLE (required command could not start)", flush=True)
+            continue
+        status = "passed" if result.returncode == 0 else "failed"
+        if status != "passed":
+            all_passed = False
+        reported_commands.add(index)
+        command_statuses.append(f"Validation check {index} — {status}")
+        append_report(
+            f"$ {display_command}\n"
+            f"Validation check {index} — {status}\n{result.stdout[-6000:]}"
+        )
         if result.returncode:
             _status_print(f"[TESTS] FAILED (exit {result.returncode})", flush=True)
-            if folder is not None:
-                record_test_result(folder, passed=False)
-            return False, "\n\n".join(results)
-        _status_print("[TESTS] PASSED", flush=True)
+        else:
+            _status_print("[TESTS] PASSED", flush=True)
     if deadline is not None and time.monotonic() >= deadline:
-        report = "\n\n".join(results) + "\nTask deadline reached before git diff --check"
+        # A command may consume the remaining task budget.  Keep the final
+        # report complete even when the deadline is observed only after the
+        # command loop has otherwise finished.
+        for remaining in range(1, len(test_commands) + 1):
+            mark_unavailable(remaining, "task deadline reached")
+        report = report_text("Task deadline reached before git diff --check")
         _status_print("[TESTS] Overall task deadline reached", flush=True)
         if folder is not None:
             record_test_result(folder, passed=False)
@@ -677,30 +742,40 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
     except RuntimeError as exc:
         if folder is not None:
             record_test_result(folder, passed=False)
-        return False, "\n\n".join(results) + f"\ngit diff --check failed: {exc}"
+        return False, report_text(f"git diff --check failed: {exc}")
     if whitespace_report:
         _status_print("[TESTS] git diff --check FAILED", flush=True)
         if folder is not None:
             record_test_result(folder, passed=False)
-        return False, "\n\n".join(results) + f"\ngit diff --check failed\n{whitespace_report}"
-    _status_print("[TESTS] All configured checks passed", flush=True)
+        return False, report_text(f"git diff --check failed\n{whitespace_report}")
+    if all_passed:
+        _status_print("[TESTS] All configured checks passed", flush=True)
+    else:
+        _status_print("[TESTS] Local validation failed", flush=True)
+    report = report_text()
     if folder is not None:
-        record_test_result(folder, passed=True)
-    return True, "\n\n".join(results)
+        record_test_result(folder, passed=all_passed)
+    return all_passed, report
 
 
 def preflight_test_commands(repo: Path, test_commands: list[list[str]],
-                            sandbox: dict[str, Any] | None = None) -> None:
-    """Fail early when the configured test tool or Python module is unavailable."""
+                            sandbox: dict[str, Any] | None = None,
+                            fail_fast: bool = True) -> list[str]:
+    """Check configured tools, optionally collecting every unavailable entry."""
+    unavailable: list[str] = []
     for argv in test_commands:
         if sandbox and sandbox.get("enabled"):
             continue
         executable = argv[0]
         if shutil.which(executable) is None:
-            raise RuntimeError(
+            reason = (
                 f"Configured test command is unavailable: executable {executable!r} "
                 "was not found on PATH"
             )
+            if fail_fast:
+                raise RuntimeError(reason)
+            unavailable.append(reason)
+            continue
         executable_name = Path(executable).name.lower()
         if len(argv) >= 3 and argv[1] == "-m" and (
             executable_name.startswith("python") or executable_name == "py"
@@ -713,10 +788,14 @@ def preflight_test_commands(repo: Path, test_commands: list[list[str]],
                 module,
             ], repo, timeout=30, check=False)
             if result.returncode:
-                raise RuntimeError(
+                reason = (
                     f"Configured test dependency is unavailable: Python module "
                     f"{module!r} is not installed for {executable!r}"
                 )
+                if fail_fast:
+                    raise RuntimeError(reason)
+                unavailable.append(reason)
+    return unavailable
 
 
 def retryable_test_failure(report: str) -> bool:
@@ -726,6 +805,8 @@ def retryable_test_failure(report: str) -> bool:
         "no module named",
         "command not found",
         "executable file not found",
+        "required command unavailable",
+        "required command could not start",
         "address already in use",
         "cannot bind",
         "no such file or directory",
@@ -1828,8 +1909,58 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
 
 
 def validate_publication_approval(run: Run, issue: Issue, base: str,
-                                  config: dict[str, Any], approval: dict[str, Any]) -> tuple[str, str, str]:
+                                  config: dict[str, Any], approval: dict[str, Any],
+                                  folder: Path | None = None) -> tuple[str, str, str]:
     """Validate approval metadata without running tests or a reviewer."""
+    if folder is None:
+        raise RuntimeError(
+            "No recorded local validation; run all configured checks before publishing"
+        )
+    # Approval records can outlive a later failed or blocked repair attempt.
+    # Treat every durable terminal marker as authoritative before accepting an
+    # approval object, including approvals supplied explicitly by a caller.
+    try:
+        if os.path.lexists(_blocked_path(folder)):
+            raise RuntimeError(
+                "Run is blocked; rerun validation and review before publishing"
+            )
+        result_path = _result_path(folder)
+        if os.path.lexists(result_path):
+            raw_result = read_text_bounded(result_path, MAX_DURABLE_JSON_BYTES)
+            if raw_result is None:
+                raise RuntimeError(
+                    "Run result is unreadable; rerun validation and review before publishing"
+                )
+            try:
+                result = json.loads(raw_result)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    "Run result is invalid; rerun validation and review before publishing"
+                ) from exc
+            status = result.get("status") if isinstance(result, dict) else None
+            if status != "APPROVED":
+                detail = status if isinstance(status, str) and status else "invalid"
+                raise RuntimeError(
+                    f"Run result is {detail}; publication is blocked until the run succeeds"
+                )
+    except OSError as exc:
+        raise RuntimeError(
+            "Run terminal state is unreadable; rerun validation and review before publishing"
+        ) from exc
+    usage = read_run_usage(folder)
+    recorded_test = usage.get("test_result")
+    recorded_status = (
+        recorded_test.get("status") if isinstance(recorded_test, dict) else None
+    )
+    if recorded_status != "passed":
+        if recorded_status == "failed":
+            raise RuntimeError(
+                "Local validation failed; rerun all configured checks before publishing"
+            )
+        raise RuntimeError(
+            "Local validation is unavailable or not recorded; "
+            "run all configured checks before publishing"
+        )
     if approval.get("branch") != run.branch:
         raise RuntimeError("Publication approval belongs to a different branch")
     if approval.get("issue_digest") != issue_fingerprint(issue):
@@ -1913,7 +2044,7 @@ def push_existing_pr(run: Run, issue: Issue, github_repo: str, base: str,
     if approval is None or approval.get("kind") == "manual":
         raise RuntimeError("No fresh automated review approval recorded for the PR repair")
     _base_sha, digest, _summary = validate_publication_approval(
-        run, issue, base, config, approval,
+        run, issue, base, config, approval, folder,
     )
     lookup = fetch_pr or (lambda: get_pull_request(
         run.worktree, github_repo, pull_request.number, config.get("github_host", DEFAULT_GITHUB_HOST),
@@ -2074,19 +2205,47 @@ def _change_summary(patch_summary: str, developer_report: str = "") -> str:
 def _validation_summary(report: str, test_commands: list[list[str]], *, checks_ran: bool = True) -> str:
     """Format concise, safe validation evidence for a pull-request body."""
     if not checks_ran:
-        return (
-            "Configured checks were not run during publication.\n\n"
-            "This patch was published with explicit human completion approval.\n\n"
-            "- `git diff --check` — passed\n\n"
-            "CI and human review are still required."
+        lines = [
+            "Configured checks were not run during publication.", "",
+            "This patch was published with explicit human completion approval.", "",
+        ]
+        for index, argv in enumerate(test_commands, start=1):
+            display_command = html.escape(
+                f"<configured test command: {len(argv)} argv values>"
+            ).replace("`", "&#96;")
+            lines.append(
+                f"- <code>{display_command}</code> — unavailable (checks not run)"
+            )
+        lines.extend([
+            "- `git diff --check` — unavailable (checks not run)", "",
+            "CI and human review are still required.",
+        ])
+        return "\n".join(lines)
+    status_by_index: dict[int, str] = {}
+    for raw_line in _clean_terminal_output(report).splitlines():
+        match = re.match(
+            r"^Validation check (\d+) — (passed|failed|unavailable|blocked)\b",
+            raw_line.strip(),
         )
-    lines = ["All configured checks passed.", ""]
-    for argv in test_commands:
+        if match:
+            status_by_index[int(match.group(1))] = match.group(2)
+    if status_by_index:
+        overall = (
+            "All configured checks passed."
+            if all(status_by_index.get(index) == "passed" for index in range(1, len(test_commands) + 1))
+            else "Local validation did not pass; publication is blocked."
+        )
+    else:
+        overall = "Local validation status was not recorded; publication is blocked."
+    lines = [overall, ""]
+    for index, argv in enumerate(test_commands, start=1):
         display_command = html.escape(
             f"<configured test command: {len(argv)} argv values>"
         ).replace("`", "&#96;")
-        lines.append(f"- <code>{display_command}</code> — passed")
-    lines.append("- `git diff --check` — passed")
+        status = status_by_index.get(index, "unavailable (status not recorded)")
+        lines.append(f"- <code>{display_command}</code> — {status}")
+    diff_status = "failed" if "git diff --check failed" in report else "passed"
+    lines.append(f"- `git diff --check` — {diff_status}")
 
     highlights: list[str] = []
     for raw_line in _clean_terminal_output(report).splitlines():
@@ -2122,6 +2281,19 @@ def _publish(run: Run, issue: Issue, github_repo: str, base: str,
     """Publish the exact patch covered by an existing approval."""
     if not eligible(issue):
         raise RuntimeError("Issue is closed; publication blocked")
+    approval = dict(manual_approval) if manual_approval is not None else load_publication_approval(folder)
+    if approval is not None and manual_approval is not None:
+        approval.setdefault("kind", "manual")
+    if approval is None:
+        raise RuntimeError(
+            "No approval recorded for the current patch; run --review or complete development first"
+        )
+    # Validate the local readiness gate before any idempotent publication
+    # shortcut.  Returning an existing PR or publication record is still a
+    # publication outcome and must not make an unvalidated run look ready.
+    base_sha, digest, patch_summary = validate_publication_approval(
+        run, issue, base, config, approval, folder,
+    )
     if auto:
         recorded = _load_publication_record(folder)
         if recorded is not None:
@@ -2142,16 +2314,6 @@ def _publish(run: Run, issue: Issue, github_repo: str, base: str,
             f"{url}. No duplicate PR created."
         )
         return url
-    approval = dict(manual_approval) if manual_approval is not None else load_publication_approval(folder)
-    if approval is not None and manual_approval is not None:
-        approval.setdefault("kind", "manual")
-    if approval is None:
-        raise RuntimeError(
-            "No approval recorded for the current patch; run --review or complete development first"
-        )
-    base_sha, digest, patch_summary = validate_publication_approval(
-        run, issue, base, config, approval,
-    )
     # Use the same escape-sequence-aware editor as the interactive shell when
     # publication is started directly from a real terminal. Foreground shell
     # publication runs with piped stdin and keeps the ordinary line protocol
@@ -2311,6 +2473,7 @@ def _orchestration_runtime() -> WorkflowRuntime:
         "_review_reason": _review_reason,
         "record_blocked": record_blocked,
         "record_test_failure_blocked": record_test_failure_blocked,
+        "record_validation_blocked": record_validation_blocked,
         "_compact_feedback": _compact_feedback,
         "retryable_test_failure": retryable_test_failure,
         "test_failure_fingerprint": test_failure_fingerprint,
@@ -2363,6 +2526,7 @@ _STATE_NAMES = frozenset({
     "clear_blocked", "clear_result", "load_blocked", "load_latest_developer_report",
     "load_publication_approval", "next_log", "record_blocked",
     "record_no_code_changes_blocked", "record_result", "record_review_approval",
+    "record_validation_blocked",
     "review_approval_path",
 })
 _WORKFLOW_IMPLEMENTATIONS = {

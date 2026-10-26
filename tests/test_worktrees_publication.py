@@ -10,14 +10,127 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner import cli as agentic
+from agentic_runner.telemetry import record_test_result
 from test_worktrees import _GitRepositoryTestCase, sh
 
 
 class PublicationTests(_GitRepositoryTestCase):
+    @staticmethod
+    def _record_passed_validation(folder):
+        record_test_result(folder, passed=True)
+
+    def test_validation_summary_preserves_unavailable_command_status(self):
+        summary = agentic._validation_summary(
+            'Validation check 1 — passed\n'
+            'Validation check 2 — unavailable (required command unavailable)',
+            [['python', '-m', 'ok'], ['missing-tool']],
+        )
+        self.assertIn('Local validation did not pass; publication is blocked.', summary)
+        self.assertIn('&lt;configured test command: 3 argv values&gt;</code> — passed', summary)
+        self.assertIn('&lt;configured test command: 1 argv values&gt;</code> — unavailable', summary)
+
+    def test_automated_publication_rejects_recorded_local_validation_failure(self):
+        run = agentic.create_worktree(self.repo, 'main', 192)
+        (run.worktree / 'fix.py').write_text('fixed=True\n')
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(192, 'Failed local gate', 'Keep checks hard')
+        config = {'test_commands': [[sys.executable, '-c', 'pass']], 'max_files': 10}
+        base_sha, digest, _ = agentic.prepare_patch(run.worktree, 'main', 10)
+        agentic.record_review_approval(
+            run, issue, 'main', base_sha, digest,
+            {'approved': True, 'summary': 'Reviewed', 'findings': [], 'skipped': []},
+            {'reviewer_agent': {'provider': 'codex'}}, folder,
+        )
+        (folder / 'run.json').write_text(
+            json.dumps({'test_result': {'status': 'failed'}}), encoding='utf-8',
+        )
+
+        with self.assertRaisesRegex(RuntimeError, 'Local validation failed'):
+            agentic.validate_publication_approval(
+                run, issue, 'main', config,
+                {**agentic.load_review_approval(folder), 'kind': 'automated'},
+                folder,
+            )
+
+    def test_publication_rejects_stale_approval_after_terminal_failure(self):
+        run = agentic.create_worktree(self.repo, 'main', 195)
+        (run.worktree / 'fix.py').write_text('fixed=True\n')
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(195, 'Stale repair approval', 'Do not publish a failed repair')
+        config = {'test_commands': [[sys.executable, '-c', 'pass']], 'max_files': 10}
+        base_sha, digest, _ = agentic.prepare_patch(run.worktree, 'main', 10)
+        approval = agentic.record_review_approval(
+            run, issue, 'main', base_sha, digest,
+            {'approved': True, 'summary': 'Reviewed before repair failure', 'findings': [], 'skipped': []},
+            {'reviewer_agent': {'provider': 'codex'}}, folder,
+        )
+        approval['kind'] = 'automated'
+        self._record_passed_validation(folder)
+
+        for marker, state in (
+            ('blocked.json', {'status': 'blocked', 'result_status': 'BLOCKED'}),
+            ('result.json', {'status': 'RETRY_EXHAUSTED'}),
+        ):
+            with self.subTest(marker=marker):
+                (folder / marker).write_text(json.dumps(state), encoding='utf-8')
+                with self.assertRaisesRegex(RuntimeError, 'publication|blocked'):
+                    agentic.validate_publication_approval(
+                        run, issue, 'main', config, approval, folder,
+                    )
+                (folder / marker).unlink()
+
+    def test_publication_requires_recorded_successful_validation_for_all_approvals(self):
+        for kind, recorded_status in (
+            ('automated', None), ('automated', 'unknown'), ('manual', None),
+        ):
+            with self.subTest(kind=kind, recorded_status=recorded_status):
+                run = agentic.create_worktree(self.repo, 'main', 193)
+                (run.worktree / 'fix.py').write_text('fixed=True\n')
+                folder = agentic.logs_path(self.repo, run)
+                issue = agentic.Issue(193, 'Missing local gate', '')
+                config = {'max_files': 10}
+                base_sha, digest, _ = agentic.prepare_patch(run.worktree, 'main', 10)
+                if kind == 'manual':
+                    approval = agentic.record_manual_approval(
+                        run, issue, 'main', config, folder, 'Human reviewed the patch',
+                    )
+                else:
+                    approval = agentic.record_review_approval(
+                        run, issue, 'main', base_sha, digest,
+                        {'approved': True, 'summary': 'Reviewed', 'findings': [], 'skipped': []},
+                        {'reviewer_agent': {'provider': 'codex'}}, folder,
+                    )
+                approval['kind'] = kind
+                if recorded_status is not None:
+                    (folder / 'run.json').write_text(
+                        json.dumps({'test_result': {'status': recorded_status}}),
+                        encoding='utf-8',
+                    )
+
+                with self.assertRaisesRegex(RuntimeError, 'unavailable or not recorded'):
+                    agentic.validate_publication_approval(
+                        run, issue, 'main', config, approval, folder,
+                    )
+
+                self._record_passed_validation(folder)
+                with patch('agentic.prepare_patch', return_value=(base_sha, digest, 'summary')):
+                    self.assertEqual(
+                        agentic.validate_publication_approval(
+                            run, issue, 'main', config, approval, folder,
+                        )[:2],
+                        (base_sha, digest),
+                    )
+
     def test_auto_publish_reuses_existing_pr_and_records_url_without_prompt(self):
         run = agentic.create_worktree(self.repo, 'main', 190)
+        (run.worktree / 'fix.py').write_text('fixed=True\n')
         folder = agentic.logs_path(self.repo, run)
         issue = agentic.Issue(190, 'Existing automatic PR', '')
+        config = {'test_commands': [[sys.executable, '-c', 'pass']], 'max_files': 10}
+        agentic.record_manual_approval(
+            run, issue, 'main', config, folder, 'Existing PR is already approved',
+        )
+        self._record_passed_validation(folder)
         with (
             patch('agentic.check_existing_pr', return_value=[{
                 'number': 9, 'url': 'https://github.test/pull/9', 'state': 'OPEN',
@@ -25,7 +138,7 @@ class PublicationTests(_GitRepositoryTestCase):
             patch('agentic_shell_input._interactive_line', side_effect=AssertionError('prompted')),
         ):
             url = agentic.publish(
-                run, issue, 'owner/repo', 'main', {'max_files': 10}, folder,
+                run, issue, 'owner/repo', 'main', config, folder,
                 auto=True,
             )
         self.assertEqual(url, 'https://github.test/pull/9')
@@ -43,7 +156,21 @@ class PublicationTests(_GitRepositoryTestCase):
             {'approved': True, 'summary': 'Approved', 'findings': [], 'skipped': []},
             {'reviewer_agent': {'provider': 'codex'}}, folder,
         )
+        self._record_passed_validation(folder)
         self.assertTrue(agentic._automatic_candidate_eligible(issue, folder))
+
+    def test_automatic_candidate_requires_recorded_local_validation(self):
+        run = agentic.create_worktree(self.repo, 'main', 194)
+        (run.worktree / 'fix.py').write_text('fixed=True\n')
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(194, 'Missing local validation', '')
+        base_sha, digest, _ = agentic.prepare_patch(run.worktree, 'main', 10)
+        agentic.record_review_approval(
+            run, issue, 'main', base_sha, digest,
+            {'approved': True, 'summary': 'Approved', 'findings': [], 'skipped': []},
+            {'reviewer_agent': {'provider': 'codex'}}, folder,
+        )
+        self.assertFalse(agentic._automatic_candidate_eligible(issue, folder))
 
     def test_changed_issue_invalidates_both_approval_kinds_with_durable_evidence(self):
         folder = Path(self.tmp.name) / "approval-invalidation"
@@ -101,10 +228,11 @@ class PublicationTests(_GitRepositoryTestCase):
         approval = agentic.record_manual_approval(
             run, issue, 'main', config, folder, 'Human approved the current patch',
         )
+        self._record_passed_validation(folder)
         (run.worktree / 'fix.py').write_text('after\n')
         with self.assertRaisesRegex(RuntimeError, 'Patch changed since approval'):
             agentic.validate_publication_approval(
-                run, issue, 'main', config, approval,
+                run, issue, 'main', config, approval, folder,
             )
 
 
@@ -118,6 +246,7 @@ class PublicationTests(_GitRepositoryTestCase):
             'base_sha': 'base-sha',
             'patch_digest': 'digest',
         }
+        self._record_passed_validation(agentic.logs_path(self.repo, run))
         summary = (
             ' fix.py | 2 ++\n'
             ' 1 file changed, 2 insertions(+)\n'
@@ -128,6 +257,7 @@ class PublicationTests(_GitRepositoryTestCase):
               patch('agentic.prepare_patch', return_value=('base-sha', 'digest', summary))):
             result = agentic.validate_publication_approval(
                 run, issue, 'main', config, approval,
+                agentic.logs_path(self.repo, run),
             )
 
         self.assertEqual(result, ('base-sha', 'digest', summary))
@@ -225,6 +355,7 @@ class PublicationTests(_GitRepositoryTestCase):
             {'approved': True, 'summary': 'Good', 'findings': [], 'skipped': []},
             cfg, folder,
         )
+        self._record_passed_validation(folder)
         with (patch('agentic.check_existing_pr', return_value=[]),
               patch('agentic.verify_and_review') as verify,
               patch('agentic.run_tests') as run_tests,
@@ -258,6 +389,7 @@ class PublicationTests(_GitRepositoryTestCase):
             {'approved': True, 'summary': 'Good', 'findings': [], 'skipped': []},
             cfg, folder,
         )
+        self._record_passed_validation(folder)
         with (patch('agentic.check_existing_pr', return_value=[]),
               patch('agentic_shell_input._interactive_line', side_effect=['later', 'q']) as confirm,
               patch('agentic.command', wraps=agentic.command) as mock_command,
@@ -287,6 +419,7 @@ class PublicationTests(_GitRepositoryTestCase):
                     {'approved': True, 'summary': 'Good', 'findings': [], 'skipped': []},
                     cfg, folder,
                 )
+                self._record_passed_validation(folder)
                 with (patch('agentic.check_existing_pr', return_value=[]),
                       patch('agentic_shell_input._interactive_line', return_value=response),
                       patch('agentic.command', wraps=agentic.command) as mock_command):
@@ -309,6 +442,7 @@ class PublicationTests(_GitRepositoryTestCase):
             {'approved': True, 'summary': 'Good', 'findings': [], 'skipped': []},
             cfg, folder,
         )
+        self._record_passed_validation(folder)
         with (patch('agentic.check_existing_pr', return_value=[]),
               patch('agentic_shell_input._interactive_line', side_effect=KeyboardInterrupt),
               patch('agentic._status_print') as status):
@@ -349,6 +483,7 @@ class PublicationTests(_GitRepositoryTestCase):
             {'approved': True, 'summary': 'Good', 'findings': [], 'skipped': []},
             cfg, folder,
         )
+        self._record_passed_validation(folder)
 
         def mutate_on_confirm(*args):
             (run.worktree / 'fix.py').write_text('after\n')
@@ -376,7 +511,9 @@ class PublicationTests(_GitRepositoryTestCase):
             {'approved': True, 'summary': 'Good', 'findings': [], 'skipped': []},
             config, folder,
         )
+        self._record_passed_validation(folder)
         agentic.next_log(folder, 'tests').write_text(
+            'Validation check 1 — passed\n'
             '\x1b[32mTest Files 2 passed (2)\x1b[0m\n'
             '\x1b[32mTests 4 passed <img src=x> `[details]`\x1b[0m',
             encoding='utf-8',
@@ -443,6 +580,7 @@ class PublicationTests(_GitRepositoryTestCase):
             {'approved': True, 'summary': 'Good', 'findings': [], 'skipped': []},
             config, folder,
         )
+        self._record_passed_validation(folder)
         marker = self.repo / 'hook-ran'
         hook = self.repo / '.git' / 'hooks' / 'pre-commit'
         hook.write_text(
@@ -489,6 +627,7 @@ class PublicationTests(_GitRepositoryTestCase):
             {'approved': True, 'summary': 'Good', 'findings': [], 'skipped': []},
             config, folder,
         )
+        self._record_passed_validation(folder)
 
         def fail_on_push(_repo, *args, **_kwargs):
             if args[2:4] == ('push', '-u'):
@@ -521,6 +660,7 @@ class PublicationTests(_GitRepositoryTestCase):
         approval = agentic.record_manual_approval(
             run, issue, 'main', config, folder, 'Human accepted the remaining scope decision',
         )
+        self._record_passed_validation(folder)
         commands = []
 
         def fake_command(argv, cwd, **kwargs):
@@ -555,8 +695,14 @@ class PublicationTests(_GitRepositoryTestCase):
 
     def test_publish_skips_existing_pr_and_rejects_closed_issue(self):
         run = agentic.create_worktree(self.repo, 'main', 35)
+        (run.worktree / 'fix.py').write_text('fixed=True\n')
         folder = agentic.logs_path(self.repo, run)
         config = {'test_commands': [['go', 'test', './...']], 'max_files': None}
+        agentic.record_manual_approval(
+            run, agentic.Issue(35, 'Existing', ''), 'main', config, folder,
+            'Existing PR is already approved',
+        )
+        self._record_passed_validation(folder)
         existing = {'url': 'https://github.test/pr/35'}
         with (patch('agentic.check_existing_pr', return_value=[existing]) as check,
               patch('agentic.verify_and_review') as verify):
@@ -569,6 +715,24 @@ class PublicationTests(_GitRepositoryTestCase):
                 'owner/repo', 'main', config, folder,
             )
 
+    def test_existing_pr_shortcut_requires_local_validation(self):
+        run = agentic.create_worktree(self.repo, 'main', 350)
+        (run.worktree / 'fix.py').write_text('fixed=True\n')
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(350, 'Existing PR without validation', '')
+        config = {'test_commands': [[sys.executable, '-c', 'pass']], 'max_files': 10}
+        approval = agentic.record_manual_approval(
+            run, issue, 'main', config, folder, 'Approval without local validation',
+        )
+
+        with patch('agentic.check_existing_pr') as check:
+            with self.assertRaisesRegex(RuntimeError, 'unavailable or not recorded'):
+                agentic.publish(
+                    run, issue, 'owner/repo', 'main', config, folder,
+                    manual_approval=approval, auto=True,
+                )
+        check.assert_not_called()
+
     def test_pr_repair_pushes_existing_branch_without_creating_a_pr(self):
         run = agentic.create_worktree(self.repo, 'main', 36)
         (run.worktree / 'fix.py').write_text('fixed=True\n')
@@ -580,6 +744,7 @@ class PublicationTests(_GitRepositoryTestCase):
             {'approved': True, 'summary': 'Fresh review', 'findings': [], 'skipped': []},
             config, folder,
         )
+        self._record_passed_validation(folder)
         pull_request = agentic.PullRequest(
             123, 'Repair', 'Fix CI', 'OPEN', 'main', 'base-sha', run.branch,
             'head-sha', 'owner/repo', 'https://github.test/pull/123',

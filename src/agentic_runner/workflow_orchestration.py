@@ -78,6 +78,7 @@ def develop(
     _review_reason = runtime._review_reason
     record_blocked = runtime.record_blocked
     record_test_failure_blocked = runtime.record_test_failure_blocked
+    record_validation_blocked = runtime.record_validation_blocked
     _compact_feedback = runtime._compact_feedback
     retryable_test_failure = runtime.retryable_test_failure
     test_failure_fingerprint = runtime.test_failure_fingerprint
@@ -344,10 +345,37 @@ def develop(
             )
             latest_reason = "Tests failed: " + _result_text(test_output[-3_000:])
             if not retryable_test_failure(test_output):
-                raise RuntimeError(
-                    "Tests failed because of an environment or infrastructure problem; "
-                    f"retries skipped.\n{test_output[-2500:]}"
+                try:
+                    _, patch_digest, _ = prepare_patch(
+                        run.worktree, base, config["max_files"],
+                    )
+                except NoCodeChangesError:
+                    patch_digest = ""
+                reason = (
+                    "Required local validation is unavailable; retries skipped.\n"
+                    f"{test_output[-2500:]}"
                 )
+                record_workflow_outcome(
+                    folder, approved=False, attempts=attempt + 1,
+                    first_pass=False, review_findings=review_findings_seen,
+                )
+                record_validation_blocked(
+                    folder, test_output, patch_digest=patch_digest,
+                    attempts=attempt + 1, max_retries=config["max_retries"],
+                    issue_digest=issue_fingerprint(issue),
+                )
+                next_action = _resume_action(issue, folder)
+                record_result(
+                    folder, "BLOCKED", attempts=attempt + 1,
+                    max_retries=config["max_retries"], reason=reason,
+                    worktree=run.worktree, next_action=next_action,
+                )
+                print_run_summary(
+                    run, "BLOCKED", next_action,
+                    attempts=attempt + 1, max_retries=config["max_retries"],
+                    reason=_result_text(reason), logs_path=folder,
+                )
+                return False
             failure_digest = test_failure_fingerprint(test_output)
             if failure_digest == last_test_failure_digest:
                 try:
