@@ -43,6 +43,8 @@ def develop(
     instruction: str | None = None,
     system_prompt: str | None = None,
     verbose: bool = False,
+    repair_mode: bool = False,
+    repair_scope: str | None = None,
     *,
     runtime: WorkflowRuntime,
 ) -> bool:
@@ -138,7 +140,10 @@ def develop(
     feedback = initial_feedback
     required_review_findings: list[Any] = []
     last_rejected_digest: str | None = None
-    latest_review = _latest_numbered_log(folder, "review", "json")
+    latest_review = (
+        _latest_numbered_log(folder, "review", "json")
+        if not repair_mode else None
+    )
     if latest_review:
         try:
             raw_review = read_text_bounded(latest_review, MAX_DURABLE_JSON_BYTES)
@@ -184,6 +189,8 @@ def develop(
                 instruction=instruction,
                 system_prompt=system_prompt,
                 provider=(config.get("developer_agent") or {}).get("provider", "codex"),
+                repair_mode=repair_mode,
+                repair_scope=repair_scope,
             ),
             output=output,
             **agent_kwargs,
@@ -220,6 +227,8 @@ def develop(
                 instruction=instruction,
                 system_prompt=system_prompt,
                 verbose=verbose,
+                repair_mode=repair_mode,
+                repair_scope=repair_scope,
             )
         except NoCodeChangesError:
             record_workflow_outcome(

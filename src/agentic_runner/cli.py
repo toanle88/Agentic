@@ -689,6 +689,8 @@ def repair_ci(
                 initial_feedback=feedback,
                 test_commands=test_commands_for_profile(config, "fast"),
                 deadline=deadline, verbose=verbose,
+                repair_mode=True,
+                repair_scope=feedback,
             )
         attempt_event = {
             "event": "repair_attempt", "attempt": attempt, "completed": completed,
