@@ -777,7 +777,7 @@ def _folder_metadata(folder: Path) -> _FolderMetadata:
                 if entry.name in DASHBOARD_EXCLUDED_FILES:
                     continue
                 activity_ns = max(activity_ns, stat.st_mtime_ns)
-                file_candidate = (stat.st_mtime_ns, entry.name, Path(entry.path))
+                file_candidate = (stat.st_mtime_ns, entry.name, folder / entry.name)
                 if len(files) < MAX_FILES_PER_RUN:
                     heapq.heappush(files, file_candidate)
                 elif file_candidate > files[0]:
