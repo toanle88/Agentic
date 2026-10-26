@@ -35,6 +35,11 @@ _DEFAULT_URL_OPEN = urllib.request.urlopen
 
 OPENROUTER_READ_FILE_CHARS = 12_000
 OPENROUTER_READ_CHUNK_CHARS = 8_192
+# Ranged reads are line-oriented, but the requested line may be very distant
+# from the beginning of a file. Keep the work needed to locate it bounded
+# independently of the returned character budget.
+OPENROUTER_READ_SCAN_CHARS = 256_000
+OPENROUTER_READ_SCAN_LINES = 50_000
 OPENROUTER_COMMAND_OUTPUT_CHARS = 6_000
 OPENROUTER_COMMAND_READ_CHUNK_BYTES = 4_096
 OPENROUTER_COMMAND_DRAIN_TIMEOUT_SECONDS = 1.0
@@ -753,12 +758,17 @@ def _open_regular_text_stream(root: Path, relative: str):
 
 
 def _bounded_file_text(root: Path, relative: str, *, start_line: int | None = None,
-                       end_line: int | None = None) -> str:
+                       end_line: int | None = None,
+                       scan_stats: dict[str, int | bool] | None = None) -> str:
     """Read only the requested lines and output budget from a text file."""
     marker = "\n...[truncated; use start_line/end_line to read a smaller range]"
+    scan_marker = "\n...[scan limit reached; use a closer start_line/end_line range]"
     chunks: list[str] = []
     used = 0
     truncated = False
+    scan_limited = False
+    scanned_chars = 0
+    scanned_lines = 0
     with _open_regular_text_stream(root, relative) as stream:
         if start_line is None and end_line is None:
             value = stream.read(OPENROUTER_READ_FILE_CHARS + 1)
@@ -771,9 +781,17 @@ def _bounded_file_text(root: Path, relative: str, *, start_line: int | None = No
         assert start_line is not None and end_line is not None
         line_number = 1
         while True:
-            block = stream.read(OPENROUTER_READ_CHUNK_CHARS)
+            remaining_scan = OPENROUTER_READ_SCAN_CHARS - scanned_chars
+            if remaining_scan <= 0:
+                scan_limited = True
+                break
+            block = stream.read(min(OPENROUTER_READ_CHUNK_CHARS, remaining_scan))
             if not block:
                 break
+            if len(block) > remaining_scan:
+                block = block[:remaining_scan]
+                scan_limited = True
+            scanned_chars += len(block)
             block_start = 0
             while block_start < len(block):
                 newline = block.find("\n", block_start)
@@ -790,15 +808,33 @@ def _bounded_file_text(root: Path, relative: str, *, start_line: int | None = No
                     used += len(segment)
                 if newline < 0:
                     break
+                scanned_lines += 1
                 line_number += 1
                 if line_number > end_line:
                     break
+                if scanned_lines >= OPENROUTER_READ_SCAN_LINES:
+                    scan_limited = True
+                    break
                 block_start = block_end
-            if truncated or line_number > end_line:
+            if truncated or line_number > end_line or scan_limited:
+                break
+            if scanned_chars >= OPENROUTER_READ_SCAN_CHARS:
+                scan_limited = True
                 break
     text = "".join(chunks)
     if truncated:
         text = text[:OPENROUTER_READ_FILE_CHARS - len(marker)] + marker
+    elif scan_limited:
+        if text:
+            text = text[:max(0, OPENROUTER_READ_FILE_CHARS - len(scan_marker))] + scan_marker
+        else:
+            text = scan_marker.lstrip("\n")
+    if scan_stats is not None:
+        scan_stats.update({
+            "scanned_chars": scanned_chars,
+            "scanned_lines": scanned_lines,
+            "scan_limited": scan_limited,
+        })
     return text
 
 

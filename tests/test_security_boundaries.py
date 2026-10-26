@@ -502,6 +502,18 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
                 for value in credentials.values():
                     self.assertNotIn(value, redacted)
 
+    def test_provider_environment_does_not_inherit_empty_nonsemantic_credential(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "SERVICE_VALUE": "",
+            },
+            clear=True,
+        ):
+            environment = provider_process_environment("codex", "SERVICE_VALUE")
+        self.assertNotIn("SERVICE_VALUE", environment)
+        self.assertNotIn("OPENAI_API_KEY", environment)
+
     def test_configured_credential_with_nonsemantic_name_is_redacted_from_provider_streams(self):
         value = "custom-configured-credential-123456"
         with tempfile.TemporaryDirectory() as temp, patch.dict(
@@ -1306,6 +1318,22 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
             })
             command = sandbox_command(["git", "status"], worktree, settings)
         self.assertNotIn(f"{host_target.resolve()}:/agentic-git:ro", command)
+        self.assertNotIn("/agentic-git", " ".join(command))
+        self.assertNotIn("/workspace/.git:ro", " ".join(command))
+
+    def test_sandbox_rejects_mocked_reparse_git_directory_without_host_mount(self):
+        with tempfile.TemporaryDirectory() as temp:
+            worktree = Path(temp)
+            (worktree / ".git").mkdir()
+            settings = validate_sandbox({
+                "enabled": True, "engine": "docker", "image": "test-image",
+            })
+            with patch.object(
+                agentic_sandbox,
+                "_is_reparse_or_symbolic_link",
+                side_effect=lambda path: path.name == ".git",
+            ):
+                command = sandbox_command(["git", "status"], worktree, settings)
         self.assertNotIn("/agentic-git", " ".join(command))
         self.assertNotIn("/workspace/.git:ro", " ".join(command))
 

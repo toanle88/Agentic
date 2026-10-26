@@ -20,11 +20,14 @@ Agentic uses bounded observation with explicit continuation:
 - Dashboard snapshots read bounded log tails, index each run's numbered files
   once, and use a bounded metadata-keyed cache. Changed artifact metadata
   invalidates the affected snapshot; old run folders remain readable.
-- OpenRouter file reads have a fixed character budget and ranged reads consume
-  fixed-size chunks. `list_files` returns at most 300 files per page, accepts
-  page numbers from 1 through 100, and adds a continuation marker when another
-  page exists. Calls beyond page 100 are rejected before repository traversal.
-  Protected paths remain filtered on every page.
+- OpenRouter file reads have a fixed character budget. Ranged reads consume
+  fixed-size chunks and stop after at most 256,000 scanned characters or
+  50,000 scanned lines, independently of the requested output range. An
+  incomplete distant range receives a scan-limit marker. `list_files` returns
+  at most 300 files per page, accepts page numbers from 1 through 100, and adds
+  a continuation marker when another page exists. Calls beyond page 100 are
+  rejected before repository traversal. Protected paths remain filtered on
+  every page.
 - Configured sandbox image builds use the engine's default network by default
   so dependency installation remains functional. `sandbox.build_network: false`
   explicitly passes `--network=none`. This is independent of runtime
@@ -52,8 +55,9 @@ visible continuation marker, and callers can retrieve subsequent pages through
 page 100 without changing the path or protected-file policy. The page bound
 prevents an untrusted page number from forcing unbounded lazy traversal;
 repositories requiring more than 30,000 readable files in one directory tree
-need a separate bounded listing mechanism. Dashboard and file-read
-limits can omit old content from a single response, so targeted range or tail
-requests remain the compatibility path for detailed inspection. The cache is
-an in-process optimization only; durable run records and Git worktrees remain
-the source of truth.
+need a separate bounded listing mechanism. Dashboard and file-read limits can
+omit old content from a single response, so targeted range or tail requests
+remain the compatibility path for detailed inspection; distant ranges that
+exhaust the scan budget return an explicit marker rather than scanning the
+whole file. The cache is an in-process optimization only; durable run records
+and Git worktrees remain the source of truth.

@@ -24,10 +24,10 @@ except ImportError:  # pragma: no cover - native Windows has no resource module.
     resource = None
 
 try:
-    from agentic_runner import dashboard, dashboard_data, openrouter, worktrees
+    from agentic_runner import dashboard, dashboard_data, openrouter, openrouter_tools, worktrees
 except ModuleNotFoundError:  # Direct source-checkout execution.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-    from agentic_runner import dashboard, dashboard_data, openrouter, worktrees
+    from agentic_runner import dashboard, dashboard_data, openrouter, openrouter_tools, worktrees
 
 
 def percentile(values: list[float], fraction: float) -> float:
@@ -132,6 +132,31 @@ def _sample_openrouter_tools(worktree: Path) -> None:
     )
 
 
+def _sample_openrouter_distant_range(
+    worktree: Path, relative: str,
+) -> tuple[float, dict[str, Any]]:
+    """Measure a provider-free distant range and report bounded scan work."""
+    stats: dict[str, int | bool] = {}
+    started = time.perf_counter()
+    openrouter_tools._bounded_file_text(
+        worktree, relative,
+        start_line=openrouter_tools.OPENROUTER_READ_SCAN_LINES + 100,
+        end_line=openrouter_tools.OPENROUTER_READ_SCAN_LINES + 101,
+        scan_stats=stats,
+    )
+    elapsed = time.perf_counter() - started
+    return elapsed, {
+        "requested_start_line": openrouter_tools.OPENROUTER_READ_SCAN_LINES + 100,
+        "requested_end_line": openrouter_tools.OPENROUTER_READ_SCAN_LINES + 101,
+        "file_bytes": (worktree / relative).stat().st_size,
+        "scanned_chars": stats.get("scanned_chars", 0),
+        "scanned_lines": stats.get("scanned_lines", 0),
+        "scan_limit_chars": openrouter_tools.OPENROUTER_READ_SCAN_CHARS,
+        "scan_limit_lines": openrouter_tools.OPENROUTER_READ_SCAN_LINES,
+        "scan_limited": bool(stats.get("scan_limited", False)),
+    }
+
+
 def _sample_git_operations(repo: Path) -> None:
     worktrees.git(repo, "status", "--short")
     worktrees.git(repo, "diff", "--cached", "--name-only")
@@ -147,9 +172,10 @@ def measure(logs: Path, repetitions: int) -> dict[str, Any]:
         name: {"cold": [], "warm": []}
         for name in (
             "dashboard_collection", "dashboard_rendering",
-            "openrouter_file_tools", "git_operations",
+            "openrouter_file_tools", "openrouter_distant_range", "git_operations",
         )
     }
+    ranged_metrics: dict[str, Any] | None = None
     with tempfile.TemporaryDirectory(prefix="agentic-dashboard-benchmark-") as temp:
         fixture_root = Path(temp)
         tool_root = fixture_root / "openrouter-worktree"
@@ -159,6 +185,12 @@ def measure(logs: Path, repetitions: int) -> dict[str, Any]:
         )
         (tool_root / "nested").mkdir()
         (tool_root / "nested" / "detail.txt").write_text("detail\n", encoding="utf-8")
+        distant_path = tool_root / "distant-lines.txt"
+        distant_path.write_text(
+            "benchmark distant range line\n"
+            * (openrouter_tools.OPENROUTER_READ_SCAN_LINES + 1_000),
+            encoding="utf-8",
+        )
         git_repo = _prepare_git_fixture(fixture_root / "git-worktree")
         for _ in range(repetitions):
             for phase, is_cold in (("cold", True), ("warm", False)):
@@ -187,6 +219,11 @@ def measure(logs: Path, repetitions: int) -> dict[str, Any]:
                     time.perf_counter() - started,
                 )
 
+                ranged_seconds, ranged_metrics = _sample_openrouter_distant_range(
+                    tool_root, "distant-lines.txt",
+                )
+                case_samples["openrouter_distant_range"][phase].append(ranged_seconds)
+
                 if git_repo is not None:
                     started = time.perf_counter()
                     _sample_git_operations(git_repo)
@@ -213,6 +250,7 @@ def measure(logs: Path, repetitions: int) -> dict[str, Any]:
         "cold": _summary(cold),
         "warm": _summary(warm),
         "cases": cases,
+        "adversarial_ranged_read": ranged_metrics,
         "peak_resident_memory_bytes": max(peak_values) if peak_values else None,
         "host": {
             "python": platform.python_version(),

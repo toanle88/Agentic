@@ -1321,6 +1321,45 @@ class OpenRouterTests(unittest.TestCase):
             max(reader.read_sizes), agentic_openrouter_tools.OPENROUTER_READ_CHUNK_CHARS,
         )
 
+    def test_openrouter_distant_ranged_reader_bounds_scan_work(self):
+        class DistantLineReader:
+            def __init__(self):
+                self.remaining = 2_000_000
+                self.read_sizes = []
+                self.total_read = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def read(self, size=-1):
+                self.read_sizes.append(size)
+                if self.remaining <= 0:
+                    return ""
+                count = min(size, self.remaining)
+                self.remaining -= count
+                self.total_read += count
+                return ("distant-line\n" * ((count + 12) // 13))[:count]
+
+        reader = DistantLineReader()
+        stats = {}
+        with patch.object(agentic_openrouter_tools, "_open_regular_text_stream", return_value=reader):
+            bounded = agentic_openrouter_tools._bounded_file_text(
+                Path("synthetic-worktree"), "synthetic-large-file",
+                start_line=100_000, end_line=100_001, scan_stats=stats,
+            )
+        self.assertIn("scan limit reached", bounded)
+        self.assertTrue(stats["scan_limited"])
+        self.assertLessEqual(
+            stats["scanned_chars"], agentic_openrouter_tools.OPENROUTER_READ_SCAN_CHARS,
+        )
+        self.assertLessEqual(
+            stats["scanned_lines"], agentic_openrouter_tools.OPENROUTER_READ_SCAN_LINES,
+        )
+        self.assertEqual(reader.total_read, stats["scanned_chars"])
+
     def test_openrouter_rejects_symlink_escape_and_invalid_paths(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / 'worktree'

@@ -7,6 +7,8 @@ import re
 import subprocess
 from typing import Any
 
+from .file_boundaries import _is_reparse_or_symbolic_link
+
 
 SUPPORTED_ENGINES = ("docker", "podman")
 SUPPORTED_LANGUAGES = ("python", "node", "go", "rust", "java", "dotnet")
@@ -150,7 +152,7 @@ def _git_metadata(root: Path) -> tuple[Path, Path | None] | None:
         # Resolving a symlink here would turn an arbitrary host path into a
         # container mount.  A linked-worktree marker is a regular file and is
         # handled below; directory-style metadata must never be a symlink.
-        if marker.is_symlink():
+        if _is_reparse_or_symbolic_link(marker):
             return None
         if marker.is_dir():
             return marker, None
@@ -251,7 +253,7 @@ def sandbox_command(
         # Otherwise a provider can write refs, hooks, or the index through
         # /workspace/.git despite the separate metadata mount above.
         marker = root / ".git"
-        if not marker.is_symlink() and (marker.is_file() or marker.is_dir()):
+        if not _is_reparse_or_symbolic_link(marker) and (marker.is_file() or marker.is_dir()):
             command.extend(["-v", f"{marker}:/workspace/.git:ro"])
     if output_root is not None:
         output = output_root.resolve()
