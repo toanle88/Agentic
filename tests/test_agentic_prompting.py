@@ -146,7 +146,7 @@ class PromptTests(unittest.TestCase):
             ),
         )
 
-    def test_developer_report_must_cover_each_stable_finding_id(self):
+    def test_developer_report_must_cover_each_finding(self):
         findings = [
             {'id': 'F-2e66776f9f80', 'requirement': 'Continue workflow extraction'},
             {'id': 'F-1', 'requirement': 'Add characterization coverage'},
@@ -157,7 +157,21 @@ class PromptTests(unittest.TestCase):
             'Evidence: added the coverage\n'
         )
         error = agentic.validate_developer_review_actions(report, findings)
-        self.assertIn('F-2e66776f9f80', error)
+        self.assertIn('contains 2 findings', error)
+
+    def test_developer_report_finding_labels_are_not_a_gate(self):
+        report = (
+            'Finding: `reliability-timeout-coverage`\n'
+            'Action: fixed\n'
+            'Evidence: both timeout tests poll beyond the child delay\n'
+        )
+        self.assertEqual(
+            agentic.validate_developer_review_actions(
+                report,
+                [{'id': 'F-b4bad01bb719', 'requirement': 'Timeout coverage'}],
+            ),
+            '',
+        )
 
     def test_review_finding_ids_are_derived_from_normalized_requirements(self):
         findings = normalize_findings([

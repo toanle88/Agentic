@@ -744,7 +744,7 @@ class WorkflowTests(_GitRepositoryTestCase):
         agent_results = [
             (True, 'first'),
             (True, 'second\nReview finding actions:\n'
-                   '- Finding: F-1\n'
+                   '- Finding: reliability-timeout-coverage\n'
                    '  Action: fixed\n'
                    '  Evidence: added regression coverage'),
         ]
