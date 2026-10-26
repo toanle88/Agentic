@@ -127,6 +127,22 @@ def forbidden(filename: str) -> bool:
     )
 
 
+def self_hosted_source(filename: str) -> bool:
+    """Identify Agentic sources allowed during self-repository development."""
+    parts, _ = _protected_path(filename)
+    return (
+        parts == ["agentic.py"]
+        or (len(parts) >= 3 and parts[:2] == [".github", "workflows"])
+    )
+
+
+def provider_forbidden(filename: str, *, allow_self_hosted_sources: bool = False) -> bool:
+    """Apply provider visibility policy, with a narrow self-hosted exception."""
+    return forbidden(filename) and not (
+        allow_self_hosted_sources and self_hosted_source(filename)
+    )
+
+
 def sensitive_read(filename: str) -> bool:
     """Identify files an API-backed agent should not exfiltrate to a model."""
     if not isinstance(filename, str):

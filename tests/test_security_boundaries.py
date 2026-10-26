@@ -33,6 +33,7 @@ from agentic_runner.execution_providers import (
 from agentic_runner import file_boundaries
 from agentic_runner import worktrees as agentic_worktrees
 from agentic_runner.config import PROVIDER_API_KEY_ENV, provider_process_environment
+from agentic_runner.policy import provider_forbidden
 from agentic_runner.sandbox import sandbox_command, validate_sandbox
 from agentic_runner.security import redact_secrets, restricted_test_environment
 from agentic_runner.execution_stream import streamed_command
@@ -657,12 +658,13 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
             "private.pem": "private-key",
             "AGENTS.md": "instructions",
             "agent_config.json": "configuration",
+            "agentic.py": "runner",
             ".git/config": "git-config",
             ".github/workflows/ci.yml": "workflow",
         }
         script = (
             "from pathlib import Path\n"
-            "protected = ['.env', 'private.pem', 'AGENTS.md', 'agent_config.json', "
+            "protected = ['.env', 'private.pem', 'AGENTS.md', 'agent_config.json', 'agentic.py', "
             "'.git/config', '.github/workflows/ci.yml']\n"
             "print('protected=' + str(any(Path(path).exists() for path in protected)))\n"
             "Path('safe.py').write_text('changed\\n')\n"
@@ -687,6 +689,7 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
                         (cwd / "safe.py").write_text("changed\n", encoding="utf-8")
                         (cwd / "new.py").write_text("new\n", encoding="utf-8")
                         self.assertFalse((cwd / "AGENTS.md").exists())
+                        self.assertFalse((cwd / "agentic.py").exists())
                         result_path = Path(argv[argv.index("--output-last-message") + 1])
                         result_path.write_text("codex done", encoding="utf-8")
                         return CompletedProcess(argv, 0, stdout="")
@@ -712,6 +715,44 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
                 self.assertEqual((root / "new.py").read_text(encoding="utf-8"), "new\n")
                 for relative, content in protected.items():
                     self.assertEqual((root / relative).read_text(encoding="utf-8"), content)
+
+    def test_self_hosted_projection_includes_runner_sources_only(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "worktree"
+            projection = Path(temp) / "projection"
+            root.mkdir()
+            (root / "agentic.py").write_text("original runner\n", encoding="utf-8")
+            workflow = root / ".github/workflows/ci.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("original workflow\n", encoding="utf-8")
+            (root / "AGENTS.md").write_text("instructions\n", encoding="utf-8")
+            (root / ".env").write_text("secret\n", encoding="utf-8")
+
+            skip = lambda filename: provider_forbidden(
+                filename, allow_self_hosted_sources=True,
+            )
+            baseline = _stage_worktree(root, projection, skip=skip, read_only=False)
+
+            self.assertTrue((projection / "agentic.py").is_file())
+            self.assertTrue((projection / ".github/workflows/ci.yml").is_file())
+            self.assertNotIn("AGENTS.md", baseline)
+            self.assertNotIn(".env", baseline)
+
+            (projection / "agentic.py").write_text("changed runner\n", encoding="utf-8")
+            (projection / ".github/workflows/ci.yml").write_text(
+                "changed workflow\n", encoding="utf-8",
+            )
+            _sync_provider_worktree(
+                root, projection, baseline, allow_self_hosted_sources=True,
+            )
+
+            self.assertEqual(
+                (root / "agentic.py").read_text(encoding="utf-8"),
+                "changed runner\n",
+            )
+            self.assertEqual(workflow.read_text(encoding="utf-8"), "changed workflow\n")
+            self.assertEqual((root / "AGENTS.md").read_text(encoding="utf-8"), "instructions\n")
+            self.assertEqual((root / ".env").read_text(encoding="utf-8"), "secret\n")
 
     def test_codex_readonly_uses_a_protected_file_free_worktree(self):
         value = "codex-review-secret-123456"
