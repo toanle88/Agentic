@@ -35,7 +35,11 @@ from agentic_runner import worktrees as agentic_worktrees
 from agentic_runner.config import PROVIDER_API_KEY_ENV, provider_process_environment
 from agentic_runner.policy import provider_forbidden
 from agentic_runner.sandbox import sandbox_command, validate_sandbox
-from agentic_runner.security import redact_secrets, restricted_test_environment
+from agentic_runner.security import (
+    configured_environment_values,
+    redact_secrets,
+    restricted_test_environment,
+)
 from agentic_runner.execution_stream import streamed_command
 from agentic_runner.persistence import BoundedAppendWriter, atomic_write_text
 from agentic_runner.worktrees import (
@@ -445,6 +449,15 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
                 redact_secrets("credential=tiny", extra_values=removed),
                 "credential=[REDACTED]",
             )
+
+    def test_configured_environment_values_include_short_nonsemantic_credentials(self):
+        self.assertEqual(
+            configured_environment_values(
+                {"SERVICE_VALUE": "tiny", "EMPTY_VALUE": "", "OTHER": "ordinary"},
+                ["SERVICE_VALUE", "EMPTY_VALUE"],
+            ),
+            ["tiny"],
+        )
 
     def test_provider_specific_credentials_are_redacted_in_adversarial_forms(self):
         credentials = {

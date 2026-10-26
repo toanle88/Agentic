@@ -146,6 +146,18 @@ class ApplicationDiagnosticsTests(unittest.TestCase):
         self.assertTrue(path.with_name("agentic.log.1").exists())
         self.assertFalse(path.with_name("agentic.log.3").exists())
 
+    def test_diagnostic_redacts_short_configured_credentials(self):
+        config = self.repo / "agent_config.json"
+        config.write_text(json.dumps({
+            "developer_agent": {"api_key_env": "SERVICE_VALUE"},
+        }), encoding="utf-8")
+        with patch.dict(os.environ, {"SERVICE_VALUE": "tiny"}, clear=True):
+            app_diagnostics.record_diagnostic(
+                "handled_error", exc=RuntimeError("token=tiny"),
+                argv=["--config", str(config)], repo=self.repo, state_dir=self.state,
+            )
+        self.assertNotIn("tiny", app_diagnostics.diagnostic_path(self.repo, self.state).read_text())
+
 
 if __name__ == "__main__":
     unittest.main()

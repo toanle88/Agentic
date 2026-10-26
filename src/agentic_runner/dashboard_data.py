@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import contextvars
 import datetime as dt
+import hashlib
 import heapq
 import io
 import json
@@ -17,13 +18,14 @@ if os.name == "nt":
     import ctypes
     from ctypes import wintypes
 import re
+import stat
 import threading
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable, NamedTuple
 
 from .review import finding_severity
-from .persistence import read_text_bounded
+from .persistence import read_text_bounded, read_text_prefix, read_text_tail
 from .telemetry import read_issue_history, read_run_usage
 
 
@@ -40,6 +42,8 @@ MAX_FILES_PER_RUN = 24
 MAX_DASHBOARD_RUNS = 500
 MAX_DASHBOARD_CANDIDATE_FOLDERS = 2_000
 MAX_DASHBOARD_ENTRIES_PER_RUN = 4_096
+_INVENTORY_DIGEST_BITS = 256
+_INVENTORY_DIGEST_MASK = (1 << _INVENTORY_DIGEST_BITS) - 1
 DASHBOARD_EXCLUDED_FILES = frozenset(
     {"review-schema.json", "investigation-schema.json", "issue-snapshot.json"}
 )
@@ -366,14 +370,15 @@ def _numbered_files(folder: Path, prefixes: Iterable[str]) -> list[Path]:
     if not folder.is_dir():
         return []
     for path in folder.iterdir():
-        if not path.is_file():
+        metadata = _regular_artifact_stat(path)
+        if metadata is None:
             continue
         match = NUMBERED_FILE.fullmatch(path.name)
         if not match or match.group("prefix") not in wanted:
             continue
         try:
-            modified = path.stat().st_mtime
-        except OSError:
+            modified = metadata.st_mtime
+        except (AttributeError, OSError):
             modified = 0
         files.append((int(match.group("number")), modified, path))
     return [
@@ -390,9 +395,12 @@ def _numbered_file_index(paths: Iterable[Path]) -> dict[str, list[Path]]:
         match = NUMBERED_FILE.fullmatch(path.name)
         if not match:
             continue
+        metadata = _regular_artifact_stat(path)
+        if metadata is None:
+            continue
         try:
-            modified = path.stat().st_mtime
-        except OSError:
+            modified = metadata.st_mtime
+        except (AttributeError, OSError):
             modified = 0
         indexed[match.group("prefix")].append((int(match.group("number")), modified, path))
     return {
@@ -405,32 +413,48 @@ def _indexed_files(index: dict[str, list[Path]] | None, folder: Path,
                    prefixes: Iterable[str]) -> list[Path]:
     if index is None:
         return _numbered_files(folder, prefixes)
-    paths: list[Path] = []
+    paths: list[tuple[Path, os.stat_result]] = []
     for prefix in prefixes:
-        paths.extend(index.get(prefix, []))
-    return sorted(paths, key=lambda path: (path.stat().st_mtime, path.name))
+        for path in index.get(prefix, []):
+            metadata = _regular_artifact_stat(path)
+            if metadata is not None:
+                paths.append((path, metadata))
+    paths.sort(key=lambda item: (item[1].st_mtime, item[0].name))
+    return [path for path, _ in paths]
 
 
 def _latest(paths: Iterable[Path]) -> Path | None:
-    candidates = list(paths)
+    candidates: list[tuple[Path, os.stat_result]] = []
+    for path in paths:
+        metadata = _regular_artifact_stat(path)
+        if metadata is not None:
+            candidates.append((path, metadata))
     if not candidates:
         return None
-    return max(candidates, key=lambda path: (path.stat().st_mtime, path.name))
+    return max(candidates, key=lambda item: (item[1].st_mtime, item[0].name))[0]
+
+
+def _regular_artifact_stat(path: Path) -> os.stat_result | None:
+    """Return metadata only for a single-link regular artifact."""
+    try:
+        metadata = path.stat(follow_symlinks=False)
+    except OSError:
+        return None
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        return None
+    return metadata
 
 
 def _read(path: Path, limit: int = MAX_TEXT) -> str:
     """Read only a bounded tail from a potentially large durable artifact."""
-    try:
-        size = path.stat().st_size
-        with path.open("rb") as stream:
-            # UTF-8 characters are at most four bytes. The small multiplier
-            # lets us retain ``limit`` characters without reading the whole
-            # file, while still keeping memory bounded for hostile logs.
-            start = max(0, size - max(limit * 4, 4096))
-            stream.seek(start)
-            text = stream.read().decode("utf-8", errors="replace")
-    except OSError as exc:
-        return f"Could not read {path.name}: {exc}"
+    metadata = _regular_artifact_stat(path)
+    if metadata is None:
+        return f"Could not read {path.name}: artifact is not a regular file"
+    size = metadata.st_size
+    # UTF-8 characters are at most four bytes. The small multiplier lets us
+    # retain ``limit`` characters without reading the whole file.
+    start = max(0, size - max(limit * 4, 4096))
+    text = read_text_tail(path, max(limit * 4, 4096))
     truncated = start > 0
     if len(text) > limit:
         truncated = True
@@ -441,9 +465,12 @@ def _read(path: Path, limit: int = MAX_TEXT) -> str:
 
 
 def _timestamp(path: Path) -> str:
+    metadata = _regular_artifact_stat(path)
+    if metadata is None:
+        return "unknown"
     try:
-        return dt.datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(timespec="seconds")
-    except OSError:
+        return dt.datetime.fromtimestamp(metadata.st_mtime).astimezone().isoformat(timespec="seconds")
+    except (OSError, ValueError):
         return "unknown"
 
 
@@ -486,12 +513,7 @@ def _bounded_review_history(path: Path) -> list[Any]:
     only; recurring findings are useful evidence, but are never approval
     state.
     """
-    try:
-        with path.open("rb") as stream:
-            payload = stream.read(MAX_REVIEW_HISTORY_BYTES + 1)
-    except OSError:
-        return []
-    text = payload[:MAX_REVIEW_HISTORY_BYTES].decode("utf-8", errors="replace")
+    text = read_text_prefix(path, MAX_REVIEW_HISTORY_BYTES)
     decoder = json.JSONDecoder()
     index = 0
     while index < len(text) and text[index].isspace():
@@ -691,7 +713,7 @@ def _investigation(folder: Path, index: dict[str, list[Path]] | None = None) -> 
 
 def _audit(folder: Path) -> tuple[dict[str, Any], Path | None]:
     path = folder / "audit-report.json"
-    if not path.is_file():
+    if _regular_artifact_stat(path) is None:
         return {"state": "not-run", "summary": "No repository audit recorded.", "findings": [], "measurements": [], "skipped": []}, None
     raw = _parse_json_object(_read(path, 100_000))
     if raw is None or not isinstance(raw.get("summary"), str) or not isinstance(raw.get("findings"), list):
@@ -809,6 +831,10 @@ def _folder_metadata(folder: Path) -> _FolderMetadata:
         return _FolderMetadata(None, (), ())
     files: list[tuple[int, str, Path]] = []
     signature: list[tuple[int, str, int, int | str]] = []
+    # Keep the inventory digest independent of scandir order without retaining
+    # one metadata tuple per artifact.
+    inventory_sum = 0
+    inventory_xor = 0
     regular_count = 0
     truncated = False
     try:
@@ -833,6 +859,16 @@ def _folder_metadata(folder: Path) -> _FolderMetadata:
                 signature_candidate = (
                     stat.st_mtime_ns, entry.name, stat.st_size, signature_change_time,
                 )
+                inventory_item = (
+                    f"{entry.name}\0{stat.st_size}\0{stat.st_mtime_ns}\0"
+                    f"{signature_change_time}\n"
+                ).encode("utf-8", errors="surrogateescape")
+                inventory_value = int.from_bytes(
+                    hashlib.blake2b(inventory_item, digest_size=_INVENTORY_DIGEST_BITS // 8).digest(),
+                    "big",
+                )
+                inventory_sum = (inventory_sum + inventory_value) & _INVENTORY_DIGEST_MASK
+                inventory_xor ^= inventory_value
                 if len(signature) < MAX_FILES_PER_RUN:
                     heapq.heappush(signature, signature_candidate)
                 elif signature_candidate > signature[0]:
@@ -853,9 +889,14 @@ def _folder_metadata(folder: Path) -> _FolderMetadata:
         for modified, name, size, change_time in sorted(signature, reverse=True)
     ]
     if regular_count > MAX_FILES_PER_RUN or truncated:
+        inventory_digest = hashlib.sha256()
+        inventory_digest.update(regular_count.to_bytes(8, "big"))
+        inventory_digest.update(inventory_sum.to_bytes(_INVENTORY_DIGEST_BITS // 8, "big"))
+        inventory_digest.update(inventory_xor.to_bytes(_INVENTORY_DIGEST_BITS // 8, "big"))
         bounded_signature.append((
-            "__agentic_truncated__", regular_count, 0,
-            "scan-truncated" if truncated else "truncated",
+            "__agentic_inventory__", regular_count, 0,
+            inventory_digest.hexdigest()
+            + (":scan-truncated" if truncated else ""),
         ))
     bounded_files = tuple(
         path for _, _, path in sorted(files, key=lambda item: (item[0], item[1]), reverse=True)

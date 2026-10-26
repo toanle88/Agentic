@@ -100,6 +100,13 @@ class DiscoveryResult:
     agent_status: str | None = None
 
 
+@dataclass(frozen=True)
+class _RepositoryMetadata:
+    package_scripts: dict[str, Any]
+    package_manager: tuple[str, str]
+    make_targets: tuple[str, ...]
+
+
 def _command_key(argv: list[str]) -> tuple[str, ...]:
     return tuple(argv)
 
@@ -142,18 +149,15 @@ def _package_manager(repo: Path) -> tuple[str, str]:
     return "npm", "npm package metadata"
 
 
-def _package_candidates(repo: Path, candidates: list[dict[str, Any]], seen: set[tuple[str, ...]]) -> None:
-    package_path = repo / "package.json"
-    if not package_path.is_file():
-        return
-    try:
-        package = json.loads(package_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return
-    scripts = package.get("scripts") if isinstance(package, dict) else None
+def _package_candidates(
+    repo: Path, candidates: list[dict[str, Any]], seen: set[tuple[str, ...]],
+    metadata: _RepositoryMetadata | None = None,
+) -> None:
+    metadata = metadata or _repository_metadata(repo)
+    scripts = metadata.package_scripts
     if not isinstance(scripts, dict):
         return
-    manager, manager_reason = _package_manager(repo)
+    manager, manager_reason = metadata.package_manager
     preferred = ("test", "lint", "typecheck", "type-check", "check", "verify", "build")
     selected = [name for name in preferred if name in scripts]
     # Include a small number of project-specific quality scripts when their
@@ -170,18 +174,11 @@ def _package_candidates(repo: Path, candidates: list[dict[str, Any]], seen: set[
         )
 
 
-def _make_candidates(repo: Path, candidates: list[dict[str, Any]], seen: set[tuple[str, ...]]) -> None:
-    makefile = next((repo / name for name in ("Makefile", "makefile", "GNUmakefile") if (repo / name).is_file()), None)
-    if makefile is None:
-        return
-    try:
-        content = makefile.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return
-    targets = {
-        match.group(1)
-        for match in re.finditer(r"(?m)^([A-Za-z][A-Za-z0-9_.-]*)\s*:", content)
-    }
+def _make_candidates(
+    repo: Path, candidates: list[dict[str, Any]], seen: set[tuple[str, ...]],
+    metadata: _RepositoryMetadata | None = None,
+) -> None:
+    targets = set((metadata or _repository_metadata(repo)).make_targets)
     preferred = ("check", "test", "lint", "typecheck", "verify", "build")
     selected = [target for target in preferred if target in targets]
     selected.extend(target for target in sorted(targets) if target not in selected and any(
@@ -209,8 +206,43 @@ def _safe_local_wrapper(repo: Path, filename: str) -> bool:
     return True
 
 
-def discover_test_candidates(repo: Path) -> list[dict[str, Any]]:
+def _repository_metadata(repo: Path) -> _RepositoryMetadata:
+    package: dict[str, Any] = {}
+    package_path = repo / "package.json"
+    if package_path.is_file():
+        try:
+            value = json.loads(package_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            value = {}
+        if isinstance(value, dict):
+            package = value
+    makefile = next(
+        (repo / name for name in ("Makefile", "makefile", "GNUmakefile") if (repo / name).is_file()),
+        None,
+    )
+    content = ""
+    if makefile is not None:
+        try:
+            content = makefile.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            pass
+    targets = tuple(sorted({
+        match.group(1)
+        for match in re.finditer(r"(?m)^([A-Za-z][A-Za-z0-9_.-]*)\s*:", content)
+    }))
+    scripts = package.get("scripts")
+    return _RepositoryMetadata(
+        package_scripts=scripts if isinstance(scripts, dict) else {},
+        package_manager=_package_manager(repo),
+        make_targets=targets,
+    )
+
+
+def discover_test_candidates(
+    repo: Path, *, metadata: _RepositoryMetadata | None = None,
+) -> list[dict[str, Any]]:
     """Inspect common metadata and return safe command arrays, without running them."""
+    metadata = metadata or _repository_metadata(repo)
     candidates: list[dict[str, Any]] = []
     seen: set[tuple[str, ...]] = set()
     if (repo / "go.mod").is_file():
@@ -236,8 +268,8 @@ def discover_test_candidates(repo: Path) -> list[dict[str, Any]]:
         if (repo / "tests").is_dir() or (repo / "test").is_dir():
             _add_candidate(candidates, seen, _candidate(["python", "-m", "pytest"], "Python test directory; pytest is a common project check"))
             _add_candidate(candidates, seen, _candidate(["python", "-m", "unittest", "discover", "-s", "tests", "-q"], "Python tests directory; stdlib unittest"))
-    _package_candidates(repo, candidates, seen)
-    _make_candidates(repo, candidates, seen)
+    _package_candidates(repo, candidates, seen, metadata)
+    _make_candidates(repo, candidates, seen, metadata)
     _add_candidate(candidates, seen, _candidate(list(SAFE_GIT_DIFF_CHECK), "Git whitespace validation"))
     return candidates
 
@@ -255,7 +287,11 @@ def _safe_metadata_name(value: Any) -> bool:
     )
 
 
-def _metadata_command_inventory(repo: Path) -> list[dict[str, Any]]:
+def _metadata_command_inventory(
+    repo: Path,
+    candidates: list[dict[str, Any]] | None = None,
+    metadata: _RepositoryMetadata | None = None,
+) -> list[dict[str, Any]]:
     """Return bounded provenance for all safe metadata-defined commands.
 
     Deterministic discovery intentionally selects only likely checks.  The
@@ -263,17 +299,15 @@ def _metadata_command_inventory(repo: Path) -> list[dict[str, Any]]:
     project-specific quality task without granting it authority to invent a
     package script or build target.
     """
-    inventory = discover_test_candidates(repo)
+    metadata = metadata or _repository_metadata(repo)
+    inventory = list(candidates) if candidates is not None else discover_test_candidates(
+        repo, metadata=metadata,
+    )
     seen = {_command_key(item["argv"]) for item in inventory}
 
-    package_path = repo / "package.json"
-    try:
-        package = json.loads(package_path.read_text(encoding="utf-8")) if package_path.is_file() else {}
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        package = {}
-    scripts = package.get("scripts") if isinstance(package, dict) else None
+    scripts = metadata.package_scripts
     if isinstance(scripts, dict):
-        manager, manager_reason = _package_manager(repo)
+        manager, manager_reason = metadata.package_manager
         for name in sorted(scripts):
             if not _safe_metadata_name(name):
                 continue
@@ -282,22 +316,12 @@ def _metadata_command_inventory(repo: Path) -> list[dict[str, Any]]:
                 _candidate([manager, "run", name], f"package.json {name!r} script ({manager_reason})"),
             )
 
-    makefile = next((repo / name for name in ("Makefile", "makefile", "GNUmakefile") if (repo / name).is_file()), None)
-    if makefile is not None:
-        try:
-            content = makefile.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            content = ""
-        targets = sorted({
-            match.group(1)
-            for match in re.finditer(r"(?m)^([A-Za-z][A-Za-z0-9_.-]*)\s*:", content)
-        })
-        for target in targets:
-            if not _safe_metadata_name(target):
-                continue
-            _add_inventory_candidate(
-                inventory, seen, _candidate(["make", target], f"Makefile {target!r} target"),
-            )
+    for target in metadata.make_targets:
+        if not _safe_metadata_name(target):
+            continue
+        _add_inventory_candidate(
+            inventory, seen, _candidate(["make", target], f"Makefile {target!r} target"),
+        )
     return inventory
 
 
@@ -702,8 +726,9 @@ def discover_and_validate(
     credential_names: list[str] | None = None,
 ) -> DiscoveryResult:
     """Discover deterministic checks, optionally ask a read-only agent, then validate."""
-    deterministic = discover_test_candidates(repo)
-    metadata_inventory = _metadata_command_inventory(repo)
+    metadata = _repository_metadata(repo)
+    deterministic = discover_test_candidates(repo, metadata=metadata)
+    metadata_inventory = _metadata_command_inventory(repo, deterministic, metadata)
     assisted, agent_status = _agent_candidates(
         repo, deterministic, metadata_inventory, agent_runner=agent_runner, agent_settings=agent_settings,
         output=output, timeout=timeout, sandbox=sandbox,

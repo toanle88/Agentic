@@ -37,6 +37,13 @@ class CIRepairTests(unittest.TestCase):
             "head", "owner/repo", "https://github.test/pull/123",
         )
 
+    def test_ci_repair_redaction_values_include_short_configured_credentials(self):
+        with patch.dict("os.environ", {"SERVICE_VALUE": "tiny"}, clear=True):
+            values = agentic_cli._ci_repair_secret_values({
+                "developer_agent": {"api_key_env": "SERVICE_VALUE"},
+            })
+        self.assertEqual(values, ("tiny",))
+
     def test_repair_ci_excludes_stale_review_findings_from_developer_prompt(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

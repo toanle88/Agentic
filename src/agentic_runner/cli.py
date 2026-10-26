@@ -124,7 +124,7 @@ from .review import (  # noqa: F401
     record_review_findings, review_history_feedback,
 )
 from .sandbox import DEFAULT_SANDBOX_IMAGE, SUPPORTED_LANGUAGES, validate_sandbox
-from .security import redact_secrets  # noqa: F401
+from .security import configured_environment_values, redact_secrets  # noqa: F401
 from .shell_jobs import process_identity
 from .telemetry import (
     describe_issue_change,
@@ -648,7 +648,7 @@ def _ci_repair_secret_values(config: dict[str, Any]) -> tuple[str, ...]:
     sandbox = config.get("sandbox")
     if isinstance(sandbox, dict):
         names.update(name for name in sandbox.get("pass_env", ()) if isinstance(name, str))
-    return tuple(value for name in names if (value := os.environ.get(name)) and len(value) >= 8)
+    return tuple(configured_environment_values(os.environ, names))
 
 
 def repair_ci(
