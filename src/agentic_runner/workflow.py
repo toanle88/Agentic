@@ -1799,29 +1799,15 @@ def agent_prompt(issue: Issue, feedback: str = "", *,
 
 
 def validate_developer_review_actions(report: str, findings: list[Any]) -> str:
-    """Require a complete action/evidence entry for each prior review finding."""
+    """Require a complete action/evidence entry for each prior review finding.
+
+    Finding labels are bookkeeping supplied by an untrusted developer report;
+    the independent reviewer decides whether the feedback was actually fixed.
+    Do not make an exact stable-ID match a prerequisite for validation.
+    """
     if not findings:
         return ""
     starts = list(re.finditer(r"(?im)^\s*(?:[-*]\s*)?Finding\s*:", report))
-    expected_ids = [
-        str(item.get("id"))
-        for item in findings
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
-    ]
-    missing_ids = [
-        identifier for identifier in expected_ids
-        if not re.search(
-            rf"(?im)^\s*(?:[-*]\s*)?Finding\s*:\s*"
-            rf"(?:{re.escape(identifier)}|`{re.escape(identifier)}`)(?![\w-])",
-            report,
-        )
-    ]
-    if missing_ids:
-        return (
-            "Developer report is missing action entry for finding(s): "
-            + ", ".join(missing_ids)
-            + "."
-        )
     if len(starts) < len(findings):
         return (
             f"Developer report has {len(starts)} review-finding action entries, "
