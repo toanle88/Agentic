@@ -184,6 +184,19 @@ class TestDiscovery(unittest.TestCase):
         self.assertFalse(timed_out)
         probe.assert_called_once()
 
+    def test_versioned_python_executable_runs_module_probe(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            with patch("agentic_runner.test_discovery.subprocess.run") as probe:
+                probe.return_value.returncode = 1
+                available, timed_out = _python_module_available(
+                    ["python3.14", "-m", "pytest"], repo, 1,
+                )
+
+        self.assertFalse(available)
+        self.assertFalse(timed_out)
+        probe.assert_called_once()
+
     def test_python_module_probe_and_command_share_one_candidate_deadline(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = Path(temp)

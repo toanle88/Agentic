@@ -490,7 +490,10 @@ def _python_module_available(
     executable_name = Path(argv[0]).name.lower()
     if executable_name.endswith(".exe"):
         executable_name = executable_name[:-4]
-    if len(argv) < 3 or argv[1] != "-m" or executable_name not in {"python", "python3", "py"}:
+    is_python_executable = executable_name == "py" or re.fullmatch(
+        r"python(?:3(?:\.\d+)?)?", executable_name
+    ) is not None
+    if len(argv) < 3 or argv[1] != "-m" or not is_python_executable:
         return True, False
     if timeout <= 0:
         return False, True
