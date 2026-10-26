@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from subprocess import CompletedProcess
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
@@ -27,7 +28,7 @@ from agentic_runner import file_boundaries
 from agentic_runner import worktrees as agentic_worktrees
 from agentic_runner.config import PROVIDER_API_KEY_ENV, provider_process_environment
 from agentic_runner.sandbox import sandbox_command, validate_sandbox
-from agentic_runner.security import redact_secrets
+from agentic_runner.security import redact_secrets, restricted_test_environment
 from agentic_runner.execution_stream import streamed_command
 from agentic_runner.persistence import BoundedAppendWriter, atomic_write_text
 from agentic_runner.worktrees import (
@@ -426,6 +427,18 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
         self.assertNotIn(value, redacted)
         self.assertGreaterEqual(redacted.count("[REDACTED]"), 3)
 
+    def test_explicit_short_credentials_are_redacted(self):
+        with patch.dict("os.environ", {"SERVICE_VALUE": "tiny"}, clear=True):
+            safe, removed = restricted_test_environment(
+                blocked_names=["SERVICE_VALUE"],
+            )
+            self.assertNotIn("SERVICE_VALUE", safe)
+            self.assertEqual(removed, ["tiny"])
+            self.assertEqual(
+                redact_secrets("credential=tiny", extra_values=removed),
+                "credential=[REDACTED]",
+            )
+
     def test_provider_specific_credentials_are_redacted_in_adversarial_forms(self):
         credentials = {
             "OPENAI_API_KEY": "sk-proj-synthetic-openai-123456",
@@ -672,6 +685,35 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(RuntimeError, 'complete read-only worktree'):
                     _stage_readonly_worktree(root, Path(temp) / 'review-worktree')
+
+    def test_provider_staging_rejects_oversized_single_file_before_copy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "worktree"
+            root.mkdir()
+            (root / "public.py").write_text("12345", encoding="utf-8")
+            destination = Path(temp) / "review-worktree"
+            with patch(
+                "agentic_runner.execution_providers.MAX_PROVIDER_STAGE_BYTES", 4,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "complete read-only worktree"):
+                    _stage_readonly_worktree(root, destination)
+            self.assertFalse(destination.exists())
+
+    def test_provider_staging_counts_bytes_written_after_metadata_validation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "worktree"
+            root.mkdir()
+            (root / "public.py").write_text("12345", encoding="utf-8")
+            destination = Path(temp) / "review-worktree"
+            with patch(
+                "agentic_runner.execution_providers.MAX_PROVIDER_STAGE_BYTES", 4,
+            ), patch(
+                "agentic_runner.execution_providers.revalidate_single_link_regular",
+                return_value=SimpleNamespace(st_size=1),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "complete read-only worktree"):
+                    _stage_readonly_worktree(root, destination)
+            self.assertFalse(destination.exists())
 
     def test_streamed_command_opens_logs_before_starting_process(self):
         with tempfile.TemporaryDirectory() as temp:

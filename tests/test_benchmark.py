@@ -1,6 +1,10 @@
+import io
 import json
+import os
+import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -16,14 +20,156 @@ from scripts.agent_benchmark import (
 )
 from scripts.agent_benchmark_config import load_benchmark as load_benchmark_config
 from scripts.agent_benchmark_scenarios import (
-    MAX_RESULT_BYTES, _read_result, _run_checks, _scenario_record, run_scenario,
+    MAX_RESULT_BYTES, _read_result, _run_bounded_git_command, _run_checks,
+    _run_git, _scenario_record, run_scenario,
 )
+from scripts.agent_benchmark_scenarios import _benchmark_environment
 from scripts.benchmark import run_case
 from scripts.benchmark_execution import process_group_kwargs
 from scripts.dashboard_benchmark import generate_corpus, measure, percentile
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_benchmark_git_output_is_bounded_before_materialization(self):
+        class FakeProcess:
+            def __init__(self):
+                self.stdout = io.BytesIO(b"too much")
+                self.killed = False
+
+            def kill(self):
+                self.killed = True
+
+            def wait(self, **_kwargs):
+                return 0
+
+        process = FakeProcess()
+        with patch(
+            "scripts.agent_benchmark_scenarios.subprocess.Popen",
+            return_value=process,
+        ), patch(
+            "scripts.agent_benchmark_scenarios.MAX_GIT_OUTPUT_BYTES", 4,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "safety limit"):
+                _run_bounded_git_command(Path.cwd(), {}, ["config"])
+        self.assertTrue(process.killed)
+
+    def test_benchmark_git_timeout_does_not_wait_for_a_stuck_output_reader(self):
+        release_reader = threading.Event()
+
+        class BlockingStream:
+            def read(self, _size):
+                release_reader.wait(timeout=2)
+                return b""
+
+            def close(self):
+                release_reader.set()
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdout = BlockingStream()
+                self.killed = False
+
+            def kill(self):
+                self.killed = True
+
+            def wait(self, timeout=None):
+                if timeout is not None:
+                    raise subprocess.TimeoutExpired(["git"], timeout)
+                return -9
+
+        process = FakeProcess()
+        with patch(
+            "scripts.agent_benchmark_scenarios.subprocess.Popen",
+            return_value=process,
+        ), patch(
+            "scripts.agent_benchmark_scenarios.GIT_COMMAND_TIMEOUT_SECONDS", 0.01,
+        ):
+            started = time.monotonic()
+            with self.assertRaisesRegex(RuntimeError, "Timed out"):
+                _run_bounded_git_command(Path.cwd(), {}, ["status"])
+        self.assertTrue(process.killed)
+        self.assertLess(time.monotonic() - started, 1)
+
+    def test_benchmark_environment_requires_explicit_credential_passthrough(self):
+        secret = "benchmark-short"
+        with patch.dict(
+            os.environ,
+            {"PATH": os.environ.get("PATH", ""), "UNRELATED_TOKEN": secret},
+            clear=True,
+        ):
+            safe = _benchmark_environment({"AGENTIC_BENCHMARK_REPO": "/tmp/repo"})
+            self.assertNotIn("UNRELATED_TOKEN", safe)
+            with patch.dict(os.environ, {"AGENTIC_BENCHMARK_PASSTHROUGH_ENV": "UNRELATED_TOKEN"}):
+                self.assertEqual(_benchmark_environment({})["UNRELATED_TOKEN"], secret)
+
+    def test_benchmark_git_uses_restricted_environment(self):
+        captured = []
+
+        def fake_git_command(repo, environment, args):
+            captured.append(environment)
+            return (1, "") if args[0] == "config" else (0, "")
+
+        with tempfile.TemporaryDirectory() as temp, patch.dict(
+            os.environ,
+            {
+                "PATH": os.environ.get("PATH", ""),
+                "UNRELATED_TOKEN": "benchmark-secret",
+            },
+            clear=True,
+        ), patch(
+            "scripts.agent_benchmark_scenarios._run_bounded_git_command",
+            side_effect=fake_git_command,
+        ):
+            repo = Path(temp)
+            (repo / ".git").mkdir()
+            _run_git(repo, "status")
+
+        self.assertEqual(len(captured), 2)
+        self.assertNotIn("UNRELATED_TOKEN", captured[0])
+        self.assertEqual(captured[0]["GIT_CONFIG_GLOBAL"], os.devnull)
+
+    def test_benchmark_git_does_not_read_global_filter_configuration(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            global_config = root / "global.gitconfig"
+            marker = root / "filter-ran"
+            filter_script = root / "filter.py"
+            filter_script.write_text(
+                "from pathlib import Path\n"
+                "import sys\n"
+                f"Path({str(marker)!r}).write_text('ran')\n"
+                "sys.stdout.buffer.write(sys.stdin.buffer.read())\n",
+                encoding="utf-8",
+            )
+            clean_environment = os.environ.copy()
+            clean_environment.update({
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+            })
+            subprocess.run(
+                ["git", "init", "--initial-branch", "main"], cwd=repo,
+                env=clean_environment, check=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            subprocess.run(
+                [
+                    "git", "config", "--file", str(global_config),
+                    "filter.malicious.clean", f"{sys.executable} {filter_script}",
+                ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            (repo / ".gitattributes").write_text(
+                "payload.txt filter=malicious\n", encoding="utf-8",
+            )
+            (repo / "payload.txt").write_text("safe\n", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {"GIT_CONFIG_GLOBAL": str(global_config)}, clear=False,
+            ):
+                _run_git(repo, "add", "-A")
+            self.assertFalse(marker.exists())
+
     def test_scenario_result_read_is_bounded_and_preserves_normal_objects(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "result.json"

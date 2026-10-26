@@ -137,6 +137,16 @@ Scenario result files are read through a single descriptor and are limited to
 256,000 bytes. Missing, malformed, non-object, or oversized results become a
 bounded `runner-error` record.
 
+Scenario and configured-check processes receive a minimal environment containing
+path, temporary-directory, locale, and platform runtime variables plus the
+`AGENTIC_BENCHMARK_*` contract variables. The parent environment is not copied.
+To opt in to a provider credential or other required variable, set
+`AGENTIC_BENCHMARK_PASSTHROUGH_ENV` to a comma-separated allowlist, for example
+`OPENAI_API_KEY` or `OPENAI_API_KEY,GH_TOKEN`. Values not named in this
+allowlist are unavailable to both the scenario adapter and its checks. Keep the
+allowlist limited to the selected provider; explicit short credential values
+are also redacted from runner output and durable artifacts.
+
 Validate a corpus without running providers:
 
 ```bash
