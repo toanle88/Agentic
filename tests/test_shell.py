@@ -2064,6 +2064,83 @@ class ShellTests(unittest.TestCase):
             ''.join(state.history),
         )
 
+    def test_foreground_repair_persists_raw_stream_and_replays_concisely(self):
+        from contextlib import redirect_stdout
+
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        raw_output = (
+            '[DEVELOPER] Started (PID 123); progress log: /tmp/provider.log\n'
+            '[DEVELOPER] Running command: python tests.py\n'
+            '[DEVELOPER] Modified files: a.py\n'
+            '[DEVELOPER] Modified files: b.py\n'
+            '[DEVELOPER] ERROR: provider failed\n'
+            '[CI-REPAIR] Failure classified as infrastructure; attempt code repair '
+            'for PR #233? [y/N]: '
+        )
+
+        class Process:
+            pid = 123
+
+            def __init__(self):
+                self.stdout = StringIO(raw_output)
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self):
+                self.returncode = 1
+                return self.returncode
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), session_dir=root / 'logs'
+            )
+            state = agentic_shell_input._InteractiveOutputState()
+            previous = agentic_shell_input._activate_interactive_output(state)
+            process = Process()
+            output = TTYBuffer()
+            try:
+                with (patch('agentic_shell._is_interactive_terminal', return_value=True),
+                      patch('agentic_shell.subprocess.Popen', return_value=process),
+                      patch('agentic_shell.shutil.get_terminal_size',
+                            return_value=os.terminal_size((80, 8))),
+                      patch('agentic_shell_input.shutil.get_terminal_size',
+                            return_value=os.terminal_size((80, 8))),
+                      patch('sys.stdout', output)):
+                    with self.assertRaisesRegex(RuntimeError, 'exit 1'):
+                        shell._run_foreground(['--repair-ci'])
+            finally:
+                agentic_shell_input._restore_interactive_output(previous)
+
+            job = shell.jobs[1]
+            self.assertEqual(job.log_path.read_text(encoding='utf-8'), raw_output)
+            foreground_history = ''.join(state.history)
+            self.assertNotIn('Started (PID 123)', foreground_history)
+            self.assertNotIn('Modified files: a.py', foreground_history)
+            self.assertIn('Modified files: 2 files changed', foreground_history)
+            self.assertIn('ERROR: provider failed', foreground_history)
+            self.assertIn('attempt code repair for PR #233? [y/N]: ', foreground_history)
+
+            concise = StringIO()
+            with redirect_stdout(concise):
+                shell.show_logs(['/logs', str(job.number)])
+            concise_replay = concise.getvalue()
+            self.assertNotIn('Started (PID 123)', concise_replay)
+            self.assertNotIn('Modified files: a.py', concise_replay)
+            self.assertIn('Modified files: 2 files changed', concise_replay)
+            self.assertIn('ERROR: provider failed', concise_replay)
+            self.assertIn('attempt code repair for PR #233? [y/N]: ', concise_replay)
+
+            verbose = StringIO()
+            with redirect_stdout(verbose):
+                shell.show_logs(['/logs', str(job.number), '--verbose'])
+            self.assertIn(raw_output, verbose.getvalue())
+
     def test_foreground_publish_waiting_prompts_are_editable(self):
         prompts = (
             "[PUBLISH] Waiting for worktree selection. Enter a number or 'q' to cancel: ",
