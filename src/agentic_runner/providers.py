@@ -23,6 +23,13 @@ _NETWORK_TOOL_NAMES = (
 )
 _READONLY_GIT_SUBCOMMANDS = ("status", "diff", "log", "show")
 _MUTATING_GIT_SUBCOMMANDS = ("commit", "push", "reset", "clean", "checkout", "switch", "worktree")
+_NATIVE_PATTERN_METACHARS = frozenset("()[]{}*?$`\\\r\n")
+
+
+def _validate_native_pattern_text(value: str, *, field: str) -> None:
+    """Reject values that could alter native provider permission patterns."""
+    if any(character in value for character in _NATIVE_PATTERN_METACHARS):
+        raise ValueError(f"{field} contains unsupported native permission-pattern characters")
 
 
 def _readonly_git_unsafe_patterns(prefix: str) -> list[str]:
@@ -55,7 +62,9 @@ def _provider_worktree_scope(worktree: Path | None, *, sandbox_enabled: bool) ->
     # Native provider rules use slash-separated path patterns even when the
     # host is Windows. Preserve a rooted POSIX-looking test path such as
     # ``/tmp/worktree`` instead of resolving it to the current drive.
-    return PurePosixPath(str(worktree or Path.cwd()).replace("\\", "/"))
+    rendered = str(worktree or Path.cwd()).replace("\\", "/")
+    _validate_native_pattern_text(rendered, field="worktree")
+    return PurePosixPath(rendered)
 
 
 def _network_shell_patterns(prefix: str) -> list[str]:
@@ -259,6 +268,8 @@ def _check_command_patterns(check_commands: list[list[str]] | None) -> list[str]
             or not all(isinstance(part, str) and part for part in command)
         ):
             raise ValueError("check_commands must contain non-empty argv arrays")
+        for part in command:
+            _validate_native_pattern_text(part, field="check_commands")
         patterns.append(shlex.join(command))
     return patterns
 
@@ -267,6 +278,7 @@ def codex_command(
     prompt: str,
     *,
     readonly: bool = False,
+    worktree_is_projection: bool = False,
     schema: Path | None = None,
     output: Path | None = None,
     model: str | None = None,
@@ -290,10 +302,10 @@ def codex_command(
         )
     sandbox_mode = "read-only" if readonly or not policy.get("edit_files", False) else "workspace-write"
     args = ["codex", "exec", "--json", "--sandbox", sandbox_mode]
-    if readonly:
-        # Read-only reviews run against an allowlisted staged tree without
-        # Git metadata, so Codex must not reject the temporary cwd before it
-        # can inspect the files.
+    if readonly or worktree_is_projection:
+        # Native provider turns run from disposable projections without Git
+        # metadata, so Codex must not reject the temporary cwd before it can
+        # inspect or edit the staged files.
         args.append("--skip-git-repo-check")
     if model:
         args += ["--model", model]
