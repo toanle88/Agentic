@@ -20,6 +20,7 @@ from .policy import (
     validate_permission_policy,
     validate_permission_policy_container,
 )
+from .security import restricted_test_environment
 from .providers import (
     resolve_provider_executable,
     validate_provider_permission_policy,
@@ -122,16 +123,18 @@ def api_key_env_for_provider(provider: str, api_key_env: str | None = None) -> s
     return api_key_env or PROVIDER_API_KEY_ENV.get(provider)
 
 
-def provider_process_environment(provider: str, api_key_env: str | None) -> dict[str, str] | None:
-    """Map a configured credential name to the native CLI's canonical name."""
+def provider_process_environment(provider: str, api_key_env: str | None) -> dict[str, str]:
+    """Return a sanitized environment with only the selected credential."""
     canonical = PROVIDER_API_KEY_ENV.get(provider)
-    if not api_key_env or not canonical or api_key_env == canonical:
-        return None
-    value = os.environ.get(api_key_env)
-    if not value:
-        return None
-    environment = dict(os.environ)
-    environment[canonical] = value
+    environment, _ = restricted_test_environment(os.environ)
+    selected_name = api_key_env or canonical
+    value = os.environ.get(selected_name) if selected_name else None
+    if value and selected_name:
+        # Keep the explicitly configured name for sandbox pass-through, and
+        # map aliases to the provider's canonical name for native CLIs.
+        environment[selected_name] = value
+    if value and canonical:
+        environment[canonical] = value
     return environment
 
 

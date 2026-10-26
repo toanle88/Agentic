@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from subprocess import CompletedProcess
 from types import SimpleNamespace
@@ -20,9 +21,14 @@ from agentic_runner import persistence as persistence
 from agentic_runner import shell as agentic_shell
 from agentic_runner.openrouter_tools import _openrouter_tool_call
 from agentic_runner.execution_providers import (
+    _read_projection_file,
     _read_provider_result,
+    _remove_staging_tree,
     _stage_provider_input,
+    _stage_worktree,
     _stage_readonly_worktree,
+    _sync_provider_worktree,
+    _write_projection_file,
 )
 from agentic_runner import file_boundaries
 from agentic_runner import worktrees as agentic_worktrees
@@ -485,6 +491,12 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
                 "claude", "CUSTOM_PROVIDER_TOKEN",
             )
             self.assertEqual(custom_environment["ANTHROPIC_API_KEY"], credentials["CUSTOM_PROVIDER_TOKEN"])
+            self.assertEqual(custom_environment["CUSTOM_PROVIDER_TOKEN"], credentials["CUSTOM_PROVIDER_TOKEN"])
+            self.assertNotIn("OPENAI_API_KEY", custom_environment)
+            self.assertNotIn("GH_TOKEN", custom_environment)
+            canonical_environment = provider_process_environment("codex", None)
+            self.assertEqual(canonical_environment["OPENAI_API_KEY"], credentials["OPENAI_API_KEY"])
+            self.assertNotIn("ANTHROPIC_API_KEY", canonical_environment)
             for payload in payloads:
                 redacted = redact_secrets(payload)
                 for value in credentials.values():
@@ -627,6 +639,68 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
                 self.assertIn("env=False safe=True", message)
                 self.assertNotIn(value, message)
 
+    def test_native_developer_providers_use_a_sanitized_writable_projection(self):
+        protected = {
+            ".env": "env-secret",
+            "private.pem": "private-key",
+            "AGENTS.md": "instructions",
+            "agent_config.json": "configuration",
+            ".git/config": "git-config",
+            ".github/workflows/ci.yml": "workflow",
+        }
+        script = (
+            "from pathlib import Path\n"
+            "protected = ['.env', 'private.pem', 'AGENTS.md', 'agent_config.json', "
+            "'.git/config', '.github/workflows/ci.yml']\n"
+            "print('protected=' + str(any(Path(path).exists() for path in protected)))\n"
+            "Path('safe.py').write_text('changed\\n')\n"
+            "Path('new.py').write_text('new\\n')\n"
+            "for path in protected:\n"
+            "    try: Path(path).write_text('provider-must-not-publish')\n"
+            "    except OSError: pass\n"
+        )
+        for provider in ("codex", "gemini", "claude", "copilot"):
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                (root / "safe.py").write_text("original\n", encoding="utf-8")
+                for relative, content in protected.items():
+                    path = root / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(content, encoding="utf-8")
+                output = root / f"{provider}.txt"
+                if provider == "codex":
+                    def fake_stream(argv, cwd, **kwargs):
+                        self.assertNotEqual(cwd, root)
+                        self.assertFalse((cwd / ".env").exists())
+                        (cwd / "safe.py").write_text("changed\n", encoding="utf-8")
+                        (cwd / "new.py").write_text("new\n", encoding="utf-8")
+                        self.assertFalse((cwd / "AGENTS.md").exists())
+                        result_path = Path(argv[argv.index("--output-last-message") + 1])
+                        result_path.write_text("codex done", encoding="utf-8")
+                        return CompletedProcess(argv, 0, stdout="")
+
+                    with patch("agentic_execution.streamed_command", side_effect=fake_stream):
+                        ok, message = agentic_execution.run_codex(
+                            root, "develop", output=output, timeout=10,
+                        )
+                else:
+                    with patch(
+                        "agentic_execution.cli_provider_command",
+                        return_value=([sys.executable, "-c", script], False),
+                    ):
+                        ok, message = agentic_execution.run_cli_provider(
+                            root, "develop", output=output, provider=provider, timeout=10,
+                        )
+                self.assertTrue(ok)
+                if provider != "codex":
+                    self.assertIn("protected=False", message)
+                else:
+                    self.assertEqual(message, "codex done")
+                self.assertEqual((root / "safe.py").read_text(encoding="utf-8"), "changed\n")
+                self.assertEqual((root / "new.py").read_text(encoding="utf-8"), "new\n")
+                for relative, content in protected.items():
+                    self.assertEqual((root / relative).read_text(encoding="utf-8"), content)
+
     def test_codex_readonly_uses_a_protected_file_free_worktree(self):
         value = "codex-review-secret-123456"
         with tempfile.TemporaryDirectory() as temp, patch.dict(
@@ -699,6 +773,30 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
                     _stage_readonly_worktree(root, destination)
             self.assertFalse(destination.exists())
 
+    def test_provider_staging_cleanup_retries_after_clearing_read_only(self):
+        with tempfile.TemporaryDirectory() as temp:
+            destination = Path(temp) / "review-worktree"
+            destination.mkdir()
+            partial = destination / "partial.py"
+            partial.write_text("partial\n", encoding="utf-8")
+            partial.chmod(0o444)
+            attempts = []
+
+            def remove_after_cleanup(path):
+                attempts.append(path)
+                self.assertTrue(Path(path).stat().st_mode & 0o200)
+                Path(path).unlink()
+
+            with patch(
+                "agentic_runner.execution_providers.shutil.rmtree",
+            ) as rmtree:
+                _remove_staging_tree(destination)
+                onerror = rmtree.call_args.kwargs["onerror"]
+                onerror(remove_after_cleanup, str(partial), None)
+
+            self.assertEqual(attempts, [str(partial)])
+            self.assertFalse(partial.exists())
+
     def test_provider_staging_counts_bytes_written_after_metadata_validation(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "worktree"
@@ -714,6 +812,145 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "complete read-only worktree"):
                     _stage_readonly_worktree(root, destination)
             self.assertFalse(destination.exists())
+
+    def test_provider_sync_enforces_cumulative_file_and_byte_limits(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "worktree"
+            projection = Path(temp) / "projection"
+            root.mkdir()
+            projection.mkdir()
+            (projection / "first.py").write_text("123\n", encoding="utf-8")
+            (projection / "second.py").write_text("456\n", encoding="utf-8")
+
+            with patch(
+                "agentic_runner.execution_providers.MAX_PROVIDER_STAGE_FILES", 1,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "synchronization.*file-count"):
+                    _sync_provider_worktree(root, projection, {})
+            self.assertFalse((root / "first.py").exists())
+            self.assertFalse((root / "second.py").exists())
+
+            with patch(
+                "agentic_runner.execution_providers.MAX_PROVIDER_STAGE_BYTES", 6,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "synchronization.*byte"):
+                    _sync_provider_worktree(root, projection, {})
+            self.assertFalse((root / "first.py").exists())
+            self.assertFalse((root / "second.py").exists())
+
+    def test_provider_sync_preserves_mode_only_changes(self):
+        if os.name == "nt":
+            self.skipTest("permission mode changes are not portable on Windows")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "worktree"
+            projection = Path(temp) / "projection"
+            root.mkdir()
+            (root / "script.py").write_text("print(1)\n", encoding="utf-8")
+            (root / "script.py").chmod(0o644)
+            baseline = _stage_worktree(root, projection, skip=lambda _: False, read_only=False)
+
+            (projection / "script.py").chmod(0o755)
+            _sync_provider_worktree(root, projection, baseline)
+
+            self.assertEqual((root / "script.py").stat().st_mode & 0o777, 0o755)
+
+    def test_provider_write_rejects_same_inode_source_content_changes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "worktree"
+            root.mkdir()
+            target = root / "source.py"
+            target.write_text("original\n", encoding="utf-8")
+            expected, _ = _read_projection_file(root, "source.py")
+            target.write_text("concurrent\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "changed"):
+                _write_projection_file(
+                    root, "source.py", b"provider change\n", expected.mode, expected,
+                )
+            self.assertEqual(target.read_text(encoding="utf-8"), "concurrent\n")
+
+    def test_provider_write_revalidates_digest_immediately_before_truncation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "worktree"
+            root.mkdir()
+            target = root / "source.py"
+            target.write_text("original\n", encoding="utf-8")
+            expected, _ = _read_projection_file(root, "source.py")
+
+            with patch(
+                "agentic_runner.execution_providers._descriptor_digest",
+                side_effect=[expected.digest, "concurrent-digest"],
+            ):
+                with self.assertRaisesRegex(RuntimeError, "changed"):
+                    _write_projection_file(
+                        root, "source.py", b"provider change\n", expected.mode, expected,
+                    )
+            self.assertEqual(target.read_text(encoding="utf-8"), "original\n")
+
+    def test_provider_write_holds_mutation_lock_until_sync_is_complete(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "worktree"
+            root.mkdir()
+            target = root / "source.py"
+            target.write_text("original\n", encoding="utf-8")
+            expected, _ = _read_projection_file(root, "source.py")
+            observed = []
+
+            @contextmanager
+            def lock(_descriptor):
+                observed.append("acquire")
+                yield
+                observed.append("release")
+
+            with patch(
+                "agentic_runner.execution_providers.exclusive_regular_file_lock",
+                side_effect=lock,
+            ):
+                _write_projection_file(
+                    root, "source.py", b"provider change\n", expected.mode, expected,
+                )
+
+            self.assertEqual(observed, ["acquire", "release"])
+            self.assertEqual(target.read_text(encoding="utf-8"), "provider change\n")
+
+    def test_provider_write_opens_new_files_read_write_for_cross_platform_locking(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "worktree"
+            root.mkdir()
+            with patch(
+                "agentic_runner.execution_providers.open_relative_regular",
+                wraps=file_boundaries.open_relative_regular,
+            ) as open_relative:
+                _write_projection_file(
+                    root, "new.py", b"provider change\n", 0o644, None,
+                )
+
+            flags = open_relative.call_args.args[2]
+            self.assertEqual(flags & os.O_RDWR, os.O_RDWR)
+            self.assertEqual(
+                (root / "new.py").read_text(encoding="utf-8"),
+                "provider change\n",
+            )
+
+    def test_provider_delete_revalidates_digest_before_unlink(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "worktree"
+            root.mkdir()
+            target = root / "source.py"
+            target.write_text("original\n", encoding="utf-8")
+            expected, _ = _read_projection_file(root, "source.py")
+            target.write_text("concurrent\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "changed"):
+                file_boundaries.unlink_relative_regular(
+                    root,
+                    "source.py",
+                    expected.identity,
+                    expected_digest=expected.digest,
+                    expected_size=expected.size,
+                    description="provider worktree file",
+                )
+            self.assertEqual(target.read_text(encoding="utf-8"), "concurrent\n")
 
     def test_streamed_command_opens_logs_before_starting_process(self):
         with tempfile.TemporaryDirectory() as temp:

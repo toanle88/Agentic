@@ -64,7 +64,7 @@ class PackagingTests(unittest.TestCase):
                 self.assertIn("agentic_runner/__init__.py", names)
                 self.assertIn("agentic_runner/cli.py", names)
                 metadata = archive.read(next(name for name in names if name.endswith("METADATA"))).decode()
-            self.assertIn("Version: 1.1.113", metadata)
+            self.assertIn("Version: 1.1.114", metadata)
 
             extracted = folder / "installed"
             with zipfile.ZipFile(wheels[0]) as archive:
@@ -84,7 +84,7 @@ class PackagingTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(probe.returncode, 0, probe.stderr)
-            self.assertEqual(probe.stdout.strip(), "1.1.113")
+            self.assertEqual(probe.stdout.strip(), "1.1.114")
 
     def test_root_command_wrappers_remain_thin_compatibility_entrypoints(self):
         wrapper = (ROOT / "agentic.py").read_text(encoding="utf-8")
@@ -112,7 +112,7 @@ class PackagingTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(probe.returncode, 0, probe.stderr)
-        self.assertEqual(probe.stdout.strip(), "1.1.113")
+        self.assertEqual(probe.stdout.strip(), "1.1.114")
 
 
 if __name__ == "__main__":

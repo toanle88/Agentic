@@ -1,14 +1,49 @@
 """Single-link regular-file checks for worktree/provider boundaries."""
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
 
 class SafeTraversalUnavailable(RuntimeError):
     """The platform cannot provide an anchored, no-follow path traversal."""
+
+
+@contextmanager
+def exclusive_regular_file_lock(descriptor: int) -> Iterator[None]:
+    """Hold an exclusive OS file lock while mutating an open regular file.
+
+    The lock coordinates Agentic's own source mutations and narrows the
+    validate-to-mutate window. Digest checks remain necessary because external
+    tools may not participate in this advisory lock protocol.
+    """
+    if os.name == "nt":
+        import msvcrt
+
+        position = os.lseek(descriptor, 0, os.SEEK_CUR)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        finally:
+            os.lseek(descriptor, position, os.SEEK_SET)
+        return
+
+    import fcntl
+
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+    try:
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
 
 
 def _identity(metadata: Any) -> tuple[int, int]:
@@ -663,3 +698,77 @@ def open_single_link_regular(
         os.close(descriptor)
         raise
     return descriptor, expected_identity
+
+
+def unlink_relative_regular(
+    root: Path,
+    relative: str | Path,
+    expected_identity: tuple[int, int],
+    *,
+    expected_digest: str | None = None,
+    expected_size: int | None = None,
+    description: str = "file",
+) -> None:
+    """Unlink one regular file only when its identity/content are unchanged."""
+
+    def validate_descriptor(descriptor: int, identity: tuple[int, int]) -> None:
+        metadata = os.fstat(descriptor)
+        _validate_single_link_regular(metadata, description=description)
+        if _identity(metadata) != identity:
+            raise ValueError(f"{description} changed while it was being removed")
+        if expected_digest is None:
+            return
+        if expected_size is not None and metadata.st_size != expected_size:
+            raise ValueError(f"{description} changed while it was being removed")
+        digest = hashlib.sha256()
+        total = 0
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        while True:
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if expected_size is not None and total > expected_size:
+                raise ValueError(f"{description} changed while it was being removed")
+            digest.update(chunk)
+        if total != metadata.st_size or digest.hexdigest() != expected_digest:
+            raise ValueError(f"{description} changed while it was being removed")
+
+    parts = _parts(relative)
+    if not parts:
+        raise ValueError(f"{description} must name a file")
+    if not _supports_anchored_traversal():
+        target = _validate_windows_path_components(
+            root, parts, create=False, description=description,
+        )
+        descriptor, identity = open_single_link_regular(
+            target, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0),
+            description=description,
+        )
+        try:
+            with exclusive_regular_file_lock(descriptor):
+                validate_descriptor(descriptor, identity)
+                if identity != expected_identity:
+                    raise ValueError(f"{description} changed while it was being removed")
+                os.unlink(target)
+        finally:
+            os.close(descriptor)
+        return
+    parent, name = _walk_to_parent(root, parts, create=False)
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0),
+            dir_fd=parent,
+        )
+        try:
+            with exclusive_regular_file_lock(descriptor):
+                identity = _identity(os.fstat(descriptor))
+                validate_descriptor(descriptor, identity)
+                if identity != expected_identity:
+                    raise ValueError(f"{description} changed while it was being removed")
+                os.unlink(name, dir_fd=parent)
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent)

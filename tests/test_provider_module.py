@@ -49,6 +49,9 @@ class ProviderCommandTests(unittest.TestCase):
         self.assertEqual(command[command.index("--sandbox") + 1], "workspace-write")
         self.assertNotIn("--skip-git-repo-check", command)
 
+        projected = codex_command("develop", worktree_is_projection=True)
+        self.assertIn("--skip-git-repo-check", projected)
+
     def test_native_provider_modes_keep_reviewer_restrictions(self):
         gemini, structured = cli_provider_command("gemini", "review", readonly=True)
         self.assertTrue(structured)
@@ -258,6 +261,16 @@ class ProviderCommandTests(unittest.TestCase):
             self.assertIn(f"{tool}(//workspace/**)", command)
             self.assertNotIn(f"{tool}(/workspace/**)", command)
         self.assertNotIn("Read", command[command.index("--allowedTools") + 1:])
+
+    def test_native_permission_patterns_reject_path_and_command_metacharacters(self):
+        with self.assertRaisesRegex(ValueError, "worktree.*permission-pattern"):
+            cli_provider_command(
+                "claude", "develop", worktree=Path("/tmp/worktree)escape"),
+            )
+        with self.assertRaisesRegex(ValueError, "check_commands.*permission-pattern"):
+            cli_provider_command(
+                "claude", "develop", check_commands=[["python", "-c", "print('x')"]],
+            )
 
     def test_native_provider_network_opt_in_adds_explicit_claude_rules(self):
         policy = {

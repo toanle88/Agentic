@@ -171,7 +171,7 @@ Set `AGENTIC_STATE_DIR` or pass `--state-dir PATH` to choose another root. A sha
 ## Safety boundaries
 
 - Test commands run under the host account by default. When `security_mode` is `isolated`, provider and test processes run in the configured container instead; use explicit `sandbox.pass_env` names for credentials.
-- The developer receives write access to its worktree while isolated containers overlay the worktree `.git` entry and Git metadata read-only; the reviewer is invoked in the provider's read-only or restricted review mode.
+- Native developer providers receive a disposable writable projection containing only regular files outside the shared `forbidden` path policy. Safe changes are synchronized back after identity/content checks; protected paths, symlinks, hard links, and Git metadata are never exposed to the provider. Isolated containers mount that projection, while the reviewer uses the same policy-filtered projection read-only.
 - Native provider CLIs receive provider-specific non-interactive permissions. Gemini and Claude use their read-only review modes; Copilot review turns expose only file-inspection tools and no shell. Agentic captures the staged Git diff with its argv-only runner and supplies it as bounded, untrusted evidence, so native reviewers do not need provider-specific shell permissions. OpenRouter uses an Agentic-owned scoped tool loop.
 - The runner refuses protected changes including Agentic configuration, agent instructions, secrets, private keys, and `.codex/`. GitHub workflows are also protected for ordinary repositories; only a checkout sharing Agentic's Git common root may update its own CI workflows.
 - Issue text, repository files, and test output are untrusted input to the selected provider.
