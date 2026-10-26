@@ -194,9 +194,11 @@ Gemini developer turns receive its safe-tool approval list plus command-scoped
 receive only file-inspection tools; Agentic supplies the staged patch from its
 argv-only Git runner. Native-provider `git log` is intentionally limited to
 the bare metadata-only command because provider tool patterns cannot safely
-validate its argv. OpenRouter additionally allows an explicit metadata-only
-log option set, but rejects patch, line-range, `--follow`, and unrecognized
-history-format options.
+validate its argv. OpenRouter requires read-only `git log` to include the
+fixed metadata-only format `--format=%H%x09%an%x09%aI%x09%s` (hash, author,
+ISO author date, and subject). It also accepts the equivalent
+`--pretty=format:` spelling, but rejects bare log, patch, line-range,
+`--follow`, message/notes directives, and other history-format options.
 A developer with `run_checks: true` is represented by
 Agentic running the configured checks itself; it does not grant Gemini
 unrestricted shell access. Gemini

@@ -26,7 +26,11 @@ from .file_boundaries import (
     open_relative_regular,
     revalidate_single_link_regular,
 )
-from .git_policy import GIT_LOG_CONTENT_OPTIONS, git_log_option_exposes_history
+from .git_policy import (
+    GIT_LOG_CONTENT_OPTIONS,
+    GIT_LOG_METADATA_FORMAT_OPTIONS,
+    git_log_option_exposes_history,
+)
 from .sandbox import sandbox_command
 from .security import redact_secrets
 from .policy import default_permission_policy, forbidden, sensitive_read
@@ -472,6 +476,15 @@ def _readonly_git_command_allowed(
             return False, "git show must name an explicit path during read-only review"
     if subcommand == "log":
         log_options = argv[2:] if separator is None else argv[2:separator]
+        format_options = [
+            part for part in log_options
+            if part.startswith(("--format=", "--pretty="))
+        ]
+        if len(format_options) != 1 or format_options[0] not in GIT_LOG_METADATA_FORMAT_OPTIONS:
+            return False, (
+                "git log requires one fixed metadata-only --format or --pretty option "
+                "during read-only review"
+            )
         blocked_option = next(
             (
                 part for part in log_options

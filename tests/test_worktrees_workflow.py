@@ -5,6 +5,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from io import StringIO
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -156,6 +157,48 @@ class WorkflowTests(_GitRepositoryTestCase):
         with patch.object(agentic_worktrees, "MAX_COMMAND_OUTPUT_BYTES", 1):
             with self.assertRaisesRegex(RuntimeError, "output exceeded"):
                 agentic_worktrees.command(["git", "diff"], self.repo)
+
+    def test_bounded_command_timeout_terminates_descendants(self):
+        marker = self.repo / "timeout-descendant-alive"
+        child = (
+            "import pathlib,time; time.sleep(2); "
+            f"pathlib.Path({str(marker)!r}).write_text('alive')"
+        )
+        parent = (
+            "import subprocess,sys,time; "
+            f"subprocess.Popen([sys.executable, '-c', {child!r}]); time.sleep(10)"
+        )
+        with self.assertRaisesRegex(RuntimeError, "timed out"):
+            agentic_worktrees.command(
+                [sys.executable, "-c", parent], self.repo, timeout=1,
+            )
+        # The child writes after two seconds; wait beyond that point so a
+        # surviving descendant cannot make this test pass spuriously.
+        deadline = time.monotonic() + 4
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(marker.exists())
+
+    def test_bounded_command_output_overflow_terminates_descendants(self):
+        marker = self.repo / "overflow-descendant-alive"
+        child = (
+            "import pathlib,time; time.sleep(2); "
+            f"pathlib.Path({str(marker)!r}).write_text('alive')"
+        )
+        parent = (
+            "import os,subprocess,sys,time; "
+            f"subprocess.Popen([sys.executable, '-c', {child!r}]); "
+            "os.write(1, b'A' * 10000); time.sleep(10)"
+        )
+        with patch.object(agentic_worktrees, "MAX_COMMAND_OUTPUT_BYTES", 1024):
+            with self.assertRaisesRegex(RuntimeError, "output exceeded"):
+                agentic_worktrees.command([sys.executable, "-c", parent], self.repo)
+        # The child writes after two seconds; wait beyond that point so a
+        # surviving descendant cannot make this test pass spuriously.
+        deadline = time.monotonic() + 4
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(marker.exists())
 
     def test_auto_publish_selects_first_eligible_completed_candidate(self):
         issue = agentic.Issue(222, "Automatic publication", "Apply the approved change")

@@ -20,6 +20,7 @@ from agentic_runner import application_diagnostics as application_diagnostics
 from agentic_runner import persistence as persistence
 from agentic_runner import shell as agentic_shell
 from agentic_runner.openrouter_tools import _openrouter_tool_call
+from agentic_runner.git_policy import GIT_LOG_METADATA_FORMAT
 from agentic_runner.execution_providers import (
     _read_projection_file,
     _read_provider_result,
@@ -1130,6 +1131,8 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
                 argv = ["git", subcommand]
                 if subcommand == "diff":
                     argv.extend(["--", "README.md"])
+                elif subcommand == "log":
+                    argv.append(f"--format={GIT_LOG_METADATA_FORMAT}")
                 elif subcommand == "show":
                     argv.append("HEAD:README.md")
                 allowed, reason = agentic_openrouter._openrouter_command_allowed(

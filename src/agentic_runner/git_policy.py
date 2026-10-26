@@ -13,9 +13,16 @@ GIT_LOG_CONTENT_OPTIONS = frozenset({
     "--irreversible-delete", "--ext-diff", "--textconv", "--output",
 })
 
-# Git adds diff presentation options over time.  OpenRouter therefore uses a
+# Git adds diff presentation options over time. OpenRouter therefore uses a
 # positive metadata-only allowlist rather than relying on this content-option
-# inventory to remain complete.
+# inventory to remain complete. Log output itself is separately restricted to
+# the fixed format below; otherwise even metadata-looking directives can emit
+# full messages or notes.
+GIT_LOG_METADATA_FORMAT = "%H%x09%an%x09%aI%x09%s"
+GIT_LOG_METADATA_FORMAT_OPTIONS = frozenset({
+    f"--format={GIT_LOG_METADATA_FORMAT}",
+    f"--pretty=format:{GIT_LOG_METADATA_FORMAT}",
+})
 GIT_LOG_METADATA_OPTIONS = frozenset({
     "--abbrev-commit", "--all", "--author-date-order", "--boundary",
     "--date-order", "--decorate", "--dense", "--first-parent",
@@ -29,8 +36,8 @@ GIT_LOG_METADATA_OPTIONS = frozenset({
     "--ignore-case", "--ignore-missing", "--reflog", "--single-worktree",
 })
 GIT_LOG_METADATA_PREFIXES = (
-    "--author=", "--committer=", "--date=", "--decorate=", "--format=", "--grep=",
-    "--max-count=", "--max-parents=", "--min-parents=", "--pretty=",
+    "--author=", "--committer=", "--date=", "--decorate=", "--grep=",
+    "--max-count=", "--max-parents=", "--min-parents=",
     "--skip=", "--since=", "--after=", "--until=", "--before=",
 )
 
@@ -44,6 +51,8 @@ def git_log_option_exposes_history(part: str) -> bool:
     """
     if not part.startswith("-") or part == "--":
         return False
+    if part.startswith(("--format=", "--pretty=")):
+        return part not in GIT_LOG_METADATA_FORMAT_OPTIONS
     option = part.split("=", 1)[0]
     if option in GIT_LOG_METADATA_OPTIONS or any(
         part.startswith(prefix) for prefix in GIT_LOG_METADATA_PREFIXES
