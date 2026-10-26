@@ -19,6 +19,15 @@ from agentic_runner.shell_commands import parse_audit_command
 
 
 class AuditTests(unittest.TestCase):
+    def setUp(self):
+        # Direct audit workflow tests model the explicit consent required by
+        # trusted-mode execution; trust-specific behavior is covered separately.
+        self._trust_prompt = patch(
+            'agentic.request_repository_trust', return_value='trusted',
+        )
+        self._trust_prompt.start()
+        self.addCleanup(self._trust_prompt.stop)
+
     def test_audit_is_a_distinct_cli_and_work_item_identity(self):
         args = agentic.build_parser().parse_args(["audit"])
         self.assertEqual(args.command, "audit")

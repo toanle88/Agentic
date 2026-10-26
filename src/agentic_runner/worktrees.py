@@ -109,6 +109,36 @@ def repository_state_key(repo: Path) -> str:
     return f"{slug}-{digest}"
 
 
+def repository_identity(repo: Path) -> str:
+    """Return a non-reversible identity for repository trust decisions.
+
+    The trust record stores only the digest returned here.  The canonical
+    checkout, Git common directory, and configured remote identities are used
+    so a moved checkout or changed remote cannot silently inherit consent.
+    """
+    root = repo.resolve()
+    try:
+        root_text = git(repo, "rev-parse", "--show-toplevel").strip()
+        if root_text:
+            root = Path(root_text).resolve()
+    except (OSError, RuntimeError):
+        pass
+    try:
+        common_text = git(repo, "rev-parse", "--git-common-dir").strip()
+        common = Path(common_text)
+        if not common.is_absolute():
+            common = root / common
+        common_text = str(common.resolve())
+    except (OSError, RuntimeError):
+        common_text = ""
+    try:
+        remote_text = git(repo, "remote", "-v", check=False).strip()
+    except (OSError, RuntimeError):
+        remote_text = ""
+    payload = "\0".join((str(root), common_text, remote_text))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _absolute_state_path(path: Path) -> Path:
     """Make an absolute state path, canonicalizing Windows spellings only."""
     absolute = Path(os.path.abspath(os.fspath(path)))

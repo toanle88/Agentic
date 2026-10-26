@@ -21,6 +21,15 @@ from test_agentic import sh
 
 
 class ConfigurationTests(unittest.TestCase):
+    def setUp(self):
+        # These tests exercise doctor command execution; model the new
+        # explicit consent rather than allowing a host check implicitly.
+        self._trust_prompt = patch(
+            'agentic.request_repository_trust', return_value='trusted',
+        )
+        self._trust_prompt.start()
+        self.addCleanup(self._trust_prompt.stop)
+
     def test_doctor_status_labels_use_shared_tty_styling_and_plain_fallback(self):
         class TTYBuffer(io.StringIO):
             def isatty(self):

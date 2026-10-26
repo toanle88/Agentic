@@ -477,11 +477,13 @@ class TestDiscovery(unittest.TestCase):
                 }],
                 fast_commands=[["git", "diff", "--no-ext-diff", "--no-textconv", "--check"]], slow_commands=[],
             )
-            with patch("agentic.discover_and_validate", return_value=discovery) as discovery_mock, \
-                 patch("builtins.input", return_value="n"):
+            with (patch("agentic.discover_and_validate", return_value=discovery) as discovery_mock,
+                  patch("agentic.request_repository_trust", return_value="trusted") as trust_prompt,
+                  patch("builtins.input", return_value="n")):
                 self.assertEqual(agentic.init_repository(repo, discover_tests=True), 0)
             self.assertFalse((repo / "agent_config.json").exists())
             discovery_mock.assert_not_called()
+            trust_prompt.assert_called_once()
 
     def test_init_discovery_writes_only_after_confirmation(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -495,14 +497,16 @@ class TestDiscovery(unittest.TestCase):
                 }],
                 fast_commands=[["git", "diff", "--no-ext-diff", "--no-textconv", "--check"]], slow_commands=[],
             )
-            with patch("agentic.discover_and_validate", return_value=discovery), \
-                 patch("builtins.input", return_value="y"):
+            with (patch("agentic.discover_and_validate", return_value=discovery),
+                  patch("agentic.request_repository_trust", return_value="trusted") as trust_prompt,
+                  patch("builtins.input", return_value="y")):
                 self.assertEqual(agentic.init_repository(repo, discover_tests=True), 0)
             config = json.loads((repo / "agent_config.json").read_text())
             self.assertEqual(
                 config["test_commands"],
                 [["git", "diff", "--no-ext-diff", "--no-textconv", "--check"]],
             )
+            trust_prompt.assert_called_once()
 
     def test_protected_existing_config_skips_assisted_discovery(self):
         with tempfile.TemporaryDirectory() as temp:

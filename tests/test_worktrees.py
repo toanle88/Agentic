@@ -23,6 +23,11 @@ class _GitRepositoryTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         parent = Path(self.tmp.name)
+        self._state_environment = patch.dict(
+            os.environ, {"AGENTIC_STATE_DIR": str(parent / "agentic-state")}, clear=False,
+        )
+        self._state_environment.start()
+        self.addCleanup(self._state_environment.stop)
         bare = parent / 'remote.git'
         sh('git', 'init', '--bare', '--initial-branch=main', str(bare), cwd=parent)
         self.repo = parent / 'project'
@@ -33,6 +38,7 @@ class _GitRepositoryTestCase(unittest.TestCase):
         sh('git', 'add', 'readme.md', cwd=self.repo)
         sh('git', 'commit', '-m', 'initial', cwd=self.repo)
         sh('git', 'push', '-u', 'origin', 'main', cwd=self.repo)
+        agentic.record_repository_trust(self.repo, parent / "agentic-state")
 
 
 class GitTest(_GitRepositoryTestCase):

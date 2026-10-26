@@ -367,7 +367,8 @@ termination for every running Agentic job.
 | `agentic status --json` | Emit machine-readable worktree status. |
 | `agentic runs --json` | Alias for `status --json`. |
 | `agentic init [--provider NAME] [--security-mode MODE] [--sandbox-image IMAGE] [--sandbox-dockerfile PATH]` | Create ignored target configuration and detect a starter check. |
-| `agentic doctor` | Diagnose repository, GitHub task access, and developer/reviewer agent prerequisites. |
+| `agentic doctor` | Diagnose repository, GitHub task access, and developer/reviewer agent prerequisites. Configured checks require repository trust or explicit isolation. |
+| `agentic trust [--revoke]` | Inspect or revoke the external repository consent required for trusted host execution. |
 | `agentic --state-dir PATH ...` | Store worktrees and runtime artifacts in a chosen location. |
 | `agentic cleanup --issue N` | Preview removal of a clean issue worktree; add `--yes` to confirm. Use `--discard --yes` only when permanently deleting dirty files is intentional. |
 | `agentic dashboard` | Generate the HTML run dashboard. Add `--serve` for a loopback server that regenerates it for live polling. Remote serving requires `--allow-remote`, `AGENTIC_DASHBOARD_TOKEN`, and TLS certificate/key files. |
@@ -441,6 +442,10 @@ default for compatibility with host-installed providers. Use isolated mode for
 untrusted repositories or issue text by supplying a project-specific
 Docker/Podman image; isolated runs fail closed when the engine, image, or
 configured credentials are unavailable. Never expose production credentials.
+The first trusted execution prompts for explicit repository consent, and
+non-interactive runs fail closed without prior consent. Dashboard operations are
+read-only and do not require trust; use `agentic trust --revoke` to revoke a
+recorded decision.
 The developer and reviewer are separate processes; the reviewer uses the
 provider's read-only or restricted mode. Agentic does not replace CI, security
 review, or human approval.

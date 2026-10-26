@@ -61,6 +61,34 @@ With `--security-mode isolated` (or `--secure`), the sandbox is preflighted
 before discovery and both provider assistance and candidate checks run inside
 that sandbox; discovery fails closed if it cannot be applied.
 
+### Repository trust consent
+
+Trusted mode remains the compatibility default for existing configurations, but
+it no longer silently starts host-side execution. Before the first trusted run,
+Agentic explains that repository code, configured test commands, and provider
+workflows may use the host account's permissions, then offers host trust,
+isolated mode, or cancellation.
+
+Blank, invalid, EOF, and non-interactive responses fail closed. Choosing
+isolated mode uses the configured sandbox for that run and fails closed if its
+engine, image, or required credentials are unavailable; it never falls back to
+trusted execution. Consent is stored outside the repository in the private
+Agentic state namespace as an identity digest based on the canonical checkout,
+Git common directory, and available remote identity. Identity changes require
+consent again. The record contains no repository contents, remote URL, or
+credentials.
+
+Inspect or revoke consent with:
+
+```bash
+agentic trust --repo /path/to/target-repository
+agentic trust --repo /path/to/target-repository --revoke
+```
+
+The read-only dashboard does not require repository trust. Trust authorizes
+host execution only; it does not make repository files, issue text, or provider
+output trusted instructions.
+
 Runtime state is controlled separately from project configuration. Use `--state-dir PATH` or `AGENTIC_STATE_DIR` for worktrees, logs, shell records, and dashboards. This is especially useful in WSL when Windows Git must open the worktree from a shared mounted drive. On POSIX systems, Agentic rejects symlinked, non-directory, or attacker-writable state ancestors and requires the configured state root to be private; writers create missing state hierarchy through an anchored, race-resistant path. Choose a shared mount with permissions that satisfy this policy, or keep runtime state in a private user directory and share only the worktree when necessary.
 
 ## Example
@@ -141,7 +169,7 @@ them. A failure preserves the completed run, worktree, and logs for manual
 | `automation.auto_publish` | boolean | `false` | Opt in to automatic publication of eligible completed audits, approved issue/local-task runs, and reviewed CI-repair patches. For CI repair, this authorizes the guarded same-branch commit and push; it does not suppress non-code failure confirmation. |
 | `system_prompt` | nonempty string or `null` | `null` | Optional persistent project guidance included as bounded, untrusted context in developer and reviewer prompts. |
 | `permission_policy` | object | safe role defaults | Provider-independent capabilities for `developer` and `reviewer`; legacy configurations are normalized to these defaults. |
-| `security_mode` | `trusted` or `isolated` | `trusted` | `isolated` requires the configured Docker/Podman engine and image and fails closed when either is unavailable. |
+| `security_mode` | `trusted` or `isolated` | `trusted` | `isolated` requires the configured Docker/Podman engine and image and fails closed when either is unavailable. The first trusted execution requires external repository-trust consent. |
 | `sandbox` | object | disabled | Optional Docker/Podman isolation for provider, OpenRouter tool, and test processes. `pass_env` names explicit credential variables to pass into the container. |
 | `developer` | object | Codex defaults | Provider settings for the coding agent. |
 | `reviewer` | object | Codex defaults | Provider settings for the independent reviewer. |
