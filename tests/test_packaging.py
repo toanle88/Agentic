@@ -91,6 +91,17 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("from agentic_runner import cli as _implementation", wrapper)
         self.assertNotIn("def main", wrapper)
 
+    def test_root_runner_wrapper_executes_from_source_checkout(self):
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "agentic.py"), "--version"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "python -m agentic_runner.cli 1.1.114")
+
     def test_runtime_modules_import_without_repository_root(self):
         environment = os.environ.copy()
         environment["PYTHONPATH"] = str(ROOT / "src")
