@@ -514,9 +514,14 @@ class AgenticShell:
         number = self.next_number
         self.next_number += 1
         record_path = self._record_path(number)
+        log_path = self.session_dir / f"job-{number:03d}.log"
+        log_writer = BoundedLogWriter(
+            log_path,
+            redaction_values=_shell_redaction_values(self.config, os.environ),
+        )
         job = Job(
-            number, argv, self.session_dir / f"job-{number:03d}.log", process,
-            time.time(), None, record_path, self.session_id,
+            number, argv, log_path, process, time.time(), log_writer,
+            record_path, self.session_id,
         )
         self.jobs[number] = job
         self._write_record(job)
@@ -772,13 +777,15 @@ class AgenticShell:
                 input_forwarder = _ForegroundInputForwarder(process, foreground)
                 input_forwarder.start()
             stdout = process.stdout
+            foreground_log_buffer = ""
             if stdout is not None:
                 pending = ""
                 previous_was_carriage_return = False
                 prompt_was_displayed = False
                 patch_stream = PatchSummaryStream()
+                concise = ConciseLogStream()
 
-                def emit_line(line: str, *, terminated: bool) -> None:
+                def render_line(line: str, *, terminated: bool) -> None:
                     nonlocal prompt_was_displayed
                     line = line.rstrip("\r")
                     line, generated_prefix = untag_system_prefix(line)
@@ -817,6 +824,19 @@ class AgenticShell:
                             flush=True,
                         )
 
+                def emit_line(line: str, *, terminated: bool) -> None:
+                    # Recognized prompts are kept out of the concise stream so
+                    # an incomplete confirmation prompt remains editable.
+                    if not terminated and _is_foreground_prompt(line):
+                        render_line(line, terminated=False)
+                        return
+                    filtered = concise.feed(line + ("\n" if terminated else ""))
+                    progress = concise.take_transient()
+                    if progress:
+                        _shell_write_transient(progress)
+                    for visible in filtered.splitlines(keepends=True):
+                        render_line(visible.rstrip("\r\n"), terminated=True)
+
                 chunks: Queue[str | None] = Queue()
 
                 def read_stdout() -> None:
@@ -853,6 +873,9 @@ class AgenticShell:
                             and not prompt_was_displayed
                             and _is_foreground_prompt(pending)
                         ):
+                            if foreground_job is not None and foreground_job.log_handle is not None:
+                                foreground_job.log_handle.write(foreground_log_buffer)
+                                foreground_log_buffer = ""
                             foreground.set_prompt(
                                 pending,
                                 system_prefix=_foreground_prompt_prefix(pending),
@@ -862,6 +885,11 @@ class AgenticShell:
                         continue
                     if chunk is None:
                         break
+                    if foreground_job is not None and foreground_job.log_handle is not None:
+                        foreground_log_buffer += chunk
+                        if chunk in {"\r", "\n"} or len(foreground_log_buffer) >= 8192:
+                            foreground_job.log_handle.write(foreground_log_buffer)
+                            foreground_log_buffer = ""
                     if prompt_was_displayed:
                         # Preserve the active prompt while status or other
                         # child output is rendered above it.
@@ -886,8 +914,14 @@ class AgenticShell:
                     # an exact prompt as complete.
                 if pending:
                     emit_line(pending, terminated=False)
+                filtered = concise.flush()
+                for visible in filtered.splitlines(keepends=True):
+                    render_line(visible.rstrip("\r\n"), terminated=True)
                 stdout_reader.join(timeout=1.0)
                 _shell_clear_transient()
+            if foreground_job is not None and foreground_job.log_handle is not None:
+                foreground_job.log_handle.write(foreground_log_buffer)
+                foreground_job.log_handle.close()
             returncode = process.wait()
             cancellation_reason = (
                 input_forwarder.cancel_reason if input_forwarder is not None else None
@@ -914,6 +948,8 @@ class AgenticShell:
             if returncode:
                 raise RuntimeError(f"command failed with exit {returncode}")
         finally:
+            if foreground_job is not None and foreground_job.log_handle is not None:
+                foreground_job.log_handle.close()
             if input_forwarder is not None:
                 input_forwarder.stop()
             if interrupt_handler_installed:

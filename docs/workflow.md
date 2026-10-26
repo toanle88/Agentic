@@ -316,7 +316,9 @@ agentic --pr 123 --repair-ci --clean
 ```
 
 The interactive shell provides `/repair-pr 123 [--clean]` and runs it in the foreground
-so confirmation prompts remain available. Agentic reads failed check summaries
+so confirmation prompts remain available. Its raw output is retained in the
+foreground job log: `/logs JOB` shows the concise replay and `/logs JOB --verbose`
+shows the complete captured stream. Agentic reads failed check summaries
 and bounded failed-run log excerpts as untrusted evidence, classifies
 the failure, and uses only the exact existing worktree for the PR branch. A
 new repair requires a clean worktree and `HEAD` equal to the current PR head.
