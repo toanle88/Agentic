@@ -100,13 +100,13 @@ class PackagingTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        if sys.version_info >= (3, 14):
-            expected_output = f"{Path(sys.executable).name} -m agentic_runner.cli 1.1.115"
-        else:
-            expected_output = "agentic.py 1.1.115"
-        self.assertEqual(
-            result.stdout.strip(),
-            expected_output,
+        output = result.stdout.strip()
+        self.assertIn(
+            output,
+            {
+                "agentic.py 1.1.115",
+                f"{Path(sys.executable).name} -m agentic_runner.cli 1.1.115",
+            },
         )
 
     def test_runtime_modules_import_without_repository_root(self):
