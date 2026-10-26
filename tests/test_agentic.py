@@ -652,6 +652,22 @@ class PureTests(unittest.TestCase):
         ))
         self.assertTrue(agentic.retryable_test_failure('AssertionError: expected 2, got 3'))
 
+    def test_nested_environment_text_does_not_hide_outer_test_failure(self):
+        report = (
+            'Validation check 1 — passed\n'
+            'Validation check 2 — failed\n\n'
+            '$ <configured test command: 3 argv values>\n'
+            'Validation check 1 — unavailable (required command unavailable)\n'
+            'F401 imported but unused\n'
+        )
+        self.assertTrue(agentic.retryable_test_failure(report))
+        self.assertFalse(agentic.retryable_test_failure(
+            'Validation check 1 — passed\n\n'
+            'Validation check 2 — unavailable (required command unavailable)\n\n'
+            '$ <configured test command: 1 argv values>\n'
+            'nested fixture text: required command unavailable\n'
+        ))
+
 
     def test_test_failure_fingerprint_ignores_runtime_metadata(self):
         first = (

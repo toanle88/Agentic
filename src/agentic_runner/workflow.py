@@ -844,6 +844,22 @@ def preflight_test_commands(repo: Path, test_commands: list[list[str]],
 
 def retryable_test_failure(report: str) -> bool:
     """Return false for failures that retries cannot repair by changing code."""
+    # ``run_tests`` puts the outer validation status block before command
+    # evidence.  A configured test command may itself run Agentic's test
+    # suite, whose fixture output can contain the same environment phrases as
+    # the outer runner.  Inspect the outer statuses first so nested output
+    # cannot turn a real test/lint failure into a non-retryable infrastructure
+    # failure.
+    outer_statuses: list[str] = []
+    for raw_line in strip_ansi(report).splitlines():
+        line = raw_line.strip()
+        if line.startswith("$ <configured test command:"):
+            break
+        if line.startswith("Validation check "):
+            outer_statuses.append(line.lower())
+    if outer_statuses:
+        return not any("unavailable" in line for line in outer_statuses)
+
     lower = report.lower()
     environment_markers = (
         "no module named",
