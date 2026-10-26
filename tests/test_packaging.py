@@ -100,7 +100,11 @@ class PackagingTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "python -m agentic_runner.cli 1.1.114")
+        executable_name = Path(sys.executable).name
+        self.assertEqual(
+            result.stdout.strip(),
+            f"{executable_name} -m agentic_runner.cli 1.1.114",
+        )
 
     def test_runtime_modules_import_without_repository_root(self):
         environment = os.environ.copy()
