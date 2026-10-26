@@ -558,6 +558,21 @@ remains active for every other repository and still blocks `agent_config.json`,
 
 ## Logs and dashboard
 
+### Trusted host execution
+
+When a configuration uses the compatibility default `security_mode: "trusted"`,
+the first developer, review, or configured-check execution prompts for explicit
+repository trust. The prompt describes host-account access and offers host
+execution, the configured isolated sandbox, or cancellation. Non-interactive
+execution and the default/invalid response stop without running repository
+code. Selecting isolation fails closed if the configured engine, image, or
+credentials are unavailable and never falls back to the host.
+
+Consent is stored outside the checkout as a bounded identity digest in the
+Agentic state directory. It is invalidated by a checkout/common-directory or
+remote-identity change and can be revoked with `agentic trust --revoke`.
+Dashboard generation remains read-only and does not ask for this consent.
+
 Durable artifacts are stored in the centralized Agentic state directory:
 
 ```text

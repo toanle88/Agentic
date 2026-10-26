@@ -114,6 +114,13 @@ from .ci_repair import (
 )
 from .output import style_system_text, style_text
 from .persistence import read_text_bounded, read_text_tail
+from .trust import (
+    TrustChoice,
+    is_repository_trusted,
+    record_repository_trust,  # noqa: F401 - historical CLI compatibility export
+    request_repository_trust,
+    revoke_repository_trust,
+)
 from .openrouter import (  # noqa: F401
     run_openrouter,
 )
@@ -1120,7 +1127,8 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
                      sandbox_context: str = ".",
                      sandbox_language: str | None = None,
                      discover_tests: bool = False,
-                     discovery_timeout: int = DISCOVERY_TIMEOUT_SECONDS) -> int:
+                     discovery_timeout: int = DISCOVERY_TIMEOUT_SECONDS,
+                     state_dir: Path | None = None) -> int:
     """Create personal target-repository setup without overwriting it by default."""
     if security_mode not in SECURITY_MODES:
         raise ValueError(f"security_mode must be one of: {', '.join(SECURITY_MODES)}")
@@ -1185,6 +1193,16 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
         )
     skip_protected_discovery = discover_tests and config_path.exists() and not force
     if discover_tests and not skip_protected_discovery:
+        if security_mode == "trusted":
+            choice = request_repository_trust(
+                repo,
+                state_dir or default_state_dir(),
+                output_fn=lambda message: _status_print(message, flush=True),
+            )
+            if choice == "isolated":
+                security_mode = "isolated"
+                sandbox = dict(sandbox)
+                sandbox["enabled"] = True
         # Isolated discovery must fail closed before a provider or candidate
         # command can run. Trusted discovery filters credential-like host
         # variables before candidate validation; it is not full isolation.
@@ -1327,8 +1345,18 @@ def doctor(
     run_commands: bool = False,
     profile: str = "fast",
     worktree: Path | None = None,
+    state_dir: Path | None = None,
 ) -> int:
     """Compatibility wrapper for the extracted diagnostics workflow."""
+    security_override = None
+    if run_commands:
+        target_config = (config_path or repo / AGENT_CONFIG_FILENAME).resolve()
+        if target_config.is_file():
+            loaded = load_config(target_config)
+            trust_state_dir = state_dir or default_state_dir()
+            choice = _resolve_execution_security(repo, loaded, trust_state_dir)
+            if choice == "isolated" and loaded.get("security_mode") == "trusted":
+                security_override = "isolated"
     return _run_doctor(
         repo,
         config_path,
@@ -1336,12 +1364,48 @@ def doctor(
         run_commands=run_commands,
         profile=profile,
         worktree=worktree,
+        security_mode_override=security_override,
         command_lock=(lambda path: worktree_path_lock(repo, path)) if run_commands else None,
         installed_git_version=installed_git_version,
         probe=probe,
         preflight_test_commands=preflight_test_commands,
         relative_worktree_paths_supported=relative_worktree_paths_supported,
     )
+
+
+def _resolve_execution_security(
+    repo: Path, config: dict[str, Any], state_dir: Path,
+) -> TrustChoice:
+    """Require external consent before any configured trusted preflight."""
+    if config.get("security_mode") != "trusted":
+        return "isolated"
+    override = os.environ.get("AGENTIC_SECURITY_MODE_OVERRIDE")
+    if override == "isolated":
+        return "isolated"
+    if override:
+        raise RuntimeError("Unsupported Agentic security-mode override")
+    return request_repository_trust(
+        repo,
+        state_dir,
+        output_fn=lambda message: _status_print(message, flush=True),
+    )
+
+
+def repository_trust_status(
+    repo: Path, *, state_dir: Path | None = None, revoke: bool = False,
+) -> int:
+    """Show or revoke the external consent record without loading project config."""
+    if revoke:
+        path = revoke_repository_trust(repo, state_dir)
+        _status_print(f"[TRUST] Revoked repository host-execution consent ({path})")
+        return 0
+    trusted = is_repository_trusted(repo, state_dir)
+    _status_print(
+        "[TRUST] Host execution consent is recorded for this repository"
+        if trusted else
+        "[TRUST] No matching host-execution consent is recorded for this repository"
+    )
+    return 0
 
 
 def _run_log_folder(repo: Path, run: Run, state_dir: Path | None = None) -> Path:
@@ -1606,7 +1670,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
-        "command", nargs="?", choices=("help", "shell", "dashboard", "audit", "init", "doctor", "cleanup", "status", "runs"),
+        "command", nargs="?", choices=("help", "shell", "dashboard", "audit", "init", "doctor", "cleanup", "status", "runs", "trust"),
         help="Show help or route to a built-in subcommand",
     )
     parser.add_argument("--repo", default=str(Path.cwd()), help="Project root (default: current directory)")
@@ -1712,6 +1776,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--yes", action="store_true", help="Confirm a cleanup operation")
     parser.add_argument("--remove-logs", action="store_true", help="With cleanup, also delete matching run logs")
     parser.add_argument(
+        "--revoke", action="store_true",
+        help="With trust, revoke external repository host-execution consent",
+    )
+    parser.add_argument(
         "--discard", action="store_true",
         help="With cleanup, permanently delete dirty worktree files (requires --yes)",
     )
@@ -1787,6 +1855,15 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
     config = load_config(config_path)
     if args.workflow_mode is not None:
         config["workflow_mode"] = args.workflow_mode
+    state_dir = Path(args.state_dir).expanduser() if args.state_dir else default_state_dir()
+    selected_security = _resolve_execution_security(repo, config, state_dir)
+    if selected_security == "isolated" and config.get("security_mode") == "trusted":
+        # Keep the target configuration unchanged.  The isolated choice is a
+        # one-run safety decision and must still pass the normal sandbox and
+        # credential preflight below.
+        config = dict(config)
+        config["security_mode"] = "isolated"
+        config["sandbox"] = dict(config.get("sandbox") or {})
     github_host = config.get("github_host", DEFAULT_GITHUB_HOST)
     test_commands = (
         config["test_commands"] if args.publish
@@ -1805,7 +1882,6 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
         preflight_agent_settings(
             config["developer_agent"], config["reviewer_agent"], sandbox=config["sandbox"]
         )
-    state_dir = Path(args.state_dir).expanduser() if args.state_dir else default_state_dir()
     if args.repair_ci:
         pr_number = args.pr_number
         if not isinstance(pr_number, int) or isinstance(pr_number, bool):
@@ -2203,6 +2279,7 @@ def _main(argv: list[str] | None = None) -> int:
                 sandbox_language=args.sandbox_language,
                 discover_tests=args.discover_tests,
                 discovery_timeout=args.discovery_timeout,
+                state_dir=Path(args.state_dir).expanduser() if args.state_dir else None,
             )
         if args.secure:
             parser.error("--secure is only valid with init")
@@ -2212,7 +2289,17 @@ def _main(argv: list[str] | None = None) -> int:
                 json_output=args.json, run_commands=args.commands,
                 profile=args.profile,
                 worktree=Path(args.worktree) if args.worktree else None,
+                state_dir=Path(args.state_dir).expanduser() if args.state_dir else None,
             )
+        if args.command == "trust":
+            repo = _absolute_path(Path(args.repo))
+            root = _absolute_path(Path(git(repo, "rev-parse", "--show-toplevel")))
+            if not _paths_equal(repo, root):
+                raise RuntimeError("Run trust from the project root or pass --repo pointing to that root")
+            state_dir = Path(args.state_dir).expanduser() if args.state_dir else default_state_dir()
+            return repository_trust_status(repo, state_dir=state_dir, revoke=args.revoke)
+        if args.revoke:
+            parser.error("--revoke is only valid with the trust command")
         if args.command in {"status", "runs"}:
             repo = _absolute_path(Path(args.repo))
             root = _absolute_path(Path(git(repo, "rev-parse", "--show-toplevel")))

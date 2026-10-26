@@ -19,6 +19,7 @@ from .config import (
     api_key_env_for_provider,
     auth_mode_for_settings,
     load_config,
+    preflight_security,
     sandbox_env_for_provider,
 )
 from .execution import _doctor_public_detail
@@ -182,6 +183,7 @@ def run_doctor(
     probe: Callable[..., tuple[bool, str]],
     preflight_test_commands: Callable[..., None],
     relative_worktree_paths_supported: Callable[[], bool],
+    security_mode_override: str | None = None,
 ) -> int:
     """Report local prerequisites and return nonzero when a required item is missing."""
     if profile not in {"fast", "slow"}:
@@ -255,6 +257,14 @@ def run_doctor(
     if target_config.is_file():
         try:
             loaded = load_config(target_config)
+            if security_mode_override == "isolated" and loaded.get("security_mode") == "trusted":
+                loaded = dict(loaded)
+                loaded["security_mode"] = "isolated"
+                loaded["sandbox"] = dict(loaded.get("sandbox") or {})
+            if run_commands and loaded.get("security_mode") == "isolated":
+                preflight_security(
+                    loaded["security_mode"], loaded.get("sandbox", {}), repo=repo,
+                )
             github_host = loaded.get("github_host", DEFAULT_GITHUB_HOST)
             gh_path = None if loaded["task_source"] == "local" else shutil.which("gh")
             if loaded["task_source"] == "local":

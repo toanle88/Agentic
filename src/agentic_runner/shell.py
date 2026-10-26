@@ -33,7 +33,9 @@ from .output import (
     untag_system_prefix,
 )
 from .persistence import atomic_write_text, read_text_bounded
+from .config import load_config
 from .security import configured_environment_values, sensitive_environment_values
+from .trust import request_repository_trust
 from .shell_input import (  # noqa: F401
     COMMAND_DESCRIPTIONS,
     HELP,
@@ -447,7 +449,8 @@ class AgenticShell:
 
     def _launch(self, argv: list[str],
                 on_complete: Callable[[int], None] | None = None,
-                run_token: str | None = None) -> Job:
+                run_token: str | None = None,
+                security_mode_override: str | None = None) -> Job:
         number = self.next_number
         self.next_number += 1
         log_path = self.session_dir / f"job-{number:03d}.log"
@@ -457,6 +460,9 @@ class AgenticShell:
         if run_token:
             environment = os.environ.copy()
             environment["AGENTIC_SHELL_JOB_ID"] = run_token
+        if security_mode_override is not None:
+            environment = environment or os.environ.copy()
+            environment["AGENTIC_SECURITY_MODE_OVERRIDE"] = security_mode_override
         log_writer = BoundedLogWriter(
             log_path,
             redaction_values=_shell_redaction_values(
@@ -965,10 +971,17 @@ class AgenticShell:
                 _restore_interactive_output(previous_output)
             self._set_terminal_mode(TerminalMode.OUTPUT)
 
-    def _run_runner_command(self, argv: list[str]) -> None:
+    def _run_runner_command(
+        self, argv: list[str], *, security_mode_override: str | None = None,
+    ) -> None:
+        environment = None
+        if security_mode_override:
+            environment = os.environ.copy()
+            environment["AGENTIC_SECURITY_MODE_OVERRIDE"] = security_mode_override
         result = subprocess.run(
             argv, cwd=self.repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace", check=False,
+            env=environment,
         )
         if result.stdout:
             if "--json" in argv:
@@ -995,6 +1008,26 @@ class AgenticShell:
         except (OSError, json.JSONDecodeError):
             return "github"
         return data.get("task_source", "github") if isinstance(data, dict) else "github"
+
+    def _execution_security_override(self) -> str | None:
+        """Obtain trust consent while this interactive shell owns the TTY."""
+        config_path = self.config or (self.repo / "agent_config.json")
+        try:
+            config = load_config(config_path)
+        except (OSError, ValueError, json.JSONDecodeError):
+            # Let the child runner report the normal missing/malformed-config
+            # error; the shell cannot safely infer a security mode here.
+            return None
+        if config.get("security_mode") != "trusted":
+            return None
+        choice = request_repository_trust(
+            self.repo,
+            self.state_dir,
+            input_fn=lambda prompt: self._input(prompt),
+            output_fn=_shell_print,
+            interactive=True,
+        )
+        return "isolated" if choice == "isolated" else None
 
     def _status_line(self) -> str:
         """Return bounded, non-secret context for the interactive prompt."""
@@ -1076,11 +1109,24 @@ class AgenticShell:
         argv = self._runner_args(issue, runner_flags)
         if task_file and task_file_value is None:
             argv.extend(["--task-file", str(task_file)])
+        security_override = self._execution_security_override()
         if _has_job_flag(flags, "--publish"):
             _shell_print("[PUBLISH] Running in the foreground so publication confirmation can be entered")
-            self._run_foreground(argv)
+            previous = os.environ.get("AGENTIC_SECURITY_MODE_OVERRIDE")
+            if security_override:
+                os.environ["AGENTIC_SECURITY_MODE_OVERRIDE"] = security_override
+            try:
+                self._run_foreground(argv)
+            finally:
+                if previous is None:
+                    os.environ.pop("AGENTIC_SECURITY_MODE_OVERRIDE", None)
+                else:
+                    os.environ["AGENTIC_SECURITY_MODE_OVERRIDE"] = previous
         else:
-            self._launch(argv, run_token=uuid.uuid4().hex)
+            self._launch(
+                argv, run_token=uuid.uuid4().hex,
+                security_mode_override=security_override,
+            )
 
     def run_repair_pr(self, parts: list[str]) -> None:
         pr_number, clean = _parse_repair_pr_command(parts)
@@ -1089,18 +1135,42 @@ class AgenticShell:
         if clean:
             argv.append("--clean")
         _shell_print("[CI-REPAIR] Running in the foreground so confirmation can be entered")
-        self._run_foreground(argv)
+        security_override = self._execution_security_override()
+        previous = os.environ.get("AGENTIC_SECURITY_MODE_OVERRIDE")
+        if security_override:
+            os.environ["AGENTIC_SECURITY_MODE_OVERRIDE"] = security_override
+        try:
+            self._run_foreground(argv)
+        finally:
+            if security_override:
+                if previous is None:
+                    os.environ.pop("AGENTIC_SECURITY_MODE_OVERRIDE", None)
+                else:
+                    os.environ["AGENTIC_SECURITY_MODE_OVERRIDE"] = previous
 
     def run_audit(self, parts: list[str]) -> None:
         flags = _parse_audit_command(parts)
         argv = self._runner_args(None, flags)
         argv.insert(len(self._runner_prefix()), "audit")
         self.active_task = "repository audit"
+        security_override = self._execution_security_override()
         if _has_job_flag(flags, "--publish"):
             _shell_print("[PUBLISH] Running in the foreground so publication confirmation can be entered")
-            self._run_foreground(argv)
+            previous = os.environ.get("AGENTIC_SECURITY_MODE_OVERRIDE")
+            if security_override:
+                os.environ["AGENTIC_SECURITY_MODE_OVERRIDE"] = security_override
+            try:
+                self._run_foreground(argv)
+            finally:
+                if previous is None:
+                    os.environ.pop("AGENTIC_SECURITY_MODE_OVERRIDE", None)
+                else:
+                    os.environ["AGENTIC_SECURITY_MODE_OVERRIDE"] = previous
         else:
-            self._launch(argv, run_token=uuid.uuid4().hex)
+            self._launch(
+                argv, run_token=uuid.uuid4().hex,
+                security_mode_override=security_override,
+            )
 
     def run_dashboard(self, parts: list[str]) -> None:
         dashboard = self.runner.with_name("agentic_dashboard.py")
@@ -1359,7 +1429,11 @@ class AgenticShell:
             value_options={"--profile", "--worktree"},
             boolean_options={"--json", "--commands"},
         )
-        self._run_runner_command(self._subcommand_args("doctor", flags))
+        security_override = self._execution_security_override() if "--commands" in flags else None
+        self._run_runner_command(
+            self._subcommand_args("doctor", flags),
+            security_mode_override=security_override,
+        )
 
     def run_cleanup(self, parts: list[str]) -> None:
         flags = _parse_options(
