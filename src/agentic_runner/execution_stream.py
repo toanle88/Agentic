@@ -50,7 +50,7 @@ def _process_group_kwargs() -> dict[str, Any]:
 
 
 def _stop_process_tree(process: subprocess.Popen[Any]) -> None:
-    """Stop a provider and its descendants without leaving output pipes open."""
+    """Stop a provider and wait for its process group to exit."""
     if os.name != "nt":
         try:
             os.killpg(process.pid, signal.SIGKILL)
@@ -70,6 +70,11 @@ def _stop_process_tree(process: subprocess.Popen[Any]) -> None:
             process.kill()
     except OSError:
         pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
 
 
 def _append_bounded_human_log(path: Path, text: str) -> bool:

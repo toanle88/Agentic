@@ -13,13 +13,23 @@ from typing import Any
 try:
     from scripts.agent_benchmark_config import _path_under_root, render_command
     from scripts.benchmark_execution import (
-        run_command as _run_shared_command,
+        process_group_kwargs, run_command as _run_shared_command,
+        terminate_process_tree,
     )
 except ModuleNotFoundError:  # Direct ``python scripts/agent_benchmark.py`` use.
     from agent_benchmark_config import _path_under_root, render_command
     from benchmark_execution import (
-        run_command as _run_shared_command,
+        process_group_kwargs, run_command as _run_shared_command,
+        terminate_process_tree,
     )
+
+try:
+    from agentic_runner.file_boundaries import open_single_link_regular
+except ModuleNotFoundError:  # Direct source-checkout use without installation.
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    from agentic_runner.file_boundaries import open_single_link_regular
 
 
 SUCCESS_STATUSES = {"success", "completed", "passed", "approved"}
@@ -65,7 +75,7 @@ def _run_bounded_git_command(
     process = subprocess.Popen(
         ["git", *args],
         cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        stdin=subprocess.DEVNULL, env=environment,
+        stdin=subprocess.DEVNULL, env=environment, **process_group_kwargs(),
     )
     chunks: list[bytes] = []
     overflow = False
@@ -87,7 +97,7 @@ def _run_bounded_git_command(
                 if total > MAX_GIT_OUTPUT_BYTES:
                     overflow = True
                     try:
-                        process.kill()
+                        terminate_process_tree(process)
                     except OSError:
                         pass
                     return
@@ -101,7 +111,7 @@ def _run_bounded_git_command(
         returncode = process.wait(timeout=GIT_COMMAND_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired as exc:
         try:
-            process.kill()
+            terminate_process_tree(process)
         except OSError:
             pass
         process.wait()
@@ -201,13 +211,21 @@ def _run_checks(
 
 
 def _read_result(path: Path) -> dict[str, Any]:
+    descriptor: int | None = None
     try:
-        with path.open("rb") as stream:
-            payload = stream.read(MAX_RESULT_BYTES + 1)
+        descriptor, _ = open_single_link_regular(
+            path,
+            os.O_RDONLY | getattr(os, "O_NONBLOCK", 0),
+            description="scenario result",
+        )
+        payload = os.read(descriptor, MAX_RESULT_BYTES + 1)
     except FileNotFoundError:
         return {"status": "runner-error", "error": "scenario did not write result_file"}
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         return {"status": "runner-error", "error": f"invalid scenario result: {exc}"}
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
     if len(payload) > MAX_RESULT_BYTES:
         return {
             "status": "runner-error",

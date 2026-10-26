@@ -47,6 +47,9 @@ class BenchmarkTests(unittest.TestCase):
             "scripts.agent_benchmark_scenarios.subprocess.Popen",
             return_value=process,
         ), patch(
+            "scripts.agent_benchmark_scenarios.terminate_process_tree",
+            side_effect=lambda current: current.kill(),
+        ), patch(
             "scripts.agent_benchmark_scenarios.MAX_GIT_OUTPUT_BYTES", 4,
         ):
             with self.assertRaisesRegex(RuntimeError, "safety limit"):
@@ -82,6 +85,9 @@ class BenchmarkTests(unittest.TestCase):
             "scripts.agent_benchmark_scenarios.subprocess.Popen",
             return_value=process,
         ), patch(
+            "scripts.agent_benchmark_scenarios.terminate_process_tree",
+            side_effect=lambda current: current.kill(),
+        ), patch(
             "scripts.agent_benchmark_scenarios.GIT_COMMAND_TIMEOUT_SECONDS", 0.01,
         ):
             started = time.monotonic()
@@ -89,6 +95,67 @@ class BenchmarkTests(unittest.TestCase):
                 _run_bounded_git_command(Path.cwd(), {}, ["status"])
         self.assertTrue(process.killed)
         self.assertLess(time.monotonic() - started, 1)
+
+    @unittest.skipIf(os.name == "nt", "uses a POSIX executable fixture")
+    def test_benchmark_git_timeout_terminates_descendants(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            marker = root / "timeout-descendant-alive"
+            child = (
+                "import pathlib,time; time.sleep(2); "
+                f"pathlib.Path({str(marker)!r}).write_text('alive')"
+            )
+            script = root / "git"
+            script.write_text(
+                "#!" + sys.executable + "\n"
+                "import subprocess,sys,time\n"
+                f"subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+                "time.sleep(10)\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o700)
+            environment = {"PATH": f"{root}{os.pathsep}{os.environ.get('PATH', '')}"}
+            with patch(
+                "scripts.agent_benchmark_scenarios.GIT_COMMAND_TIMEOUT_SECONDS", 1,
+            ), self.assertRaisesRegex(RuntimeError, "Timed out"):
+                _run_bounded_git_command(root, environment, ["status"])
+            # The child writes after two seconds; wait beyond that point so a
+            # surviving descendant cannot make this test pass spuriously.
+            deadline = time.monotonic() + 4
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertFalse(marker.exists())
+
+    @unittest.skipIf(os.name == "nt", "uses a POSIX executable fixture")
+    def test_benchmark_git_output_overflow_terminates_descendants(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            marker = root / "overflow-descendant-alive"
+            child = (
+                "import pathlib,time; time.sleep(2); "
+                f"pathlib.Path({str(marker)!r}).write_text('alive')"
+            )
+            script = root / "git"
+            script.write_text(
+                "#!" + sys.executable + "\n"
+                "import os,subprocess,sys,time\n"
+                f"subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+                "os.write(1, b'A' * 10000)\n"
+                "time.sleep(10)\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o700)
+            environment = {"PATH": f"{root}{os.pathsep}{os.environ.get('PATH', '')}"}
+            with patch(
+                "scripts.agent_benchmark_scenarios.MAX_GIT_OUTPUT_BYTES", 1024,
+            ), self.assertRaisesRegex(RuntimeError, "safety limit"):
+                _run_bounded_git_command(root, environment, ["status"])
+            # The child writes after two seconds; wait beyond that point so a
+            # surviving descendant cannot make this test pass spuriously.
+            deadline = time.monotonic() + 4
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertFalse(marker.exists())
 
     def test_benchmark_environment_requires_explicit_credential_passthrough(self):
         secret = "benchmark-short"
@@ -189,6 +256,32 @@ class BenchmarkTests(unittest.TestCase):
             result["error"], f"scenario result exceeds {MAX_RESULT_BYTES}-byte limit",
         )
 
+    def test_symlinked_scenario_result_is_a_runner_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            outside = root / "outside.json"
+            outside.write_text('{"status":"success"}', encoding="utf-8")
+            path = root / "result.json"
+            try:
+                path.symlink_to(outside)
+            except OSError as exc:
+                self.skipTest(f"symlinks unavailable: {exc}")
+            result = _read_result(path)
+        self.assertEqual(result["status"], "runner-error")
+
+    def test_hardlinked_scenario_result_is_a_runner_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            outside = root / "outside.json"
+            outside.write_text('{"status":"success"}', encoding="utf-8")
+            path = root / "result.json"
+            try:
+                os.link(outside, path)
+            except OSError as exc:
+                self.skipTest(f"hard links unavailable: {exc}")
+            result = _read_result(path)
+        self.assertEqual(result["status"], "runner-error")
+
     def test_malformed_scenario_result_is_a_runner_error(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "result.json"
@@ -273,7 +366,7 @@ class BenchmarkTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             marker = Path(temp) / "descendant-alive"
             child = (
-                "import pathlib,time; time.sleep(0.5); "
+                "import pathlib,time; time.sleep(2); "
                 f"pathlib.Path({str(marker)!r}).write_text('alive')"
             )
             parent = (
@@ -284,7 +377,11 @@ class BenchmarkTests(unittest.TestCase):
                 Path(temp), {"name": "timeout", "command": [sys.executable, "-c", parent]},
                 timeout=1,
             )
-            time.sleep(0.8)
+            # The child writes after two seconds; wait beyond that point so a
+            # surviving descendant cannot make this test pass spuriously.
+            deadline = time.monotonic() + 4
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
         self.assertEqual(result["status"], "timeout")
         self.assertFalse(marker.exists())
 
@@ -292,7 +389,7 @@ class BenchmarkTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             marker = Path(temp) / "descendant-alive"
             child = (
-                "import pathlib,time; time.sleep(0.5); "
+                "import pathlib,time; time.sleep(2); "
                 f"pathlib.Path({str(marker)!r}).write_text('alive')"
             )
             parent = (
@@ -302,7 +399,11 @@ class BenchmarkTests(unittest.TestCase):
             passed, records = _run_checks(
                 Path(temp), [[sys.executable, '-c', parent]], timeout=1,
             )
-            time.sleep(0.8)
+            # The child writes after two seconds; wait beyond that point so a
+            # surviving descendant cannot make this test pass spuriously.
+            deadline = time.monotonic() + 4
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
         self.assertFalse(passed)
         self.assertEqual(records[0]["status"], "timeout")
         self.assertFalse(marker.exists())

@@ -20,6 +20,7 @@ import uuid
 from typing import Any
 
 from .execution import _console_print
+from .execution_stream import _process_group_kwargs, _stop_process_tree
 from .models import DEFAULT_GITHUB_HOST, Issue, PullRequest, Run, StatePaths
 from .security import redact_secrets
 from .output import style_system_text, style_text
@@ -326,7 +327,7 @@ def command(argv: list[str], cwd: Path, *, timeout: int = 180,
         else:
             process = subprocess.Popen(
                 argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                env=env,
+                env=env, **_process_group_kwargs(),
             )
             chunks: list[bytes] = []
             overflow = False
@@ -348,7 +349,7 @@ def command(argv: list[str], cwd: Path, *, timeout: int = 180,
                         if total > max_output_bytes:
                             overflow = True
                             try:
-                                process.kill()
+                                _stop_process_tree(process)
                             except OSError:
                                 pass
                             return
@@ -361,7 +362,7 @@ def command(argv: list[str], cwd: Path, *, timeout: int = 180,
             try:
                 returncode = process.wait(timeout=timeout)
             except subprocess.TimeoutExpired as exc:
-                process.kill()
+                _stop_process_tree(process)
                 process.wait()
                 reader.join(timeout=1)
                 if process.stdout is not None:
@@ -369,7 +370,7 @@ def command(argv: list[str], cwd: Path, *, timeout: int = 180,
                 raise exc
             reader.join(timeout=1)
             if reader.is_alive():
-                process.kill()
+                _stop_process_tree(process)
                 process.wait()
                 reader.join(timeout=1)
             if process.stdout is not None:

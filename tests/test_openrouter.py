@@ -21,6 +21,7 @@ from agentic_runner import openrouter as agentic_openrouter
 from agentic_runner import file_boundaries
 from agentic_runner.context import compact_openrouter_request
 from agentic_runner import openrouter_tools as agentic_openrouter_tools
+from agentic_runner.git_policy import GIT_LOG_METADATA_FORMAT
 
 
 class OpenRouterTests(unittest.TestCase):
@@ -753,7 +754,18 @@ class OpenRouterTests(unittest.TestCase):
                 ['git', 'log'],
                 ['git', 'log', '--oneline', '--', 'public.txt'],
                 ['git', 'log', '--pretty=%h', '--max-count=1', '--', 'public.txt'],
+                ['git', 'log', '--format=%B', '--', 'public.txt'],
+                ['git', 'log', '--pretty=format:%N', '--', 'public.txt'],
                 ['git', 'log', '--decorate=short', '--', 'public.txt'],
+            ):
+                allowed, reason = agentic_openrouter._openrouter_command_allowed(
+                    argv, readonly=True, worktree=root,
+                )
+                self.assertFalse(allowed, (argv, reason))
+
+            for argv in (
+                ['git', 'log', f'--format={GIT_LOG_METADATA_FORMAT}', '--', 'public.txt'],
+                ['git', 'log', f'--pretty=format:{GIT_LOG_METADATA_FORMAT}', '--max-count=1'],
             ):
                 allowed, reason = agentic_openrouter._openrouter_command_allowed(
                     argv, readonly=True, worktree=root,
