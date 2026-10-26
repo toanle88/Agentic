@@ -1,5 +1,6 @@
 """Focused tests for bounded CI evidence and PR-repair safety."""
 import json
+from contextlib import nullcontext
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -35,6 +36,89 @@ class CIRepairTests(unittest.TestCase):
             123, "Fix", "body", "OPEN", "main", "base", "agent/issue-1-abcd1234",
             "head", "owner/repo", "https://github.test/pull/123",
         )
+
+    def test_repair_ci_excludes_stale_review_findings_from_developer_prompt(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            worktree = root / "worktree"
+            folder = root / "run"
+            repo.mkdir()
+            worktree.mkdir()
+            folder.mkdir()
+            (folder / "review-001.json").write_text(json.dumps({
+                "approved": False,
+                "findings": [{
+                    "id": "F-stale",
+                    "requirement": "Unrelated stale review requirement",
+                    "action_target": "Change an unrelated component",
+                }],
+            }))
+            evidence = CIEvidence(
+                "code/test",
+                ({"name": "unit tests", "state": "FAILURE"},),
+                ({"excerpt": "CI diagnostic: expected 2 results, got 3"},),
+                self.pr.head_sha,
+            )
+            config = {
+                "max_retries": 0,
+                "max_files": None,
+                "task_timeout_seconds": 60,
+                "test_commands": [["true"]],
+                "developer_agent": {"provider": "codex"},
+                "reviewer_agent": {"provider": "codex"},
+                "sandbox": {},
+                "ci_repair": {"max_attempts": 1},
+            }
+            prompts = []
+            expected_scope = evidence.prompt_context()
+
+            def fake_run_agent(worktree_path, prompt, **kwargs):
+                prompts.append(prompt)
+                return True, "Implemented the targeted CI fix."
+
+            def fake_verify_and_review(*args, **kwargs):
+                return True, "tests passed", {"approved": True, "findings": []}, "digest", "base"
+
+            real_develop = agentic_cli._agentic_workflow.develop
+
+            def wrapped_develop(*args, **kwargs):
+                self.assertTrue(kwargs["repair_mode"])
+                self.assertEqual(kwargs["repair_scope"], expected_scope)
+                agentic_cli._agentic_workflow.bind(vars(agentic_cli))
+                return real_develop(*args, **kwargs)
+
+            with (
+                patch.object(agentic_cli, "github_repo_from_remote", return_value="owner/repo"),
+                patch.object(agentic_cli, "_github_preflight"),
+                patch.object(agentic_cli, "get_pull_request", return_value=self.pr),
+                patch.object(agentic_cli, "find_worktree_for_branch",
+                             return_value=Run(None, self.pr.head, worktree)),
+                patch.object(agentic_cli, "logs_path", return_value=folder),
+                patch.object(agentic_cli, "worktree_lock", return_value=nullcontext()),
+                patch.object(agentic_cli, "verify_worktree_for_pr"),
+                patch.object(agentic_cli, "git", return_value=""),
+                patch.object(agentic_cli, "worktree_change_fingerprint", return_value="clean"),
+                patch.object(agentic_cli, "can_resume_dirty_worktree", return_value=False),
+                patch.object(agentic_cli, "record_issue_metadata"),
+                patch.object(agentic_cli, "record_security_policy"),
+                patch.object(agentic_cli, "fetch_ci_evidence", return_value=evidence),
+                patch.object(agentic_cli, "test_commands_for_profile", return_value=[["true"]]),
+                patch.object(agentic_cli, "run_agent", side_effect=fake_run_agent),
+                patch.object(agentic_cli, "verify_and_review", side_effect=fake_verify_and_review),
+                patch.object(agentic_cli, "develop", side_effect=wrapped_develop),
+                patch.object(agentic_cli, "_confirm_ci_repair", return_value=False),
+            ):
+                self.assertEqual(agentic_cli.repair_ci(repo, self.pr.number, config), 0)
+
+            self.assertEqual(len(prompts), 1)
+            prompt = prompts[0]
+            self.assertIn("CI diagnostic: expected 2 results, got 3", prompt)
+            self.assertIn("TARGETED CI REPAIR SCOPE", prompt)
+            self.assertIn("exclusive justification and scope", prompt)
+            self.assertNotIn("F-stale", prompt)
+            self.assertNotIn("Unrelated stale review requirement", prompt)
+            self.assertNotIn("body", prompt)
 
     def test_github_preflight_uses_the_active_cli_environment(self):
         with patch("agentic_runner.cli.shutil.which", return_value="/usr/bin/gh") as which:
