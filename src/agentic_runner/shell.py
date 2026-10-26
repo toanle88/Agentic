@@ -33,7 +33,7 @@ from .output import (
     untag_system_prefix,
 )
 from .persistence import atomic_write_text, read_text_bounded
-from .security import sensitive_environment_values
+from .security import configured_environment_values, sensitive_environment_values
 from .shell_input import (  # noqa: F401
     COMMAND_DESCRIPTIONS,
     HELP,
@@ -144,10 +144,7 @@ def _shell_redaction_values(config: Path | None, environment: Mapping[str, str])
         sandbox = data.get("sandbox")
         if isinstance(sandbox, dict):
             names.update(name for name in sandbox.get("pass_env", ()) if isinstance(name, str))
-    values.extend(
-        environment[name] for name in names
-        if name in environment and len(environment[name]) >= 8
-    )
+    values.extend(configured_environment_values(environment, names))
     return sorted(set(values), key=len, reverse=True)
 
 

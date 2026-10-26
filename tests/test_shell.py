@@ -43,6 +43,19 @@ WINDOWS_TREE_PARENT = (
 
 
 class ShellTests(unittest.TestCase):
+    def test_shell_redaction_values_include_short_configured_credentials(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config = Path(temp) / "agent_config.json"
+            config.write_text(json.dumps({
+                "developer_agent": {"api_key_env": "SERVICE_VALUE"},
+                "sandbox": {"pass_env": ["PASSTHROUGH_VALUE"]},
+            }), encoding="utf-8")
+            values = agentic_shell._shell_redaction_values(
+                config, {"SERVICE_VALUE": "tiny", "PASSTHROUGH_VALUE": "brief"},
+            )
+        self.assertIn("tiny", values)
+        self.assertIn("brief", values)
+
     def _windows_tree_argv(self, root):
         return [
             sys.executable, '-u', '-c', WINDOWS_TREE_PARENT,

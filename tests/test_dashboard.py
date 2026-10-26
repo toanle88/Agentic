@@ -204,6 +204,53 @@ class DashboardTests(unittest.TestCase):
                 agentic_dashboard_data.collect_runs(root)
                 self.assertEqual(snapshot.call_count, 2)
 
+    def test_dashboard_ignores_symlinked_known_and_numbered_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            run = root / "agent-audit-ab12cd345678"
+            outside = Path(temp) / "outside"
+            run.mkdir(parents=True)
+            outside.write_text(json.dumps({
+                "summary": "outside audit", "findings": [],
+            }), encoding="utf-8")
+            try:
+                (run / "audit-report.json").symlink_to(outside)
+                (run / "review-001.json").symlink_to(outside)
+            except OSError as exc:
+                self.skipTest(f"symbolic links unavailable: {exc}")
+            snapshot = agentic_dashboard_data.collect_runs(root)[0]
+
+        self.assertEqual(snapshot["audit_report"]["state"], "not-run")
+        self.assertEqual(snapshot["review"]["status"], "not-run")
+        self.assertNotIn("outside audit", json.dumps(snapshot))
+
+    def test_dashboard_cache_invalidates_when_an_older_artifact_changes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            run = root / "agent-audit-ab12cd345678"
+            run.mkdir(parents=True)
+            audit = run / "audit-report.json"
+            audit.write_text(json.dumps({"summary": "old", "findings": []}), encoding="utf-8")
+            old_time = dt.datetime.now().timestamp() - 1_000
+            os.utime(audit, (old_time, old_time))
+            for index in range(agentic_dashboard_data.MAX_FILES_PER_RUN + 3):
+                path = run / f"developer-{index:03d}.txt"
+                path.write_text(f"developer {index}\n", encoding="utf-8")
+                os.utime(path, (old_time + index + 1, old_time + index + 1))
+
+            with patch.object(
+                agentic_dashboard_data, "_run_snapshot",
+                wraps=agentic_dashboard_data._run_snapshot,
+            ) as snapshot:
+                first = agentic_dashboard_data.collect_runs(root)[0]
+                audit.write_text(json.dumps({"summary": "new", "findings": []}), encoding="utf-8")
+                os.utime(audit, (old_time, old_time))
+                second = agentic_dashboard_data.collect_runs(root)[0]
+
+        self.assertEqual(first["audit_report"]["summary"], "old")
+        self.assertEqual(second["audit_report"]["summary"], "new")
+        self.assertEqual(snapshot.call_count, 2)
+
     def test_dashboard_reuses_one_bounded_folder_index_for_snapshot_build(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / ".demo-agent-runs"
@@ -232,6 +279,19 @@ class DashboardTests(unittest.TestCase):
                 signature = agentic_dashboard_data._folder_signature(run)
         self.assertEqual(len(signature), 1)
         self.assertEqual(len(signature[0]), 4)
+
+    def test_dashboard_large_folder_inventory_metadata_stays_bounded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            run = Path(temp) / "agent-issue-127-ab12cd34"
+            run.mkdir(parents=True)
+            for index in range(agentic_dashboard_data.MAX_DASHBOARD_ENTRIES_PER_RUN + 1):
+                (run / f"artifact-{index:05d}.txt").write_text(str(index), encoding="utf-8")
+
+            metadata = agentic_dashboard_data._folder_metadata(run)
+
+        self.assertLessEqual(len(metadata.files), agentic_dashboard_data.MAX_FILES_PER_RUN)
+        self.assertLessEqual(len(metadata.signature), agentic_dashboard_data.MAX_FILES_PER_RUN + 1)
+        self.assertTrue(any(item[0] == "__agentic_inventory__" for item in metadata.signature))
 
     def test_windows_dashboard_signature_does_not_read_artifacts(self):
         with tempfile.TemporaryDirectory() as temp:

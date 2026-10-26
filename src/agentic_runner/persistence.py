@@ -13,6 +13,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Iterable
 
+from .file_boundaries import open_single_link_regular
 from .security import redact_secrets
 
 
@@ -432,12 +433,33 @@ def read_text_tail(path: Path, max_bytes: int, *, encoding: str = "utf-8") -> st
     if max_bytes <= 0:
         return ""
     try:
-        with path.open("rb") as stream:
-            stream.seek(0, os.SEEK_END)
-            size = stream.tell()
-            stream.seek(max(0, size - max_bytes))
-            payload = stream.read(max_bytes)
-    except OSError:
+        descriptor, _ = open_single_link_regular(
+            path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0), description="text artifact",
+        )
+        try:
+            size = os.lseek(descriptor, 0, os.SEEK_END)
+            os.lseek(descriptor, max(0, size - max_bytes), os.SEEK_SET)
+            payload = os.read(descriptor, max_bytes)
+        finally:
+            os.close(descriptor)
+    except (OSError, ValueError):
+        return ""
+    return payload.decode(encoding, errors="replace")
+
+
+def read_text_prefix(path: Path, max_bytes: int, *, encoding: str = "utf-8") -> str:
+    """Read at most the first *max_bytes* from a single-link regular file."""
+    if max_bytes <= 0:
+        return ""
+    try:
+        descriptor, _ = open_single_link_regular(
+            path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0), description="text artifact",
+        )
+        try:
+            payload = os.read(descriptor, max_bytes)
+        finally:
+            os.close(descriptor)
+    except (OSError, ValueError):
         return ""
     return payload.decode(encoding, errors="replace")
 
@@ -453,9 +475,14 @@ def read_text_bounded(path: Path, max_bytes: int, *, encoding: str = "utf-8") ->
     if max_bytes <= 0:
         return "" if max_bytes == 0 else None
     try:
-        with path.open("rb") as stream:
-            payload = stream.read(max_bytes + 1)
-    except OSError:
+        descriptor, _ = open_single_link_regular(
+            path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0), description="text artifact",
+        )
+        try:
+            payload = os.read(descriptor, max_bytes + 1)
+        finally:
+            os.close(descriptor)
+    except (OSError, ValueError):
         return None
     if len(payload) > max_bytes:
         return None

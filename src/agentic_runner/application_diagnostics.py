@@ -21,7 +21,11 @@ from typing import Any
 
 from . import __version__
 from .persistence import BoundedAppendWriter, rotate_bounded_log
-from .security import redact_secrets, sensitive_environment_values
+from .security import (
+    configured_environment_values,
+    redact_secrets,
+    sensitive_environment_values,
+)
 
 
 DIAGNOSTIC_FILENAME = "agentic.log"
@@ -125,10 +129,7 @@ def _diagnostic_redaction_values(
                 names.update(
                     name for name in sandbox.get("pass_env", ()) if isinstance(name, str)
                 )
-            values.extend(
-                os.environ[name] for name in names
-                if name in os.environ and len(os.environ[name]) >= 8
-            )
+            values.extend(configured_environment_values(os.environ, names))
     return sorted(set(values), key=len, reverse=True)
 
 

@@ -32,6 +32,24 @@ def sensitive_environment_values(environ: Mapping[str, str] | None = None) -> li
     return sorted(values, key=len, reverse=True)
 
 
+def configured_environment_values(
+    environ: Mapping[str, str], names: Iterable[str],
+) -> list[str]:
+    """Return every non-empty value named by explicit credential settings.
+
+    Explicit configuration is an intentional secret boundary even when the
+    environment variable name is not credential-shaped. The length heuristic
+    belongs only to discovery of likely credentials from arbitrary names.
+    """
+    values = {
+        value for name in names
+        if isinstance(name, str)
+        and (value := environ.get(name))
+        and isinstance(value, str)
+    }
+    return sorted(values, key=len, reverse=True)
+
+
 def restricted_test_environment(
     environ: Mapping[str, str] | None = None,
     blocked_names: Iterable[str] = (),
@@ -51,7 +69,7 @@ def restricted_test_environment(
         if _SENSITIVE_ENV_NAME.search(name) or explicitly_blocked:
             # A configured credential name is an explicit secret boundary;
             # short values must be redacted just like longer credentials.
-            if explicitly_blocked or len(value) >= 8:
+            if (explicitly_blocked or len(value) >= 8) and value:
                 removed_values.append(value)
             continue
         safe[name] = value
