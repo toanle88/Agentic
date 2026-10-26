@@ -1627,7 +1627,7 @@ class ConfigurationTests(unittest.TestCase):
             self.assertTrue(sensitive_read(path), path)
         self.assertFalse(sensitive_read('src/credentials.txt'))
         self.assertTrue(agentic.forbidden('.github\\workflows\\release.yml'))
-        self.assertFalse(sensitive_read('.github\\workflows\\release.yml'))
+        self.assertTrue(sensitive_read('.github\\workflows\\release.yml'))
 
         with tempfile.TemporaryDirectory() as temp:
             unlimited = Path(temp) / 'agent_config.json'

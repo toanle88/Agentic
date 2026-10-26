@@ -148,6 +148,24 @@ class GuidanceTests(unittest.TestCase):
             self.assertTrue(all(len(record["sha256"]) == 64 for record in records))
             self.assertNotIn("standards\\n", json.dumps(records))
 
+    def test_decision_selection_keeps_lexical_first_records_with_bounded_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            decisions = root / "docs" / "decisions"
+            decisions.mkdir(parents=True)
+            for index in reversed(range(40)):
+                (decisions / f"{index:04d}-choice.md").write_text(
+                    str(index), encoding="utf-8",
+                )
+            (decisions / "ignored.txt").write_text("ignored", encoding="utf-8")
+
+            selected = discover_guidance(root, phase="review")
+
+        self.assertEqual(
+            [item.path for item in selected],
+            [f"docs/decisions/{index:04d}-choice.md" for index in range(24)],
+        )
+
     def test_missing_guidance_preserves_original_prompt_and_no_audit_record(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

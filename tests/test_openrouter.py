@@ -760,6 +760,27 @@ class OpenRouterTests(unittest.TestCase):
                 )
                 self.assertTrue(allowed, (argv, reason))
 
+    def test_openrouter_read_policy_matches_provider_protected_paths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / '.github' / 'workflows').mkdir(parents=True)
+            for relative in ('agentic.py', 'agent_config.json', '.github/workflows/ci.yml'):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('protected', encoding='utf-8')
+
+            for relative in ('agentic.py', 'agent_config.json', '.github/workflows/ci.yml'):
+                with self.subTest(relative=relative):
+                    result = agentic_openrouter._openrouter_tool_call(
+                        root, 'read_file', {'path': relative}, readonly=True,
+                    )
+                    self.assertIn('protected file', result)
+                    allowed, reason = agentic_openrouter._openrouter_command_allowed(
+                        ['git', 'show', f'HEAD:{relative}'],
+                        readonly=True, worktree=root,
+                    )
+                    self.assertFalse(allowed, (relative, reason))
+
     def test_openrouter_git_diff_disables_malicious_external_diff_config(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
