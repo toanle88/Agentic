@@ -47,8 +47,11 @@ def restricted_test_environment(
     safe: dict[str, str] = {}
     removed_values: list[str] = []
     for name, value in source.items():
-        if _SENSITIVE_ENV_NAME.search(name) or name.casefold() in blocked:
-            if len(value) >= 8:
+        explicitly_blocked = name.casefold() in blocked
+        if _SENSITIVE_ENV_NAME.search(name) or explicitly_blocked:
+            # A configured credential name is an explicit secret boundary;
+            # short values must be redacted just like longer credentials.
+            if explicitly_blocked or len(value) >= 8:
                 removed_values.append(value)
             continue
         safe[name] = value
@@ -78,7 +81,9 @@ def redact_secrets(text: str, extra_values: Iterable[str] = ()) -> str:
 
     redacted = _KEY_VALUE.sub(redact_key_value, redacted)
     values = list(sensitive_environment_values())
-    values.extend(value for value in extra_values if isinstance(value, str) and len(value) >= 8)
+    # Callers use extra_values for explicitly configured credentials. Do not
+    # apply the heuristic length threshold to those values.
+    values.extend(value for value in extra_values if isinstance(value, str) and value)
     for value in sorted(set(values), key=len, reverse=True):
         redacted = redacted.replace(value, "[REDACTED]")
     return redacted

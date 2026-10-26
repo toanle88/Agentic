@@ -43,6 +43,7 @@ AUDIT_BRANCH_RE = re.compile(
 AUDIT_KEY = hashlib.sha256(b"agentic-repository-audit-v1").hexdigest()[:12]
 MAX_SELECTION_RUNS = 5
 RELATIVE_WORKTREE_GIT = (2, 48, 0)
+MAX_COMMAND_OUTPUT_BYTES = 8 * 1024 * 1024
 _GIT_SAFETY_CONFIG = (
     "-c", "core.fsmonitor=false",
     "-c", f"core.hooksPath={os.devnull}",
@@ -313,6 +314,8 @@ def command(argv: list[str], cwd: Path, *, timeout: int = 180,
             check: bool = True, env: dict[str, str] | None = None,
             max_output_bytes: int | None = None) -> subprocess.CompletedProcess[str]:
     """Subprocess without a shell; issue data never becomes shell code."""
+    if max_output_bytes is None:
+        max_output_bytes = MAX_COMMAND_OUTPUT_BYTES
     if max_output_bytes is not None and max_output_bytes < 1:
         raise ValueError("max_output_bytes must be positive")
     try:
@@ -397,13 +400,32 @@ def git(repo: Path, *args: str, check: bool = True) -> str:
     # Keep the environment explicit as well: Git gives several environment
     # variables precedence over configuration files.
     environment = os.environ.copy()
+    for name in list(environment):
+        if name.startswith("GIT_CONFIG_"):
+            environment.pop(name, None)
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"):
+        environment.pop(name, None)
     environment.update({
         "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_ATTR_NOSYSTEM": "1",
         "GIT_OPTIONAL_LOCKS": "0",
         "GIT_TERMINAL_PROMPT": "0",
     })
     for name in ("GIT_EXTERNAL_DIFF", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND"):
         environment.pop(name, None)
+    filter_probe = command(
+        ["git", "config", "--local", "--name-only", "--get-regexp",
+         r"^filter\..+\.(clean|smudge|process|required)$"],
+        repo, timeout=10, check=False, env=environment,
+        max_output_bytes=MAX_COMMAND_OUTPUT_BYTES,
+    )
+    if filter_probe.returncode not in (0, 1):
+        raise RuntimeError("Could not inspect repository Git filter configuration")
+    if filter_probe.stdout.strip():
+        raise RuntimeError(
+            "Repository Git filter drivers are not supported for safe operations"
+        )
     return command(
         ["git", *_GIT_SAFETY_CONFIG, *args], repo,
         check=check, env=environment,

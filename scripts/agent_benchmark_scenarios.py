@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+from threading import Thread
 import time
 from typing import Any
 
@@ -25,6 +26,27 @@ SUCCESS_STATUSES = {"success", "completed", "passed", "approved"}
 REPORTED_STATUSES = SUCCESS_STATUSES | {"failed", "timeout", "runner-error"}
 MAX_ERROR = 500
 MAX_RESULT_BYTES = 256_000
+MAX_GIT_OUTPUT_BYTES = 8 * 1024 * 1024
+GIT_COMMAND_TIMEOUT_SECONDS = 10
+_BENCHMARK_BASE_ENV = frozenset({
+    "PATH", "HOME", "USERPROFILE", "TMP", "TEMP", "TMPDIR", "SYSTEMROOT",
+    "PATHEXT", "LANG", "LC_ALL", "LC_CTYPE",
+})
+
+
+def _benchmark_environment(values: dict[str, str]) -> dict[str, str]:
+    """Build a minimal child environment with explicit credential opt-in."""
+    names = {
+        item.strip() for item in os.environ.get(
+            "AGENTIC_BENCHMARK_PASSTHROUGH_ENV", ""
+        ).split(",") if item.strip()
+    }
+    environment = {
+        name: value for name, value in os.environ.items()
+        if name in _BENCHMARK_BASE_ENV or name in names
+    }
+    environment.update(values)
+    return environment
 
 
 def _run_benchmark_command(
@@ -36,13 +58,91 @@ def _run_benchmark_command(
     return result.returncode, result.timed_out
 
 
-def _run_git(repo: Path, *args: str) -> None:
-    result = subprocess.run(
-        ["git", *args], cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, encoding="utf-8", errors="replace", check=False,
+def _run_bounded_git_command(
+    repo: Path, environment: dict[str, str], args: list[str],
+) -> tuple[int, str]:
+    """Run Git without materializing output beyond the safety limit."""
+    process = subprocess.Popen(
+        ["git", *args],
+        cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL, env=environment,
     )
-    if result.returncode:
-        raise RuntimeError(f"git {' '.join(args)} failed: {result.stdout[-MAX_ERROR:]}")
+    chunks: list[bytes] = []
+    overflow = False
+    read_error: BaseException | None = None
+    total = 0
+
+    def read_output() -> None:
+        nonlocal overflow, read_error, total
+        stream = process.stdout
+        if stream is None:
+            return
+        try:
+            while True:
+                read = getattr(stream, "read1", stream.read)
+                chunk = read(64 * 1024)
+                if not chunk:
+                    return
+                total += len(chunk)
+                if total > MAX_GIT_OUTPUT_BYTES:
+                    overflow = True
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+                    return
+                chunks.append(chunk)
+        except BaseException as exc:  # pragma: no cover - OS-specific pipe failures
+            read_error = exc
+
+    reader = Thread(target=read_output, daemon=True)
+    reader.start()
+    try:
+        returncode = process.wait(timeout=GIT_COMMAND_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            process.kill()
+        except OSError:
+            pass
+        process.wait()
+        if process.stdout is not None:
+            process.stdout.close()
+        raise RuntimeError("Timed out running benchmark Git command") from exc
+    finally:
+        reader.join(timeout=1)
+        if process.stdout is not None:
+            process.stdout.close()
+    if overflow:
+        raise RuntimeError("Git command output exceeded its safety limit")
+    if read_error is not None:
+        raise RuntimeError("Could not read benchmark Git output") from read_error
+    return returncode, b"".join(chunks).decode("utf-8", errors="replace")
+
+
+def _run_git(repo: Path, *args: str) -> None:
+    environment = _benchmark_environment({})
+    for name in list(environment):
+        if name.startswith("GIT_CONFIG_"):
+            environment.pop(name, None)
+    environment.update({
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+    })
+    if (repo / ".git").exists():
+        filter_returncode, filter_output = _run_bounded_git_command(
+            repo, environment,
+            ["config", "--local", "--name-only", "--get-regexp",
+             r"^filter\..+\.(clean|smudge|process|required)$"],
+        )
+        if filter_returncode not in (0, 1) or filter_output.strip():
+            raise RuntimeError("benchmark fixture uses unsupported Git filter drivers")
+    returncode, output = _run_bounded_git_command(
+        repo, environment, list(args),
+    )
+    if returncode:
+        raise RuntimeError(f"git {' '.join(args)} failed: {output[-MAX_ERROR:]}")
 
 
 def prepare_repository(source: Path, destination: Path) -> None:
@@ -62,14 +162,19 @@ def prepare_repository(source: Path, destination: Path) -> None:
         )
 
 
-def _run_checks(repo: Path, checks: list[list[str]], timeout: int) -> tuple[bool, list[dict[str, Any]]]:
+def _run_checks(
+    repo: Path, checks: list[list[str]], timeout: int,
+    *, env: dict[str, str] | None = None,
+) -> tuple[bool, list[dict[str, Any]]]:
+    if env is None:
+        env = _benchmark_environment({})
     records: list[dict[str, Any]] = []
     all_passed = True
     for command in checks:
         started = time.monotonic()
         try:
             returncode, timed_out = _run_benchmark_command(
-                command, cwd=repo, timeout=timeout,
+                command, cwd=repo, env=env, timeout=timeout,
             )
             status = "timeout" if timed_out else "passed" if returncode == 0 else "failed"
             records.append({
@@ -205,8 +310,7 @@ def run_scenario(
         "task_id": task["id"], "repetition": str(repetition),
     }
     rendered = render_command(command, values)
-    environment = os.environ.copy()
-    environment.update({
+    environment = _benchmark_environment({
         "AGENTIC_BENCHMARK_ROOT": str(root),
         "AGENTIC_BENCHMARK_REVIEWER": runner.removeprefix("reviewer:"),
         "AGENTIC_BENCHMARK_SCENARIO": runner, "AGENTIC_BENCHMARK_TASK_ID": task["id"],
@@ -228,7 +332,9 @@ def run_scenario(
             raw = _read_result(result_file)
     except OSError as exc:
         raw = {"status": "runner-error", "error": str(exc)}
-    checks_passed, checks = _run_checks(repo, task["checks"], timeout)
+    checks_passed, checks = _run_checks(
+        repo, task["checks"], timeout, env=environment,
+    )
     keep_path = run_root if keep_workspace else None
     record = _scenario_record(
         task, runner, raw, command_exit, time.monotonic() - started,

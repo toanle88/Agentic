@@ -63,6 +63,59 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(snapshot["review"]["skipped"], ["Browser check unavailable"])
             self.assertEqual(snapshot["review"]["recurring"][0]["count"], 2)
 
+    def test_dashboard_bounds_run_and_artifact_corpus(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            root.mkdir(parents=True)
+            for index in range(agentic_dashboard_data.MAX_DASHBOARD_RUNS + 3):
+                run = root / f"agent-issue-{index}-ab12cd34"
+                run.mkdir()
+                for artifact in range(agentic_dashboard_data.MAX_FILES_PER_RUN + 3):
+                    (run / f"developer-{artifact:03d}.log").write_text("done\n")
+            snapshots = agentic_dashboard_data.collect_runs(root)
+            self.assertLessEqual(
+                len(snapshots), agentic_dashboard_data.MAX_DASHBOARD_RUNS,
+            )
+            self.assertTrue(snapshots)
+            self.assertLessEqual(
+                max(item["file_count"] for item in snapshots),
+                agentic_dashboard_data.MAX_FILES_PER_RUN,
+            )
+
+    def test_dashboard_bounds_candidate_folder_scan(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            root.mkdir(parents=True)
+            for index in range(4):
+                run = root / f"agent-issue-{index}-ab12cd34"
+                run.mkdir()
+                (run / "developer-001.log").write_text("done\n")
+            with patch.object(
+                agentic_dashboard_data, "MAX_DASHBOARD_CANDIDATE_FOLDERS", 2,
+            ):
+                snapshots = agentic_dashboard_data.collect_runs(root)
+            self.assertLessEqual(len(snapshots), 2)
+
+    def test_dashboard_preserves_active_run_older_than_folder_limit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            active = root / "agent-issue-130-active001"
+            newer = root / "agent-issue-131-newer001"
+            active.mkdir(parents=True)
+            (active / "developer-001.log").write_text("Started\n", encoding="utf-8")
+            newer.mkdir()
+            (newer / "developer-001.log").write_text("Finished in 1s\n", encoding="utf-8")
+            # Updating an existing artifact changes the run's activity without
+            # changing the containing directory mtime.
+            activity_time = dt.datetime.now().timestamp() + 60
+            os.utime(active / "developer-001.log", (activity_time, activity_time))
+
+            with patch.object(agentic_dashboard_data, "MAX_DASHBOARD_RUNS", 1):
+                snapshots = agentic_dashboard_data.collect_runs(root)
+
+            self.assertEqual([snapshot["id"] for snapshot in snapshots], [active.name])
+            self.assertEqual(snapshots[0]["status"], "in-progress")
+
     def test_dashboard_bounds_large_log_reads_to_a_tail(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / ".demo-agent-runs"
@@ -92,6 +145,25 @@ class DashboardTests(unittest.TestCase):
                 (run / "developer-001.txt").write_text("second\n")
                 agentic_dashboard_data.collect_runs(root)
                 self.assertEqual(snapshot.call_count, 2)
+
+    def test_dashboard_reuses_one_bounded_folder_index_for_snapshot_build(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            run = root / "agent-issue-126-ab12cd34"
+            run.mkdir(parents=True)
+            (run / "developer-001.txt").write_text("first\n")
+            with (patch.object(
+                agentic_dashboard_data, "_folder_metadata",
+                wraps=agentic_dashboard_data._folder_metadata,
+            ) as metadata, patch.object(
+                agentic_dashboard_data, "_all_log_files",
+                side_effect=AssertionError("snapshot rescanned the folder"),
+            )):
+                snapshots = agentic_dashboard_data.collect_runs(root)
+            self.assertEqual(len(snapshots), 1)
+            # One scan selects the folder and one revalidates the snapshot's
+            # metadata after the bounded read.
+            self.assertEqual(metadata.call_count, 2)
 
     def test_dashboard_folder_signature_uses_metadata_without_reading_artifacts(self):
         with tempfile.TemporaryDirectory() as temp:

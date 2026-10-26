@@ -7,7 +7,9 @@ preserving the optional fields used by older run records.
 from __future__ import annotations
 
 import csv
+import contextvars
 import datetime as dt
+import heapq
 import io
 import json
 import os
@@ -18,7 +20,7 @@ import re
 import threading
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, NamedTuple
 
 from .review import finding_severity
 from .persistence import read_text_bounded
@@ -35,6 +37,12 @@ RUN_NAME = re.compile(
 NUMBERED_FILE = re.compile(r"^(?P<prefix>.+)-(?P<number>\d+)(?P<suffix>\.[^.]+)$")
 MAX_TEXT = 5_000
 MAX_FILES_PER_RUN = 24
+MAX_DASHBOARD_RUNS = 500
+MAX_DASHBOARD_CANDIDATE_FOLDERS = 2_000
+MAX_DASHBOARD_ENTRIES_PER_RUN = 4_096
+DASHBOARD_EXCLUDED_FILES = frozenset(
+    {"review-schema.json", "investigation-schema.json", "issue-snapshot.json"}
+)
 MAX_REVIEW_HISTORY_BYTES = 256_000
 MAX_REVIEW_HISTORY_ENTRIES = 50
 MAX_REVIEW_HISTORY_FINDINGS = 100
@@ -58,6 +66,15 @@ _RUN_SNAPSHOT_CACHE: dict[
     tuple[str, str], tuple[tuple[tuple[str, int, int, int | str], ...], dict[str, Any] | None]
 ] = {}
 _RUN_SNAPSHOT_CACHE_LOCK = threading.RLock()
+_SNAPSHOT_FILES: contextvars.ContextVar[tuple[Path, ...] | None] = contextvars.ContextVar(
+    "agentic_dashboard_snapshot_files", default=None,
+)
+
+
+class _FolderMetadata(NamedTuple):
+    activity_ns: int | None
+    signature: tuple[tuple[str, int, int, int | str], ...]
+    files: tuple[Path, ...]
 
 
 if os.name == "nt":
@@ -329,8 +346,15 @@ def collect_runs_from_roots(logs_roots: Iterable[Path]) -> list[dict[str, Any]]:
     for root in logs_roots:
         for run in collect_runs(root):
             merged.setdefault(run["id"], run)
+        if len(merged) > MAX_DASHBOARD_RUNS:
+            keep = sorted(
+                merged.values(),
+                key=lambda run: (run["last_activity"], run["id"]),
+                reverse=True,
+            )[:MAX_DASHBOARD_RUNS]
+            merged = {run["id"]: run for run in keep}
     return sorted(
-        merged.values(),
+        list(merged.values())[:MAX_DASHBOARD_RUNS],
         key=lambda run: (run["last_activity"], run["id"]),
         reverse=True,
     )
@@ -711,59 +735,79 @@ def _latest_developer(folder: Path, index: dict[str, list[Path]] | None = None) 
 
 
 def _all_log_files(folder: Path) -> list[Path]:
-    if not folder.is_dir():
-        return []
-    excluded = {"review-schema.json", "investigation-schema.json", "issue-snapshot.json"}
-    files: list[tuple[float, str, Path]] = []
+    return list(_folder_metadata(folder).files)
+
+
+def _folder_metadata(folder: Path) -> _FolderMetadata:
+    """Collect bounded activity, cache metadata, and artifact paths in one scan."""
     try:
-        entries = os.scandir(folder)
-        with entries:
-            for entry in entries:
-                try:
-                    if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
-                        continue
-                    if entry.name in excluded:
-                        continue
-                    modified = entry.stat(follow_symlinks=False).st_mtime
-                except OSError:
-                    continue
-                files.append((modified, entry.name, Path(entry.path)))
+        activity_ns = folder.stat().st_mtime_ns
     except OSError:
-        return []
-    return [
-        path for _, _, path in sorted(files, key=lambda item: (item[0], item[1]), reverse=True)
-    ]
-
-
-def _folder_signature(folder: Path) -> tuple[tuple[str, int, int, int | str], ...]:
-    """Return cache metadata for regular artifacts with one directory scan."""
-    if not folder.is_dir():
-        return ()
-    signature: list[tuple[str, int, int, int]] = []
+        return _FolderMetadata(None, (), ())
+    files: list[tuple[int, str, Path]] = []
+    signature: list[tuple[int, str, int, int | str]] = []
+    regular_count = 0
+    truncated = False
     try:
         entries = os.scandir(folder)
         with entries:
-            for entry in entries:
+            for entry_number, entry in enumerate(entries):
+                if entry_number >= MAX_DASHBOARD_ENTRIES_PER_RUN:
+                    truncated = True
+                    break
                 try:
                     if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
                         continue
                     stat = entry.stat(follow_symlinks=False)
                 except OSError:
                     continue
-                # Windows can retain the same nanosecond mtime for two rapid
-                # writes.  Its native ChangeTime is more reliable than
-                # Python's creation-time-compatible st_ctime on Windows.
-                change_time = (
+                regular_count += 1
+                signature_change_time = (
                     f"{_windows_file_change_time(entry.path, stat.st_ctime_ns)}:"
                     f"{getattr(stat, 'st_ino', 0)}"
                     if os.name == "nt" else stat.st_ctime_ns
                 )
-                signature.append((
-                    entry.name, stat.st_size, stat.st_mtime_ns, change_time,
-                ))
+                signature_candidate = (
+                    stat.st_mtime_ns, entry.name, stat.st_size, signature_change_time,
+                )
+                if len(signature) < MAX_FILES_PER_RUN:
+                    heapq.heappush(signature, signature_candidate)
+                elif signature_candidate > signature[0]:
+                    heapq.heapreplace(signature, signature_candidate)
+                if entry.name in DASHBOARD_EXCLUDED_FILES:
+                    continue
+                activity_ns = max(activity_ns, stat.st_mtime_ns)
+                file_candidate = (stat.st_mtime_ns, entry.name, Path(entry.path))
+                if len(files) < MAX_FILES_PER_RUN:
+                    heapq.heappush(files, file_candidate)
+                elif file_candidate > files[0]:
+                    heapq.heapreplace(files, file_candidate)
     except OSError:
-        return ()
-    return tuple(sorted(signature))
+        return _FolderMetadata(activity_ns, (), ())
+
+    bounded_signature = [
+        (name, size, modified, change_time)
+        for modified, name, size, change_time in sorted(signature, reverse=True)
+    ]
+    if regular_count > MAX_FILES_PER_RUN or truncated:
+        bounded_signature.append((
+            "__agentic_truncated__", regular_count, 0,
+            "scan-truncated" if truncated else "truncated",
+        ))
+    bounded_files = tuple(
+        path for _, _, path in sorted(files, key=lambda item: (item[0], item[1]), reverse=True)
+    )
+    return _FolderMetadata(activity_ns, tuple(bounded_signature), bounded_files)
+
+
+def _folder_activity_ns(folder: Path) -> int | None:
+    """Return activity from the bounded folder metadata scan."""
+    return _folder_metadata(folder).activity_ns
+
+
+def _folder_signature(folder: Path) -> tuple[tuple[str, int, int, int | str], ...]:
+    """Return cache metadata from the bounded folder metadata scan."""
+    return _folder_metadata(folder).signature
 
 
 def _process_running(folder: Path, index: dict[str, list[Path]] | None = None) -> bool:
@@ -774,11 +818,17 @@ def _process_running(folder: Path, index: dict[str, list[Path]] | None = None) -
     return "Started" in content and "Finished in" not in content
 
 
-def _run_snapshot(folder: Path) -> dict[str, Any] | None:
+def _run_snapshot(
+    folder: Path, all_files: Iterable[Path] | None = None,
+) -> dict[str, Any] | None:
     match = RUN_NAME.fullmatch(folder.name)
     if not match:
         return None
-    all_files = _all_log_files(folder)
+    if all_files is None:
+        all_files = _SNAPSHOT_FILES.get()
+        if all_files is None:
+            all_files = _all_log_files(folder)
+    all_files = list(all_files)
     index = _numbered_file_index(all_files)
     investigation, investigation_path = _investigation(folder, index)
     audit, audit_path = _audit(folder)
@@ -981,21 +1031,49 @@ def collect_runs(logs_root: Path) -> list[dict[str, Any]]:
     if not logs_root.is_dir():
         return []
     root_key = str(logs_root.resolve())
-    folders = [folder for folder in logs_root.iterdir() if folder.is_dir()]
+    folders: list[tuple[int, str, Path]] = []
+    metadata_by_folder: dict[str, _FolderMetadata] = {}
+    candidate_count = 0
+    try:
+        for folder in logs_root.iterdir():
+            if not folder.is_dir():
+                continue
+            candidate_count += 1
+            if candidate_count > MAX_DASHBOARD_CANDIDATE_FOLDERS:
+                break
+            metadata = _folder_metadata(folder)
+            activity_ns = metadata.activity_ns
+            if activity_ns is None:
+                continue
+            metadata_by_folder[folder.name] = metadata
+            candidate = (activity_ns, folder.name, folder)
+            if len(folders) < MAX_DASHBOARD_RUNS:
+                heapq.heappush(folders, candidate)
+            elif candidate > folders[0]:
+                heapq.heapreplace(folders, candidate)
+    except OSError:
+        return []
+    selected_folders = [folder for _, _, folder in sorted(folders, reverse=True)]
     runs: list[dict[str, Any]] = []
-    for folder in folders:
+    for folder in selected_folders:
         cache_key = (root_key, folder.name)
+        metadata = metadata_by_folder.get(folder.name, _FolderMetadata(None, (), ()))
         snapshot: dict[str, Any] | None = None
         for _ in range(_MAX_SNAPSHOT_RETRIES):
-            normalized_signature = _folder_signature(folder)
+            normalized_signature = metadata.signature
             with _RUN_SNAPSHOT_CACHE_LOCK:
                 cached = _RUN_SNAPSHOT_CACHE.get(cache_key)
             if cached and cached[0] == normalized_signature:
                 snapshot = cached[1]
                 break
 
-            candidate = _run_snapshot(folder)
-            current_signature = _folder_signature(folder)
+            snapshot_token = _SNAPSHOT_FILES.set(metadata.files)
+            try:
+                candidate = _run_snapshot(folder)
+            finally:
+                _SNAPSHOT_FILES.reset(snapshot_token)
+            current_metadata = _folder_metadata(folder)
+            current_signature = current_metadata.signature
             with _RUN_SNAPSHOT_CACHE_LOCK:
                 current = _RUN_SNAPSHOT_CACHE.get(cache_key)
                 if current_signature != normalized_signature:
@@ -1005,6 +1083,7 @@ def collect_runs(logs_root: Path) -> list[dict[str, Any]]:
                     if current and current[0] == current_signature:
                         snapshot = current[1]
                         break
+                    metadata = current_metadata
                     continue
                 if current and current[0] == current_signature:
                     snapshot = current[1]
@@ -1016,7 +1095,7 @@ def collect_runs(logs_root: Path) -> list[dict[str, Any]]:
             # An actively written run may not have a stable view yet. Return
             # a matching cached snapshot if one exists; otherwise omit this
             # run rather than exposing a candidate known to be stale.
-            current_signature = _folder_signature(folder)
+            current_signature = metadata.signature
             with _RUN_SNAPSHOT_CACHE_LOCK:
                 current = _RUN_SNAPSHOT_CACHE.get(cache_key)
                 if current and current[0] == current_signature:

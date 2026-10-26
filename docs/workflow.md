@@ -205,6 +205,28 @@ changed-line count (ties are lexical) within the hunk budget. Omitted middle
 sections are called out so the read-only reviewer can inspect affected files.
 Smaller patches retain the complete diff.
 
+Repository Git operations disable system and global Git configuration and
+reject repositories that configure clean, smudge, process, or required filter
+drivers. This fail-closed behavior applies before staging, worktree creation,
+and publication; repositories using those filters must remove them or use a
+separate trusted workflow.
+
+Read-only native-review staging accepts at most 10,000 regular files, 2,000
+directories, 12,000 traversed entries, and 64 MiB total source content. A
+single staged file remains limited to 4 MiB. Exceeding any staging bound or
+encountering a traversal/copy error fails the review rather than passing a
+partial tree.
+
+Dashboard collection inspects at most 2,000 candidate run folders, keeps at
+most the 500 newest inspected runs, and retains 24 newest regular artifacts
+per run; its activity/cache index examines at most 4,096 directory entries per
+run folder. Older candidates, entries, and artifacts are omitted from that
+snapshot. Dashboard parsing, exports, and durable artifact reads retain their
+existing per-record byte limits. Git command output is capped at 8 MiB before
+it is materialized, so an oversized status or proposed diff fails closed
+instead of growing memory before prompt truncation. Large review prompts still
+retain the complete manifest/statistics within their documented prompt bounds.
+
 Review findings use `F-<12 lowercase hex>` IDs derived from the normalized
 requirement; duplicate fingerprints receive `-2`, `-3`, and so on. Each
 transmitted finding retains its ID, a concise requirement, and an action target.

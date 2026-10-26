@@ -24,8 +24,14 @@ class WorkflowTests(_GitRepositoryTestCase):
         captured = {}
 
         def fake_command(argv, cwd, **kwargs):
-            captured.update(argv=argv, cwd=cwd, kwargs=kwargs)
-            return CompletedProcess(argv, 0, stdout="ok\n", stderr="")
+            result = CompletedProcess(
+                argv, 0,
+                stdout="" if argv[1:3] == ["config", "--local"] else "ok\n",
+                stderr="",
+            )
+            if result.stdout:
+                captured.update(argv=argv, cwd=cwd, kwargs=kwargs)
+            return result
 
         with patch.object(agentic_worktrees, "command", side_effect=fake_command):
             self.assertEqual(agentic_worktrees.git(self.repo, "status"), "ok")
@@ -41,7 +47,23 @@ class WorkflowTests(_GitRepositoryTestCase):
             self.assertIn(setting, argv)
         environment = captured["kwargs"]["env"]
         self.assertEqual(environment["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(environment["GIT_CONFIG_GLOBAL"], os.devnull)
+        self.assertEqual(environment["GIT_ATTR_NOSYSTEM"], "1")
         self.assertNotIn("GIT_EXTERNAL_DIFF", environment)
+
+    def test_git_rejects_repository_filter_drivers_before_running_operations(self):
+        subprocess.run(
+            ["git", "config", "filter.malicious.clean", "sh -c evil"],
+            cwd=self.repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        with self.assertRaisesRegex(RuntimeError, "filter drivers"):
+            agentic_worktrees.git(self.repo, "status")
+
+    def test_git_diff_output_is_bounded_before_materialization(self):
+        (self.repo / "readme.md").write_text("changed\n")
+        with patch.object(agentic_worktrees, "MAX_COMMAND_OUTPUT_BYTES", 1):
+            with self.assertRaisesRegex(RuntimeError, "output exceeded"):
+                agentic_worktrees.command(["git", "diff"], self.repo)
 
     def test_auto_publish_selects_first_eligible_completed_candidate(self):
         issue = agentic.Issue(222, "Automatic publication", "Apply the approved change")

@@ -38,6 +38,10 @@ from .telemetry import extract_jsonl_usage
 MAX_PROVIDER_RESULT_BYTES = 4 * 1024 * 1024
 MAX_PROVIDER_STREAM_BYTES = 2 * 1024 * 1024
 MAX_PROVIDER_MESSAGE_CHARS = 50_000
+MAX_PROVIDER_STAGE_BYTES = 64 * 1024 * 1024
+MAX_PROVIDER_STAGE_FILES = 10_000
+MAX_PROVIDER_STAGE_ENTRIES = 12_000
+MAX_PROVIDER_STAGE_DIRECTORIES = 2_000
 PROVIDER_MESSAGE_TRUNCATION_MARKER = "\n[agentic_provider_message_truncated]\n"
 
 
@@ -89,26 +93,60 @@ def _stage_readonly_worktree(source: Path, destination: Path) -> Path:
     copied into the provider's cwd.
     """
     source = source.resolve()
+    destination_preexisted = destination.exists()
     destination.mkdir(parents=True, exist_ok=True)
     try:
         entries = iter_safe_regular_files(
             source, skip=sensitive_read, fail_on_error=True,
+            max_entries=MAX_PROVIDER_STAGE_ENTRIES,
+            max_directories=MAX_PROVIDER_STAGE_DIRECTORIES,
         )
+        files_seen = 0
+        staged_bytes = 0
         for kind, relative, _ in entries:
             if kind != "file":
                 continue
+            files_seen += 1
+            if files_seen > MAX_PROVIDER_STAGE_FILES:
+                raise RuntimeError("Provider staging exceeded its file-count limit")
             destination_path = destination / relative
             destination_path.parent.mkdir(parents=True, exist_ok=True)
             descriptor, expected_identity = open_relative_regular(
                 source, relative, os.O_RDONLY, description="review worktree file",
             )
             with os.fdopen(descriptor, "rb") as source_stream:
-                revalidate_single_link_regular(
+                metadata = revalidate_single_link_regular(
                     source_stream.fileno(), expected_identity,
                     description="review worktree file",
                 )
+                if metadata.st_size > MAX_PROVIDER_RESULT_BYTES:
+                    raise RuntimeError(f"Provider input is too large: {source / relative}")
+                if staged_bytes + metadata.st_size > MAX_PROVIDER_STAGE_BYTES:
+                    raise RuntimeError("Provider staging exceeded its byte limit")
                 with destination_path.open("wb") as destination_stream:
-                    shutil.copyfileobj(source_stream, destination_stream)
+                    copied = 0
+                    while True:
+                        remaining_stage_bytes = MAX_PROVIDER_STAGE_BYTES - staged_bytes
+                        if remaining_stage_bytes <= 0:
+                            raise RuntimeError("Provider staging exceeded its byte limit")
+                        chunk = source_stream.read(
+                            min(
+                                64 * 1024,
+                                MAX_PROVIDER_RESULT_BYTES - copied + 1,
+                                remaining_stage_bytes + 1,
+                            )
+                        )
+                        if not chunk:
+                            break
+                        copied += len(chunk)
+                        if copied > MAX_PROVIDER_RESULT_BYTES:
+                            raise RuntimeError(f"Provider input is too large: {source / relative}")
+                        if len(chunk) > remaining_stage_bytes:
+                            raise RuntimeError("Provider staging exceeded its byte limit")
+                        written = destination_stream.write(chunk)
+                        if written != len(chunk):
+                            raise OSError("Provider staging wrote an incomplete chunk")
+                        staged_bytes += written
             try:
                 destination_path.chmod(0o444)
             except OSError:
@@ -116,6 +154,8 @@ def _stage_readonly_worktree(source: Path, destination: Path) -> Path:
     except (OSError, RuntimeError, ValueError) as exc:
         # A platform without anchored traversal or a changed tree is not safe
         # to expose to a read-only provider.
+        if not destination_preexisted:
+            shutil.rmtree(destination, ignore_errors=True)
         raise RuntimeError("Could not stage the complete read-only worktree") from exc
     return destination
 
