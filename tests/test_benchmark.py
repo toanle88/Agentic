@@ -222,10 +222,16 @@ class BenchmarkTests(unittest.TestCase):
             set(result["cases"]),
             {
                 "dashboard_collection", "dashboard_rendering",
-                "openrouter_file_tools", "git_operations",
+                "openrouter_file_tools", "openrouter_distant_range", "git_operations",
             },
         )
         self.assertEqual(result["cases"]["openrouter_file_tools"]["status"], "measured")
+        ranged = result["adversarial_ranged_read"]
+        self.assertTrue(ranged["scan_limited"])
+        self.assertGreater(ranged["file_bytes"], ranged["scan_limit_chars"])
+        self.assertGreater(ranged["requested_start_line"], ranged["scan_limit_lines"])
+        self.assertLessEqual(ranged["scanned_chars"], ranged["scan_limit_chars"])
+        self.assertLessEqual(ranged["scanned_lines"], ranged["scan_limit_lines"])
 
     def test_benchmark_facade_preserves_split_component_contract(self):
         self.assertIs(load_benchmark, load_benchmark_config)

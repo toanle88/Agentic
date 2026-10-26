@@ -184,13 +184,14 @@ Set `AGENTIC_STATE_DIR` or pass `--state-dir PATH` to choose another root. A sha
 - Prompt context is bounded before provider calls. Issue descriptions, handoffs,
   test reports, and review feedback are compacted without persisting their full
   text. OpenRouter file and command results are capped, support line-range file
-  reads, and older tool output is replaced with a reread hint before the next
-  request. `run.json` keeps aggregate usage plus per-invocation metadata such as
+  reads with bounded scan work, and identify incomplete distant ranges with a
+  marker before the next request. `run.json` keeps aggregate usage plus
+  per-invocation metadata such as
   prompt/completion character counts and tool-turn counts; it also keeps bounded
   operation timing/status metadata for provider and test commands. It never
   stores full prompts or command arguments.
 - `security_mode: "isolated"` requires the optional container mode and fails closed when its engine is unavailable.
-- Container mode mounts the task worktree, overlays its `.git` entry and required Git metadata read-only, and mounts a fresh per-invocation provider output directory. It uses a read-only container root and disables networking by default. Durable run state is never the provider's writable output mount: provider results and schemas are staged in the disposable directory and copied or validated by the host. Read-only filesystem access does not implicitly disable networking: when `sandbox.allow_network` is enabled, both developer and reviewer processes can use outbound networking while the reviewer worktree mount remains read-only. OpenRouter file inspection remains host-side but its command tools use the same container boundary.
+- Container mode mounts the task worktree, overlays its `.git` entry and required Git metadata read-only only when the metadata paths are regular, non-reparse paths belonging to the authoritative checkout, and mounts a fresh per-invocation provider output directory. It uses a read-only container root and disables networking by default. Durable run state is never the provider's writable output mount: provider results and schemas are staged in the disposable directory and copied or validated by the host. Read-only filesystem access does not implicitly disable networking: when `sandbox.allow_network` is enabled, both developer and reviewer processes can use outbound networking while the reviewer worktree mount remains read-only. OpenRouter file inspection remains host-side but its command tools use the same container boundary.
 - `agentic status --json` exposes stable worktree records for scripts without parsing terminal output.
 
 ## WSL and Windows Git compatibility

@@ -7,7 +7,10 @@ budgets in [`audits/2026-10-21-issue-73.md`](audits/2026-10-21-issue-73.md). Rec
 additional peak resident memory, Python version, operating system, CPU,
 filesystem type, and repetition count for dashboard collection and its bounded
 log processing. The harness also reports provider-free dashboard rendering,
-OpenRouter file-tool, and Git-operation fixture cases. Use three cold
+ordinary and adversarial distant-range OpenRouter file-tool cases, and
+Git-operation fixture cases. The distant-range case records the requested
+range, file size, scanned characters, scanned lines, and configured scan
+limits, so its bounded work is visible in the result. Use three cold
 and three warm repetitions on the same host. A result is a regression when
 p95 is more than 20% slower or additional peak memory is more than 10% higher than the
 same-host baseline; investigate before changing a safety boundary.
@@ -32,7 +35,9 @@ python scripts/dashboard_benchmark.py --logs /tmp/agentic-dashboard-corpus \
 Use `--logs` without `--generate` to measure an existing corpus. The helper
 clears only the in-process dashboard snapshot cache between cold samples, uses
 disposable fixtures for file tools and Git, and does not invoke providers or
-network services. Filesystem type is reported as
+network services. The adversarial fixture is a large line-oriented file with
+a distant requested range; it is intentionally expected to hit the scan
+budget rather than return the requested lines. Filesystem type is reported as
 unknown when the standard library cannot identify it; record it from the host
 when comparing results across filesystems.
 

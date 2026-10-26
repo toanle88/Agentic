@@ -126,8 +126,14 @@ def api_key_env_for_provider(provider: str, api_key_env: str | None = None) -> s
 def provider_process_environment(provider: str, api_key_env: str | None) -> dict[str, str]:
     """Return a sanitized environment with only the selected credential."""
     canonical = PROVIDER_API_KEY_ENV.get(provider)
-    environment, _ = restricted_test_environment(os.environ)
+    # The selected credential name may be intentionally non-semantic (for
+    # example SERVICE_VALUE), so the heuristic environment filter cannot
+    # identify it. Remove it before copying the host environment, then add
+    # back only the selected credential and its provider alias below.
     selected_name = api_key_env or canonical
+    environment, _ = restricted_test_environment(
+        os.environ, blocked_names=(selected_name,) if selected_name else (),
+    )
     value = os.environ.get(selected_name) if selected_name else None
     if value and selected_name:
         # Keep the explicitly configured name for sandbox pass-through, and
