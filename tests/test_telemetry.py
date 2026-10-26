@@ -21,6 +21,7 @@ from agentic_runner.telemetry import (
     read_issue_history,
     read_run_instruction,
     record_operation,
+    record_test_result,
     record_issue_metadata,
     read_issue_snapshot,
     record_run_instruction,
@@ -355,6 +356,14 @@ class TelemetryTests(unittest.TestCase):
             self.assertEqual(metrics["operations"][1]["status"], "failed")
             self.assertEqual(metrics["operations"][1]["exit_code"], 1)
             self.assertNotIn("python -c", json.dumps(metrics))
+
+    def test_record_test_result_persists_only_terminal_status(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            record_test_result(folder, passed=True)
+            self.assertEqual(read_run_usage(folder)["test_result"], {"status": "passed"})
+            record_test_result(folder, passed=False)
+            self.assertEqual(read_run_usage(folder)["test_result"], {"status": "failed"})
 
     def test_record_security_policy_is_sanitized_and_backward_compatible(self):
         with tempfile.TemporaryDirectory() as temp:

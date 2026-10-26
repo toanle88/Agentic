@@ -63,6 +63,64 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(snapshot["review"]["skipped"], ["Browser check unavailable"])
             self.assertEqual(snapshot["review"]["recurring"][0]["count"], 2)
 
+    def test_dashboard_uses_terminal_test_result_over_aggregate_fixture_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            run = root / "agent-issue-260-ab12cd34"
+            run.mkdir(parents=True)
+            (run / "test-command-035.txt").write_text(
+                "[TESTS] Finished in 11s (exit 0)\n", encoding="utf-8",
+            )
+            (run / "tests-035.txt").write_text(
+                "fixture output: FAILED (exit 1)\n", encoding="utf-8",
+            )
+            (run / "run.json").write_text(json.dumps({
+                "metrics": {"operations": [{
+                    "role": "tests", "name": "test-command-035",
+                    "status": "completed", "exit_code": 0,
+                }]},
+                "test_result": {"status": "passed"},
+            }), encoding="utf-8")
+            snapshot = agentic_dashboard_data.collect_runs(root)[0]
+
+        self.assertEqual(snapshot["tests"]["status"], "passed")
+        self.assertEqual(snapshot["tests"]["file"], "test-command-035.txt")
+
+    def test_dashboard_uses_test_operation_for_legacy_runs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            run = root / "agent-issue-261-ab12cd34"
+            run.mkdir(parents=True)
+            (run / "test-command-001.txt").write_text(
+                "[TESTS] Finished in 1s (exit 0)\n", encoding="utf-8",
+            )
+            (run / "tests-001.txt").write_text(
+                "fixture output: FAILED (exit 1)\n", encoding="utf-8",
+            )
+            (run / "run.json").write_text(json.dumps({
+                "metrics": {"operations": [{
+                    "role": "tests", "name": "test-command-001",
+                    "status": "completed", "exit_code": 0,
+                }]},
+            }), encoding="utf-8")
+            snapshot = agentic_dashboard_data.collect_runs(root)[0]
+
+        self.assertEqual(snapshot["tests"]["status"], "passed")
+
+    def test_dashboard_text_fallback_uses_terminal_command_exit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            run = root / "agent-issue-262-ab12cd34"
+            run.mkdir(parents=True)
+            (run / "test-command-001.txt").write_text(
+                "fixture output: FAILED (exit 1)\n"
+                "[TESTS] Finished in 1s (exit 0)\n",
+                encoding="utf-8",
+            )
+            snapshot = agentic_dashboard_data.collect_runs(root)[0]
+
+        self.assertEqual(snapshot["tests"]["status"], "passed")
+
     def test_dashboard_bounds_run_and_artifact_corpus(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / ".demo-agent-runs"

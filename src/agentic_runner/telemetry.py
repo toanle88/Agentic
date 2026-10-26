@@ -44,6 +44,7 @@ _KNOWN_RUN_FIELDS = {
     "usage_by_invocation", "security_policy", "security_policy_history",
     "instruction", "issue_metadata", "metrics", "guidance_loads",
     "guidance_stats", "workflow_metrics", "workflow_mode", "shell_job_id",
+    "test_result",
 }
 
 
@@ -586,6 +587,16 @@ def record_operation(folder: Path, role: str, name: str, *,
     _write_run_record(path, data)
 
 
+def record_test_result(folder: Path, *, passed: bool) -> None:
+    """Persist the terminal result of the latest configured test run."""
+    path, data = _load_run_record(folder)
+    data["test_result"] = {
+        "status": "passed" if passed else "failed",
+        "recorded_at": _timestamp(),
+    }
+    _write_run_record(path, data)
+
+
 def record_guidance_loads(folder: Path, loads: list[dict[str, Any]], *,
                           prompt_chars: int | None = None,
                           prompt_chars_with_guidance: int | None = None) -> None:
@@ -702,6 +713,11 @@ def read_run_usage(folder: Path) -> dict[str, Any]:
         result["by_invocation"] = data["usage_by_invocation"]
     if isinstance(data.get("metrics"), dict):
         result["metrics"] = data["metrics"]
+    test_result = data.get("test_result")
+    if isinstance(test_result, dict):
+        status = test_result.get("status")
+        if status in {"passed", "failed"}:
+            result["test_result"] = {"status": status}
     if isinstance(data.get("security_policy"), dict):
         result["security_policy"] = data["security_policy"]
     if isinstance(data.get("security_policy_history"), list):

@@ -851,6 +851,28 @@ class StreamingTests(unittest.TestCase):
             self.assertIn('hello', report)
             self.assertFalse((root / '.agent-test-output.log').exists())
 
+    def test_test_runner_records_terminal_result(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            sh('git', 'init', cwd=root)
+            passed, _ = agentic.run_tests(
+                root, [[sys.executable, '-c', 'print("ok")']], folder=root,
+            )
+            self.assertTrue(passed)
+            self.assertEqual(
+                json.loads((root / 'run.json').read_text())['test_result']['status'],
+                'passed',
+            )
+
+            failed, _ = agentic.run_tests(
+                root, [[sys.executable, '-c', 'raise SystemExit(1)']], folder=root,
+            )
+            self.assertFalse(failed)
+            self.assertEqual(
+                json.loads((root / 'run.json').read_text())['test_result']['status'],
+                'failed',
+            )
+
     def test_test_runner_reports_command_and_diff_check_failures(self):
         with tempfile.TemporaryDirectory() as dirname:
             root = Path(dirname)

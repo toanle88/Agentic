@@ -709,10 +709,73 @@ def _audit(folder: Path) -> tuple[dict[str, Any], Path | None]:
 
 
 def _tests(folder: Path, index: dict[str, list[Path]] | None = None) -> tuple[dict[str, Any], Path | None]:
-    path = _latest(_indexed_files(index, folder, ["test-command", "tests"]))
+    command_path = _latest(_indexed_files(index, folder, ["test-command"]))
+    usage = read_run_usage(folder)
+    test_result = usage.get("test_result")
+    terminal_status = (
+        test_result.get("status")
+        if isinstance(test_result, dict) else None
+    )
+    if terminal_status in {"passed", "failed"}:
+        path = command_path or folder / "run.json"
+        content = _read(command_path) if command_path is not None else (
+            f"Recorded test result: {terminal_status}."
+        )
+        return {
+            "status": terminal_status, "summary": content[-2_000:],
+            "file": path.name, "updated": _timestamp(path),
+        }, path
+
+    metrics = usage.get("metrics")
+    operations = metrics.get("operations", []) if isinstance(metrics, dict) else []
+    latest_operation = next(
+        (
+            operation for operation in reversed(operations)
+            if isinstance(operation, dict)
+            and operation.get("role") == "tests"
+            and str(operation.get("name", "")).startswith("test-command-")
+        ),
+        None,
+    ) if isinstance(operations, list) else None
+    if latest_operation is not None:
+        exit_code = latest_operation.get("exit_code")
+        operation_status = latest_operation.get("status")
+        valid_exit_code = isinstance(exit_code, int) and not isinstance(exit_code, bool)
+        if operation_status in {"failed", "timeout"}:
+            status = "failed"
+        elif (valid_exit_code and exit_code == 0) or (
+            exit_code is None and operation_status == "completed"
+        ):
+            status = "passed"
+        elif valid_exit_code:
+            status = "failed"
+        else:
+            status = "unknown"
+        path = command_path or folder / "run.json"
+        content = _read(command_path) if command_path is not None else (
+            f"Recorded test command result: {status}."
+        )
+        return {
+            "status": status, "summary": content[-2_000:],
+            "file": path.name, "updated": _timestamp(path),
+        }, path
+
+    # Older runs have no durable terminal status. Only command logs are valid
+    # text evidence; aggregate reports may contain expected fixture failures.
+    path = command_path
     if path is None:
         return {"status": "not-run", "summary": "No test result recorded."}, None
     content = _read(path)
+    terminal_exits = re.findall(
+        r"(?im)^\s*(?:\[TESTS\]\s*)?Finished in .*?\(exit\s+(-?\d+)\)",
+        content,
+    )
+    if terminal_exits:
+        status = "passed" if terminal_exits[-1] == "0" else "failed"
+        return {
+            "status": status, "summary": content[-2_000:],
+            "file": path.name, "updated": _timestamp(path),
+        }, path
     failed = re.search(r"\bFAILED\b|exit [1-9]\b|\[TIMEOUT\]", content, re.IGNORECASE)
     passed = re.search(r"exit 0|\bPASSED\b|All configured checks passed", content, re.IGNORECASE)
     return {

@@ -70,7 +70,7 @@ from .review import (
     record_review_findings,
 )
 from .security import redact_secrets, restricted_test_environment
-from .telemetry import read_run_instruction, record_workflow_outcome
+from .telemetry import read_run_instruction, record_test_result, record_workflow_outcome
 from .worktrees import (
     AUDIT_BRANCH_RE,
     AUDIT_KEY,
@@ -628,6 +628,8 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
         if deadline is not None and time.monotonic() >= deadline:
             report = "\n\n".join(results) + "\nTask deadline reached before the next test command"
             _status_print("[TESTS] Overall task deadline reached", flush=True)
+            if folder is not None:
+                record_test_result(folder, passed=False)
             return False, report.strip()
         display_command = safe_command_label(argv)
         _status_print(f"[TESTS] Running: {display_command}", flush=True)
@@ -641,11 +643,15 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
         append_report(f"$ {display_command}\n{result.stdout[-6000:]}")
         if result.returncode:
             _status_print(f"[TESTS] FAILED (exit {result.returncode})", flush=True)
+            if folder is not None:
+                record_test_result(folder, passed=False)
             return False, "\n\n".join(results)
         _status_print("[TESTS] PASSED", flush=True)
     if deadline is not None and time.monotonic() >= deadline:
         report = "\n\n".join(results) + "\nTask deadline reached before git diff --check"
         _status_print("[TESTS] Overall task deadline reached", flush=True)
+        if folder is not None:
+            record_test_result(folder, passed=False)
         return False, report.strip()
     try:
         whitespace_report = _whitespace_check(
@@ -661,11 +667,17 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
                 worktree, _remaining_timeout(deadline, 180) or 1,
             )
     except RuntimeError as exc:
+        if folder is not None:
+            record_test_result(folder, passed=False)
         return False, "\n\n".join(results) + f"\ngit diff --check failed: {exc}"
     if whitespace_report:
         _status_print("[TESTS] git diff --check FAILED", flush=True)
+        if folder is not None:
+            record_test_result(folder, passed=False)
         return False, "\n\n".join(results) + f"\ngit diff --check failed\n{whitespace_report}"
     _status_print("[TESTS] All configured checks passed", flush=True)
+    if folder is not None:
+        record_test_result(folder, passed=True)
     return True, "\n\n".join(results)
 
 
