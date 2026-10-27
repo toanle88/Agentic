@@ -266,6 +266,122 @@ if os.name == "nt":
                 _windows_close_handle(handle)
 
 
+def _atomic_replace_windows(
+    root: Path,
+    parts: list[str],
+    content: bytes,
+    *,
+    expected_identity: tuple[int, int] | None,
+    mode: int | None,
+    create_parents: bool,
+    allow_existing: bool,
+    require_existing: bool,
+    description: str,
+) -> None:
+    """Atomically replace a file relative to an anchored Windows directory."""
+    if os.name != "nt":
+        raise SafeTraversalUnavailable("Windows directory handles are unavailable")
+
+    parent = _windows_open_directory(root)
+    target_descriptor = -1
+    temporary_descriptor = -1
+    temporary_path: Path | None = None
+    target_was_absent = False
+    target_path: Path | None = None
+    try:
+        for part in parts[:-1]:
+            try:
+                child = _open_directory_at(parent, part)
+            except FileNotFoundError:
+                if not create_parents:
+                    raise
+                _windows_directory_path(parent, part).mkdir()
+                child = _open_directory_at(parent, part)
+            parent.close()
+            parent = child
+
+        name = parts[-1]
+        target_path = parent.path() / name
+        try:
+            target_descriptor, target_identity = _windows_open_regular_at(
+                parent, name, os.O_WRONLY, mode or 0o644, description=description,
+            )
+        except FileNotFoundError:
+            if expected_identity is not None or require_existing:
+                raise
+            target_was_absent = True
+        else:
+            if expected_identity is None and not allow_existing:
+                raise FileExistsError(f"{description} already exists")
+            if expected_identity is None:
+                expected_identity = target_identity
+            elif target_identity != expected_identity:
+                raise ValueError(f"{description} changed while it was being replaced")
+            if mode is None:
+                mode = stat.S_IMODE(os.fstat(target_descriptor).st_mode)
+
+        for _ in range(10):
+            candidate = parent.path() / f".{name}.agentic-{uuid.uuid4().hex}.tmp"
+            try:
+                temporary_descriptor, _ = _windows_open_regular_at(
+                    parent, candidate.name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    mode if mode is not None else 0o644,
+                    description=f"temporary {description}",
+                )
+            except FileExistsError:
+                continue
+            temporary_path = candidate
+            break
+        if temporary_descriptor < 0:
+            raise FileExistsError(f"could not create a temporary {description}")
+
+        remaining = memoryview(content)
+        while remaining:
+            written = os.write(temporary_descriptor, remaining)
+            if written <= 0:
+                raise OSError("temporary file write made no progress")
+            remaining = remaining[written:]
+        if mode is not None and hasattr(os, "fchmod"):
+            os.fchmod(temporary_descriptor, mode)
+        os.fsync(temporary_descriptor)
+        os.close(temporary_descriptor)
+        temporary_descriptor = -1
+
+        if target_descriptor >= 0:
+            assert expected_identity is not None
+            revalidate_single_link_regular(
+                target_descriptor, expected_identity, description=description,
+            )
+            assert target_path is not None
+            path_metadata = os.stat(target_path, follow_symlinks=False)
+            _validate_single_link_regular(path_metadata, description=description)
+            if _identity(path_metadata) != expected_identity:
+                raise ValueError(f"{description} changed while it was being replaced")
+            os.close(target_descriptor)
+            target_descriptor = -1
+
+        assert temporary_path is not None
+        assert target_path is not None
+        if target_was_absent:
+            os.link(temporary_path, target_path)
+            temporary_path.unlink()
+        else:
+            os.replace(temporary_path, target_path)
+        temporary_path = None
+    finally:
+        if temporary_descriptor >= 0:
+            os.close(temporary_descriptor)
+        if target_descriptor >= 0:
+            os.close(target_descriptor)
+        parent.close()
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
 def _parts(relative: str | Path) -> list[str]:
     path = Path(relative)
     if path.is_absolute() or ".." in path.parts:
@@ -319,7 +435,12 @@ def _walk_to_parent(root: Path, parts: list[str], *, create: bool) -> tuple[int,
 
 
 def _validate_windows_path_components(
-    root: Path, parts: list[str], *, create: bool, description: str,
+    root: Path,
+    parts: list[str],
+    *,
+    create: bool,
+    description: str,
+    allow_missing_final: bool = False,
 ) -> Path:
     """Validate a Windows path when POSIX ``dir_fd`` traversal is unavailable.
 
@@ -343,7 +464,7 @@ def _validate_windows_path_components(
             if not is_final and not current.is_dir():
                 raise NotADirectoryError(str(current))
             continue
-        if not create:
+        if not create and not (is_final and allow_missing_final):
             raise FileNotFoundError(str(current))
         if not is_final:
             current.mkdir()
@@ -587,6 +708,14 @@ def atomic_replace_relative_regular(
     parts = _parts(relative)
     if not parts:
         raise ValueError(f"{description} must name a file")
+    if os.name == "nt":
+        _atomic_replace_windows(
+            root, parts, content,
+            expected_identity=expected_identity, mode=mode,
+            create_parents=create_parents, allow_existing=allow_existing,
+            require_existing=require_existing, description=description,
+        )
+        return
     target_descriptor = -1
     temporary_descriptor = -1
     temporary_name: str | None = None
@@ -637,7 +766,8 @@ def atomic_replace_relative_regular(
                 raise FileExistsError(f"could not create a temporary {description}")
         else:
             target_path = _validate_windows_path_components(
-                root, parts, create=create_parents, description=description,
+                root, parts, create=create_parents, allow_missing_final=True,
+                description=description,
             )
             try:
                 target_descriptor, target_identity = open_single_link_regular(
