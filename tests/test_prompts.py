@@ -23,7 +23,7 @@ class PromptBoundaryTests(unittest.TestCase):
             "new feedback",
             required_review_findings=["finding"],
         )
-        self.assertIn("Finding 1: finding", prompt)
+        self.assertIn("Finding: finding | action target: finding", prompt)
         self.assertIn("new feedback", prompt)
 
     def test_copilot_developer_prompt_uses_runner_for_shell_and_git(self):

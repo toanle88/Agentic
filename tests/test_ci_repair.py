@@ -56,7 +56,6 @@ class CIRepairTests(unittest.TestCase):
             (folder / "review-001.json").write_text(json.dumps({
                 "approved": False,
                 "findings": [{
-                    "id": "F-stale",
                     "requirement": "Unrelated stale review requirement",
                     "action_target": "Change an unrelated component",
                 }],
@@ -124,7 +123,6 @@ class CIRepairTests(unittest.TestCase):
             self.assertIn("CI diagnostic: expected 2 results, got 3", prompt)
             self.assertIn("TARGETED CI REPAIR SCOPE", prompt)
             self.assertIn("exclusive justification and scope", prompt)
-            self.assertNotIn("F-stale", prompt)
             self.assertNotIn("Unrelated stale review requirement", prompt)
             self.assertNotIn("body", prompt)
 

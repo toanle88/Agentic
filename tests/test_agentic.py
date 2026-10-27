@@ -322,7 +322,7 @@ class PureTests(unittest.TestCase):
         self.assertEqual(parsed["findings"], [])
 
 
-    def test_repeated_review_findings_are_fingerprinted_and_reported(self):
+    def test_repeated_review_findings_are_reported_without_ids(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
             first = {

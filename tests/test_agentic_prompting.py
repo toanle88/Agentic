@@ -9,7 +9,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner import cli as agentic
-from agentic_runner.review import finding_fingerprint, normalize_findings
+from agentic_runner.review import normalize_findings
 
 
 class PromptTests(unittest.TestCase):
@@ -36,7 +36,6 @@ class PromptTests(unittest.TestCase):
     def test_compact_feedback_preserves_final_finding_under_bound(self):
         findings = [
             {
-                'id': f'F-{index}',
                 'requirement': 'requirement-' + ('r' * 600) + str(index),
                 'action_target': 'target-' + ('t' * 400) + str(index),
             }
@@ -46,22 +45,19 @@ class PromptTests(unittest.TestCase):
             'summary': 'summary', 'findings': findings,
         })
         self.assertLessEqual(len(rendered), agentic.FEEDBACK_CONTEXT_CHARS)
-        self.assertIn('F-8', rendered)
         self.assertIn('requirement-rrrr', rendered)
         self.assertIn('action: target-tttt', rendered)
 
-    def test_compact_feedback_keeps_all_ids_and_required_fields_when_count_exceeds_bound(self):
+    def test_compact_feedback_keeps_all_findings_and_required_fields_when_count_exceeds_bound(self):
         findings = [
             {
-                'id': f'F-{index}',
                 'requirement': f'requirement-{index}',
                 'action_target': f'target-{index}',
             }
             for index in range(300)
         ]
         rendered = agentic._compact_feedback({'summary': 'optional', 'findings': findings})
-        for index in range(300):
-            self.assertRegex(rendered, rf'- F-{index}: r \(action: t\)')
+        self.assertEqual(rendered.count('- r (action: t)'), 300)
 
 
     def test_prompt_context_is_bounded_without_losing_tail(self):
@@ -108,7 +104,6 @@ class PromptTests(unittest.TestCase):
         issue = agentic.Issue(24, 'task', 'details')
         findings = [
             {
-                'id': f'F-{index}',
                 'requirement': f'requirement-{index}',
                 'action_target': f'target-{index}',
             }
@@ -116,50 +111,51 @@ class PromptTests(unittest.TestCase):
         ]
         prompt = agentic.agent_prompt(issue, required_review_findings=findings)
         for index in range(60):
-            self.assertIn(f'F-{index}', prompt)
+            self.assertIn(f'requirement-{index}', prompt)
+            self.assertIn(f'target-{index}', prompt)
 
     def test_structured_finding_prompt_matches_action_validator_format(self):
         issue = agentic.Issue(24, 'task', 'details')
         prompt = agentic.agent_prompt(issue, required_review_findings=[{
-            'id': 'F-1', 'requirement': 'Fix the defect', 'action_target': 'Add coverage',
+            'requirement': 'Fix the defect', 'action_target': 'Add coverage',
         }])
-        self.assertIn('Finding: F-1', prompt)
+        self.assertIn('Finding: Fix the defect | action target: Add coverage', prompt)
         self.assertEqual(
             agentic.validate_developer_review_actions(
-                'Finding: F-1\nAction: fixed\nEvidence: added coverage\n',
-                [{'id': 'F-1', 'requirement': 'Fix the defect'}],
+                'Finding: Fix the defect\nAction: fixed\nEvidence: added coverage\n',
+                [{'requirement': 'Fix the defect'}],
             ),
             '',
         )
         self.assertEqual(
             agentic.validate_developer_review_actions(
-                'Finding: `F-1`\nAction: fixed\nEvidence: added coverage\n',
-                [{'id': 'F-1', 'requirement': 'Fix the defect'}],
+                'Finding: Fix the defect\nAction: fixed\nEvidence: added coverage\n',
+                [{'requirement': 'Fix the defect'}],
             ),
             '',
         )
         self.assertIn(
             'missing Action',
             agentic.validate_developer_review_actions(
-                'Finding: F-1\nEvidence: inspected the patch\n',
-                [{'id': 'F-1', 'requirement': 'Fix the defect'}],
+                'Finding: Fix the defect\nEvidence: inspected the patch\n',
+                [{'requirement': 'Fix the defect'}],
             ),
         )
 
     def test_developer_report_must_cover_each_finding(self):
         findings = [
-            {'id': 'F-2e66776f9f80', 'requirement': 'Continue workflow extraction'},
-            {'id': 'F-1', 'requirement': 'Add characterization coverage'},
+            {'requirement': 'Continue workflow extraction'},
+            {'requirement': 'Add characterization coverage'},
         ]
         report = (
-            'Finding: F-1\n'
+            'Finding: Add characterization coverage\n'
             'Action: fixed\n'
             'Evidence: added the coverage\n'
         )
         error = agentic.validate_developer_review_actions(report, findings)
         self.assertIn('contains 2 findings', error)
 
-    def test_developer_report_finding_labels_are_not_a_gate(self):
+    def test_developer_report_finding_text_is_not_a_gate(self):
         report = (
             'Finding: `reliability-timeout-coverage`\n'
             'Action: fixed\n'
@@ -168,28 +164,28 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(
             agentic.validate_developer_review_actions(
                 report,
-                [{'id': 'F-b4bad01bb719', 'requirement': 'Timeout coverage'}],
+                [{'requirement': 'Timeout coverage'}],
             ),
             '',
         )
 
-    def test_review_finding_ids_are_derived_from_normalized_requirements(self):
+    def test_review_findings_do_not_receive_identifiers(self):
         findings = normalize_findings([
-            {'requirement': ' Fix   the contract\n', 'id': 'provider-one'},
-            {'requirement': 'Fix the contract', 'id': 'provider-two'},
-            {'requirement': 'Add coverage', 'id': 'not-a-finding-id'},
+            {'requirement': ' Fix   the contract\n'},
+            {'requirement': 'Fix the contract'},
+            {'requirement': 'Add coverage'},
+            {'requirement': 'Add coverage', 'action_target': 'Document the behavior'},
         ])
 
-        contract_id = f'F-{finding_fingerprint("Fix the contract")}'
-        coverage_id = f'F-{finding_fingerprint("Add coverage")}'
-        self.assertEqual([item['id'] for item in findings], [
-            contract_id, contract_id + '-2', coverage_id,
+        self.assertEqual([item['requirement'] for item in findings], [
+            'Fix the contract', 'Add coverage', 'Add coverage',
         ])
+        self.assertEqual(findings[1]['action_target'], 'Add coverage')
+        self.assertEqual(findings[2]['action_target'], 'Document the behavior')
         for item in findings:
-            self.assertRegex(item['id'], r'^F-[0-9a-f]{12}(?:-\d+)?$')
+            self.assertNotIn('id', item)
+            self.assertNotIn('fingerprint', item)
         self.assertEqual(findings[0]['requirement'], 'Fix the contract')
-        self.assertNotIn('provider-one', {item['id'] for item in findings})
-        self.assertNotIn('not-a-finding-id', {item['id'] for item in findings})
 
 
     def test_per_run_instruction_is_actionable_for_developer_and_bounded(self):

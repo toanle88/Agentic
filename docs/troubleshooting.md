@@ -77,7 +77,7 @@ If the same findings repeat, check whether:
 - the developer is addressing symptoms instead of the production path; or
 - an environment limitation is being reported as a code defect.
 
-Agentic fingerprints review findings and reports repeated severities in the terminal and resume feedback. Treat a repeated finding as unresolved until the production path or reviewer evidence changes.
+Agentic normalizes review findings and reports recurring findings in the terminal and resume feedback. Treat a recurring finding as unresolved until the production path or reviewer evidence changes.
 
 Do not use `--new` when you want the prior review evidence; use the same `--issue N` command.
 

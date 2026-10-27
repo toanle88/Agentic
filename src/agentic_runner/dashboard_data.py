@@ -548,7 +548,7 @@ def _finding_severity(value: Any, finding_text: str) -> str:
 
 
 def _finding_records(values: Any) -> tuple[list[str], list[dict[str, str]]]:
-    """Keep legacy finding text while exposing bounded filter metadata."""
+    """Keep finding text while exposing bounded filter metadata."""
     if not isinstance(values, list):
         values = [values]
     text: list[str] = []
@@ -558,7 +558,6 @@ def _finding_records(values: Any) -> tuple[list[str], list[dict[str, str]]]:
             finding_text = str(value.get("requirement", value.get("text", value.get("message", ""))))
             severity = _finding_severity(value.get("severity", "UNSPECIFIED"), finding_text)
             record = {
-                "id": str(value.get("id", "")),
                 "text": finding_text,
                 "severity": severity,
             }
@@ -586,18 +585,20 @@ def _review(folder: Path, index: dict[str, list[Path]] | None = None) -> tuple[d
             if not isinstance(findings, list):
                 continue
             for item in findings[:MAX_REVIEW_HISTORY_FINDINGS]:
-                if not isinstance(item, dict) or not isinstance(item.get("fingerprint"), str):
+                if not isinstance(item, dict):
                     continue
-                key = item["fingerprint"][:256]
+                key = str(item.get("requirement") or item.get("text") or "").strip()[:256]
+                if not key:
+                    continue
                 current = counts.setdefault(key, {
-                    "fingerprint": key, "count": 0,
+                    "count": 0,
                     "severity": str(item.get("severity", "UNSPECIFIED")),
                     "text": str(item.get("text", ""))[:MAX_REVIEW_HISTORY_FIELD],
                 })
                 current["count"] += 1
     recurring = sorted(
         (item for item in counts.values() if item["count"] > 1),
-        key=lambda item: (-item["count"], item["fingerprint"]),
+        key=lambda item: (-item["count"], item["text"]),
     )
     if path is None:
         return {
