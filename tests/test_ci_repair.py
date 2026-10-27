@@ -92,6 +92,7 @@ class CIRepairTests(unittest.TestCase):
             def wrapped_develop(*args, **kwargs):
                 self.assertTrue(kwargs["repair_mode"])
                 self.assertEqual(kwargs["repair_scope"], expected_scope)
+                self.assertEqual(kwargs["review_base_sha"], self.pr.head_sha)
                 agentic_cli._agentic_workflow.bind(vars(agentic_cli))
                 return real_develop(*args, **kwargs)
 
@@ -303,6 +304,39 @@ class CIRepairTests(unittest.TestCase):
         )
         self.assertNotIn(secret, json.dumps(constructed.to_dict()))
         self.assertNotIn(secret, constructed.prompt_context())
+
+    def test_fetch_ci_evidence_reads_failed_job_tail_and_classifies_it(self):
+        calls = []
+
+        def fake_command(argv, cwd, **kwargs):
+            calls.append(argv)
+            if argv[1:3] == ["pr", "checks"]:
+                payload = [{
+                    "name": "windows tests", "state": "FAILURE", "bucket": "fail",
+                    "link": "https://github.test/owner/repo/actions/runs/10/job/99",
+                }]
+            elif argv[1:3] == ["run", "list"]:
+                payload = []
+            else:
+                self.assertIn("--job", argv)
+                payload = (
+                    "permission denied while preparing the runner\n"
+                    + ("noise\n" * 2_000)
+                    + "Traceback (most recent call last):\n"
+                    + "AssertionError: actual failure\n"
+                )
+            return SimpleNamespace(
+                stdout=json.dumps(payload) if not isinstance(payload, str) else payload,
+            )
+
+        evidence = fetch_ci_evidence(
+            Path("."), "owner/repo", self.pr, run_command=fake_command,
+        )
+        self.assertEqual(evidence.classification, "code/test")
+        self.assertIn("AssertionError: actual failure", evidence.logs[0]["excerpt"])
+        self.assertIn("middle of CI log omitted", evidence.logs[0]["excerpt"])
+        self.assertEqual(evidence.logs[0]["run_id"], "99")
+        self.assertTrue(any("--job" in call for call in calls))
 
     def test_fetch_ci_evidence_requires_matching_failed_run_head_and_conclusion(self):
         calls = []

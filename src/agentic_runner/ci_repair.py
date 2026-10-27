@@ -77,6 +77,26 @@ def _safe_text(value: Any, limit: int = 2_000, *, extra_values: Iterable[str] = 
     return redact_secrets(text, extra_values=extra_values)[:max(0, limit)]
 
 
+def _log_excerpt(
+    value: Any, limit: int = MAX_LOG_CHARS, *, extra_values: Iterable[str] = (),
+) -> str:
+    """Keep both the command context and failure tail from noisy CI logs."""
+    raw = str(value or "")
+    cleaned = _safe_text(raw, max(len(raw), limit), extra_values=extra_values)
+    if len(cleaned) <= limit:
+        return cleaned
+    marker = "\n...[middle of CI log omitted]...\n"
+    head_size = min(2_000, max(0, limit - len(marker)))
+    tail_size = max(0, limit - len(marker) - head_size)
+    return cleaned[:head_size] + marker + cleaned[-tail_size:]
+
+
+def _job_id_from_link(link: Any) -> int | None:
+    """Extract a GitHub Actions job ID from a check details URL."""
+    match = re.search(r"/job/(\d+)(?:/|$)", str(link or ""))
+    return int(match.group(1)) if match else None
+
+
 def _safe_value(value: Any, limit: int = 500, *, extra_values: Iterable[str] = ()) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return _safe_text(value, limit, extra_values=extra_values) if isinstance(value, str) else value
@@ -133,7 +153,14 @@ class CIEvidence:
                 for item in self.checks[:MAX_CHECKS]
             ],
             "logs": [
-                _safe_evidence_value(item, extra_values=extra_values)
+                {
+                    "run_id": _safe_text(item.get("run_id"), 200, extra_values=extra_values),
+                    "name": _safe_text(item.get("name"), 400, extra_values=extra_values),
+                    "url": _safe_text(item.get("url"), 800, extra_values=extra_values),
+                    "excerpt": _log_excerpt(
+                        item.get("excerpt"), extra_values=extra_values,
+                    ),
+                }
                 for item in self.logs[:MAX_RUNS]
             ],
         }
@@ -173,12 +200,22 @@ def classify_failure(
                 diagnostic_parts.append(
                     _safe_text(item[key], 2_000, extra_values=extra_values).casefold()
                 )
+    log_values = list(logs)[:10]
     text = "\n".join(
         diagnostic_parts
     ) + "\n" + "\n".join(
         _safe_text(item, MAX_LOG_CHARS, extra_values=extra_values).casefold()
-        for item in list(logs)[:10]
+        for item in log_values
     )
+    tail_text = "\n".join(
+        _safe_text(item, MAX_LOG_CHARS, extra_values=extra_values).casefold()[-4_000:]
+        for item in log_values
+    )
+    # CI suites often print expected permission or infrastructure diagnostics
+    # before the final failing traceback. The tail of the exact failed job is
+    # the strongest signal for the repair classification.
+    if any(marker in tail_text for marker in _CODE_TEST_MARKERS):
+        return "code/test"
     if any(marker in text for marker in (
         "permission denied", "resource not accessible", "insufficient permission",
         "unauthorized", "forbidden", "403", "requires write access",
@@ -241,7 +278,11 @@ def _run_gh_command(
 def _bounded_stdout(result: Any, label: str) -> str:
     """Read command output only when it fits before parsing or copying it."""
     value = getattr(result, "stdout", "")
-    limit = MAX_CI_LOG_OUTPUT_BYTES if "failed-run log" in label else MAX_CI_OUTPUT_BYTES
+    limit = (
+        MAX_CI_LOG_OUTPUT_BYTES
+        if any(marker in label for marker in ("failed-run log", "failed-job log"))
+        else MAX_CI_OUTPUT_BYTES
+    )
     if isinstance(value, bytes):
         size = len(value)
         if size > limit:
@@ -301,7 +342,46 @@ def fetch_ci_evidence(
     ], github_host, run_command=run_command)
     logs: list[dict[str, str]] = []
     total = 0
-    if isinstance(raw_runs, list):
+
+    def append_log(
+        *, identifier: str, name: Any, url: Any, output: Any,
+    ) -> None:
+        nonlocal total
+        excerpt = _log_excerpt(output, extra_values=extra_values)
+        if not excerpt:
+            return
+        remaining = MAX_TOTAL_LOG_CHARS - total
+        if remaining <= 0:
+            return
+        excerpt = excerpt[:remaining]
+        logs.append({
+            "run_id": identifier,
+            "name": _safe_text(name, 400, extra_values=extra_values),
+            "url": _safe_text(url, 800, extra_values=extra_values),
+            "excerpt": excerpt,
+        })
+        total += len(excerpt)
+
+    failed_job_ids: list[tuple[int, dict[str, Any]]] = []
+    for check in checks:
+        if str(check.get("name", "")) not in failed_names:
+            continue
+        job_id = _job_id_from_link(check.get("link"))
+        if job_id is not None and all(job_id != item[0] for item in failed_job_ids):
+            failed_job_ids.append((job_id, check))
+    for job_id, check in failed_job_ids[:MAX_RUNS]:
+        result = _run_gh_command(
+            repo,
+            ["run", "view", "--job", str(job_id), "--repo", github_repo, "--log-failed"],
+            github_host,
+            run_command=run_command,
+        )
+        append_log(
+            identifier=str(job_id), name=check.get("name"),
+            url=check.get("link"), output=_bounded_stdout(result, "GitHub failed-job log"),
+        )
+
+    if not logs and isinstance(raw_runs, list):
         for raw_run in raw_runs[:MAX_RUNS]:
             if not isinstance(raw_run, dict):
                 continue
@@ -316,32 +396,22 @@ def fetch_ci_evidence(
             run_id = raw_run.get("databaseId")
             if not isinstance(run_id, int):
                 continue
+            if any(item.get("run_id") == str(run_id) for item in logs):
+                continue
             result = _run_gh_command(
                 repo,
                 ["run", "view", str(run_id), "--repo", github_repo, "--log-failed"],
                 github_host,
                 run_command=run_command,
             )
-            excerpt = _safe_text(
-                _bounded_stdout(result, "GitHub failed-run log"),
-                MAX_LOG_CHARS, extra_values=extra_values,
+            append_log(
+                identifier=str(run_id),
+                name=raw_run.get("name") or raw_run.get("workflowName"),
+                url=raw_run.get("url"),
+                output=_bounded_stdout(result, "GitHub failed-run log"),
             )
-            if not excerpt:
-                continue
-            remaining = MAX_TOTAL_LOG_CHARS - total
-            if remaining <= 0:
+            if total >= MAX_TOTAL_LOG_CHARS:
                 break
-            excerpt = excerpt[:remaining]
-            logs.append({
-                "run_id": str(run_id),
-                "name": _safe_text(
-                    raw_run.get("name") or raw_run.get("workflowName"), 400,
-                    extra_values=extra_values,
-                ),
-                "url": _safe_text(raw_run.get("url"), 800, extra_values=extra_values),
-                "excerpt": excerpt,
-            })
-            total += len(excerpt)
     classification = classify_failure(
         checks, (item["excerpt"] for item in logs), extra_values=extra_values,
     )

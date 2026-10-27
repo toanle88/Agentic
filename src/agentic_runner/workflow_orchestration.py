@@ -46,6 +46,7 @@ def develop(
     verbose: bool = False,
     repair_mode: bool = False,
     repair_scope: str | None = None,
+    review_base_sha: str | None = None,
     *,
     runtime: WorkflowRuntime,
 ) -> bool:
@@ -232,6 +233,7 @@ def develop(
                 verbose=verbose,
                 repair_mode=repair_mode,
                 repair_scope=repair_scope,
+                review_base_sha=review_base_sha,
             )
         except NoCodeChangesError:
             record_workflow_outcome(

@@ -781,6 +781,7 @@ def repair_ci(
                 deadline=deadline, verbose=verbose,
                 repair_mode=True,
                 repair_scope=feedback,
+                review_base_sha=pull_request.head_sha,
             )
         attempt_event = {
             "event": "repair_attempt", "attempt": attempt, "completed": completed,

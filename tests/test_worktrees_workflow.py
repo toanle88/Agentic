@@ -559,9 +559,13 @@ class WorkflowTests(_GitRepositoryTestCase):
               patch('agentic.prepare_patch', side_effect=[patch_value, patch_value]),
               patch('agentic.review', side_effect=[invalid, approved]) as review,
               patch('agentic.record_review_findings') as record):
-            result = agentic.verify_and_review(run, issue, 'main', config, folder)
+            result = agentic.verify_and_review(
+                run, issue, 'main', config, folder, review_base_sha='repair-head',
+            )
         self.assertTrue(result[0])
         self.assertEqual(review.call_count, 2)
+        self.assertEqual(review.call_args_list[0].args[3], 'repair-head')
+        self.assertEqual(review.call_args_list[1].args[3], 'repair-head')
         self.assertEqual(review.call_args.kwargs['agent'], config['reviewer_agent'])
         self.assertEqual(review.call_args.kwargs['system_prompt'], config['system_prompt'])
         record.assert_called_once_with(folder, approved)
