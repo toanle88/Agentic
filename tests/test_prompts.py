@@ -1,9 +1,13 @@
 """Focused tests for the extracted prompt-boundary module."""
+import tempfile
 import unittest
+from pathlib import Path
 
 import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner.models import Issue
 from agentic_runner.prompts import build_agent_prompt
+from agentic_runner.telemetry import record_test_result
+from agentic_runner.workflow import host_validation_note
 
 
 class PromptBoundaryTests(unittest.TestCase):
@@ -34,6 +38,40 @@ class PromptBoundaryTests(unittest.TestCase):
         self.assertIn("Agentic performs configured checks and Git inspection", prompt)
         self.assertNotIn("git status", prompt)
         self.assertNotIn("git diff --cached", prompt)
+
+    def test_developer_prompt_uses_host_owned_git_validation_context(self):
+        prompt = build_agent_prompt(
+            Issue(47, "Refactor", "Issue body"),
+            provider="codex",
+            repository_context=(
+                "Target base branch: main\n"
+                "Authoritative base revision: abc123\n"
+                "The host runner performs the final base comparison."
+            ),
+        )
+        self.assertIn("HOST-OWNED REPOSITORY VALIDATION", prompt)
+        self.assertIn("Authoritative base revision: abc123", prompt)
+        self.assertIn("Do not report `git diff --check`", prompt)
+        self.assertIn("host runs those checks", prompt)
+
+    def test_copilot_prompt_does_not_receive_native_git_context(self):
+        prompt = build_agent_prompt(
+            Issue(47, "Refactor", "Issue body"),
+            provider="copilot",
+            repository_context="Authoritative base revision: abc123",
+        )
+        self.assertNotIn("HOST-OWNED REPOSITORY VALIDATION", prompt)
+
+    def test_host_validation_note_is_authoritative_and_contains_only_host_facts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            record_test_result(folder, passed=True, diff_check="passed")
+            note = host_validation_note("main", "abc123", folder)
+        self.assertIn("HOST-AUTHORITATIVE VALIDATION", note)
+        self.assertIn("Base comparison: performed", note)
+        self.assertIn("Base revision used by host: abc123", note)
+        self.assertIn("git diff --check: passed", note)
+        self.assertNotIn("version", note.casefold())
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ from typing import Any, Mapping
 
 from .models import Issue, Run
 from .config import credential_environment_names
-from .persistence import read_text_bounded
+from .persistence import atomic_write_text, read_text_bounded
 
 
 MAX_DURABLE_JSON_BYTES = 256_000
@@ -69,6 +69,7 @@ def develop(
     _remaining_timeout = runtime._remaining_timeout
     run_agent = runtime.run_agent
     agent_prompt = runtime.agent_prompt
+    developer_repository_context = runtime.developer_repository_context
     verify_and_review = runtime.verify_and_review
     record_workflow_outcome = runtime.record_workflow_outcome
     record_no_code_changes_blocked = runtime.record_no_code_changes_blocked
@@ -192,6 +193,9 @@ def develop(
                 instruction=instruction,
                 system_prompt=system_prompt,
                 provider=(config.get("developer_agent") or {}).get("provider", "codex"),
+                repository_context=developer_repository_context(
+                    run.worktree, base,
+                ),
                 repair_mode=repair_mode,
                 repair_scope=repair_scope,
             ),
@@ -247,8 +251,9 @@ def develop(
             latest_reason = _result_text(action_error)
             _status_print(f"[RETRY] {action_error}", style_status_tokens=False)
             continue
+        validated_base_sha = ""
         try:
-            passed, test_output, verdict, digest, _ = verify_and_review(
+            passed, test_output, verdict, digest, validated_base_sha = verify_and_review(
                 run, issue, base, config, folder, test_commands=test_commands,
                 deadline=deadline, developer_report=developer_report,
                 instruction=instruction,
@@ -300,6 +305,16 @@ def develop(
         except RuntimeError:
             # Policy violations, malformed diff, or mid-review mutation are not model-retryable.
             raise
+        finally:
+            developer_report = (
+                f"{developer_report.rstrip()}\n\n"
+                f"{runtime.host_validation_note(base, validated_base_sha, folder)}"
+            ).lstrip()
+            atomic_write_text(output, developer_report)
+            _status_print(
+                "[DEVELOPER] Host validation appended to the developer handoff",
+                style_status_tokens=False,
+            )
         if passed:
             clear_blocked(folder)
             clear_result(folder)
