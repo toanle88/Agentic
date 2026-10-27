@@ -69,7 +69,8 @@ OPENROUTER_SEARCH_READ_CHUNK_BYTES = 8_192
 OPENROUTER_SEARCH_QUERY_CHARS = 10_000
 OPENROUTER_MALFORMED_TOOL_CALL_ERROR_KEY = "__agentic_tool_error"
 OPENROUTER_SEARCH_TRUNCATION_MARKER = (
-    "\n...[search truncated; scan limit reached; narrow the path or query]"
+    "\n...[search results truncated (search truncated); "
+    "scan limit reached; narrow the path or query]"
 )
 OPENROUTER_SEARCH_INCOMPLETE_MARKER = (
     "\n...[search incomplete; one or more files could not be read]"

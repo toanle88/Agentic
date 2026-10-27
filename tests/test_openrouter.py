@@ -1899,6 +1899,43 @@ class OpenRouterTests(unittest.TestCase):
             )
             self.assertIn('use start_line/end_line', ranged_bounded)
 
+    def test_openrouter_search_marks_max_results_as_incomplete(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "first.txt").write_text("needle\n", encoding="utf-8")
+            (root / "second.txt").write_text("needle\n", encoding="utf-8")
+            result = agentic_openrouter._openrouter_tool_call(
+                root, "search_files", {
+                    "query": "needle", "max_results": 1,
+                }, readonly=True,
+            )
+        self.assertIn("search results truncated", result)
+        self.assertEqual(result.count(":1: needle"), 1)
+
+    def test_openrouter_search_bounds_per_file_scan(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "huge-line.txt").write_text(
+                "x" * (agentic_openrouter_tools.OPENROUTER_SEARCH_SCAN_BYTES + 1),
+                encoding="utf-8",
+            )
+            result = agentic_openrouter._openrouter_tool_call(
+                root, "search_files", {"query": "missing"}, readonly=True,
+            )
+        self.assertIn("search results truncated", result)
+
+    def test_openrouter_search_bounds_per_file_line_scan(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "many-lines.txt").write_text(
+                "x\n" * (agentic_openrouter_tools.OPENROUTER_SEARCH_SCAN_LINES + 1),
+                encoding="utf-8",
+            )
+            result = agentic_openrouter._openrouter_tool_call(
+                root, "search_files", {"query": "missing"}, readonly=True,
+            )
+        self.assertIn("search results truncated", result)
+
     def test_openrouter_file_list_pages_reuse_bounded_index(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

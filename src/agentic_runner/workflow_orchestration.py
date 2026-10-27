@@ -13,7 +13,7 @@ from typing import Any, Mapping
 
 from .models import Issue, Run
 from .config import credential_environment_names
-from .persistence import read_text_bounded
+from .persistence import atomic_write_text, read_text_bounded
 
 
 MAX_DURABLE_JSON_BYTES = 256_000
@@ -247,8 +247,9 @@ def develop(
             latest_reason = _result_text(action_error)
             _status_print(f"[RETRY] {action_error}", style_status_tokens=False)
             continue
+        validated_base_sha = ""
         try:
-            passed, test_output, verdict, digest, _ = verify_and_review(
+            passed, test_output, verdict, digest, validated_base_sha = verify_and_review(
                 run, issue, base, config, folder, test_commands=test_commands,
                 deadline=deadline, developer_report=developer_report,
                 instruction=instruction,
@@ -300,6 +301,16 @@ def develop(
         except RuntimeError:
             # Policy violations, malformed diff, or mid-review mutation are not model-retryable.
             raise
+        finally:
+            developer_report = (
+                f"{developer_report.rstrip()}\n\n"
+                f"{runtime.host_validation_note(base, validated_base_sha, folder)}"
+            ).lstrip()
+            atomic_write_text(output, developer_report)
+            _status_print(
+                "[DEVELOPER] Host validation appended to the developer handoff",
+                style_status_tokens=False,
+            )
         if passed:
             clear_blocked(folder)
             clear_result(folder)
