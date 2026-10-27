@@ -196,10 +196,20 @@ def _git_metadata(root: Path) -> tuple[Path, Path | None] | None:
         return None
 
 
+def _is_absolute_argument(value: str) -> bool:
+    """Return whether an argv value is an absolute path on either platform."""
+    return (
+        Path(value).is_absolute()
+        or PurePosixPath(value).is_absolute()
+        or PureWindowsPath(value).is_absolute()
+    )
+
+
 def sandbox_command(
     argv: list[str], cwd: Path, settings: dict[str, Any] | None,
     *, output_root: Path | None = None, read_only: bool = False,
     pass_env: list[str] | None = None, restricted: bool = False,
+    preserve_git_metadata: bool = True,
     env: dict[str, str] | None = None,
 ) -> list[str]:
     """Build a hardened container command while preserving argv semantics."""
@@ -212,7 +222,11 @@ def sandbox_command(
         "--cap-drop=ALL", "--security-opt=no-new-privileges",
         "--pids-limit", "256", "--memory", "2g", "--cpus", "2",
         "--read-only",
-        "--tmpfs", "/tmp:rw,nosuid,size=256m",
+        # Docker's tmpfs defaults can include noexec.  Temporary provider
+        # fixtures and provider helpers may need to resolve executable files,
+        # so make the intended execution policy explicit while retaining the
+        # read-only root filesystem and dropped capabilities.
+        "--tmpfs", "/tmp:rw,nosuid,exec,size=256m",
         # Read-only is a filesystem/provider-capability policy. It must not
         # implicitly disable provider API access: native reviewers may need
         # outbound networking even though their worktree remains read-only.
@@ -229,7 +243,7 @@ def sandbox_command(
         command[2:2] = ["--user", f"{getuid()}:{getgid()}"]
     replacements: list[tuple[Path, str]] = [(root, "/workspace")]
     git_metadata = _git_metadata(root)
-    if git_metadata:
+    if git_metadata and preserve_git_metadata:
         git_dir, common_dir = git_metadata
         if common_dir is None:
             command.extend(["-v", f"{git_dir}:/agentic-git:ro"])
@@ -267,6 +281,12 @@ def sandbox_command(
     rendered_argv: list[str] = []
     for part in argv:
         replaced = part
+        # Relative executable names, flags, module names, and inline program
+        # text must remain argv data. Only absolute host paths can refer to a
+        # mounted worktree or invocation output directory.
+        if not _is_absolute_argument(part):
+            rendered_argv.append(part)
+            continue
         for source, destination in replacements:
             source_text = os.fspath(source)
             normalized_source = os.path.normcase(os.path.realpath(os.path.normpath(source_text)))

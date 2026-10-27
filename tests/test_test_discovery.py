@@ -253,7 +253,9 @@ class TestDiscovery(unittest.TestCase):
                 )
 
         self.assertEqual(results[0]["status"], "passed")
-        sandbox.assert_called_once_with(["tool-only-in-image"], repo, settings)
+        sandbox.assert_called_once_with(
+            ["tool-only-in-image"], repo, settings, preserve_git_metadata=False,
+        )
 
     def test_agent_assistance_is_read_only_and_unsafe_candidates_are_ignored(self):
         with tempfile.TemporaryDirectory() as temp:

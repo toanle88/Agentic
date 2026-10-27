@@ -1558,6 +1558,7 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(result['status'], 'passed')
         sandbox_command.assert_called_once_with(
             ['tool'], Path('/tmp/worktree'), sandbox, pass_env=[],
+            preserve_git_metadata=False,
         )
 
 

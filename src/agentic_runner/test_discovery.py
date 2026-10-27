@@ -593,7 +593,10 @@ def _run_candidate(
     *, env: dict[str, str] | None = None,
 ) -> tuple[int, str, bool]:
     """Run one candidate with argv execution and bounded output retention."""
-    process_argv = sandbox_command(argv, repo, sandbox)
+    # Validation commands may create independent temporary repositories. Do
+    # not force the worktree's mounted GIT_DIR into their entire subprocess
+    # tree, because that would redirect nested git init/clone operations.
+    process_argv = sandbox_command(argv, repo, sandbox, preserve_git_metadata=False)
     popen_kwargs: dict[str, Any] = {}
     if os.name != "nt":
         popen_kwargs["start_new_session"] = True

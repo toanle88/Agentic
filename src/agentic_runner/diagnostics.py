@@ -63,7 +63,9 @@ def _run_configured_command(
         env, _ = restricted_test_environment()
     try:
         process = subprocess.run(
-            sandbox_command(argv, cwd, sandbox, pass_env=[]),
+            sandbox_command(
+                argv, cwd, sandbox, pass_env=[], preserve_git_metadata=False,
+            ),
             cwd=cwd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.STDOUT,
