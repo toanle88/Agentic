@@ -892,6 +892,32 @@ class WorkflowTests(_GitRepositoryTestCase):
         self.assertIn('Attempts: 1/1 (configured retries: 0)', output.getvalue())
 
 
+    def test_develop_blocks_tool_turn_exhaustion_without_restarting(self):
+        run = agentic.create_worktree(self.repo, 'main', 40)
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(40, 'Provider no-progress', 'Implement it')
+        config = {
+            'max_retries': 5,
+            'max_files': None,
+            'developer_agent': {'provider': 'openrouter'},
+        }
+        with (patch('agentic.run_agent', return_value=(
+                    False,
+                    'OpenRouter agent exceeded 40 tool turns\n'
+                    'Last assistant message: Let me inspect the file.',
+              )) as run_agent,
+              patch('sys.stdout', new_callable=StringIO) as output):
+            self.assertTrue(agentic.develop(run, issue, 'main', config, folder))
+
+        run_agent.assert_called_once()
+        rendered = output.getvalue()
+        self.assertIn('[RESULT] BLOCKED', rendered)
+        self.assertIn('stopped without making progress', rendered)
+        result = json.loads((folder / 'result.json').read_text(encoding='utf-8'))
+        self.assertEqual(result['status'], 'BLOCKED')
+        self.assertEqual(result['attempts'], 1)
+
+
     def test_develop_local_retry_exhaustion_reports_reusable_task_file_command(self):
         run = agentic.create_worktree(self.repo, 'main', 43)
         folder = agentic.logs_path(self.repo, run)

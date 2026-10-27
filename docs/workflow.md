@@ -277,6 +277,13 @@ Run the same issue again to resume its existing worktree:
 agentic --issue 119
 ```
 
+When a background shell job resumes an issue that has multiple worktrees, it
+cannot ask for terminal input because its stdin is closed. In that case Agentic
+deterministically selects the newest worktree, which is the first entry in the
+normal selection list. Direct foreground commands still show the numbered
+selection prompt; use `--new` when a background job should create a fresh
+worktree instead.
+
 When an online resume finds that the GitHub issue title, body, or state changed,
 Agentic prints a bounded change summary and starts a new investigation,
 development, test, and review pass. Previous manual or automated publication

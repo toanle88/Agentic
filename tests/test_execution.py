@@ -1067,6 +1067,27 @@ class StreamingTests(unittest.TestCase):
             self.assertIn('Validation check 2 — unavailable', report)
             streamed.assert_called_once()
 
+    def test_test_runner_isolates_nested_git_repositories_in_sandbox(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            sh('git', 'init', cwd=root)
+            with (
+                patch('agentic.preflight_test_commands', return_value=[]),
+                patch(
+                    'agentic.streamed_command',
+                    return_value=CompletedProcess([], 0, stdout='ok'),
+                ) as streamed,
+            ):
+                passed, _ = agentic.run_tests(
+                    root,
+                    [[sys.executable, '-m', 'unittest']],
+                    folder=root,
+                    sandbox={'enabled': True, 'engine': 'docker', 'image': 'test-image'},
+                )
+
+        self.assertTrue(passed)
+        self.assertFalse(streamed.call_args.kwargs['preserve_git_metadata'])
+
     def test_test_runner_reports_each_command_when_deadline_expires_after_loop(self):
         with tempfile.TemporaryDirectory() as dirname:
             root = Path(dirname)

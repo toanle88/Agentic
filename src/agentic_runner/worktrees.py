@@ -829,7 +829,18 @@ def run_for_branch(repo: Path, branch: str) -> Run | None:
     return next((run for run in discover_runs(repo) if run.branch == branch), None)
 
 
-def choose_existing(runs: list[Run], *, prompt_prefix: str = "RESUME") -> Run:
+def choose_existing(
+    runs: list[Run], *, prompt_prefix: str = "RESUME", interactive: bool = True
+) -> Run:
+    """Choose an existing run, or reuse the newest run without a prompt.
+
+    Background shell jobs intentionally have stdin connected to ``DEVNULL``.
+    When more than one worktree exists, prompting from such a process raises
+    ``EOFError`` and prevents the child runner from starting. The discovery
+    order is newest-first, so selecting the first run is deterministic and
+    matches the default choice a user would normally make for a background
+    resume. Direct terminal invocations continue to use the explicit prompt.
+    """
     displayed_runs = runs[:MAX_SELECTION_RUNS]
     label = prompt_prefix.upper()
     if len(displayed_runs) == 1:
@@ -841,6 +852,13 @@ def choose_existing(runs: list[Run], *, prompt_prefix: str = "RESUME") -> Run:
     _status_print("\nMultiple worktrees exist for this issue:")
     for idx, run in enumerate(displayed_runs, 1):
         _status_print(f" {idx}. {run.branch}  ({run.worktree})")
+    if not interactive:
+        selected = displayed_runs[0]
+        _status_print(
+            f"[{label}] Non-interactive run; selecting newest worktree: "
+            f"{selected.branch} ({selected.worktree})"
+        )
+        return selected
     prompt = (
         f"\n[{label}] Waiting for worktree selection. "
         "Enter a number or 'q' to cancel: "

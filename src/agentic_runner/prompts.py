@@ -117,14 +117,17 @@ def build_agent_prompt(
 ) -> str:
     """Build the bounded developer prompt for one issue run."""
     feedback_context = _bounded_text(feedback, FEEDBACK_CONTEXT_CHARS)
-    inspection_steps = (
-        "FIRST inspect the repository, AGENTS.md if present, source, tests, and "
-        "what has ALREADY been completed."
-        if provider == "copilot" else
-        "FIRST inspect the repository, AGENTS.md if present, git status, git diff, "
-        "git diff --cached, recent commits, source, tests, and what has ALREADY "
-        "been completed."
-    )
+    inspection_steps = "Start with the smallest set of files relevant to the issue. Read applicable " \
+        "repository guidance and the relevant source/tests, then implement the " \
+        "explicit requested outcome, accounting for what has ALREADY been completed. " \
+        "Do not perform a repository-wide audit, inspect unrelated history, or reread " \
+        "files after the relevant evidence is known."
+    if provider != "copilot":
+        inspection_steps = inspection_steps.replace(
+            "Do not perform a repository-wide audit",
+            "Use current-worktree and staged-change evidence (the workflow may refer to `git diff --cached`) "
+            "only when relevant. Do not perform a repository-wide audit",
+        )
     if required_review_findings:
         required_lines = [
             "Complete current repair review findings requiring action:"
@@ -167,6 +170,29 @@ def build_agent_prompt(
         "one list entry for every finding from the current repair review."
         if repair_mode else "one list entry for every finding from the prior\n  review."
     )
+    tool_discipline = (
+        "Tool discipline:\n"
+        "- Do not read the same file repeatedly. Use start_line/end_line for a narrower\n"
+        "  follow-up or move on to implementation once the relevant evidence is known.\n"
+        "- If a tool returns an ERROR, do not retry the same rejected command or invent\n"
+        "  recursive search variants. Use list_files/read_file or an allowed configured\n"
+        "  check instead.\n"
+        "- After one focused inspection pass, either make the requested change, run the\n"
+        "  relevant checks, or report a concrete blocker."
+        if provider == "copilot" else
+        "Tool discipline:\n"
+        "- Do not read the same file repeatedly. Use start_line/end_line for a narrower\n"
+        "  follow-up or move on to implementation once the relevant evidence is known.\n"
+        "- If a tool returns an ERROR, do not retry the same rejected command or invent\n"
+        "  recursive search variants. Use list_files/read_file or an allowed configured\n"
+        "  check instead.\n"
+        "- Use the bounded `search_files` tool for repository searches. Safe Git\n"
+        "  inspection uses `git status`, explicit-path `git diff`, and metadata `git log`\n"
+        "  with a fixed `--format`; do not use recursive grep or unrestricted Git history\n"
+        "  commands.\n"
+        "- After one focused inspection pass, either make the requested change, run the\n"
+        "  relevant checks, or report a concrete blocker."
+    )
     return f"""You are an autonomous coding agent in a pre-existing Git worktree.
 {inspection_steps} This task may be resumed.
 Decide the next useful steps yourself; avoid rebuilding completed functionality.
@@ -193,6 +219,22 @@ Use the feedback above deliberately. Before editing, reconcile each actionable
 review finding or failed check with the current worktree. Fix it, verify why it
 does not apply, or state the concrete blocker; do not silently ignore feedback
 or repeat an unchanged implementation.
+
+{tool_discipline}
+
+Completion protocol:
+- The normal developer completion signal is the `finish` tool. After making the
+  requested edits and running relevant configured checks, call `finish` exactly
+  once with a concise implementation, verification, and remaining-risk summary.
+- Do not continue repository exploration after the relevant evidence is known or
+  after the requested change and checks are complete.
+
+Developer lifecycle:
+- Before the first edit, inspect only the files relevant to the issue.
+- After a successful edit, run configured checks, make other already-identified
+  edits, or call `finish`; do not start a new repository-wide search.
+- If a check fails, inspect that failure, repair it, rerun the check, and then
+  call `finish` when validation is complete.
 
 Make focused changes and appropriate tests. Do not weaken tests, alter secrets,
 change agent_config.json or AGENTS.md, commit, push, publish, or access the
