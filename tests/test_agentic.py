@@ -444,6 +444,27 @@ class PureTests(unittest.TestCase):
         self.assertIn('wrong shape', verdict['summary'])
 
 
+    def test_review_rejects_empty_rejection_without_blocker(self):
+        with tempfile.TemporaryDirectory() as temp:
+            worktree = Path(temp)
+            folder = worktree / 'logs'
+            folder.mkdir()
+            issue = agentic.Issue(20, 'Incomplete review', '')
+            with (patch.dict(
+                      'agentic_workflow._WORKFLOW_IMPLEMENTATIONS',
+                      {'_review_diff_context': lambda worktree, base: '<staged_patch>'},
+                  ),
+                  patch('agentic.run_agent', return_value=(True, json.dumps({
+                      'approved': False,
+                      'summary': 'I am still inspecting the patch',
+                      'findings': [],
+                      'skipped': [],
+                  })))):
+                verdict = agentic.review(worktree, issue, folder, 'base')
+        self.assertTrue(verdict['_tooling_error'])
+        self.assertIn('without actionable findings', verdict['summary'])
+
+
     def test_review_schema_requires_every_declared_property(self):
         self.assertEqual(
             set(agentic.REVIEW_SCHEMA['properties']),

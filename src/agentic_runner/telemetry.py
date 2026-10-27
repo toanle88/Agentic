@@ -587,13 +587,17 @@ def record_operation(folder: Path, role: str, name: str, *,
     _write_run_record(path, data)
 
 
-def record_test_result(folder: Path, *, passed: bool) -> None:
+def record_test_result(folder: Path, *, passed: bool,
+                       diff_check: str | None = None) -> None:
     """Persist the terminal result of the latest configured test run."""
     path, data = _load_run_record(folder)
-    data["test_result"] = {
+    test_result: dict[str, Any] = {
         "status": "passed" if passed else "failed",
         "recorded_at": _timestamp(),
     }
+    if diff_check in {"passed", "failed", "not_run"}:
+        test_result["git_diff_check"] = diff_check
+    data["test_result"] = test_result
     _write_run_record(path, data)
 
 
@@ -718,6 +722,9 @@ def read_run_usage(folder: Path) -> dict[str, Any]:
         status = test_result.get("status")
         if status in {"passed", "failed"}:
             result["test_result"] = {"status": status}
+            diff_check = test_result.get("git_diff_check")
+            if diff_check in {"passed", "failed", "not_run"}:
+                result["test_result"]["git_diff_check"] = diff_check
     if isinstance(data.get("security_policy"), dict):
         result["security_policy"] = data["security_policy"]
     if isinstance(data.get("security_policy_history"), list):

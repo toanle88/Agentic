@@ -59,6 +59,12 @@ OPENROUTER_SEARCH_MAX_RESULTS = 100
 OPENROUTER_SEARCH_MAX_FILES = 2_000
 OPENROUTER_SEARCH_MAX_DIRECTORIES = 2_000
 OPENROUTER_SEARCH_RESULT_CHARS = 8_000
+OPENROUTER_SEARCH_SCAN_BYTES = 256_000
+OPENROUTER_SEARCH_SCAN_LINES = 50_000
+OPENROUTER_SEARCH_READ_CHUNK_CHARS = 8_192
+OPENROUTER_SEARCH_TRUNCATION_MARKER = (
+    "\n...[search results truncated; narrow the path or query]"
+)
 OPENROUTER_READ_FILE_TRUNCATION_MARKER = (
     "\n...[truncated; use start_line/end_line to read a smaller range]"
 )
@@ -1054,6 +1060,30 @@ def _search_files(
     needle = query if case_sensitive else query.casefold()
     results: list[str] = []
     used_chars = 0
+
+    def append_match(relative: str, line_number: int, line: str) -> bool:
+        """Append one match and report whether the result must be truncated."""
+        nonlocal used_chars
+        detail = line.rstrip("\r\n").strip()
+        result = f"{relative}:{line_number}: {detail}"
+        separator_chars = 1 if results else 0
+        remaining = OPENROUTER_SEARCH_RESULT_CHARS - used_chars - separator_chars
+        if remaining <= 0:
+            return True
+        if len(result) > remaining:
+            results.append(result[:remaining])
+            used_chars += separator_chars + remaining
+            return True
+        results.append(result)
+        used_chars += separator_chars + len(result)
+        return len(results) >= max_results
+
+    def truncated_result() -> str:
+        body = "\n".join(results)
+        return body + OPENROUTER_SEARCH_TRUNCATION_MARKER if body else (
+            OPENROUTER_SEARCH_TRUNCATION_MARKER.lstrip("\n")
+        )
+
     try:
         files = iter_safe_regular_files(
             root,
@@ -1067,26 +1097,63 @@ def _search_files(
                 continue
             try:
                 with _open_regular_text_stream(root, relative) as stream:
-                    for line_number, line in enumerate(stream, 1):
-                        if "\x00" in line:
+                    pending = ""
+                    line_number = 1
+                    scanned_bytes = 0
+                    scanned_lines = 0
+                    stop_file = False
+                    scan_limited = False
+                    while (
+                        scanned_bytes < OPENROUTER_SEARCH_SCAN_BYTES
+                        and scanned_lines < OPENROUTER_SEARCH_SCAN_LINES
+                    ):
+                        remaining_scan = OPENROUTER_SEARCH_SCAN_BYTES - scanned_bytes
+                        block = stream.read(
+                            min(OPENROUTER_SEARCH_READ_CHUNK_CHARS, remaining_scan),
+                        )
+                        if not block:
                             break
-                        haystack = line if case_sensitive else line.casefold()
-                        if needle not in haystack:
-                            continue
-                        detail = line.rstrip("\r\n").strip()
-                        result = f"{relative}:{line_number}: {detail}"
-                        remaining = OPENROUTER_SEARCH_RESULT_CHARS - used_chars
-                        if remaining <= 0:
-                            return (
-                                "\n".join(results)
-                                + "\n...[search results truncated; narrow the path or query]"
-                            )
-                        if len(result) > remaining:
-                            result = result[:remaining]
-                        results.append(result)
-                        used_chars += len(result) + (1 if results else 0)
-                        if len(results) >= max_results:
-                            return "\n".join(results)
+                        block_bytes = len(block.encode("utf-8"))
+                        if block_bytes > remaining_scan:
+                            while block and block_bytes > remaining_scan:
+                                block = block[:-1]
+                                block_bytes = len(block.encode("utf-8"))
+                            scan_limited = True
+                        if not block:
+                            break
+                        scanned_bytes += block_bytes
+                        pending += block
+                        while "\n" in pending:
+                            line, pending = pending.split("\n", 1)
+                            line += "\n"
+                            if "\x00" in line:
+                                stop_file = True
+                                break
+                            haystack = line if case_sensitive else line.casefold()
+                            if needle in haystack and append_match(relative, line_number, line):
+                                return truncated_result()
+                            line_number += 1
+                            scanned_lines += 1
+                            if scanned_lines >= OPENROUTER_SEARCH_SCAN_LINES:
+                                return truncated_result()
+                        if stop_file:
+                            break
+                        if scan_limited:
+                            break
+                    if not stop_file and not scan_limited and pending:
+                        if "\x00" not in pending:
+                            haystack = pending if case_sensitive else pending.casefold()
+                            if needle in haystack and append_match(relative, line_number, pending):
+                                return truncated_result()
+                    if (
+                        not stop_file
+                        and (
+                            scan_limited
+                            or scanned_bytes >= OPENROUTER_SEARCH_SCAN_BYTES
+                            or scanned_lines >= OPENROUTER_SEARCH_SCAN_LINES
+                        )
+                    ):
+                        return truncated_result()
             except (OSError, RuntimeError, UnicodeError):
                 continue
     except (OSError, RuntimeError, SafeTraversalUnavailable) as exc:
