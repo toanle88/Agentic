@@ -874,6 +874,30 @@ class OpenRouterTests(unittest.TestCase):
             self.assertNotIn('OPENAI_API_KEY', process_argv)
             self.assertNotIn('secret', process_argv)
 
+    def test_openrouter_commands_receive_a_restricted_environment(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with (
+                patch.dict(agentic.os.environ, {
+                    'OPENROUTER_API_KEY': 'router-secret',
+                    'OTHER_PROVIDER_TOKEN': 'provider-secret',
+                    'PATH': agentic.os.environ.get('PATH', ''),
+                }, clear=True),
+                patch('agentic_openrouter_tools._bounded_command_capture', return_value=(
+                    0, 'ok\n', False, False,
+                )) as capture,
+            ):
+                result = agentic_openrouter._openrouter_tool_call(
+                    root, 'run_command', {'argv': ['python', '-m', 'unittest']},
+                    readonly=False,
+                )
+
+            self.assertIn('exit 0', result)
+            environment = capture.call_args.kwargs['env']
+            self.assertNotIn('OPENROUTER_API_KEY', environment)
+            self.assertNotIn('OTHER_PROVIDER_TOKEN', environment)
+            self.assertIn('PATH', environment)
+
     def test_openrouter_network_denial_overrides_sandbox_network_setting(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

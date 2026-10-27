@@ -47,6 +47,7 @@ from .config import (  # noqa: F401
     preflight_security,
     api_key_env_for_provider,
     auth_mode_for_settings,
+    credential_environment_names,
     sandbox_env_for_provider,
     sandbox_env_for_providers,
     test_commands_for_profile,
@@ -618,6 +619,7 @@ def _require_manual_completion_validation(
         sandbox=config.get("sandbox"),
         deadline=deadline,
         verbose=verbose,
+        credential_names=credential_environment_names(config),
     )
     if passed:
         return report
@@ -2194,6 +2196,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
                 sandbox=config.get("sandbox"),
                 deadline=task_deadline,
                 verbose=args.verbose,
+                credential_names=credential_environment_names(config),
             )
         if not passed:
             raise RuntimeError(f"Base tests are failing; retained worktree.\n{report[-2500:]}")

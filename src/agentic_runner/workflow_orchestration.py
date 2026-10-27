@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .models import Issue, Run
+from .config import credential_environment_names
 from .persistence import read_text_bounded
 
 
@@ -177,6 +178,7 @@ def develop(
             "settings": config.get("developer_agent"),
             "timeout": _remaining_timeout(deadline, config.get("effective_developer_timeout_seconds")),
             "verbose": verbose,
+            "credential_names": credential_environment_names(config),
         }
         if test_commands is not None:
             agent_kwargs["check_commands"] = test_commands

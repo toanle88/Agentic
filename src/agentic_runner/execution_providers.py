@@ -700,7 +700,7 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
     redaction_values = [credential_value] if credential_value else []
     process_env = provider_process_environment(provider, api_key_env)
     if provider == "copilot" and host:
-        process_env = dict(process_env or os.environ)
+        process_env = dict(process_env)
         process_env["COPILOT_GH_HOST"] = host
     with tempfile.TemporaryDirectory(prefix="agentic-provider-") as temporary_directory:
         invocation_root = Path(temporary_directory)

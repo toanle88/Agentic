@@ -26,6 +26,7 @@ from .config import (
     OPENROUTER_MAX_TURNS,
     api_key_env_for_provider,
     auth_mode_for_settings,
+    credential_environment_names,
     PROVIDER_API_KEY_ENV,
     sandbox_env_for_provider,
 )
@@ -345,6 +346,7 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
               timeout: int | None = None,
               sandbox: dict[str, Any] | None = None,
               check_commands: list[list[str]] | None = None,
+              credential_names: list[str] | None = None,
               verbose: bool = False) -> tuple[bool, str]:
     """Dispatch one developer/reviewer turn to the configured provider."""
     if isinstance(settings, AgentSettings):
@@ -413,6 +415,8 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
             router_kwargs["json_mode"] = True
         if check_commands is not None:
             router_kwargs["check_commands"] = check_commands
+        if credential_names:
+            router_kwargs["credential_names"] = credential_names
         if provider_sandbox is not None:
             router_kwargs["sandbox"] = provider_sandbox
         return run_openrouter(
@@ -720,6 +724,7 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
         display_command = safe_command_label(argv)
         unavailable = preflight_test_commands(
             worktree, [argv], sandbox=sandbox, fail_fast=False,
+            credential_names=credential_names, env=test_environment,
         )
         if unavailable:
             mark_unavailable(index, "required command unavailable")
@@ -804,7 +809,9 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
 
 def preflight_test_commands(repo: Path, test_commands: list[list[str]],
                             sandbox: dict[str, Any] | None = None,
-                            fail_fast: bool = True) -> list[str]:
+                            fail_fast: bool = True,
+                            credential_names: list[str] | None = None,
+                            env: dict[str, str] | None = None) -> list[str]:
     """Check configured tools, optionally collecting every unavailable entry."""
     unavailable: list[str] = []
     for argv in test_commands:
@@ -830,7 +837,10 @@ def preflight_test_commands(repo: Path, test_commands: list[list[str]],
                 "import importlib.util, sys; "
                 "sys.exit(0 if importlib.util.find_spec(sys.argv[1]) else 1)",
                 module,
-            ], repo, timeout=30, check=False)
+            ], repo, timeout=30, check=False,
+                env=env if env is not None else restricted_test_environment(
+                    blocked_names=credential_names or (),
+                )[0])
             if result.returncode:
                 reason = (
                     f"Configured test dependency is unavailable: Python module "
@@ -1039,7 +1049,8 @@ def investigate_issue(worktree: Path, issue: Issue, folder: Path, *,
                       timeout: int | None = None,
                       agent: dict[str, Any] | AgentSettings | None = None,
                       verbose: bool = False,
-                      sandbox: dict[str, Any] | None = None) -> dict[str, Any]:
+                      sandbox: dict[str, Any] | None = None,
+                      credential_names: list[str] | None = None) -> dict[str, Any]:
     """Investigate an issue and record feedback for the development turn."""
     schema = folder / "investigation-schema.json"
     atomic_write_json(schema, INVESTIGATION_SCHEMA)
@@ -1086,6 +1097,8 @@ paths and test names when they support the observation.
     }
     if sandbox is not None and sandbox.get("enabled"):
         run_kwargs["sandbox"] = sandbox
+    if credential_names:
+        run_kwargs["credential_names"] = credential_names
     ok, message = run_agent(
         worktree, prompt, readonly=True, schema=schema, output=output,
         settings=agent, **run_kwargs,
@@ -1448,7 +1461,8 @@ def audit_repository(worktree: Path, issue: Issue, folder: Path, *,
                      timeout: int | None = None,
                      agent: dict[str, Any] | AgentSettings | None = None,
                      verbose: bool = False,
-                     sandbox: dict[str, Any] | None = None) -> dict[str, Any]:
+                     sandbox: dict[str, Any] | None = None,
+                     credential_names: list[str] | None = None) -> dict[str, Any]:
     """Run the bounded, read-only repository audit and persist its report."""
     if not issue.is_audit or not issue.audit_key:
         raise ValueError("audit_repository requires an audit work item")
@@ -1485,6 +1499,8 @@ pass/fail decision about a patch.
     }
     if sandbox is not None and sandbox.get("enabled"):
         run_kwargs["sandbox"] = sandbox
+    if credential_names:
+        run_kwargs["credential_names"] = credential_names
     ok, message = run_agent(
         worktree, prompt, readonly=True, schema=schema, output=output,
         settings=agent, **run_kwargs,
@@ -1532,6 +1548,7 @@ def _run_audit(run: Run, issue: Issue, config: dict[str, Any], folder: Path, *,
             agent=config.get("reviewer_agent"),
             timeout=_remaining_timeout(deadline, config.get("effective_reviewer_timeout_seconds")),
             sandbox=config.get("sandbox"), verbose=verbose,
+            credential_names=credential_environment_names(config),
         )
 
     report = run_once()
@@ -1636,6 +1653,7 @@ def _run_investigation(run: Run, issue: Issue, config: dict[str, Any],
             ),
             "sandbox": config.get("sandbox"),
             "verbose": verbose,
+            "credential_names": credential_environment_names(config),
         }
         return investigate_issue(run.worktree, issue, folder, **kwargs)
 
@@ -1664,6 +1682,7 @@ def review(worktree: Path, issue: Issue, folder: Path, base_sha: str,
            timeout: int | None = None,
            agent: dict[str, Any] | AgentSettings | None = None,
            sandbox: dict[str, Any] | None = None,
+           credential_names: list[str] | None = None,
            developer_report: str = "",
            instruction: str | None = None,
            system_prompt: str | None = None,
@@ -1748,6 +1767,8 @@ verdict.
     }
     if sandbox is not None and sandbox.get("enabled"):
         run_kwargs["sandbox"] = sandbox
+    if credential_names:
+        run_kwargs["credential_names"] = credential_names
     ok, message = run_agent(
         worktree, prompt, readonly=True, schema=schema, output=output,
         settings=agent, **run_kwargs,
@@ -1904,6 +1925,7 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
         instruction=instruction,
         system_prompt=system_prompt,
         agent=config.get("reviewer_agent"),
+        credential_names=credential_environment_names(config),
         timeout=_remaining_timeout(
             deadline,
             config.get("effective_reviewer_timeout_seconds"),
@@ -1921,6 +1943,7 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
             instruction=instruction,
             system_prompt=system_prompt,
             agent=config.get("reviewer_agent"),
+            credential_names=credential_environment_names(config),
             timeout=_remaining_timeout(
                 deadline,
                 config.get("effective_reviewer_timeout_seconds"),
