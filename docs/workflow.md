@@ -319,8 +319,9 @@ The interactive shell provides `/repair-pr 123 [--clean]` and runs it in the for
 so confirmation prompts remain available. Its raw output is retained in the
 foreground job log: `/logs JOB` shows the concise replay and `/logs JOB --verbose`
 shows the complete captured stream. Agentic reads failed check summaries
-and bounded failed-run log excerpts as untrusted evidence, classifies
-the failure, and uses only the exact existing worktree for the PR branch. A
+and bounded failed-job log excerpts as untrusted evidence, classifies
+the failure, and preserves the tail of noisy logs where the final diagnostic
+usually appears. It uses only the exact existing worktree for the PR branch. A
 new repair requires a clean worktree and `HEAD` equal to the current PR head.
 If a previous Agentic repair exhausted its developer attempts, a later repair
 can continue its preserved patch only when durable PR, branch, head, worktree,
@@ -344,7 +345,8 @@ checks and review must approve a patch before publication. Each repair attempt
 uses the current failed-CI diagnostics as its explicit scope: stale rejected
 review findings from the existing run and the broad original PR description do
 not become developer requirements. A fresh read-only review still checks the
-resulting patch against that targeted CI-repair scope.
+resulting patch against that targeted CI-repair scope, starting at the current
+PR head so the original PR changes are not reported as new repair changes.
 With `automation.auto_publish` false (the default), Agentic asks before
 committing and pushing; true permits the guarded same-branch push. The
 `ci_repair.max_attempts` and polling settings bound repeated repair cycles and

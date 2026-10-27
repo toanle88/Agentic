@@ -1869,6 +1869,7 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
                       verbose: bool = False,
                       repair_mode: bool = False,
                       repair_scope: str | None = None,
+                      review_base_sha: str | None = None,
                       ) -> tuple[bool, str, dict[str, Any], str, str]:
     # A new validation attempt supersedes prior terminal state and automated
     # approval. A successful review below records a fresh approval for its
@@ -1920,7 +1921,7 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
         style_patch_stat=True,
     )
     verdict = review(
-        run.worktree, issue, folder, base_sha, test_report=report,
+        run.worktree, issue, folder, review_base_sha or base_sha, test_report=report,
         developer_report=developer_report,
         instruction=instruction,
         system_prompt=system_prompt,
@@ -1938,7 +1939,7 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
     if verdict.get("_tooling_error"):
         _status_print("[REVIEW] Reviewer result was invalid; retrying read-only review")
         verdict = review(
-            run.worktree, issue, folder, base_sha, test_report=report,
+            run.worktree, issue, folder, review_base_sha or base_sha, test_report=report,
             developer_report=developer_report,
             instruction=instruction,
             system_prompt=system_prompt,
@@ -2565,6 +2566,7 @@ def develop(
     verbose: bool = False,
     repair_mode: bool = False,
     repair_scope: str | None = None,
+    review_base_sha: str | None = None,
 ) -> bool:
     """Compatibility facade for the extracted developer retry loop."""
     return _orchestrated_develop(
@@ -2581,6 +2583,7 @@ def develop(
         verbose=verbose,
         repair_mode=repair_mode,
         repair_scope=repair_scope,
+        review_base_sha=review_base_sha,
         runtime=_orchestration_runtime(),
     )
 
