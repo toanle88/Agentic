@@ -42,6 +42,8 @@ _DEFAULT_URL_OPEN = urllib.request.urlopen
 
 OPENROUTER_READ_FILE_CHARS = 12_000
 OPENROUTER_EDIT_FILE_CHARS = 1_000_000
+OPENROUTER_WRITE_FILE_BYTES = 4 * 1024 * 1024
+OPENROUTER_MUTATION_BYTES = 16 * 1024 * 1024
 OPENROUTER_READ_CHUNK_CHARS = 8_192
 # Ranged reads are line-oriented, but the requested line may be very distant
 # from the beginning of a file. Keep the work needed to locate it bounded
@@ -59,11 +61,19 @@ OPENROUTER_SEARCH_MAX_RESULTS = 100
 OPENROUTER_SEARCH_MAX_FILES = 2_000
 OPENROUTER_SEARCH_MAX_DIRECTORIES = 2_000
 OPENROUTER_SEARCH_RESULT_CHARS = 8_000
-OPENROUTER_SEARCH_SCAN_BYTES = 256_000
+OPENROUTER_SEARCH_SCAN_BYTES_PER_FILE = 256_000
+OPENROUTER_SEARCH_SCAN_BYTES = 2_000_000
+OPENROUTER_SEARCH_SCAN_LINES_PER_FILE = 10_000
 OPENROUTER_SEARCH_SCAN_LINES = 50_000
-OPENROUTER_SEARCH_READ_CHUNK_CHARS = 8_192
+OPENROUTER_SEARCH_READ_CHUNK_BYTES = 8_192
+OPENROUTER_SEARCH_QUERY_CHARS = 10_000
+OPENROUTER_MALFORMED_TOOL_CALL_ERROR_KEY = "__agentic_tool_error"
 OPENROUTER_SEARCH_TRUNCATION_MARKER = (
-    "\n...[search results truncated; narrow the path or query]"
+    "\n...[search results truncated (search truncated); "
+    "scan limit reached; narrow the path or query]"
+)
+OPENROUTER_SEARCH_INCOMPLETE_MARKER = (
+    "\n...[search incomplete; one or more files could not be read]"
 )
 OPENROUTER_READ_FILE_TRUNCATION_MARKER = (
     "\n...[truncated; use start_line/end_line to read a smaller range]"
@@ -639,7 +649,10 @@ def _openrouter_tools(
                     "Use this instead of recursive grep."
                 ),
                 "parameters": {"type": "object", "properties": {
-                    "query": {"type": "string", "description": "Literal text to find."},
+                    "query": {
+                        "type": "string", "maxLength": OPENROUTER_SEARCH_QUERY_CHARS,
+                        "description": "Literal text to find.",
+                    },
                     "path": {
                         "type": "string",
                         "description": "Relative directory to search, default '.'.",
@@ -848,6 +861,27 @@ def _open_regular_text_stream(root: Path, relative: str):
                 os.close(descriptor)
     except OSError as exc:
         raise ValueError(f"read_file could not open a regular file: {exc}") from exc
+    return stream
+
+
+def _open_regular_binary_stream(root: Path, relative: str):
+    """Open a single-link regular file for bounded byte-oriented scanning."""
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+        descriptor, expected_identity = open_relative_regular(
+            root, relative, flags, description="search target",
+        )
+        try:
+            revalidate_single_link_regular(
+                descriptor, expected_identity, description="search target",
+            )
+            stream = os.fdopen(descriptor, "rb", buffering=0)
+            descriptor = -1
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+    except OSError as exc:
+        raise ValueError(f"search could not open a regular file: {exc}") from exc
     return stream
 
 
@@ -1060,29 +1094,22 @@ def _search_files(
     needle = query if case_sensitive else query.casefold()
     results: list[str] = []
     used_chars = 0
+    scanned_bytes = 0
+    scanned_lines = 0
+    read_failures = 0
+    truncated = False
+    aggregate_truncated = False
 
-    def append_match(relative: str, line_number: int, line: str) -> bool:
-        """Append one match and report whether the result must be truncated."""
+    def append_result(relative: str, line_number: int, detail: str) -> bool:
         nonlocal used_chars
-        detail = line.rstrip("\r\n").strip()
-        result = f"{relative}:{line_number}: {detail}"
-        separator_chars = 1 if results else 0
-        remaining = OPENROUTER_SEARCH_RESULT_CHARS - used_chars - separator_chars
+        result = f"{relative}:{line_number}: {detail.rstrip(chr(13) + chr(10)).strip()}"
+        separator = 1 if results else 0
+        remaining = OPENROUTER_SEARCH_RESULT_CHARS - used_chars - separator
         if remaining <= 0:
-            return True
-        if len(result) > remaining:
-            results.append(result[:remaining])
-            used_chars += separator_chars + remaining
-            return True
-        results.append(result)
-        used_chars += separator_chars + len(result)
-        return len(results) >= max_results
-
-    def truncated_result() -> str:
-        body = "\n".join(results)
-        return body + OPENROUTER_SEARCH_TRUNCATION_MARKER if body else (
-            OPENROUTER_SEARCH_TRUNCATION_MARKER.lstrip("\n")
-        )
+            return False
+        results.append(result[:remaining])
+        used_chars += separator + len(results[-1])
+        return True
 
     try:
         files = iter_safe_regular_files(
@@ -1095,66 +1122,105 @@ def _search_files(
         for kind, relative, _ in files:
             if kind != "file":
                 continue
+            if (
+                scanned_bytes >= OPENROUTER_SEARCH_SCAN_BYTES
+                or scanned_lines >= OPENROUTER_SEARCH_SCAN_LINES
+            ):
+                truncated = True
+                break
+            file_bytes = 0
+            file_lines = 0
+            file_truncated = False
+            line_number = 1
+            line_window = ""
+            line_detail: list[str] = []
+            line_detail_chars = 0
+            line_matched = False
+            decoder = codecs.getincrementaldecoder("utf-8")("replace")
+            pending_crlf = False
             try:
-                with _open_regular_text_stream(root, relative) as stream:
-                    pending = ""
-                    line_number = 1
-                    scanned_bytes = 0
-                    scanned_lines = 0
-                    stop_file = False
-                    scan_limited = False
-                    while (
-                        scanned_bytes < OPENROUTER_SEARCH_SCAN_BYTES
-                        and scanned_lines < OPENROUTER_SEARCH_SCAN_LINES
-                    ):
-                        remaining_scan = OPENROUTER_SEARCH_SCAN_BYTES - scanned_bytes
-                        block = stream.read(
-                            min(OPENROUTER_SEARCH_READ_CHUNK_CHARS, remaining_scan),
+                with _open_regular_binary_stream(root, relative) as stream:
+                    while True:
+                        remaining_bytes = min(
+                            OPENROUTER_SEARCH_SCAN_BYTES - scanned_bytes,
+                            OPENROUTER_SEARCH_SCAN_BYTES_PER_FILE - file_bytes,
+                            OPENROUTER_SEARCH_READ_CHUNK_BYTES,
                         )
-                        if not block:
+                        if remaining_bytes <= 0:
+                            if scanned_bytes >= OPENROUTER_SEARCH_SCAN_BYTES:
+                                truncated = True
+                                aggregate_truncated = True
+                            else:
+                                file_truncated = True
+                                truncated = True
                             break
-                        block_bytes = len(block.encode("utf-8"))
-                        if block_bytes > remaining_scan:
-                            while block and block_bytes > remaining_scan:
-                                block = block[:-1]
-                                block_bytes = len(block.encode("utf-8"))
-                            scan_limited = True
-                        if not block:
+                        chunk = stream.read(remaining_bytes)
+                        if not chunk:
+                            chunk_text = decoder.decode(b"", final=True)
+                            at_eof = True
+                        else:
+                            scanned_bytes += len(chunk)
+                            file_bytes += len(chunk)
+                            chunk_text = decoder.decode(chunk, final=False)
+                            at_eof = len(chunk) < remaining_bytes
+                        binary_content = "\x00" in chunk_text
+                        if binary_content:
+                            chunk_text = chunk_text.split("\x00", 1)[0]
+                        if pending_crlf:
+                            if chunk_text.startswith("\n"):
+                                chunk_text = chunk_text[1:]
+                            pending_crlf = False
+                        pieces = chunk_text.splitlines(keepends=True)
+                        for piece_index, piece in enumerate(pieces):
+                            candidate = line_window + piece
+                            haystack = candidate if case_sensitive else candidate.casefold()
+                            line_matched = line_matched or needle in haystack
+                            keep_window = max(0, len(needle) - 1)
+                            line_window = candidate[-keep_window:] if keep_window else ""
+                            if line_detail_chars < OPENROUTER_SEARCH_RESULT_CHARS:
+                                kept = piece[:OPENROUTER_SEARCH_RESULT_CHARS - line_detail_chars]
+                                line_detail.append(kept)
+                                line_detail_chars += len(kept)
+                            if piece.endswith(("\n", "\r")):
+                                if line_matched and not append_result(
+                                    relative, line_number, "".join(line_detail),
+                                ):
+                                    return "\n".join(results) + OPENROUTER_SEARCH_TRUNCATION_MARKER
+                                if line_matched and len(results) >= max_results:
+                                    return "\n".join(results) + OPENROUTER_SEARCH_TRUNCATION_MARKER
+                                file_lines += 1
+                                scanned_lines += 1
+                                if (
+                                    file_lines >= OPENROUTER_SEARCH_SCAN_LINES_PER_FILE
+                                ):
+                                    file_truncated = True
+                                    truncated = True
+                                    break
+                                if scanned_lines >= OPENROUTER_SEARCH_SCAN_LINES:
+                                    truncated = True
+                                    aggregate_truncated = True
+                                    break
+                                line_number += 1
+                                line_window = ""
+                                line_detail = []
+                                line_detail_chars = 0
+                                line_matched = False
+                            pending_crlf = (
+                                piece_index == len(pieces) - 1
+                                and piece.endswith("\r")
+                            )
+                        if binary_content or file_truncated or aggregate_truncated or at_eof:
                             break
-                        scanned_bytes += block_bytes
-                        pending += block
-                        while "\n" in pending:
-                            line, pending = pending.split("\n", 1)
-                            line += "\n"
-                            if "\x00" in line:
-                                stop_file = True
-                                break
-                            haystack = line if case_sensitive else line.casefold()
-                            if needle in haystack and append_match(relative, line_number, line):
-                                return truncated_result()
-                            line_number += 1
-                            scanned_lines += 1
-                            if scanned_lines >= OPENROUTER_SEARCH_SCAN_LINES:
-                                return truncated_result()
-                        if stop_file:
-                            break
-                        if scan_limited:
-                            break
-                    if not stop_file and not scan_limited and pending:
-                        if "\x00" not in pending:
-                            haystack = pending if case_sensitive else pending.casefold()
-                            if needle in haystack and append_match(relative, line_number, pending):
-                                return truncated_result()
-                    if (
-                        not stop_file
-                        and (
-                            scan_limited
-                            or scanned_bytes >= OPENROUTER_SEARCH_SCAN_BYTES
-                            or scanned_lines >= OPENROUTER_SEARCH_SCAN_LINES
-                        )
-                    ):
-                        return truncated_result()
-            except (OSError, RuntimeError, UnicodeError):
+                    if not file_truncated and not aggregate_truncated and line_detail_chars:
+                        if line_matched and not append_result(
+                            relative, line_number, "".join(line_detail),
+                        ):
+                            return "\n".join(results) + OPENROUTER_SEARCH_TRUNCATION_MARKER
+                        if line_matched and len(results) >= max_results:
+                            return "\n".join(results) + OPENROUTER_SEARCH_TRUNCATION_MARKER
+                        scanned_lines += 1
+            except (OSError, RuntimeError, UnicodeError, ValueError):
+                read_failures += 1
                 continue
     except (OSError, RuntimeError, SafeTraversalUnavailable) as exc:
         if results:
@@ -1163,7 +1229,14 @@ def _search_files(
                 + f"\n...[search stopped: {exc}; narrow the path or query]"
             )
         return f"ERROR: search could not safely traverse {relative_target!r}: {exc}"
-    return "\n".join(results) or "(no matches)"
+    output = "\n".join(results)
+    if truncated:
+        return output + OPENROUTER_SEARCH_TRUNCATION_MARKER
+    if read_failures:
+        return output + OPENROUTER_SEARCH_INCOMPLETE_MARKER if output else (
+            "ERROR: search incomplete; one or more files could not be read"
+        )
+    return output or "(no matches)"
 
 
 def _stop_command_process(process: subprocess.Popen[Any]) -> None:
@@ -1326,7 +1399,50 @@ def _bounded_command_capture(
     return process.returncode, output_tail, truncated, timed_out
 
 
-def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
+def _validate_tool_call_shape(name: Any, arguments: Any) -> str | None:
+    """Validate untrusted provider tool-call shape before dispatch."""
+    if not isinstance(name, str) or not name.strip():
+        return "ERROR: tool name must be a non-empty string"
+    if not isinstance(arguments, dict):
+        return "ERROR: tool arguments must be a JSON object"
+
+    def field_type(field: str, expected: type | tuple[type, ...]) -> str | None:
+        if field in arguments and (
+            not isinstance(arguments[field], expected)
+            or (expected is int and isinstance(arguments[field], bool))
+        ):
+            return f"ERROR: {field} has an invalid type"
+        return None
+
+    if name == "list_files":
+        return field_type("path", str) or field_type("page", int)
+    if name == "read_file":
+        return field_type("path", str) or field_type("start_line", int) or field_type("end_line", int)
+    if name == "search_files":
+        return (
+            field_type("query", str)
+            or field_type("path", str)
+            or field_type("case_sensitive", bool)
+            or field_type("max_results", int)
+        )
+    if name == "run_command":
+        argv = arguments.get("argv")
+        if not isinstance(argv, list) or not argv or not all(isinstance(part, str) for part in argv):
+            return "ERROR: argv must be a non-empty array of strings"
+    elif name == "write_file":
+        return field_type("path", str) or field_type("content", str)
+    elif name == "edit_file":
+        return (
+            field_type("path", str)
+            or field_type("old_text", str)
+            or field_type("new_text", str)
+        )
+    elif name == "finish":
+        return field_type("summary", str)
+    return None
+
+
+def _openrouter_tool_call(worktree: Path, name: Any, arguments: Any,
                           *, readonly: bool, command_timeout: int | None = None,
                           allow_network: bool = False,
                           permission_policy: dict[str, bool] | None = None,
@@ -1334,8 +1450,19 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                           sandbox: dict[str, Any] | None = None,
                           allow_runner_source: bool = False,
                           redaction_values: list[str] | None = None,
-                          env: dict[str, str] | None = None) -> str:
+                          env: dict[str, str] | None = None,
+                          mutation_state: dict[str, int] | None = None) -> str:
     try:
+        if isinstance(arguments, dict) and OPENROUTER_MALFORMED_TOOL_CALL_ERROR_KEY in arguments:
+            malformed_error = arguments[OPENROUTER_MALFORMED_TOOL_CALL_ERROR_KEY]
+            if not isinstance(malformed_error, str):
+                return "ERROR: malformed tool-call error must be a string"
+            if not malformed_error.startswith("ERROR:"):
+                malformed_error = f"ERROR: {malformed_error}"
+            return malformed_error[:1_000]
+        shape_error = _validate_tool_call_shape(name, arguments)
+        if shape_error:
+            return shape_error
         if env is None:
             env, removed_values = restricted_test_environment()
             redaction_values = [
@@ -1412,6 +1539,11 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
             query = arguments.get("query")
             if not isinstance(query, str) or not query:
                 return "ERROR: query must be a non-empty string"
+            if len(query) > OPENROUTER_SEARCH_QUERY_CHARS:
+                return (
+                    "ERROR: query must be at most "
+                    f"{OPENROUTER_SEARCH_QUERY_CHARS} characters"
+                )
             relative = arguments.get("path", ".")
             if not isinstance(relative, str) or not relative.strip():
                 return "ERROR: path must be a non-empty worktree-relative string"
@@ -1508,6 +1640,28 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
             content = arguments.get("content", "")
             if not isinstance(content, str):
                 return "ERROR: file content must be a string"
+            if len(content) > OPENROUTER_EDIT_FILE_CHARS:
+                return (
+                    "ERROR: file content must be at most "
+                    f"{OPENROUTER_EDIT_FILE_CHARS} characters"
+                )
+            try:
+                content_bytes = content.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                return f"ERROR: file content is not valid UTF-8: {exc}"
+            if len(content_bytes) > OPENROUTER_WRITE_FILE_BYTES:
+                return (
+                    "ERROR: file content must be at most "
+                    f"{OPENROUTER_WRITE_FILE_BYTES} UTF-8 bytes"
+                )
+            mutation_bytes = (mutation_state or {}).get("bytes", 0)
+            if mutation_state is not None and (
+                mutation_bytes + len(content_bytes) > OPENROUTER_MUTATION_BYTES
+            ):
+                return (
+                    "ERROR: OpenRouter file mutation budget is limited to "
+                    f"{OPENROUTER_MUTATION_BYTES} UTF-8 bytes per run"
+                )
             exists = target.exists()
             if exists and not policy.get("edit_files"):
                 return "ERROR: editing files is disabled by the permission policy"
@@ -1517,7 +1671,7 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
             mode = None
             try:
                 atomic_replace_relative_regular(
-                    worktree.resolve(), relative, content.encode("utf-8"),
+                    worktree.resolve(), relative, content_bytes,
                     expected_identity=expected_identity, mode=mode,
                     create_parents=True, allow_existing=exists,
                     require_existing=exists,
@@ -1525,6 +1679,8 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                 )
             except (OSError, RuntimeError, ValueError) as exc:
                 return f"ERROR: could not open {relative!r} for writing: {exc}"
+            if mutation_state is not None:
+                mutation_state["bytes"] = mutation_bytes + len(content_bytes)
             return f"Wrote {relative}"
         if name == "run_command":
             argv = arguments.get("argv")
@@ -1552,7 +1708,7 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                 output = marker + output[-(OPENROUTER_COMMAND_OUTPUT_CHARS - len(marker)):]
             return f"exit {returncode}\n{output}"
         return f"ERROR: unknown tool {name!r}"
-    except (OSError, UnicodeError, ValueError) as exc:
+    except (OSError, UnicodeError, ValueError, TypeError, AttributeError, KeyError, IndexError) as exc:
         return f"ERROR: {redact_secrets(str(exc), extra_values=redaction_values or ())}"
 
 

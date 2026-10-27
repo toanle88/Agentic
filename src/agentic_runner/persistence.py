@@ -9,11 +9,11 @@ from __future__ import annotations
 import json
 import os
 import stat
-import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, Iterable
 
-from .file_boundaries import open_single_link_regular
+from .file_boundaries import atomic_replace_relative_regular, open_single_link_regular
 from .security import redact_secrets
 
 
@@ -378,6 +378,83 @@ def _fsync_parent_directory(path: Path) -> None:
         os.close(directory_fd)
 
 
+def _atomic_write_bytes_anchored(path: Path, payload: bytes) -> None:
+    """Publish a complete artifact through an anchored parent descriptor."""
+    parent, name = _open_log_parent(path)
+    target = -1
+    temporary = -1
+    temporary_name: str | None = None
+    expected_identity: tuple[int, int] | None = None
+    try:
+        try:
+            target = os.open(
+                name,
+                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=parent,
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            metadata = _validate_log_descriptor(target, path)
+            expected_identity = (int(metadata.st_dev), int(metadata.st_ino))
+
+        for _ in range(10):
+            candidate = f".{name}.agentic-{uuid.uuid4().hex}.tmp"
+            try:
+                temporary = os.open(
+                    candidate,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=parent,
+                )
+            except FileExistsError:
+                continue
+            temporary_name = candidate
+            break
+        if temporary < 0 or temporary_name is None:
+            raise FileExistsError(f"could not create a temporary durable artifact: {path}")
+
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(temporary, remaining)
+            if written <= 0:
+                raise OSError("durable artifact write made no progress")
+            remaining = remaining[written:]
+        os.fsync(temporary)
+        os.close(temporary)
+        temporary = -1
+
+        if target >= 0:
+            assert expected_identity is not None
+            metadata = _validate_log_descriptor(target, path)
+            if (int(metadata.st_dev), int(metadata.st_ino)) != expected_identity:
+                raise OSError(f"durable log changed while being replaced: {path}")
+            path_metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if not stat.S_ISREG(path_metadata.st_mode) or path_metadata.st_nlink != 1:
+                raise OSError(f"durable log target changed while being replaced: {path}")
+            if (int(path_metadata.st_dev), int(path_metadata.st_ino)) != expected_identity:
+                raise OSError(f"durable log changed while being replaced: {path}")
+            os.close(target)
+            target = -1
+            os.replace(temporary_name, name, src_dir_fd=parent, dst_dir_fd=parent)
+        else:
+            os.link(temporary_name, name, src_dir_fd=parent, dst_dir_fd=parent)
+            os.unlink(temporary_name, dir_fd=parent)
+        temporary_name = None
+        os.fsync(parent)
+    finally:
+        if temporary >= 0:
+            os.close(temporary)
+        if target >= 0:
+            os.close(target)
+        if temporary_name is not None:
+            try:
+                os.unlink(temporary_name, dir_fd=parent)
+            except FileNotFoundError:
+                pass
+        os.close(parent)
+
+
 def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8",
                       redact: bool = True, extra_values: Iterable[str] = ()) -> None:
     """Optionally redact, then replace *path* after the complete write succeeds.
@@ -393,28 +470,20 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8",
     the credential regex over JavaScript source can turn expressions such as
     ``key=value`` into invalid code.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
     if redact:
         text = redact_secrets(text, extra_values=extra_values)
-    temporary: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding=encoding, dir=path.parent,
-            prefix=f".{path.name}.", suffix=".tmp", delete=False,
-        ) as stream:
-            temporary = stream.name
-            stream.write(text)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        _fsync_parent_directory(path)
-        temporary = None
-    finally:
-        if temporary is not None:
-            try:
-                Path(temporary).unlink()
-            except FileNotFoundError:
-                pass
+    payload = text.encode(encoding)
+    if _supports_anchored_log_open():
+        _atomic_write_bytes_anchored(path, payload)
+    else:
+        _validate_log_parent(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _validate_log_parent(path)
+        atomic_replace_relative_regular(
+            path.parent, path.name, payload,
+            allow_existing=True, description="durable artifact",
+        )
+    _fsync_parent_directory(path)
 
 
 def atomic_write_json(path: Path, value: Any, *, indent: int = 2) -> None:

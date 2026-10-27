@@ -499,6 +499,168 @@ class OpenRouterTests(unittest.TestCase):
                 root, 'unknown', {}, readonly=False
             ))
 
+    def test_openrouter_tool_boundary_rejects_malformed_provider_arguments(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            malformed = [
+                (['read_file'], {}),
+                ('read_file', None),
+                ('read_file', []),
+                ('run_command', {'argv': 'python'}),
+                ('list_files', {'page': True}),
+            ]
+            for name, arguments in malformed:
+                with self.subTest(name=name, arguments=arguments):
+                    result = agentic_openrouter._openrouter_tool_call(
+                        root, name, arguments, readonly=True,
+                    )
+                    self.assertTrue(result.startswith('ERROR:'), result)
+            for name in (
+                'list_files', 'read_file', 'search_files', 'run_command',
+                'write_file', 'edit_file', 'finish', 'unknown',
+            ):
+                with self.subTest(sentinel_name=name):
+                    result = agentic_openrouter._openrouter_tool_call(
+                        root,
+                        name,
+                        {'__agentic_tool_error': 'malformed call'},
+                        readonly=True,
+                    )
+                    self.assertEqual('ERROR: malformed call', result)
+
+    def test_openrouter_loop_records_malformed_tool_call_and_continues(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            responses = iter([
+                {'choices': [{'message': {
+                    'role': 'assistant', 'content': None,
+                    'tool_calls': [{'id': 'bad', 'function': {
+                        'name': ['read_file'], 'arguments': None,
+                    }}, ['not-a-tool-call']],
+                }}]},
+                {'choices': [{'message': {'role': 'assistant', 'content': 'done'}}]},
+            ])
+            with (patch.dict(agentic.os.environ, {'ROUTER_KEY': 'secret'}, clear=False),
+                  patch('agentic_openrouter._openrouter_request', side_effect=lambda *args: next(responses))):
+                ok, message = agentic.run_openrouter(
+                    root, 'prompt', output=root / 'malformed.txt', model='openai/test',
+                    api_key_env='ROUTER_KEY',
+                )
+            self.assertTrue(ok)
+            self.assertEqual(message, 'done')
+            raw = (root / 'malformed.jsonl').read_text(encoding='utf-8')
+            self.assertIn('tool_result', raw)
+            self.assertIn('tool name must be a non-empty string', raw)
+
+    def test_openrouter_search_reports_bounded_scans_and_read_failures(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'large.txt').write_text('x' * 32, encoding='utf-8')
+            with patch.multiple(
+                agentic_openrouter_tools,
+                OPENROUTER_SEARCH_SCAN_BYTES_PER_FILE=8,
+                OPENROUTER_SEARCH_SCAN_BYTES=12,
+                OPENROUTER_SEARCH_SCAN_LINES_PER_FILE=100,
+                OPENROUTER_SEARCH_SCAN_LINES=100,
+            ):
+                result = agentic_openrouter._openrouter_tool_call(
+                    root, 'search_files', {'query': 'missing'}, readonly=True,
+                )
+            self.assertIn('search truncated', result)
+            self.assertNotEqual(result, '(no matches)')
+
+            with patch.object(
+                agentic_openrouter_tools,
+                '_open_regular_binary_stream',
+                side_effect=ValueError('read failed'),
+            ):
+                incomplete = agentic_openrouter._openrouter_tool_call(
+                    root, 'search_files', {'query': 'missing'}, readonly=True,
+                )
+            self.assertTrue(incomplete.startswith('ERROR: search incomplete'), incomplete)
+
+    def test_openrouter_search_continues_after_per_file_scan_limit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'a-large.txt').write_text('x' * 32, encoding='utf-8')
+            (root / 'b-match.txt').write_text('needle\n', encoding='utf-8')
+            with patch.multiple(
+                agentic_openrouter_tools,
+                OPENROUTER_SEARCH_SCAN_BYTES_PER_FILE=8,
+                OPENROUTER_SEARCH_SCAN_BYTES=100,
+                OPENROUTER_SEARCH_SCAN_LINES_PER_FILE=100,
+                OPENROUTER_SEARCH_SCAN_LINES=100,
+            ):
+                result = agentic_openrouter._openrouter_tool_call(
+                    root, 'search_files', {'query': 'needle'}, readonly=True,
+                )
+        self.assertIn('b-match.txt:1: needle', result)
+        self.assertIn('search truncated', result)
+
+    def test_openrouter_search_marks_result_count_truncation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'matches.txt').write_text('needle\nneedle\n', encoding='utf-8')
+            result = agentic_openrouter._openrouter_tool_call(
+                root,
+                'search_files',
+                {'query': 'needle', 'max_results': 1},
+                readonly=True,
+            )
+        self.assertIn('matches.txt:1: needle', result)
+        self.assertIn('search truncated', result)
+
+    def test_openrouter_search_preserves_prefix_before_binary_content(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'mixed.txt').write_bytes(b'needle before binary\n\x00ignored')
+            result = agentic_openrouter._openrouter_tool_call(
+                root, 'search_files', {'query': 'needle'}, readonly=True,
+            )
+        self.assertIn('mixed.txt:1: needle before binary', result)
+
+    def test_openrouter_search_preserves_crlf_line_numbers_across_chunks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'crlf.txt').write_bytes(b'abcde\r\nneedle\r\nafter\r\n')
+            with patch.object(agentic_openrouter_tools, 'OPENROUTER_SEARCH_READ_CHUNK_BYTES', 6):
+                result = agentic_openrouter._openrouter_tool_call(
+                    root, 'search_files', {'query': 'needle'}, readonly=True,
+                )
+        self.assertIn('crlf.txt:2: needle', result)
+
+    def test_openrouter_history_sanitizes_malformed_tool_calls(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bodies = []
+            responses = iter([
+                {'choices': [{'message': {
+                    'role': 'assistant', 'content': None,
+                    'tool_calls': [{'id': 'bad', 'function': {
+                        'name': ['read_file'], 'arguments': None,
+                    }}],
+                }}]},
+                {'choices': [{'message': {'role': 'assistant', 'content': 'done'}}]},
+            ])
+
+            def fake_request(url, api_key, body, timeout):
+                bodies.append(json.loads(json.dumps(body)))
+                return next(responses)
+
+            with (patch.dict(agentic.os.environ, {'ROUTER_KEY': 'secret'}, clear=False),
+                  patch('agentic_openrouter._openrouter_request', side_effect=fake_request)):
+                ok, message = agentic.run_openrouter(
+                    root, 'prompt', output=root / 'malformed-history.txt', model='openai/test',
+                    api_key_env='ROUTER_KEY',
+                )
+        self.assertTrue(ok)
+        self.assertEqual(message, 'done')
+        assistant = bodies[1]['messages'][2]
+        call = assistant['tool_calls'][0]
+        self.assertIsInstance(call['function']['name'], str)
+        self.assertIsInstance(call['function']['arguments'], str)
+        self.assertIn('tool name must be a non-empty string', json.dumps(bodies[1]))
+
     def test_openrouter_edit_file_replaces_one_exact_block(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
