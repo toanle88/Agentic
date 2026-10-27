@@ -1278,11 +1278,31 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
         self.assertEqual(command[0:2], ["docker", "run"])
         self.assertIn("--read-only", command)
         self.assertIn("--tmpfs", command)
+        self.assertEqual(command[command.index("--tmpfs") + 1], "/tmp:rw,nosuid,exec,size=256m")
         self.assertIn("--network", command)
         self.assertEqual(command[command.index("--network") + 1], "none")
         self.assertIn("test-image", command)
         self.assertEqual(command[command.index("--entrypoint") + 1], "python")
         self.assertEqual(command[command.index("test-image") + 1:], ["-m", "unittest"])
+
+    def test_sandbox_preserves_relative_argv_values_for_current_worktree(self):
+        settings = validate_sandbox({"enabled": True, "engine": "docker", "image": "test-image"})
+        code = "import os; print(os.getuid())"
+        command = sandbox_command(
+            ["python", "-c", code, "."], Path.cwd(), settings, restricted=True,
+        )
+        image_index = command.index("test-image")
+        self.assertEqual(command[command.index("--entrypoint") + 1], "python")
+        self.assertEqual(command[image_index + 1:], ["-c", code, "."])
+
+    def test_sandbox_can_leave_git_metadata_environment_unset_for_checks(self):
+        settings = validate_sandbox({"enabled": True, "engine": "docker", "image": "test-image"})
+        command = sandbox_command(
+            ["python", "-m", "unittest"], Path("/tmp/worktree"), settings,
+            preserve_git_metadata=False,
+        )
+        self.assertNotIn("GIT_DIR=/agentic-git", command)
+        self.assertNotIn("GIT_WORK_TREE=/workspace", command)
 
     def test_sandbox_read_only_and_network_policies_are_independent(self):
         settings = validate_sandbox({
