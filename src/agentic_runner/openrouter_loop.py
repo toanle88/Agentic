@@ -27,9 +27,11 @@ from .persistence import BoundedAppendWriter, atomic_write_text
 from .openrouter_tools import (
     OPENROUTER_READ_FILE_SCAN_LIMIT_MARKER,
     OPENROUTER_READ_FILE_TRUNCATION_MARKER,
+    OPENROUTER_MALFORMED_TOOL_CALL_ERROR_KEY,
     _openrouter_request,
     _openrouter_tool_call,
     _openrouter_tools,
+    _validate_tool_call_shape,
 )
 from .policy import default_permission_policy
 from .output import is_transient_progress, strip_ansi, style_text
@@ -45,6 +47,7 @@ OPENROUTER_IDENTICAL_TOOL_CALL_LIMIT = 4
 OPENROUTER_IDENTICAL_TOOL_CALL_HARD_LIMIT = 6
 OPENROUTER_EXPLORATION_TOOLS = frozenset({"list_files", "read_file", "search_files"})
 _TRUNCATION_MARKER = "\n[agentic_stream_truncated: size limit reached]\n"
+_MALFORMED_TOOL_CALL_NAME = "read_file"
 
 
 def _normalized_assistant_message(message: dict[str, Any]) -> dict[str, Any]:
@@ -63,19 +66,48 @@ def _normalized_assistant_message(message: dict[str, Any]) -> dict[str, Any]:
     if isinstance(raw_calls, list):
         for raw_call in raw_calls:
             if not isinstance(raw_call, dict):
-                continue
-            function = raw_call.get("function")
-            if not isinstance(function, dict) or not isinstance(function.get("name"), str):
-                continue
-            arguments = function.get("arguments", "{}")
-            if isinstance(arguments, dict):
-                arguments = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
-            if not isinstance(arguments, str):
-                arguments = "{}"
+                error = "ERROR: tool call must be an object"
+                call_id = "call"
+                name = _MALFORMED_TOOL_CALL_NAME
+                arguments = json.dumps(
+                    {OPENROUTER_MALFORMED_TOOL_CALL_ERROR_KEY: error},
+                    ensure_ascii=False, separators=(",", ":"),
+                )
+            else:
+                call_id = raw_call.get("id", "call")
+                function = raw_call.get("function")
+                if not isinstance(function, dict):
+                    name = None
+                    arguments: Any = None
+                else:
+                    name = function.get("name")
+                    arguments = function.get("arguments", "{}")
+                parsed_arguments = arguments
+                if isinstance(arguments, (str, bytes, bytearray)):
+                    try:
+                        parsed_arguments = json.loads(arguments)
+                    except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+                        parsed_arguments = arguments
+                error = _validate_tool_call_shape(name, parsed_arguments)
+                if error is None:
+                    if isinstance(arguments, dict):
+                        arguments = json.dumps(
+                            arguments, ensure_ascii=False, separators=(",", ":"),
+                        )
+                    elif isinstance(arguments, (bytes, bytearray)):
+                        arguments = json.dumps(
+                            parsed_arguments, ensure_ascii=False, separators=(",", ":"),
+                        )
+                else:
+                    arguments = json.dumps(
+                        {OPENROUTER_MALFORMED_TOOL_CALL_ERROR_KEY: error},
+                        ensure_ascii=False, separators=(",", ":"),
+                    )
+                    name = _MALFORMED_TOOL_CALL_NAME
             call: dict[str, Any] = {
-                "id": raw_call.get("id", "call"),
+                "id": call_id,
                 "type": "function",
-                "function": {"name": function["name"], "arguments": arguments},
+                "function": {"name": name, "arguments": arguments},
             }
             if not isinstance(call["id"], str) or not call["id"]:
                 call["id"] = "call"
@@ -215,6 +247,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
     started_at = datetime.datetime.now(datetime.timezone.utc)
     last_message = ""
     usage_records: list[dict[str, Any]] = []
+    mutation_state = {"bytes": 0}
     identical_tool_calls: dict[str, int] = {}
     truncated_read_paths: set[str] = set()
     force_final_response = False
@@ -393,22 +426,37 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
             for tool_call in tool_calls:
                 if not isinstance(tool_call, dict):
                     continue
-                function = tool_call.get("function") or {}
-                name = function.get("name", "")
-                raw_arguments = function.get("arguments", "{}")
+                function = tool_call.get("function")
+                if not isinstance(function, dict):
+                    name = None
+                    raw_arguments = None
+                else:
+                    name = function.get("name")
+                    raw_arguments: Any = function.get("arguments", "{}")
                 try:
-                    arguments = raw_arguments if isinstance(raw_arguments, dict) else json.loads(raw_arguments)
-                except (TypeError, json.JSONDecodeError):
-                    arguments = {}
-                if not isinstance(arguments, dict):
-                    arguments = {}
+                    if isinstance(raw_arguments, dict):
+                        arguments = raw_arguments
+                    elif isinstance(raw_arguments, (str, bytes, bytearray)):
+                        arguments = json.loads(raw_arguments)
+                    else:
+                        arguments = raw_arguments
+                except json.JSONDecodeError:
+                    arguments = raw_arguments
+                shape_error = _validate_tool_call_shape(name, arguments)
+                typed_name = name if isinstance(name, str) else ""
+                typed_arguments = arguments if isinstance(arguments, dict) else {}
                 repeated_tool_call = False
-                if name in {"write_file", "edit_file"}:
+                if shape_error:
+                    # Malformed provider input is still sent through the tool
+                    # boundary so it produces a bounded result and remains in
+                    # the assistant/tool history for the next turn.
+                    pass
+                elif name in {"write_file", "edit_file"}:
                     # A successful write changes repository state, so earlier
                     # read repetition is no longer evidence of a stuck session.
                     identical_tool_calls.clear()
                 else:
-                    signature = _tool_call_signature(name, arguments)
+                    signature = _tool_call_signature(typed_name, typed_arguments)
                     identical_tool_calls[signature] = identical_tool_calls.get(signature, 0) + 1
                     repeated_count = identical_tool_calls[signature]
                     if repeated_count >= OPENROUTER_IDENTICAL_TOOL_CALL_HARD_LIMIT:
@@ -448,11 +496,20 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                         "with the evidence already collected."
                     )
                 else:
-                    phase_error = _phase_tool_error(
-                        name, arguments, edited=edited, repair_mode=repair_mode,
-                        check_commands=check_commands,
-                    )
-                    path_key = _tool_path_key(arguments)
+                    if shape_error:
+                        phase_error = None
+                    else:
+                        # Validation above guarantees these provider values have
+                        # the concrete shapes required by the phase policy, but
+                        # the validator intentionally accepts Any so malformed
+                        # calls can be converted into bounded tool errors.
+                        assert isinstance(name, str)
+                        assert isinstance(arguments, dict)
+                        phase_error = _phase_tool_error(
+                            name, arguments, edited=edited, repair_mode=repair_mode,
+                            check_commands=check_commands,
+                        )
+                    path_key = _tool_path_key(arguments) if isinstance(arguments, dict) else None
                     if (
                         not phase_error
                         and name == "write_file"
@@ -463,6 +520,16 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                             "Use read_file with start_line/end_line, then use edit_file; "
                             "do not replace the whole file."
                         )
+                    elif shape_error:
+                        result = _openrouter_tool_call(
+                            worktree, name, arguments, readonly=readonly,
+                            command_timeout=tool_timeout, allow_network=allow_network,
+                            permission_policy=permission_policy,
+                            check_commands=check_commands,
+                            sandbox=sandbox, allow_runner_source=allow_runner_source,
+                            redaction_values=redaction_values,
+                            env=restricted_environment, mutation_state=mutation_state,
+                        )
                     else:
                         result = phase_error or _openrouter_tool_call(
                             worktree, name, arguments, readonly=readonly,
@@ -471,7 +538,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                             check_commands=check_commands,
                             sandbox=sandbox, allow_runner_source=allow_runner_source,
                             redaction_values=redaction_values,
-                            env=restricted_environment,
+                            env=restricted_environment, mutation_state=mutation_state,
                         )
                     if name == "read_file" and path_key is not None:
                         if (
@@ -496,7 +563,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                 elif name == "edit_file" and result.startswith("Edited "):
                     edited = True
                     repair_mode = False
-                elif name in {"write_file", "edit_file"} and result.startswith("ERROR:"):
+                elif isinstance(name, str) and name in {"write_file", "edit_file"} and result.startswith("ERROR:"):
                     # A failed mutation needs another inspection/repair pass.
                     # Keeping the validate phase here would prevent the agent
                     # from reading the exact context needed to correct an

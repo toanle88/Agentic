@@ -19,6 +19,11 @@ PLACEHOLDER_NAMES = {
     "benchmark_root", "repo", "reviewer", "result_file", "scenario", "state_dir",
     "task_file", "task_id", "repetition",
 }
+MAX_TASKS = 100
+MAX_CHECKS_PER_TASK = 100
+MAX_DEFECTS_PER_TASK = 100
+MAX_REVIEWERS = 20
+MAX_SCENARIO_RECORDS = 100_000
 
 
 def _argv(value: Any, label: str) -> list[str]:
@@ -89,6 +94,8 @@ def load_benchmark(path: Path) -> dict[str, Any]:
     tasks_raw = raw.get("tasks")
     if not isinstance(tasks_raw, list) or not tasks_raw:
         raise ValueError("benchmark.tasks must be a nonempty list")
+    if len(tasks_raw) > MAX_TASKS:
+        raise ValueError(f"benchmark.tasks must contain at most {MAX_TASKS} tasks")
     tasks: list[dict[str, Any]] = []
     seen_tasks: set[str] = set()
     for index, item in enumerate(tasks_raw, 1):
@@ -103,8 +110,17 @@ def load_benchmark(path: Path) -> dict[str, Any]:
         checks_raw = item.get("checks")
         if not isinstance(checks_raw, list) or not checks_raw:
             raise ValueError(f"tasks[{index}].checks must be a nonempty list")
+        if len(checks_raw) > MAX_CHECKS_PER_TASK:
+            raise ValueError(
+                f"tasks[{index}].checks must contain at most {MAX_CHECKS_PER_TASK} commands"
+            )
         checks = [_argv(command, f"tasks[{index}].checks[{check_index}]")
                   for check_index, command in enumerate(checks_raw, 1)]
+        defects = _defects(item.get("defects"), f"tasks[{index}].defects")
+        if len(defects) > MAX_DEFECTS_PER_TASK:
+            raise ValueError(
+                f"tasks[{index}].defects must contain at most {MAX_DEFECTS_PER_TASK} items"
+            )
         tasks.append({
             "id": task_id,
             "name": item.get("name", task_id),
@@ -115,7 +131,7 @@ def load_benchmark(path: Path) -> dict[str, Any]:
                 if item.get("review_repository") is not None else None
             ),
             "checks": checks,
-            "defects": _defects(item.get("defects"), f"tasks[{index}].defects"),
+            "defects": defects,
         })
         if not isinstance(tasks[-1]["name"], str) or not tasks[-1]["name"].strip():
             raise ValueError(f"tasks[{index}].name must be a nonempty string")
@@ -134,6 +150,10 @@ def load_benchmark(path: Path) -> dict[str, Any]:
         raise ValueError("benchmark.reviewers must be an object")
     if reviewers_raw and len(reviewers_raw) < 2:
         raise ValueError("benchmark.reviewers must contain at least two providers")
+    if len(reviewers_raw) > MAX_REVIEWERS:
+        raise ValueError(
+            f"benchmark.reviewers must contain at most {MAX_REVIEWERS} providers"
+        )
     reviewers: dict[str, list[str]] = {}
     for reviewer, value in reviewers_raw.items():
         if not isinstance(reviewer, str) or not TASK_ID.fullmatch(reviewer):
@@ -144,6 +164,13 @@ def load_benchmark(path: Path) -> dict[str, Any]:
     repetitions = raw.get("repetitions", 1)
     if type(repetitions) is not int or not 1 <= repetitions <= 20:
         raise ValueError("benchmark.repetitions must be an integer from 1 to 20")
+    scenario_count = len(RUNNERS) + len(reviewers)
+    record_count = len(tasks) * repetitions * scenario_count
+    if record_count > MAX_SCENARIO_RECORDS:
+        raise ValueError(
+            "benchmark corpus expands to too many scenario records: "
+            f"{record_count} > {MAX_SCENARIO_RECORDS}"
+        )
     return {
         "path": path.resolve(), "tasks": tasks, "runners": runners,
         "reviewers": reviewers, "repetitions": repetitions,

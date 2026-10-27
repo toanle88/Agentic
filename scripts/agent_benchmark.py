@@ -58,15 +58,27 @@ def run_benchmark(path: Path, *, timeout: int = 1800, workdir: Path | None = Non
         workspace_root.mkdir(parents=True, exist_ok=True)
     try:
         records: list[dict[str, Any]] = []
+        scenario_names = list(RUNNERS) + [f"reviewer:{name}" for name in config["reviewers"]]
+        records_by_runner = {runner: [] for runner in scenario_names}
+        records_by_task = {
+            task["id"]: {runner: [] for runner in scenario_names}
+            for task in config["tasks"]
+        }
+
+        def retain(record: dict[str, Any]) -> None:
+            records.append(record)
+            records_by_runner[record["runner"]].append(record)
+            records_by_task[record["task_id"]][record["runner"]].append(record)
+
         for task in config["tasks"]:
             for repetition in range(1, config["repetitions"] + 1):
                 for runner in RUNNERS:
-                    records.append(run_scenario(
+                    retain(run_scenario(
                         root, task, runner, config["runners"][runner], workspace_root,
                         timeout, keep_workspace=keep_workspaces, repetition=repetition,
                     ))
                 for reviewer, command in config["reviewers"].items():
-                    records.append(run_scenario(
+                    retain(run_scenario(
                         root, task, f"reviewer:{reviewer}", command, workspace_root,
                         timeout, keep_workspace=keep_workspaces,
                         source_repository=task["review_repository"], repetition=repetition,
@@ -74,9 +86,8 @@ def run_benchmark(path: Path, *, timeout: int = 1800, workdir: Path | None = Non
     finally:
         if temporary is not None:
             temporary.cleanup()
-    scenario_names = list(RUNNERS) + [f"reviewer:{name}" for name in config["reviewers"]]
     by_runner = {
-        runner: aggregate_metrics(item for item in records if item["runner"] == runner)
+        runner: aggregate_metrics(records_by_runner[runner])
         for runner in scenario_names
     }
     reviewer_metrics = {
@@ -85,13 +96,10 @@ def run_benchmark(path: Path, *, timeout: int = 1800, workdir: Path | None = Non
     }
     task_metrics = {}
     for task in config["tasks"]:
-        task_records = [item for item in records if item["task_id"] == task["id"]]
         task_metrics[task["id"]] = {
             "name": task["name"],
             "scenarios": {
-                runner: aggregate_metrics(
-                    item for item in task_records if item["runner"] == runner
-                )
+                runner: aggregate_metrics(records_by_task[task["id"]][runner])
                 for runner in scenario_names
             },
         }
