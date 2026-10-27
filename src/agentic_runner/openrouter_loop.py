@@ -39,6 +39,9 @@ OPENROUTER_RAW_LOG_BYTES = 2_000_000
 OPENROUTER_RAW_EVENT_BYTES = 256_000
 OPENROUTER_LOG_BYTES = 200_000
 OPENROUTER_FINAL_MESSAGE_CHARS = 50_000
+OPENROUTER_IDENTICAL_TOOL_CALL_LIMIT = 4
+OPENROUTER_IDENTICAL_TOOL_CALL_HARD_LIMIT = 6
+OPENROUTER_EXPLORATION_TOOLS = frozenset({"list_files", "read_file", "search_files"})
 _TRUNCATION_MARKER = "\n[agentic_stream_truncated: size limit reached]\n"
 
 
@@ -78,6 +81,57 @@ def _normalized_assistant_message(message: dict[str, Any]) -> dict[str, Any]:
     if calls:
         normalized["tool_calls"] = calls
     return normalized
+
+
+def _tool_call_signature(name: str, arguments: dict[str, Any]) -> str:
+    """Return a stable identity for detecting repeated no-progress calls."""
+    return json.dumps(
+        {"name": name, "arguments": arguments},
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def _configured_command_key(argv: Any) -> tuple[str, ...] | None:
+    if not isinstance(argv, list) or not all(isinstance(part, str) for part in argv):
+        return None
+    return tuple(argv)
+
+
+def _phase_tool_error(
+    name: str, arguments: dict[str, Any], *, edited: bool, repair_mode: bool,
+    check_commands: list[list[str]] | None,
+) -> str | None:
+    """Keep the developer in an inspect/edit/validate lifecycle."""
+    if not edited or repair_mode:
+        return None
+    if name in OPENROUTER_EXPLORATION_TOOLS:
+        return (
+            "ERROR: the worktree is in the validate phase after a successful edit. "
+            "Run a configured check, make another already-identified edit, or call finish. "
+            "Repository exploration is available again only after a failed check."
+        )
+    if name == "run_command" and check_commands:
+        argv_key = _configured_command_key(arguments.get("argv"))
+        configured = {_configured_command_key(command) for command in check_commands}
+        if argv_key not in configured:
+            return (
+                "ERROR: after editing, run only one of the configured validation commands "
+                "or call finish"
+            )
+    return None
+
+
+def _command_succeeded(result: str) -> bool:
+    return result.startswith("exit 0\n") or result == "exit 0"
+
+
+def _command_failed(result: str) -> bool:
+    if not result.startswith("exit "):
+        return False
+    return not result.startswith("exit 0\n") and result != "exit 0"
 
 def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                    readonly: bool = False, schema: Path | None = None,
@@ -145,6 +199,9 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
     started_at = datetime.datetime.now(datetime.timezone.utc)
     last_message = ""
     usage_records: list[dict[str, Any]] = []
+    identical_tool_calls: dict[str, int] = {}
+    edited = False
+    repair_mode = False
     raw_writer = BoundedAppendWriter(
         raw_file, max_bytes=OPENROUTER_RAW_LOG_BYTES,
         truncation_marker=json.dumps({
@@ -314,6 +371,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                 ))
             if not tool_calls:
                 break
+            finished = False
             for tool_call in tool_calls:
                 if not isinstance(tool_call, dict):
                     continue
@@ -326,6 +384,21 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                     arguments = {}
                 if not isinstance(arguments, dict):
                     arguments = {}
+                repeated_tool_call = False
+                if name == "write_file":
+                    # A successful write changes repository state, so earlier
+                    # read repetition is no longer evidence of a stuck session.
+                    identical_tool_calls.clear()
+                else:
+                    signature = _tool_call_signature(name, arguments)
+                    identical_tool_calls[signature] = identical_tool_calls.get(signature, 0) + 1
+                    repeated_count = identical_tool_calls[signature]
+                    if repeated_count >= OPENROUTER_IDENTICAL_TOOL_CALL_HARD_LIMIT:
+                        raise RuntimeError(
+                            "OpenRouter agent repeated the same tool call "
+                            f"{OPENROUTER_IDENTICAL_TOOL_CALL_LIMIT} times without progress: {name}"
+                        )
+                    repeated_tool_call = repeated_count > OPENROUTER_IDENTICAL_TOOL_CALL_LIMIT
                 record_raw({
                     "event": "tool_call", "turn": turn + 1,
                     "name": name, "arguments": arguments,
@@ -338,15 +411,27 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                         min(command_timeout, remaining_tool_time)
                         if command_timeout is not None else remaining_tool_time
                     )
-                result = _openrouter_tool_call(
-                    worktree, name, arguments, readonly=readonly,
-                    command_timeout=tool_timeout, allow_network=allow_network,
-                    permission_policy=permission_policy,
-                    check_commands=check_commands,
-                    sandbox=sandbox, allow_runner_source=allow_runner_source,
-                    redaction_values=redaction_values,
-                    env=restricted_environment,
-                )
+                if repeated_tool_call:
+                    result = (
+                        "ERROR: this exact tool call has already returned a result "
+                        f"{OPENROUTER_IDENTICAL_TOOL_CALL_LIMIT} times. "
+                        "Use a narrower read range, choose a different file, or proceed "
+                        "with the evidence already collected."
+                    )
+                else:
+                    phase_error = _phase_tool_error(
+                        name, arguments, edited=edited, repair_mode=repair_mode,
+                        check_commands=check_commands,
+                    )
+                    result = phase_error or _openrouter_tool_call(
+                        worktree, name, arguments, readonly=readonly,
+                        command_timeout=tool_timeout, allow_network=allow_network,
+                        permission_policy=permission_policy,
+                        check_commands=check_commands,
+                        sandbox=sandbox, allow_runner_source=allow_runner_source,
+                        redaction_values=redaction_values,
+                        env=restricted_environment,
+                    )
                 record_raw({
                     "event": "tool_result", "turn": turn + 1,
                     "name": name, "result": result,
@@ -356,12 +441,31 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                     "tool_call_id": tool_call.get("id", f"call-{turn}"),
                     "content": result,
                 })
+                if name == "write_file" and result.startswith("Wrote "):
+                    edited = True
+                    repair_mode = False
+                elif name == "run_command" and _command_succeeded(result):
+                    repair_mode = False
+                elif name == "run_command" and _command_failed(result):
+                    repair_mode = True
+                if name == "finish" and result.startswith("FINISH: "):
+                    last_message = bounded_final_message(result.removeprefix("FINISH: "))
+                    emit("Agent: " + _short(
+                        redact_secrets(last_message, extra_values=redaction_values), 350,
+                    ))
+                    finished = True
+                    break
+            if finished:
+                break
         else:
             raise RuntimeError(f"OpenRouter agent exceeded {max_tool_turns} tool turns")
     except RuntimeError as exc:
-        message = bounded_final_message(
-            redact_secrets(last_message or str(exc), extra_values=redaction_values)
-        )
+        error_message = redact_secrets(str(exc), extra_values=redaction_values)
+        if last_message:
+            error_message += "\nLast assistant message: " + redact_secrets(
+                last_message, extra_values=redaction_values,
+            )
+        message = bounded_final_message(error_message)
         emit("ERROR: " + message, generated_status="ERROR")
         atomic_write_text(output, message, extra_values=redaction_values)
         usage = combine_usage(usage_records, provider="openrouter")

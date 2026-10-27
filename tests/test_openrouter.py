@@ -450,13 +450,24 @@ class OpenRouterTests(unittest.TestCase):
             (root / '.git').mkdir()
 
             names = [item['function']['name'] for item in agentic_openrouter._openrouter_tools(True)]
-            self.assertEqual(names, ['list_files', 'read_file', 'run_command'])
+            self.assertEqual(names, ['list_files', 'read_file', 'search_files', 'run_command'])
             self.assertIn('src/main.go', agentic_openrouter._openrouter_tool_call(
                 root, 'list_files', {'path': '.'}, readonly=True
             ))
             self.assertEqual(
                 agentic_openrouter._openrouter_tool_call(root, 'read_file', {'path': 'src/main.go'}, readonly=True),
                 'package main\n',
+            )
+            (root / 'src' / 'version.py').write_text('__version__ = "1.1.115"\n', encoding='utf-8')
+            search_result = agentic_openrouter._openrouter_tool_call(
+                root, 'search_files', {'query': '__version__', 'path': 'src'}, readonly=True,
+            )
+            self.assertIn('src/version.py:1: __version__ = "1.1.115"', search_result)
+            self.assertEqual(
+                agentic_openrouter._openrouter_tool_call(
+                    root, 'search_files', {'query': 'MISSING'}, readonly=True,
+                ),
+                '(no matches)',
             )
             self.assertIn('ERROR: write_file is unavailable', agentic_openrouter._openrouter_tool_call(
                 root, 'write_file', {'path': 'new.txt', 'content': 'nope'}, readonly=True
@@ -874,6 +885,27 @@ class OpenRouterTests(unittest.TestCase):
             self.assertNotIn('OPENAI_API_KEY', process_argv)
             self.assertNotIn('secret', process_argv)
 
+    def test_openrouter_validation_runner_does_not_inherit_worktree_git_environment(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            settings = {
+                'enabled': True, 'engine': 'docker', 'image': 'test-image',
+                'allow_network': False,
+            }
+            with (
+                patch('agentic_openrouter_tools.sandbox_command', return_value=['python', '-m', 'unittest']) as sandbox,
+                patch('agentic_openrouter_tools._bounded_command_capture', return_value=(
+                    0, 'ok\n', False, False,
+                )),
+            ):
+                result = agentic_openrouter._openrouter_tool_call(
+                    root, 'run_command', {'argv': ['python', '-m', 'unittest']},
+                    readonly=False, sandbox=settings,
+                )
+
+        self.assertIn('exit 0', result)
+        self.assertFalse(sandbox.call_args.kwargs['preserve_git_metadata'])
+
     def test_openrouter_commands_receive_a_restricted_environment(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1087,6 +1119,154 @@ class OpenRouterTests(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn('exceeded 2 tool turns', message)
             self.assertIn('exceeded 2 tool turns', output.read_text())
+
+    def test_openrouter_reports_repeated_tool_calls_and_preserves_context(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'notes.txt').write_text('notes\n', encoding='utf-8')
+            response = {'choices': [{'message': {
+                'role': 'assistant', 'content': 'I am still inspecting the file.',
+                'tool_calls': [{'id': 'call', 'function': {
+                    'name': 'read_file', 'arguments': '{"path":"notes.txt"}',
+                }}],
+            }}]}
+            with (patch.dict(agentic.os.environ, {'ROUTER_KEY': 'secret'}, clear=False),
+                  patch('agentic_openrouter._openrouter_request', return_value=response)):
+                ok, message = agentic.run_openrouter(
+                    root, 'prompt', output=root / 'developer.txt', model='openai/test',
+                    api_key_env='ROUTER_KEY', max_tool_turns=10,
+                )
+
+        self.assertFalse(ok)
+        self.assertIn('repeated the same tool call 4 times', message)
+        self.assertIn('Last assistant message: I am still inspecting the file.', message)
+
+    def test_openrouter_duplicate_tool_warning_can_recover(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'notes.txt').write_text('notes\n', encoding='utf-8')
+            repeated = {'choices': [{'message': {
+                'role': 'assistant', 'content': None,
+                'tool_calls': [{'id': 'call', 'function': {
+                    'name': 'read_file', 'arguments': '{"path":"notes.txt"}',
+                }}],
+            }}]}
+            done = {'choices': [{'message': {
+                'role': 'assistant', 'content': 'done',
+            }}]}
+            with (patch.dict(agentic.os.environ, {'ROUTER_KEY': 'secret'}, clear=False),
+                  patch('agentic_openrouter._openrouter_request',
+                        side_effect=[repeated] * 5 + [done])):
+                ok, message = agentic.run_openrouter(
+                    root, 'prompt', output=root / 'developer.txt', model='openai/test',
+                    api_key_env='ROUTER_KEY', max_tool_turns=10,
+                )
+
+        self.assertTrue(ok)
+        self.assertEqual(message, 'done')
+
+    def test_openrouter_finish_tool_ends_developer_turn(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            responses = [
+                {'choices': [{'message': {
+                    'role': 'assistant', 'content': None,
+                    'tool_calls': [{'id': 'finish', 'function': {
+                        'name': 'finish',
+                        'arguments': '{"summary":"implemented and checked"}',
+                    }}],
+                }}]},
+            ]
+            bodies = []
+
+            def request(_url, _key, body, _timeout):
+                bodies.append(body)
+                return responses.pop(0)
+
+            with (patch.dict(agentic.os.environ, {'ROUTER_KEY': 'secret'}, clear=False),
+                  patch('agentic_openrouter._openrouter_request', side_effect=request)):
+                ok, message = agentic.run_openrouter(
+                    root, 'prompt', output=root / 'developer.txt', model='openai/test',
+                    api_key_env='ROUTER_KEY', max_tool_turns=10,
+                )
+        self.assertTrue(ok)
+        self.assertEqual(message, 'implemented and checked')
+        self.assertEqual(len(bodies), 1)
+        self.assertIn(
+            'finish',
+            [item['function']['name'] for item in bodies[0]['tools']],
+        )
+
+    def test_openrouter_validate_phase_blocks_exploration_until_check_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            responses = [
+                {'choices': [{'message': {
+                    'role': 'assistant', 'content': None,
+                    'tool_calls': [{'id': 'write', 'function': {
+                        'name': 'write_file',
+                        'arguments': '{"path":"version.txt","content":"2\\n"}',
+                    }}],
+                }}]},
+                {'choices': [{'message': {
+                    'role': 'assistant', 'content': None,
+                    'tool_calls': [{'id': 'read', 'function': {
+                        'name': 'read_file',
+                        'arguments': '{"path":"version.txt"}',
+                    }}],
+                }}]},
+                {'choices': [{'message': {
+                    'role': 'assistant', 'content': None,
+                    'tool_calls': [{'id': 'finish', 'function': {
+                        'name': 'finish',
+                        'arguments': '{"summary":"implemented"}',
+                    }}],
+                }}]},
+            ]
+            results = []
+
+            def request(_url, _key, body, _timeout):
+                results.append(json.loads(json.dumps(body)))
+                return responses.pop(0)
+
+            with (patch.dict(agentic.os.environ, {'ROUTER_KEY': 'secret'}, clear=False),
+                  patch('agentic_openrouter._openrouter_request', side_effect=request)):
+                ok, message = agentic.run_openrouter(
+                    root, 'prompt', output=root / 'developer.txt', model='openai/test',
+                    api_key_env='ROUTER_KEY', max_tool_turns=10,
+                    check_commands=[['python', '-m', 'unittest']],
+                )
+
+        self.assertTrue(ok)
+        self.assertEqual(message, 'implemented')
+        self.assertEqual(len(results), 3)
+        self.assertIn(
+            'validate phase',
+            results[2]['messages'][-1]['content'],
+        )
+
+    def test_openrouter_reports_the_underlying_error_after_assistant_progress(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'notes.txt').write_text('notes\n', encoding='utf-8')
+            response = {'choices': [{'message': {
+                'role': 'assistant', 'content': 'Let me inspect the file.',
+                'tool_calls': [{'id': 'call', 'function': {
+                    'name': 'read_file', 'arguments': '{"path":"notes.txt"}',
+                }}],
+            }}]}
+            with (patch.dict(agentic.os.environ, {'ROUTER_KEY': 'secret'}, clear=False),
+                  patch('agentic_openrouter._openrouter_request', side_effect=[
+                      response, RuntimeError('OpenRouter request failed: connection reset'),
+                  ])):
+                ok, message = agentic.run_openrouter(
+                    root, 'prompt', output=root / 'developer.txt', model='openai/test',
+                    api_key_env='ROUTER_KEY',
+                )
+
+        self.assertFalse(ok)
+        self.assertIn('OpenRouter request failed: connection reset', message)
+        self.assertIn('Last assistant message: Let me inspect the file.', message)
 
     def test_openrouter_drops_unknown_assistant_metadata_between_tool_turns(self):
         with tempfile.TemporaryDirectory() as temp:

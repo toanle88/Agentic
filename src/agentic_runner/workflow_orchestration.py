@@ -204,6 +204,30 @@ def develop(
             feedback = f"{provider} invocation failed: {message[-3000:]}"
             latest_reason = _result_text(feedback)
             _status_print(feedback[-1000:], style_status_tokens=False)
+            if (
+                "OpenRouter agent exceeded" in message
+                or "OpenRouter agent repeated the same tool call" in message
+            ):
+                reason = (
+                    "Developer agent stopped without making progress: "
+                    + _result_text(message[-3000:])
+                )
+                record_workflow_outcome(
+                    folder, approved=False, attempts=attempt + 1,
+                    first_pass=False, review_findings=review_findings_seen,
+                )
+                next_action = _resume_action(issue, folder)
+                record_result(
+                    folder, "BLOCKED", attempts=attempt + 1,
+                    max_retries=config["max_retries"], reason=reason,
+                    worktree=run.worktree, next_action=next_action,
+                )
+                print_run_summary(
+                    run, "BLOCKED", next_action,
+                    attempts=attempt + 1, max_retries=config["max_retries"],
+                    reason=reason, logs_path=folder,
+                )
+                return True
             continue
         developer_report = message.strip()
         if developer_report:

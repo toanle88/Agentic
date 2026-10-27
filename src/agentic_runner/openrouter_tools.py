@@ -22,6 +22,7 @@ from typing import Any, Iterator
 from .execution import _short
 from .config import validate_openrouter_base_url
 from .file_boundaries import (
+    SafeTraversalUnavailable,
     iter_safe_regular_files,
     open_relative_regular,
     revalidate_single_link_regular,
@@ -31,7 +32,7 @@ from .git_policy import (
     GIT_LOG_METADATA_FORMAT_OPTIONS,
     git_log_option_exposes_history,
 )
-from .sandbox import sandbox_command
+from .sandbox import command_uses_git_metadata, sandbox_command
 from .security import redact_secrets, restricted_test_environment
 from .policy import default_permission_policy, forbidden, sensitive_read
 
@@ -51,6 +52,10 @@ OPENROUTER_LIST_FILES_PAGE_SIZE = 300
 # Keep page-number traversal bounded while retaining the existing page API.
 OPENROUTER_LIST_FILES_MAX_PAGE = 100
 OPENROUTER_LIST_FILES_CACHE_ENTRIES = 8
+OPENROUTER_SEARCH_MAX_RESULTS = 100
+OPENROUTER_SEARCH_MAX_FILES = 2_000
+OPENROUTER_SEARCH_MAX_DIRECTORIES = 2_000
+OPENROUTER_SEARCH_RESULT_CHARS = 8_000
 OPENROUTER_GIT_OBJECT_CHECK_TIMEOUT_SECONDS = 1.0
 OPENROUTER_HTTP_RESPONSE_BYTES = 2_000_000
 NETWORK_COMMANDS = {"curl", "wget", "ssh", "scp", "sftp", "ftp", "nc", "netcat", "telnet", "gh"}
@@ -613,6 +618,29 @@ def _openrouter_tools(
         {
             "type": "function",
             "function": {
+                "name": "search_files",
+                "description": (
+                    "Search bounded non-sensitive text files for a literal query without a shell. "
+                    "Use this instead of recursive grep."
+                ),
+                "parameters": {"type": "object", "properties": {
+                    "query": {"type": "string", "description": "Literal text to find."},
+                    "path": {
+                        "type": "string",
+                        "description": "Relative directory to search, default '.'.",
+                    },
+                    "case_sensitive": {"type": "boolean", "default": False},
+                    "max_results": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": OPENROUTER_SEARCH_MAX_RESULTS,
+                    },
+                }, "required": ["query"]},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "run_command",
                 "description": "Run a non-interactive argv command in the current worktree; do not use a shell.",
                 "parameters": {"type": "object", "properties": {
@@ -631,6 +659,24 @@ def _openrouter_tools(
                     "path": {"type": "string"},
                     "content": {"type": "string"},
                 }, "required": ["path", "content"]},
+            },
+        })
+    if not readonly:
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "finish",
+                "description": (
+                    "Signal that the development task is complete. Call this after "
+                    "making the requested edits and running relevant configured checks. "
+                    "Include a concise summary of the implementation, checks, and remaining risks."
+                ),
+                "parameters": {"type": "object", "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "Final implementation and verification summary.",
+                    },
+                }, "required": ["summary"]},
             },
         })
     return tools
@@ -951,6 +997,60 @@ def _list_files_page(target: Path, root: Path, page: int) -> tuple[list[str], bo
     return cached.paths[offset:end], end < len(cached.paths)
 
 
+def _search_files(
+    target: Path, root: Path, query: str, *, case_sensitive: bool,
+    max_results: int,
+) -> str:
+    """Search bounded, non-sensitive regular files without shell execution."""
+    relative_target = target.relative_to(root).as_posix() or "."
+    needle = query if case_sensitive else query.casefold()
+    results: list[str] = []
+    used_chars = 0
+    try:
+        files = iter_safe_regular_files(
+            root,
+            relative_target,
+            skip=sensitive_read,
+            max_entries=OPENROUTER_SEARCH_MAX_FILES,
+            max_directories=OPENROUTER_SEARCH_MAX_DIRECTORIES,
+        )
+        for kind, relative, _ in files:
+            if kind != "file":
+                continue
+            try:
+                with _open_regular_text_stream(root, relative) as stream:
+                    for line_number, line in enumerate(stream, 1):
+                        if "\x00" in line:
+                            break
+                        haystack = line if case_sensitive else line.casefold()
+                        if needle not in haystack:
+                            continue
+                        detail = line.rstrip("\r\n").strip()
+                        result = f"{relative}:{line_number}: {detail}"
+                        remaining = OPENROUTER_SEARCH_RESULT_CHARS - used_chars
+                        if remaining <= 0:
+                            return (
+                                "\n".join(results)
+                                + "\n...[search results truncated; narrow the path or query]"
+                            )
+                        if len(result) > remaining:
+                            result = result[:remaining]
+                        results.append(result)
+                        used_chars += len(result) + (1 if results else 0)
+                        if len(results) >= max_results:
+                            return "\n".join(results)
+            except (OSError, RuntimeError, UnicodeError):
+                continue
+    except (OSError, RuntimeError, SafeTraversalUnavailable) as exc:
+        if results:
+            return (
+                "\n".join(results)
+                + f"\n...[search stopped: {exc}; narrow the path or query]"
+            )
+        return f"ERROR: search could not safely traverse {relative_target!r}: {exc}"
+    return "\n".join(results) or "(no matches)"
+
+
 def _stop_command_process(process: subprocess.Popen[Any]) -> None:
     """Stop a command and its descendants without leaving the output pipe open."""
     if os.name != "nt":
@@ -1126,6 +1226,13 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
         else:
             policy.update(permission_policy)
             allow_network = bool(policy.get("network"))
+        if name == "finish":
+            if readonly:
+                return "ERROR: finish is unavailable during review"
+            summary = arguments.get("summary")
+            if not isinstance(summary, str) or not summary.strip():
+                return "ERROR: summary must be a non-empty string"
+            return f"FINISH: {summary.strip()[:20_000]}"
         if name == "list_files":
             if not policy.get("search_files"):
                 return "ERROR: file listing is disabled by the permission policy"
@@ -1178,6 +1285,41 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                 )
             except (OSError, RuntimeError, ValueError) as exc:
                 return f"ERROR: could not safely read {relative!r}: {exc}"
+        if name == "search_files":
+            if not policy.get("search_files"):
+                return "ERROR: file search is disabled by the permission policy"
+            query = arguments.get("query")
+            if not isinstance(query, str) or not query:
+                return "ERROR: query must be a non-empty string"
+            relative = arguments.get("path", ".")
+            if not isinstance(relative, str) or not relative.strip():
+                return "ERROR: path must be a non-empty worktree-relative string"
+            case_sensitive = arguments.get("case_sensitive", False)
+            if not isinstance(case_sensitive, bool):
+                return "ERROR: case_sensitive must be a boolean"
+            max_results = arguments.get("max_results", OPENROUTER_SEARCH_MAX_RESULTS)
+            if (
+                not isinstance(max_results, int) or isinstance(max_results, bool)
+                or max_results < 1 or max_results > OPENROUTER_SEARCH_MAX_RESULTS
+            ):
+                return (
+                    "ERROR: max_results must be an integer between 1 and "
+                    f"{OPENROUTER_SEARCH_MAX_RESULTS}"
+                )
+            try:
+                target = worktree.resolve() if relative == "." else _safe_worktree_path(worktree, relative)
+                target = target.resolve()
+                root = worktree.resolve()
+                target.relative_to(root)
+                if not target.is_dir():
+                    return f"ERROR: search path {relative!r} is not a directory"
+                result = _search_files(
+                    target, root, query, case_sensitive=case_sensitive,
+                    max_results=max_results,
+                )
+                return redact_secrets(result, extra_values=redaction_values or ())
+            except (OSError, RuntimeError, ValueError) as exc:
+                return f"ERROR: could not safely search {relative!r}: {exc}"
         if name == "write_file":
             if readonly:
                 return "ERROR: write_file is unavailable during review"
@@ -1239,6 +1381,7 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
             process_argv = sandbox_command(
                 _safe_readonly_git_argv(argv), worktree, sandbox, read_only=readonly,
                 pass_env=[], restricted=not allow_network, env=env,
+                preserve_git_metadata=command_uses_git_metadata(argv),
             )
             returncode, output, truncated, timed_out = _bounded_command_capture(
                 process_argv, worktree, command_timeout, env=env,

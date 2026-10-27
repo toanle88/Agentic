@@ -1281,6 +1281,7 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
         self.assertEqual(command[command.index("--tmpfs") + 1], "/tmp:rw,nosuid,exec,size=256m")
         self.assertIn("--network", command)
         self.assertEqual(command[command.index("--network") + 1], "none")
+        self.assertIn("HOME=/tmp", command)
         self.assertIn("test-image", command)
         self.assertEqual(command[command.index("--entrypoint") + 1], "python")
         self.assertEqual(command[command.index("test-image") + 1:], ["-m", "unittest"])
@@ -1351,10 +1352,10 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
             with patch.object(agentic_sandbox, '_authoritative_git_common_dir', return_value=common.resolve()):
                 command = sandbox_command(["git", "status"], worktree, settings)
         self.assertIn(f"{common.resolve()}:/agentic-git-common:ro", command)
-        self.assertIn(f"{git_dir.resolve()}:/agentic-git-worktree:ro", command)
-        self.assertNotIn(f"{git_dir.resolve()}:/agentic-git-worktree:rw", command)
-        self.assertIn("GIT_DIR=/agentic-git-worktree", command)
-        self.assertIn("GIT_COMMON_DIR=/agentic-git-common", command)
+        self.assertIn(f"{git_dir.resolve()}:/agentic-git-common/worktrees/agentic:ro", command)
+        self.assertNotIn(f"{git_dir.resolve()}:/agentic-git-common/worktrees/agentic:rw", command)
+        self.assertIn("GIT_DIR=/agentic-git-common/worktrees/agentic", command)
+        self.assertNotIn("GIT_COMMON_DIR=/agentic-git-common", command)
         self.assertIn("GIT_WORK_TREE=/workspace", command)
 
     def test_sandbox_rejects_structurally_valid_pointer_to_unrelated_repository(self):

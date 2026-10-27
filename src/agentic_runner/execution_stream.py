@@ -587,7 +587,8 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                      metrics_folder: Path | None = None,
                      env: dict[str, str] | None = None,
                      redaction_values: list[str] | None = None,
-                     output_root: Path | None = None) -> subprocess.CompletedProcess[str]:
+                     output_root: Path | None = None,
+                     preserve_git_metadata: bool = True) -> subprocess.CompletedProcess[str]:
     """Stream a subprocess to terminal + durable log; print heartbeats when quiet.
 
     Raw JSONL events are stored next to the human-readable log when a provider
@@ -634,6 +635,7 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
         process_argv = sandbox_command(
             argv, cwd, sandbox, output_root=output_root, read_only=sandbox_read_only,
             pass_env=sandbox_pass_env, env=env,
+            preserve_git_metadata=preserve_git_metadata,
         )
         proc = subprocess.Popen(
             process_argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

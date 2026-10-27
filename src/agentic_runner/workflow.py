@@ -70,6 +70,7 @@ from .review import (
     parse_review_result,
     record_review_findings,
 )
+from .sandbox import command_uses_git_metadata
 from .security import redact_secrets, restricted_test_environment
 from .telemetry import (
     read_run_instruction,
@@ -742,7 +743,8 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
                                       heartbeat=15, sandbox=sandbox, sandbox_pass_env=[],
                                       metrics_folder=folder, verbose=verbose,
                                       env=test_environment,
-                                      redaction_values=redaction_values)
+                                      redaction_values=redaction_values,
+                                      preserve_git_metadata=command_uses_git_metadata(argv))
         except RuntimeError:
             mark_unavailable(index, "required command could not start")
             append_report(

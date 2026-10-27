@@ -1816,6 +1816,14 @@ def execute(args: argparse.Namespace) -> int:
     return execute_locked(args, repo)
 
 
+def _can_prompt_for_worktree() -> bool:
+    """Return whether this process can safely ask for worktree input."""
+    try:
+        return bool(sys.stdin.isatty())
+    except (AttributeError, OSError):
+        return False
+
+
 def execute_locked(args: argparse.Namespace, repo: Path) -> int:
     if args.clean and not args.repair_ci:
         raise RuntimeError("--clean is only available with --repair-ci")
@@ -1921,7 +1929,11 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
         if args.offline:
             if not previous:
                 raise RuntimeError("No existing audit worktree found; offline audit resume cannot start a run")
-            offline_run = choose_existing(previous, prompt_prefix="RESUME")
+            offline_run = choose_existing(
+                previous,
+                prompt_prefix="RESUME",
+                interactive=_can_prompt_for_worktree(),
+            )
         elif args.resume and not previous:
             raise RuntimeError("No existing audit worktree found; run audit first without --resume")
     elif task_source == "local":
@@ -1951,7 +1963,11 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
             previous = runs_for_issue(repo, args.issue)
             if not previous:
                 raise RuntimeError(f"No existing worktree found for issue #{args.issue}; offline resume cannot start a run")
-            offline_run = choose_existing(previous, prompt_prefix="RESUME")
+            offline_run = choose_existing(
+                previous,
+                prompt_prefix="RESUME",
+                interactive=_can_prompt_for_worktree(),
+            )
             cached = read_issue_snapshot(logs_path(repo, offline_run, state_dir))
             if cached is None:
                 raise RuntimeError(
@@ -2006,7 +2022,9 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
         fresh = True
     elif previous:
         run = choose_existing(
-            previous, prompt_prefix="PUBLISH" if args.publish else "RESUME"
+            previous,
+            prompt_prefix="PUBLISH" if args.publish else "RESUME",
+            interactive=_can_prompt_for_worktree(),
         )
         fresh = False
         with repository_lock(repo, state_dir):

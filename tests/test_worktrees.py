@@ -188,6 +188,25 @@ class GitTest(_GitRepositoryTestCase):
             messages,
         )
 
+    def test_choose_existing_selects_newest_run_without_prompt_for_background_job(self):
+        runs = [
+            agentic.Run(42, 'agent/issue-42-newest', self.repo / 'newest'),
+            agentic.Run(42, 'agent/issue-42-older', self.repo / 'older'),
+        ]
+        with (patch('builtins.input', side_effect=AssertionError("unexpected prompt")),
+              patch.object(agentic_worktrees, '_status_print') as status):
+            selected = agentic.choose_existing(
+                runs, prompt_prefix='RESUME', interactive=False
+            )
+
+        self.assertIs(selected, runs[0])
+        messages = [call.args[0] for call in status.call_args_list]
+        self.assertIn(
+            "[RESUME] Non-interactive run; selecting newest worktree: "
+            f"{runs[0].branch} ({runs[0].worktree})",
+            messages,
+        )
+
     def test_choose_existing_limits_regular_selection_to_five_newest_runs(self):
         runs = [
             agentic.Run(

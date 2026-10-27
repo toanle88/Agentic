@@ -205,6 +205,17 @@ def _is_absolute_argument(value: str) -> bool:
     )
 
 
+def command_uses_git_metadata(argv: list[str]) -> bool:
+    """Return whether an argv command directly invokes Git.
+
+    Validation commands are often test runners whose child processes create
+    temporary repositories.  Injecting the selected worktree's Git
+    environment into those commands redirects the child Git operations to the
+    selected worktree.  Direct Git inspection still needs the mounted metadata.
+    """
+    return bool(argv) and Path(argv[0]).stem.casefold() == "git"
+
+
 def sandbox_command(
     argv: list[str], cwd: Path, settings: dict[str, Any] | None,
     *, output_root: Path | None = None, read_only: bool = False,
@@ -254,11 +265,16 @@ def sandbox_command(
             # immutable so provider processes cannot create commits, update
             # refs, or alter the linked-worktree index inside the container.
             command.extend([
-                "-v", f"{git_dir}:/agentic-git-worktree:ro",
+                # Keep the linked-worktree admin directory at the same
+                # relative location below the common Git directory. Git uses
+                # the commondir file to resolve refs and worktree-specific
+                # HEAD/index state; mounting it at an unrelated path makes
+                # Git treat the checkout as an empty repository in a
+                # container, even when GIT_COMMON_DIR is set explicitly.
+                "-v", f"{git_dir}:/agentic-git-common/worktrees/agentic:ro",
             ])
             command.extend([
-                "--env", "GIT_DIR=/agentic-git-worktree",
-                "--env", "GIT_COMMON_DIR=/agentic-git-common",
+                "--env", "GIT_DIR=/agentic-git-common/worktrees/agentic",
             ])
         command.extend(["--env", "GIT_WORK_TREE=/workspace"])
         # The complete worktree bind mount is writable for developers, so
@@ -278,6 +294,11 @@ def sandbox_command(
     for name in policy["pass_env"] if pass_env is None else pass_env:
         if name in source_env:
             command.extend(["--env", name])
+    # The sandbox normally runs as the invoking non-root UID.  Minimal images
+    # often only define /root, which leaves Git and other tools with an
+    # unwritable or nonexistent home when Docker's --user flag is applied.
+    # Keep all user-level state ephemeral and inside the writable tmpfs.
+    command.extend(["--env", "HOME=/tmp"])
     rendered_argv: list[str] = []
     for part in argv:
         replaced = part
