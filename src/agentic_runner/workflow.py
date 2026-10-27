@@ -1835,7 +1835,6 @@ def agent_prompt(issue: Issue, feedback: str = "", *,
                  instruction: str | None = None,
                  system_prompt: str | None = None,
                  provider: str | None = None,
-                 repository_context: str | None = None,
                  repair_mode: bool = False,
                  repair_scope: str | None = None) -> str:
     """Build the bounded developer prompt through the prompt component."""
@@ -1846,28 +1845,9 @@ def agent_prompt(issue: Issue, feedback: str = "", *,
         instruction=instruction,
         system_prompt=system_prompt,
         provider=provider,
-        repository_context=repository_context,
         repair_mode=repair_mode,
         repair_scope=repair_scope,
     )
-
-
-def developer_repository_context(worktree: Path, base: str) -> str:
-    """Return host-owned Git facts for a provider projection prompt."""
-    lines = [
-        f"Target base branch: {base}",
-        "The provider worktree is a disposable projection without host Git metadata.",
-    ]
-    try:
-        base_sha = base_revision(worktree, base)
-    except RuntimeError:
-        lines.append("Authoritative base revision: unavailable to the host runner")
-    else:
-        lines.append(f"Authoritative base revision: {base_sha}")
-    lines.extend([
-        "The host runner performs the final base comparison and git diff --check after synchronization.",
-    ])
-    return "\n".join(lines)
 
 
 def host_validation_note(base: str, base_sha: str, folder: Path) -> str:
@@ -2585,7 +2565,6 @@ def _orchestration_runtime() -> WorkflowRuntime:
         "_remaining_timeout": _remaining_timeout,
         "run_agent": run_agent,
         "agent_prompt": agent_prompt,
-        "developer_repository_context": developer_repository_context,
         "host_validation_note": host_validation_note,
         "verify_and_review": verify_and_review,
         "record_workflow_outcome": record_workflow_outcome,

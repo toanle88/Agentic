@@ -69,7 +69,6 @@ def develop(
     _remaining_timeout = runtime._remaining_timeout
     run_agent = runtime.run_agent
     agent_prompt = runtime.agent_prompt
-    developer_repository_context = runtime.developer_repository_context
     verify_and_review = runtime.verify_and_review
     record_workflow_outcome = runtime.record_workflow_outcome
     record_no_code_changes_blocked = runtime.record_no_code_changes_blocked
@@ -193,9 +192,6 @@ def develop(
                 instruction=instruction,
                 system_prompt=system_prompt,
                 provider=(config.get("developer_agent") or {}).get("provider", "codex"),
-                repository_context=developer_repository_context(
-                    run.worktree, base,
-                ),
                 repair_mode=repair_mode,
                 repair_scope=repair_scope,
             ),
