@@ -57,7 +57,10 @@ class ProviderCommandTests(unittest.TestCase):
         self.assertTrue(structured)
         self.assertIn("--approval-mode", gemini)
         self.assertEqual(gemini[gemini.index("--approval-mode") + 1], "plan")
-        self.assertNotIn("--allowed-tools", gemini)
+        self.assertEqual(
+            gemini[gemini.index("--allowed-tools") + 1],
+            "read_file,list_directory,grep_search",
+        )
         self.assertNotIn("ShellTool", gemini)
 
         claude, structured = cli_provider_command("claude", "develop", readonly=False)

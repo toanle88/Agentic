@@ -436,7 +436,7 @@ def cli_provider_command(
             "gemini", "-p", prompt, "--output-format", "stream-json",
             "--approval-mode", "plan" if not can_write else ("yolo" if dangerous else "auto_edit"),
         ]
-        if not dangerous and not (readonly and permission_policy is None and not sandbox_enabled):
+        if not dangerous:
             args += _native_tool_policy_args(
                 provider, policy, worktree=worktree, readonly=readonly,
                 sandbox_enabled=sandbox_enabled,

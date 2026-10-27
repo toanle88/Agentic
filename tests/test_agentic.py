@@ -1079,6 +1079,32 @@ class PureTests(unittest.TestCase):
                 api_key_env='ROUTER_KEY', base_url='https://router.test',
             )
 
+    def test_run_agent_default_gemini_reviewer_emits_readonly_tool_allowlist(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            captured = {}
+
+            def fake_stream(argv, cwd, **kwargs):
+                captured["argv"] = argv
+                kwargs["log_file"].with_suffix(".jsonl").write_text(
+                    json.dumps({"type": "message", "content": "reviewed"}) + "\n",
+                    encoding="utf-8",
+                )
+                return CompletedProcess(argv, 0, stdout="")
+
+            with patch("agentic_execution.streamed_command", side_effect=fake_stream):
+                ok, message = agentic.run_agent(
+                    root, "review", output=root / "review.txt",
+                    settings={"provider": "gemini"}, readonly=True,
+                )
+
+        self.assertTrue(ok)
+        self.assertEqual(message, "reviewed")
+        self.assertEqual(
+            captured["argv"][captured["argv"].index("--allowed-tools") + 1],
+            "read_file,list_directory,grep_search",
+        )
+
 
     def test_run_agent_passes_only_selected_api_key_to_isolated_native_provider(self):
         root = Path('/tmp/agentic-provider-sandbox-auth-test')
