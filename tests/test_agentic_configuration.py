@@ -371,6 +371,8 @@ class ConfigurationTests(unittest.TestCase):
             ({'developer': {'model': ' '}}, 'model'),
             ({'developer': {'provider': 'openrouter', 'model': 'x', 'base_url': 'ftp://router'}}, 'base_url'),
             ({'developer': {'provider': 'gemini', 'api_key_env': 'BAD-NAME'}}, 'valid environment variable'),
+            ({'developer': {'provider': 'gemini', 'api_key_env': 'PYTHONPATH'}}, 'runtime or control'),
+            ({'developer': {'provider': 'gemini', 'api_key_env': 'BASH_ENV'}}, 'runtime or control'),
             ({'developer': {'provider': 'gemini', 'auth': 'unsupported'}}, 'auth'),
             ({'security_mode': 'unsafe'}, 'security_mode'),
         ]

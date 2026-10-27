@@ -21,7 +21,6 @@ from .policy import (
     validate_permission_policy,
     validate_permission_policy_container,
 )
-from .security import restricted_test_environment
 from .providers import (
     resolve_provider_executable,
     validate_provider_permission_policy,
@@ -49,8 +48,38 @@ PROVIDER_API_KEY_ENV = {
     "copilot": "GH_TOKEN",
     "openrouter": "OPENROUTER_API_KEY",
 }
+# Native provider CLIs receive only variables needed to locate executables,
+# user configuration, temporary files, and terminal formatting.  In
+# particular, do not inherit the host environment wholesale: variables such
+# as PYTHONPATH, BASH_ENV, NODE_OPTIONS, and LD_PRELOAD can alter provider
+# code loading or command execution.
+_PROVIDER_RUNTIME_ENV_ALLOWLIST = frozenset({
+    "PATH", "Path", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+    "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME",
+    "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES",
+    "TERM", "COLORTERM", "NO_COLOR", "CI", "APPDATA", "LOCALAPPDATA",
+    "PROGRAMDATA", "SYSTEMROOT", "SystemRoot", "WINDIR", "ComSpec", "COMSPEC",
+    "GH_HOST", "COPILOT_GH_HOST",
+    "PATHEXT",
+})
+_PROVIDER_RUNTIME_ENV_ALLOWLIST_CASEFOLDED = frozenset(
+    name.casefold() for name in _PROVIDER_RUNTIME_ENV_ALLOWLIST
+)
 AUTH_MODES = ("native_cli", "api_key", "both")
 ENVIRONMENT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_PROVIDER_CONTROL_ENV_NAMES = frozenset({
+    "BASH_ENV", "CDPATH", "CLASSPATH", "COMSPEC", "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH", "ENV", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM",
+    "GIT_CONFIG_SYSTEM", "GIT_EXEC_PATH", "GIT_SSH_COMMAND", "GIT_TEMPLATE_DIR",
+    "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "LD_LIBRARY_PATH", "LD_PRELOAD",
+    "NODE_OPTIONS", "NODE_PATH", "PERL5LIB", "PERL5OPT", "PYTHONHOME",
+    "PYTHONPATH", "PYTHONSTARTUP", "RUBYLIB", "RUBYOPT", "SHELL",
+    "_JAVA_OPTIONS",
+})
+_PROVIDER_FORBIDDEN_CREDENTIAL_NAMES = frozenset(
+    _PROVIDER_RUNTIME_ENV_ALLOWLIST_CASEFOLDED
+    | {name.casefold() for name in _PROVIDER_CONTROL_ENV_NAMES}
+)
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_ALLOWED_HOSTS = frozenset({"openrouter.ai"})
 # Keep this list intentionally small: these are models validated against
@@ -129,17 +158,25 @@ def api_key_env_for_provider(provider: str, api_key_env: str | None = None) -> s
     return api_key_env or PROVIDER_API_KEY_ENV.get(provider)
 
 
+def _validate_provider_credential_name(name: str, field: str) -> None:
+    if not isinstance(name, str) or not ENVIRONMENT_NAME_RE.fullmatch(name):
+        raise ValueError(f"{field} must be a valid environment variable name")
+    if name.casefold() in _PROVIDER_FORBIDDEN_CREDENTIAL_NAMES:
+        raise ValueError(
+            f"{field} must not use a provider runtime or control environment variable"
+        )
+
+
 def provider_process_environment(provider: str, api_key_env: str | None) -> dict[str, str]:
     """Return a sanitized environment with only the selected credential."""
     canonical = PROVIDER_API_KEY_ENV.get(provider)
-    # The selected credential name may be intentionally non-semantic (for
-    # example SERVICE_VALUE), so the heuristic environment filter cannot
-    # identify it. Remove it before copying the host environment, then add
-    # back only the selected credential and its provider alias below.
     selected_name = api_key_env or canonical
-    environment, _ = restricted_test_environment(
-        os.environ, blocked_names=(selected_name,) if selected_name else (),
-    )
+    if api_key_env is not None:
+        _validate_provider_credential_name(api_key_env, "api_key_env")
+    environment = {
+        name: value for name, value in os.environ.items()
+        if name.casefold() in _PROVIDER_RUNTIME_ENV_ALLOWLIST_CASEFOLDED
+    }
     value = os.environ.get(selected_name) if selected_name else None
     if value and selected_name:
         # Keep the explicitly configured name for sandbox pass-through, and
@@ -271,10 +308,8 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
         raise ValueError(f"{section}.json_mode must be a boolean")
     if type(allow_custom_endpoint) is not bool:
         raise ValueError(f"{section}.allow_custom_endpoint must be a boolean")
-    if api_key_env is not None and (
-        not isinstance(api_key_env, str) or not ENVIRONMENT_NAME_RE.fullmatch(api_key_env)
-    ):
-        raise ValueError(f"{section}.api_key_env must be a valid environment variable name")
+    if api_key_env is not None:
+        _validate_provider_credential_name(api_key_env, f"{section}.api_key_env")
     if auth == "native":
         auth = "native_cli"
     if auth is not None and auth not in AUTH_MODES:

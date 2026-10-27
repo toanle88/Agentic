@@ -529,6 +529,44 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
         self.assertNotIn("SERVICE_VALUE", environment)
         self.assertNotIn("OPENAI_API_KEY", environment)
 
+    def test_provider_environment_uses_runtime_allowlist(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "PATH": "/usr/bin",
+                "HOME": "/tmp/provider-home",
+                "TMPDIR": "/tmp",
+                "LANG": "C.UTF-8",
+                "COPILOT_GH_HOST": "copilot.example.com",
+                "PYTHONPATH": "/untrusted/code",
+                "BASH_ENV": "/untrusted/bashrc",
+                "NODE_OPTIONS": "--require /untrusted/module",
+                "HOST_SECRET": "host-secret-value",
+                "UNRELATED_SETTING": "host-setting",
+            },
+            clear=True,
+        ):
+            environment = provider_process_environment("codex", None)
+
+        self.assertEqual(
+            {name: environment[name] for name in ("PATH", "HOME", "TMPDIR", "LANG")},
+            {
+                "PATH": "/usr/bin", "HOME": "/tmp/provider-home",
+                "TMPDIR": "/tmp", "LANG": "C.UTF-8",
+            },
+        )
+        self.assertEqual(environment["COPILOT_GH_HOST"], "copilot.example.com")
+        for name in (
+            "PYTHONPATH", "BASH_ENV", "NODE_OPTIONS", "HOST_SECRET",
+            "UNRELATED_SETTING",
+        ):
+            self.assertNotIn(name, environment)
+
+    def test_provider_environment_rejects_control_credential_names(self):
+        with patch.dict("os.environ", {"PYTHONPATH": "/untrusted/code"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "runtime or control"):
+                provider_process_environment("codex", "PYTHONPATH")
+
     def test_configured_credential_with_nonsemantic_name_is_redacted_from_provider_streams(self):
         value = "custom-configured-credential-123456"
         with tempfile.TemporaryDirectory() as temp, patch.dict(
@@ -954,6 +992,62 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
                         root, "source.py", b"provider change\n", expected.mode, expected,
                     )
             self.assertEqual(target.read_text(encoding="utf-8"), "original\n")
+
+    def test_atomic_replace_closes_existing_target_before_commit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target.txt"
+            target.write_text("original\n", encoding="utf-8")
+            observed_descriptor = []
+            original_revalidate = file_boundaries.revalidate_single_link_regular
+            original_replace = file_boundaries.os.replace
+
+            def capture_revalidation(descriptor, expected_identity, *, description):
+                observed_descriptor.append(descriptor)
+                return original_revalidate(
+                    descriptor, expected_identity, description=description,
+                )
+
+            def assert_closed_before_replace(*args, **kwargs):
+                self.assertEqual(len(observed_descriptor), 1)
+                with self.assertRaises(OSError):
+                    os.fstat(observed_descriptor[0])
+                return original_replace(*args, **kwargs)
+
+            with patch.object(
+                file_boundaries,
+                "revalidate_single_link_regular",
+                side_effect=capture_revalidation,
+            ), patch.object(
+                file_boundaries.os,
+                "replace",
+                side_effect=assert_closed_before_replace,
+            ):
+                file_boundaries.atomic_replace_relative_regular(
+                    root, "target.txt", b"replacement\n", allow_existing=True,
+                )
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "replacement\n")
+
+    def test_atomic_replace_create_only_does_not_clobber_concurrent_target(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target.txt"
+            original_link = file_boundaries.os.link
+
+            def create_target_then_link(*args, **kwargs):
+                target.write_text("concurrent\n", encoding="utf-8")
+                return original_link(*args, **kwargs)
+
+            with patch.object(
+                file_boundaries.os, "link", side_effect=create_target_then_link,
+            ), self.assertRaises(FileExistsError):
+                file_boundaries.atomic_replace_relative_regular(
+                    root, "target.txt", b"replacement\n",
+                )
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "concurrent\n")
+            self.assertEqual(list(root.glob(".target.txt.agentic-*.tmp")), [])
 
     def test_provider_write_holds_mutation_lock_until_sync_is_complete(self):
         with tempfile.TemporaryDirectory() as temp:

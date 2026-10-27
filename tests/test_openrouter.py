@@ -536,6 +536,64 @@ class OpenRouterTests(unittest.TestCase):
                     target.write_text(before, encoding='utf-8')
                 self.assertEqual(target.read_text(encoding='utf-8'), before)
 
+    def test_openrouter_write_file_failure_preserves_original_and_cleans_temp(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "module.py"
+            original = "original content\n"
+            target.write_text(original, encoding="utf-8")
+            with patch.object(
+                file_boundaries.os,
+                "write",
+                side_effect=OSError("injected write failure"),
+            ):
+                result = agentic_openrouter._openrouter_tool_call(
+                    root, "write_file", {"path": "module.py", "content": "replacement\n"},
+                    readonly=False,
+                )
+            self.assertIn("ERROR: could not open", result)
+            self.assertEqual(target.read_text(encoding="utf-8"), original)
+            self.assertEqual(list(root.glob(".module.py.agentic-*.tmp")), [])
+
+    def test_openrouter_write_file_replaces_write_only_target(self):
+        if os.name == "nt":
+            self.skipTest("write-only file permissions are not portable on Windows")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "module.py"
+            target.write_text("original\n", encoding="utf-8")
+            target.chmod(0o200)
+            try:
+                result = agentic_openrouter._openrouter_tool_call(
+                    root, "write_file", {"path": "module.py", "content": "replacement\n"},
+                    readonly=False,
+                )
+            finally:
+                target.chmod(0o600)
+            self.assertEqual(result, "Wrote module.py")
+            self.assertEqual(target.read_text(encoding="utf-8"), "replacement\n")
+
+    def test_openrouter_edit_file_failure_preserves_original_and_cleans_temp(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "module.py"
+            original = "VERSION = 1\n"
+            target.write_text(original, encoding="utf-8")
+            with patch.object(
+                file_boundaries.os,
+                "write",
+                side_effect=OSError("injected write failure"),
+            ):
+                result = agentic_openrouter._openrouter_tool_call(
+                    root, "edit_file", {
+                        "path": "module.py", "old_text": "VERSION = 1",
+                        "new_text": "VERSION = 2",
+                    }, readonly=False,
+                )
+            self.assertIn("ERROR: could not safely replace", result)
+            self.assertEqual(target.read_text(encoding="utf-8"), original)
+            self.assertEqual(list(root.glob(".module.py.agentic-*.tmp")), [])
+
     def test_openrouter_blocks_full_write_after_truncated_read(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

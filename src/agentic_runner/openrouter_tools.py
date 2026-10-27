@@ -9,6 +9,7 @@ import os
 import queue
 import re
 import signal
+import stat
 import subprocess
 import threading
 import time
@@ -23,6 +24,7 @@ from .execution import _short
 from .config import validate_openrouter_base_url
 from .file_boundaries import (
     SafeTraversalUnavailable,
+    atomic_replace_relative_regular,
     iter_safe_regular_files,
     open_relative_regular,
     revalidate_single_link_regular,
@@ -843,6 +845,25 @@ def _open_regular_text_stream(root: Path, relative: str):
     return stream
 
 
+def _read_regular_text_with_identity(root: Path, relative: str) -> tuple[str, tuple[int, int], int]:
+    """Read a regular file while retaining its identity and mode for a write."""
+    descriptor, expected_identity = open_relative_regular(
+        root, relative, os.O_RDONLY, description="file mutation target",
+    )
+    try:
+        metadata = revalidate_single_link_regular(
+            descriptor, expected_identity, description="file mutation target",
+        )
+        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+            descriptor = -1
+            return stream.read(OPENROUTER_EDIT_FILE_CHARS + 1), expected_identity, stat.S_IMODE(
+                metadata.st_mode
+            )
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def _bounded_file_text(root: Path, relative: str, *, start_line: int | None = None,
                        end_line: int | None = None,
                        scan_stats: dict[str, int | bool] | None = None) -> str:
@@ -1378,8 +1399,9 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
             if not target.exists():
                 return f"ERROR: edit_file target {relative!r} does not exist"
             try:
-                with _open_regular_text_stream(worktree.resolve(), relative) as stream:
-                    content = stream.read(OPENROUTER_EDIT_FILE_CHARS + 1)
+                content, expected_identity, mode = _read_regular_text_with_identity(
+                    worktree.resolve(), relative,
+                )
             except (OSError, RuntimeError, ValueError, UnicodeError) as exc:
                 return f"ERROR: could not safely read {relative!r} for editing: {exc}"
             if len(content) > OPENROUTER_EDIT_FILE_CHARS:
@@ -1393,28 +1415,14 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
             if occurrences != 1:
                 return "ERROR: edit_file old_text must match exactly once"
             updated = content.replace(old_text, new_text, 1)
-            flags = os.O_WRONLY
             try:
-                descriptor, expected_identity = open_relative_regular(
-                    worktree.resolve(), relative, flags, 0o644,
-                    create_parents=False, description="edit_file target",
+                atomic_replace_relative_regular(
+                    worktree.resolve(), relative, updated.encode("utf-8"),
+                    expected_identity=expected_identity, mode=mode,
+                    description="edit_file target",
                 )
             except (OSError, RuntimeError, ValueError) as exc:
-                return f"ERROR: could not open {relative!r} for editing: {exc}"
-            try:
-                revalidate_single_link_regular(
-                    descriptor, expected_identity, description="edit_file target",
-                )
-                os.ftruncate(descriptor, 0)
-                with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                    descriptor = -1
-                    revalidate_single_link_regular(
-                        stream.fileno(), expected_identity, description="edit_file target",
-                    )
-                    stream.write(updated)
-            finally:
-                if descriptor >= 0:
-                    os.close(descriptor)
+                return f"ERROR: could not safely replace {relative!r}: {exc}"
             return f"Edited {relative}"
         if name == "write_file":
             if readonly:
@@ -1438,32 +1446,18 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                 return "ERROR: editing files is disabled by the permission policy"
             if not exists and not policy.get("create_files"):
                 return "ERROR: creating files is disabled by the permission policy"
-            flags = os.O_WRONLY
-            if policy.get("create_files"):
-                flags |= os.O_CREAT
-                if not policy.get("edit_files"):
-                    flags |= os.O_EXCL
+            expected_identity = None
+            mode = None
             try:
-                descriptor, expected_identity = open_relative_regular(
-                    worktree.resolve(), relative, flags, 0o644,
-                    create_parents=True, description="write_file target",
+                atomic_replace_relative_regular(
+                    worktree.resolve(), relative, content.encode("utf-8"),
+                    expected_identity=expected_identity, mode=mode,
+                    create_parents=True, allow_existing=exists,
+                    require_existing=exists,
+                    description="write_file target",
                 )
             except (OSError, RuntimeError, ValueError) as exc:
                 return f"ERROR: could not open {relative!r} for writing: {exc}"
-            try:
-                revalidate_single_link_regular(
-                    descriptor, expected_identity, description="write_file target",
-                )
-                os.ftruncate(descriptor, 0)
-                with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                    descriptor = -1
-                    revalidate_single_link_regular(
-                        stream.fileno(), expected_identity, description="write_file target",
-                    )
-                    stream.write(content)
-            finally:
-                if descriptor >= 0:
-                    os.close(descriptor)
             return f"Wrote {relative}"
         if name == "run_command":
             argv = arguments.get("argv")
