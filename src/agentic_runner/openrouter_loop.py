@@ -22,9 +22,11 @@ from .execution import (
     _record_provider_usage,
     _short,
 )
-from .guidance import guidance_phase, guidance_prompt
+from .guidance import guidance_phase, guidance_prompt_sections
 from .persistence import BoundedAppendWriter, atomic_write_text
 from .openrouter_tools import (
+    OPENROUTER_READ_FILE_SCAN_LIMIT_MARKER,
+    OPENROUTER_READ_FILE_TRUNCATION_MARKER,
     _openrouter_request,
     _openrouter_tool_call,
     _openrouter_tools,
@@ -94,6 +96,14 @@ def _tool_call_signature(name: str, arguments: dict[str, Any]) -> str:
     )
 
 
+def _tool_path_key(arguments: dict[str, Any]) -> str | None:
+    """Normalize a relative tool path for session-local safety checks."""
+    path = arguments.get("path")
+    if not isinstance(path, str) or not path:
+        return None
+    return os.path.normpath(path).replace("\\", "/")
+
+
 def _configured_command_key(argv: Any) -> tuple[str, ...] | None:
     if not isinstance(argv, list) or not all(isinstance(part, str) for part in argv):
         return None
@@ -152,7 +162,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                    sandbox: dict[str, Any] | None = None) -> tuple[bool, str]:
     """Run an OpenAI-compatible OpenRouter agent with scoped local tools."""
     if not model:
-        raise RuntimeError("OpenRouter requires a model, for example openai/gpt-5.4")
+        raise RuntimeError("OpenRouter requires a model, for example openai/gpt-6-luna")
     role_policy = default_permission_policy("reviewer" if readonly else "developer")
     if permission_policy is None:
         # Preserve the legacy OpenRouter-only switch for old direct callers.
@@ -175,10 +185,11 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
     redaction_values = sorted(
         set([api_key, *removed_values]), key=len, reverse=True,
     )
-    prompt = guidance_prompt(
+    task_prompt, guidance = guidance_prompt_sections(
         worktree, prompt, readonly=readonly, audit_folder=output.parent,
         phase=guidance_phase(output, readonly=readonly),
     )
+    prompt = task_prompt if guidance is None else guidance + "\n\n" + task_prompt
     output.parent.mkdir(parents=True, exist_ok=True)
     log_file = output.with_suffix(".log")
     raw_file = output.with_suffix(".jsonl")
@@ -193,13 +204,20 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                if allow_network and not readonly else "Do not access the network. ")
             + ("This is a read-only review: do not edit files or run project code." if readonly else "You may edit files and run the project's checks.")
         ),
-    }, {"role": "user", "content": prompt}]
+    }, {"role": "user", "content": task_prompt}]
+    if guidance is not None:
+        # Keep repository guidance in a separate bounded message.  Otherwise
+        # the combined guidance plus task text can be truncated as one user
+        # message, discarding the actual issue before it reaches the model.
+        messages.append({"role": "user", "content": guidance})
     tools = _openrouter_tools(readonly, permission_policy)
     started = time.monotonic()
     started_at = datetime.datetime.now(datetime.timezone.utc)
     last_message = ""
     usage_records: list[dict[str, Any]] = []
     identical_tool_calls: dict[str, int] = {}
+    truncated_read_paths: set[str] = set()
+    force_final_response = False
     edited = False
     repair_mode = False
     raw_writer = BoundedAppendWriter(
@@ -330,8 +348,8 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
             body: dict[str, Any] = {
                 "model": model,
                 "messages": messages,
-                "tools": tools,
-                "tool_choice": "auto",
+                "tools": [] if force_final_response else tools,
+                "tool_choice": "none" if force_final_response else "auto",
             }
             compact_openrouter_request(messages, tools)
             if schema is not None and json_mode:
@@ -385,7 +403,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                 if not isinstance(arguments, dict):
                     arguments = {}
                 repeated_tool_call = False
-                if name == "write_file":
+                if name in {"write_file", "edit_file"}:
                     # A successful write changes repository state, so earlier
                     # read repetition is no longer evidence of a stuck session.
                     identical_tool_calls.clear()
@@ -394,11 +412,19 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                     identical_tool_calls[signature] = identical_tool_calls.get(signature, 0) + 1
                     repeated_count = identical_tool_calls[signature]
                     if repeated_count >= OPENROUTER_IDENTICAL_TOOL_CALL_HARD_LIMIT:
-                        raise RuntimeError(
-                            "OpenRouter agent repeated the same tool call "
-                            f"{OPENROUTER_IDENTICAL_TOOL_CALL_LIMIT} times without progress: {name}"
-                        )
-                    repeated_tool_call = repeated_count > OPENROUTER_IDENTICAL_TOOL_CALL_LIMIT
+                        if readonly and schema is not None:
+                            force_final_response = True
+                        else:
+                            raise RuntimeError(
+                                "OpenRouter agent repeated the same tool call "
+                                f"{OPENROUTER_IDENTICAL_TOOL_CALL_LIMIT} times without progress: {name}"
+                            )
+                    if readonly and schema is not None and repeated_count > OPENROUTER_IDENTICAL_TOOL_CALL_LIMIT:
+                        force_final_response = True
+                    if force_final_response:
+                        repeated_tool_call = True
+                    else:
+                        repeated_tool_call = repeated_count > OPENROUTER_IDENTICAL_TOOL_CALL_LIMIT
                 record_raw({
                     "event": "tool_call", "turn": turn + 1,
                     "name": name, "arguments": arguments,
@@ -413,6 +439,9 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                     )
                 if repeated_tool_call:
                     result = (
+                        "ERROR: this exact tool call has already returned a result. "
+                        "Stop using tools and return the required final JSON now."
+                        if force_final_response else
                         "ERROR: this exact tool call has already returned a result "
                         f"{OPENROUTER_IDENTICAL_TOOL_CALL_LIMIT} times. "
                         "Use a narrower read range, choose a different file, or proceed "
@@ -423,15 +452,35 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                         name, arguments, edited=edited, repair_mode=repair_mode,
                         check_commands=check_commands,
                     )
-                    result = phase_error or _openrouter_tool_call(
-                        worktree, name, arguments, readonly=readonly,
-                        command_timeout=tool_timeout, allow_network=allow_network,
-                        permission_policy=permission_policy,
-                        check_commands=check_commands,
-                        sandbox=sandbox, allow_runner_source=allow_runner_source,
-                        redaction_values=redaction_values,
-                        env=restricted_environment,
-                    )
+                    path_key = _tool_path_key(arguments)
+                    if (
+                        not phase_error
+                        and name == "write_file"
+                        and path_key in truncated_read_paths
+                    ):
+                        result = (
+                            "ERROR: read_file returned truncated content for this path. "
+                            "Use read_file with start_line/end_line, then use edit_file; "
+                            "do not replace the whole file."
+                        )
+                    else:
+                        result = phase_error or _openrouter_tool_call(
+                            worktree, name, arguments, readonly=readonly,
+                            command_timeout=tool_timeout, allow_network=allow_network,
+                            permission_policy=permission_policy,
+                            check_commands=check_commands,
+                            sandbox=sandbox, allow_runner_source=allow_runner_source,
+                            redaction_values=redaction_values,
+                            env=restricted_environment,
+                        )
+                    if name == "read_file" and path_key is not None:
+                        if (
+                            OPENROUTER_READ_FILE_TRUNCATION_MARKER in result
+                            or OPENROUTER_READ_FILE_SCAN_LIMIT_MARKER in result
+                        ):
+                            truncated_read_paths.add(path_key)
+                        elif not result.startswith("ERROR:"):
+                            truncated_read_paths.discard(path_key)
                 record_raw({
                     "event": "tool_result", "turn": turn + 1,
                     "name": name, "result": result,
@@ -444,6 +493,15 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                 if name == "write_file" and result.startswith("Wrote "):
                     edited = True
                     repair_mode = False
+                elif name == "edit_file" and result.startswith("Edited "):
+                    edited = True
+                    repair_mode = False
+                elif name in {"write_file", "edit_file"} and result.startswith("ERROR:"):
+                    # A failed mutation needs another inspection/repair pass.
+                    # Keeping the validate phase here would prevent the agent
+                    # from reading the exact context needed to correct an
+                    # ambiguous edit_file match.
+                    repair_mode = True
                 elif name == "run_command" and _command_succeeded(result):
                     repair_mode = False
                 elif name == "run_command" and _command_failed(result):

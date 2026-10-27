@@ -248,7 +248,7 @@ class ConfigurationTests(unittest.TestCase):
             )
             config = agentic.load_config(repo / 'agent_config.json')
             self.assertEqual(config['developer_agent']['provider'], 'openrouter')
-            self.assertEqual(config['developer_agent']['model'], 'openai/gpt-5.4')
+            self.assertEqual(config['developer_agent']['model'], 'openai/gpt-6-luna')
             self.assertEqual(config['developer_agent']['api_key_env'], 'OPENROUTER_API_KEY')
             self.assertEqual(config['reviewer_agent']['provider'], 'claude')
 

@@ -337,8 +337,8 @@ secret itself:
 {
   "developer": {
     "provider": "openrouter",
-    "model": "openai/gpt-5.4",
-    "reasoning_effort": "max",
+    "model": "openai/gpt-6-luna",
+    "reasoning_effort": "none",
     "timeout_seconds": null,
     "api_key_env": "OPENROUTER_API_KEY",
     "base_url": "https://openrouter.ai/api/v1",
@@ -346,13 +346,17 @@ secret itself:
   },
   "reviewer": {
     "provider": "openrouter",
-    "model": "anthropic/claude-sonnet-4.5",
+    "model": "openai/gpt-6-luna",
     "api_key_env": "OPENROUTER_API_KEY",
     "base_url": "https://openrouter.ai/api/v1",
     "allow_custom_endpoint": false
   }
 }
 ```
+
+`openai/gpt-6-luna` is currently the only OpenRouter model validated by
+Agentic's tool-calling workflow. Other OpenRouter model IDs remain available
+as explicit configuration overrides, but are considered untested.
 
 The public `openrouter.ai` endpoint is allowed by default. A compatible
 self-hosted HTTPS endpoint requires `allow_custom_endpoint: true`; Agentic

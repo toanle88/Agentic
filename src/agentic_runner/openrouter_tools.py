@@ -39,6 +39,7 @@ from .policy import default_permission_policy, forbidden, sensitive_read
 _DEFAULT_URL_OPEN = urllib.request.urlopen
 
 OPENROUTER_READ_FILE_CHARS = 12_000
+OPENROUTER_EDIT_FILE_CHARS = 1_000_000
 OPENROUTER_READ_CHUNK_CHARS = 8_192
 # Ranged reads are line-oriented, but the requested line may be very distant
 # from the beginning of a file. Keep the work needed to locate it bounded
@@ -56,6 +57,12 @@ OPENROUTER_SEARCH_MAX_RESULTS = 100
 OPENROUTER_SEARCH_MAX_FILES = 2_000
 OPENROUTER_SEARCH_MAX_DIRECTORIES = 2_000
 OPENROUTER_SEARCH_RESULT_CHARS = 8_000
+OPENROUTER_READ_FILE_TRUNCATION_MARKER = (
+    "\n...[truncated; use start_line/end_line to read a smaller range]"
+)
+OPENROUTER_READ_FILE_SCAN_LIMIT_MARKER = (
+    "\n...[scan limit reached; use a closer start_line/end_line range]"
+)
 OPENROUTER_GIT_OBJECT_CHECK_TIMEOUT_SECONDS = 1.0
 OPENROUTER_HTTP_RESPONSE_BYTES = 2_000_000
 NETWORK_COMMANDS = {"curl", "wget", "ssh", "scp", "sftp", "ftp", "nc", "netcat", "telnet", "gh"}
@@ -654,11 +661,31 @@ def _openrouter_tools(
             "type": "function",
             "function": {
                 "name": "write_file",
-                "description": "Write complete UTF-8 file content inside the current worktree.",
+                "description": (
+                    "Create a new file or replace a complete existing UTF-8 file inside the "
+                    "current worktree. Never use this after a truncated read; use edit_file "
+                    "for an existing file when only a specific block must change."
+                ),
                 "parameters": {"type": "object", "properties": {
                     "path": {"type": "string"},
                     "content": {"type": "string"},
                 }, "required": ["path", "content"]},
+            },
+        })
+    if not readonly and policy.get("edit_files"):
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "edit_file",
+                "description": (
+                    "Replace one exact existing UTF-8 text block in a worktree file while "
+                    "preserving all other content. old_text must occur exactly once."
+                ),
+                "parameters": {"type": "object", "properties": {
+                    "path": {"type": "string"},
+                    "old_text": {"type": "string"},
+                    "new_text": {"type": "string"},
+                }, "required": ["path", "old_text", "new_text"]},
             },
         })
     if not readonly:
@@ -820,8 +847,8 @@ def _bounded_file_text(root: Path, relative: str, *, start_line: int | None = No
                        end_line: int | None = None,
                        scan_stats: dict[str, int | bool] | None = None) -> str:
     """Read only the requested lines and output budget from a text file."""
-    marker = "\n...[truncated; use start_line/end_line to read a smaller range]"
-    scan_marker = "\n...[scan limit reached; use a closer start_line/end_line range]"
+    marker = OPENROUTER_READ_FILE_TRUNCATION_MARKER
+    scan_marker = OPENROUTER_READ_FILE_SCAN_LIMIT_MARKER
     chunks: list[str] = []
     used = 0
     truncated = False
@@ -1077,8 +1104,14 @@ def _stop_command_process(process: subprocess.Popen[Any]) -> None:
 def _bounded_command_capture(
     process_argv: list[str], worktree: Path, timeout: int | None,
     *, env: dict[str, str] | None = None,
+    terminate_on_output_limit: bool = True,
 ) -> tuple[int, str, bool, bool]:
-    """Run a command while retaining only a bounded decoded output tail."""
+    """Run a command while retaining only a bounded decoded output tail.
+
+    Ordinary exploratory commands are stopped when they become excessively
+    noisy. Configured validation commands may continue to completion because
+    their exit status is more important than retaining all of their output.
+    """
     popen_kwargs: dict[str, Any] = {
         "cwd": worktree,
         "stdin": subprocess.DEVNULL,
@@ -1173,7 +1206,7 @@ def _bounded_command_capture(
                 reader_done = True
                 continue
             append_output(chunk)
-            if truncated and not terminated:
+            if truncated and terminate_on_output_limit and not terminated:
                 terminated = True
                 drain_deadline = time.monotonic() + OPENROUTER_COMMAND_DRAIN_TIMEOUT_SECONDS
                 _stop_command_process(process)
@@ -1320,6 +1353,69 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
                 return redact_secrets(result, extra_values=redaction_values or ())
             except (OSError, RuntimeError, ValueError) as exc:
                 return f"ERROR: could not safely search {relative!r}: {exc}"
+        if name == "edit_file":
+            if readonly:
+                return "ERROR: edit_file is unavailable during review"
+            if not policy.get("edit_files"):
+                return "ERROR: editing files is disabled by the permission policy"
+            target = _safe_worktree_path(worktree, arguments.get("path", ""), write=True)
+            relative = target.relative_to(worktree.resolve()).as_posix()
+            relative_parts = [part.lower() for part in Path(relative).parts]
+            self_hosted_ci = (
+                len(relative_parts) >= 3
+                and relative_parts[:2] == [".github", "workflows"]
+            )
+            if forbidden(relative) and not (
+                allow_runner_source and (relative == "agentic.py" or self_hosted_ci)
+            ):
+                return f"ERROR: protected file {relative!r} cannot be changed"
+            old_text = arguments.get("old_text")
+            new_text = arguments.get("new_text")
+            if not isinstance(old_text, str) or not old_text:
+                return "ERROR: old_text must be a non-empty string"
+            if not isinstance(new_text, str):
+                return "ERROR: new_text must be a string"
+            if not target.exists():
+                return f"ERROR: edit_file target {relative!r} does not exist"
+            try:
+                with _open_regular_text_stream(worktree.resolve(), relative) as stream:
+                    content = stream.read(OPENROUTER_EDIT_FILE_CHARS + 1)
+            except (OSError, RuntimeError, ValueError, UnicodeError) as exc:
+                return f"ERROR: could not safely read {relative!r} for editing: {exc}"
+            if len(content) > OPENROUTER_EDIT_FILE_CHARS:
+                return (
+                    f"ERROR: edit_file target {relative!r} is larger than "
+                    f"{OPENROUTER_EDIT_FILE_CHARS} characters"
+                )
+            occurrences = content.count(old_text)
+            if occurrences == 0:
+                return "ERROR: edit_file old_text was not found"
+            if occurrences != 1:
+                return "ERROR: edit_file old_text must match exactly once"
+            updated = content.replace(old_text, new_text, 1)
+            flags = os.O_WRONLY
+            try:
+                descriptor, expected_identity = open_relative_regular(
+                    worktree.resolve(), relative, flags, 0o644,
+                    create_parents=False, description="edit_file target",
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                return f"ERROR: could not open {relative!r} for editing: {exc}"
+            try:
+                revalidate_single_link_regular(
+                    descriptor, expected_identity, description="edit_file target",
+                )
+                os.ftruncate(descriptor, 0)
+                with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                    descriptor = -1
+                    revalidate_single_link_regular(
+                        stream.fileno(), expected_identity, description="edit_file target",
+                    )
+                    stream.write(updated)
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+            return f"Edited {relative}"
         if name == "write_file":
             if readonly:
                 return "ERROR: write_file is unavailable during review"
@@ -1385,6 +1481,7 @@ def _openrouter_tool_call(worktree: Path, name: str, arguments: dict[str, Any],
             )
             returncode, output, truncated, timed_out = _bounded_command_capture(
                 process_argv, worktree, command_timeout, env=env,
+                terminate_on_output_limit=check_commands is None,
             )
             if timed_out:
                 return f"ERROR: command timed out after {command_timeout}s"
