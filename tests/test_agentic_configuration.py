@@ -103,7 +103,10 @@ class ConfigurationTests(unittest.TestCase):
                   patch('agentic.shutil.which', return_value='/usr/bin/tool'),
                   patch('agentic.worktree_path_lock', return_value=nullcontext()),
                   patch('sys.stdout', new=io.StringIO()) as output):
-                result = agentic.doctor(repo, config, json_output=True, run_commands=True)
+                result = agentic.doctor(
+                    repo, config, json_output=True, run_commands=True,
+                    state_dir=repo / 'agentic-state',
+                )
 
             report = json.loads(output.getvalue())
 
