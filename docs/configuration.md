@@ -457,10 +457,12 @@ execution.
 
 Validation commands do not inherit the selected worktree's injected
 `GIT_DIR`/`GIT_WORK_TREE` environment when they invoke a test runner or other
-non-Git executable. This keeps nested test fixtures that run `git init` or
-clone temporary repositories independent from the task worktree. A validation
-command whose executable is directly `git` retains the read-only Git metadata
-mount needed for that inspection.
+non-Git executable. The worktree's `.git` entry is also hidden from those
+containers, so Git commands in fixtures cannot discover the task repository
+while configuring temporary files or repositories. This keeps nested test
+fixtures that run `git init` or clone temporary repositories independent from
+the task worktree. A validation command whose executable is directly `git`
+retains the read-only Git metadata mount needed for that inspection.
 
 Filesystem read-only mode and networking are independent policies. A read-only
 reviewer still needs outbound access when its native provider CLI must contact

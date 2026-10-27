@@ -1297,13 +1297,17 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
         self.assertEqual(command[image_index + 1:], ["-c", code, "."])
 
     def test_sandbox_can_leave_git_metadata_environment_unset_for_checks(self):
-        settings = validate_sandbox({"enabled": True, "engine": "docker", "image": "test-image"})
-        command = sandbox_command(
-            ["python", "-m", "unittest"], Path("/tmp/worktree"), settings,
-            preserve_git_metadata=False,
-        )
+        with tempfile.TemporaryDirectory() as temp:
+            worktree = Path(temp)
+            (worktree / ".git").write_text("gitdir: /host-only/git\n", encoding="utf-8")
+            settings = validate_sandbox({"enabled": True, "engine": "docker", "image": "test-image"})
+            command = sandbox_command(
+                ["python", "-m", "unittest"], worktree, settings,
+                preserve_git_metadata=False,
+            )
         self.assertNotIn("GIT_DIR=/agentic-git", command)
         self.assertNotIn("GIT_WORK_TREE=/workspace", command)
+        self.assertIn(f"{os.devnull}:/workspace/.git:ro", command)
 
     def test_sandbox_read_only_and_network_policies_are_independent(self):
         settings = validate_sandbox({

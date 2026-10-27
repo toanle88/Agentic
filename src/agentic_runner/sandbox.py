@@ -285,6 +285,18 @@ def sandbox_command(
         marker = root / ".git"
         if not _is_reparse_or_symbolic_link(marker) and (marker.is_file() or marker.is_dir()):
             command.extend(["-v", f"{marker}:/workspace/.git:ro"])
+    elif not preserve_git_metadata:
+        # A linked worktree exposes a .git pointer whose host-side target is
+        # not mounted in validation containers.  Leaving that pointer visible
+        # makes unrelated Git commands in test fixtures try to discover the
+        # task repository and fail before they can use their own temp config or
+        # repository.  Hide the pointer while keeping nested temp repositories
+        # available to the validation process.
+        marker = root / ".git"
+        if not _is_reparse_or_symbolic_link(marker) and marker.is_file():
+            command.extend(["-v", f"{os.devnull}:/workspace/.git:ro"])
+        elif not _is_reparse_or_symbolic_link(marker) and marker.is_dir():
+            command.extend(["--tmpfs", "/workspace/.git:rw,nosuid,nodev,noexec,size=1m"])
     if output_root is not None:
         output = output_root.resolve()
         if output != root and output.is_dir():
