@@ -451,6 +451,12 @@ class OpenRouterTests(unittest.TestCase):
 
             names = [item['function']['name'] for item in agentic_openrouter._openrouter_tools(True)]
             self.assertEqual(names, ['list_files', 'read_file', 'search_files', 'run_command'])
+            developer_names = [
+                item['function']['name']
+                for item in agentic_openrouter._openrouter_tools(False)
+            ]
+            self.assertIn('write_file', developer_names)
+            self.assertIn('edit_file', developer_names)
             self.assertIn('src/main.go', agentic_openrouter._openrouter_tool_call(
                 root, 'list_files', {'path': '.'}, readonly=True
             ))
@@ -491,6 +497,95 @@ class OpenRouterTests(unittest.TestCase):
             ))
             self.assertIn('ERROR: unknown tool', agentic_openrouter._openrouter_tool_call(
                 root, 'unknown', {}, readonly=False
+            ))
+
+    def test_openrouter_edit_file_replaces_one_exact_block(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / 'module.py'
+            original = 'header\nVERSION = "1.1.115"\nfooter\n'
+            target.write_text(original, encoding='utf-8')
+
+            result = agentic_openrouter._openrouter_tool_call(
+                root, 'edit_file', {
+                    'path': 'module.py',
+                    'old_text': 'VERSION = "1.1.115"',
+                    'new_text': 'VERSION = "1.1.116"',
+                }, readonly=False,
+            )
+            self.assertEqual(result, 'Edited module.py')
+            self.assertEqual(
+                target.read_text(encoding='utf-8'),
+                'header\nVERSION = "1.1.116"\nfooter\n',
+            )
+
+            for old_text in ('MISSING', 'header\n'):
+                before = target.read_text(encoding='utf-8')
+                error = agentic_openrouter._openrouter_tool_call(
+                    root, 'edit_file', {
+                        'path': 'module.py', 'old_text': old_text,
+                        'new_text': 'replacement',
+                    }, readonly=False,
+                )
+                if old_text == 'MISSING':
+                    self.assertIn('was not found', error)
+                else:
+                    # This block occurs once, so verify a valid edit is not
+                    # accidentally rejected merely because it is at the start.
+                    self.assertEqual(error, 'Edited module.py')
+                    target.write_text(before, encoding='utf-8')
+                self.assertEqual(target.read_text(encoding='utf-8'), before)
+
+    def test_openrouter_blocks_full_write_after_truncated_read(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / 'large.py'
+            original = ('keep this file intact\n' + ('x' * 13_000) + '\n')
+            target.write_text(original, encoding='utf-8')
+            responses = iter([
+                {'choices': [{'message': {
+                    'role': 'assistant', 'content': None,
+                    'tool_calls': [{'id': 'read', 'function': {
+                        'name': 'read_file',
+                        'arguments': json.dumps({'path': 'large.py'}),
+                    }}],
+                }}]},
+                {'choices': [{'message': {
+                    'role': 'assistant', 'content': None,
+                    'tool_calls': [{'id': 'write', 'function': {
+                        'name': 'write_file',
+                        'arguments': json.dumps({
+                            'path': 'large.py', 'content': 'damaged\n',
+                        }),
+                    }}],
+                }}]},
+                {'choices': [{'message': {
+                    'role': 'assistant', 'content': None,
+                    'tool_calls': [{'id': 'finish', 'function': {
+                        'name': 'finish', 'arguments': '{"summary":"done"}',
+                    }}],
+                }}]},
+            ])
+            bodies = []
+
+            def request(_url, _key, body, _timeout):
+                bodies.append(body)
+                return next(responses)
+
+            with (patch.dict(agentic.os.environ, {'ROUTER_KEY': 'secret'}, clear=False),
+                  patch('agentic_openrouter._openrouter_request', side_effect=request)):
+                ok, message = agentic.run_openrouter(
+                    root, 'preserve the file', output=root / 'developer.txt',
+                    model='openai/test', api_key_env='ROUTER_KEY', max_tool_turns=10,
+                )
+
+            self.assertTrue(ok)
+            self.assertEqual(message, 'done')
+            self.assertEqual(target.read_text(encoding='utf-8'), original)
+            self.assertTrue(any(
+                'truncated content for this path' in message.get('content', '')
+                for message in bodies[2]['messages']
+                if message.get('role') == 'tool'
             ))
 
     def test_openrouter_command_policy_rejects_shell_network_and_review_mutations(self):
@@ -1141,6 +1236,41 @@ class OpenRouterTests(unittest.TestCase):
         self.assertIn('repeated the same tool call 4 times', message)
         self.assertIn('Last assistant message: I am still inspecting the file.', message)
 
+    def test_openrouter_structured_readonly_run_forces_final_response_after_repeat(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'notes.txt').write_text('notes\n', encoding='utf-8')
+            schema = root / 'schema.json'
+            schema.write_text('{}', encoding='utf-8')
+            repeated = {'choices': [{'message': {
+                'role': 'assistant', 'content': None,
+                'tool_calls': [{'id': 'call', 'function': {
+                    'name': 'read_file', 'arguments': '{"path":"notes.txt"}',
+                }}],
+            }}]}
+            final = {'choices': [{'message': {
+                'role': 'assistant', 'content': '{"summary":"inspected","findings":[]}',
+            }}]}
+            responses = iter([repeated] * 5 + [final])
+            bodies = []
+
+            def request(_url, _key, body, _timeout):
+                bodies.append(body)
+                return next(responses)
+
+            with (patch.dict(agentic.os.environ, {'ROUTER_KEY': 'secret'}, clear=False),
+                  patch('agentic_openrouter._openrouter_request', side_effect=request)):
+                ok, message = agentic.run_openrouter(
+                    root, 'inspect the repository', output=root / 'review.txt',
+                    model='openai/test', api_key_env='ROUTER_KEY', readonly=True,
+                    schema=schema, max_tool_turns=10,
+                )
+
+            self.assertTrue(ok)
+            self.assertEqual(message, '{"summary":"inspected","findings":[]}')
+            self.assertEqual(bodies[-1]['tools'], [])
+            self.assertEqual(bodies[-1]['tool_choice'], 'none')
+
     def test_openrouter_duplicate_tool_warning_can_recover(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1245,6 +1375,58 @@ class OpenRouterTests(unittest.TestCase):
             results[2]['messages'][-1]['content'],
         )
 
+    def test_openrouter_failed_edit_reopens_repair_inspection(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            responses = [
+                {'choices': [{'message': {
+                    'role': 'assistant', 'content': None,
+                    'tool_calls': [{'id': 'write', 'function': {
+                        'name': 'write_file',
+                        'arguments': '{"path":"version.txt","content":"1\\n1\\n"}',
+                    }}],
+                }}]},
+                {'choices': [{'message': {
+                    'role': 'assistant', 'content': None,
+                    'tool_calls': [{'id': 'edit', 'function': {
+                        'name': 'edit_file', 'arguments': json.dumps({
+                            'path': 'version.txt', 'old_text': '1\n', 'new_text': '2\n',
+                        }),
+                    }}],
+                }}]},
+                {'choices': [{'message': {
+                    'role': 'assistant', 'content': None,
+                    'tool_calls': [{'id': 'read', 'function': {
+                        'name': 'read_file', 'arguments': '{"path":"version.txt"}',
+                    }}],
+                }}]},
+                {'choices': [{'message': {
+                    'role': 'assistant', 'content': None,
+                    'tool_calls': [{'id': 'finish', 'function': {
+                        'name': 'finish', 'arguments': '{"summary":"needs a narrower edit"}',
+                    }}],
+                }}]},
+            ]
+            bodies = []
+
+            def request(_url, _key, body, _timeout):
+                bodies.append(json.loads(json.dumps(body)))
+                return responses.pop(0)
+
+            with (patch.dict(agentic.os.environ, {'ROUTER_KEY': 'secret'}, clear=False),
+                  patch('agentic_openrouter._openrouter_request', side_effect=request)):
+                ok, message = agentic.run_openrouter(
+                    root, 'update the version', output=root / 'developer.txt',
+                    model='openai/test', api_key_env='ROUTER_KEY', max_tool_turns=10,
+                )
+
+            self.assertTrue(ok)
+            self.assertEqual(message, 'needs a narrower edit')
+            self.assertTrue(any(
+                message.get('role') == 'tool' and message.get('content') == '1\n1\n'
+                for message in bodies[3]['messages']
+            ))
+
     def test_openrouter_reports_the_underlying_error_after_assistant_progress(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1326,6 +1508,29 @@ class OpenRouterTests(unittest.TestCase):
                 )
         self.assertNotIn('response_format', bodies[0])
         self.assertEqual(bodies[1]['response_format'], {'type': 'json_object'})
+
+    def test_openrouter_preserves_task_when_guidance_is_large(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'AGENTS.md').write_text('guidance-' * 1_500, encoding='utf-8')
+            bodies = []
+
+            def fake_request(url, api_key, body, timeout):
+                bodies.append(body)
+                return {'choices': [{'message': {'role': 'assistant', 'content': 'done'}}]}
+
+            task = 'TASK_MARKER: implement the requested version bump'
+            with (patch.dict(agentic.os.environ, {'ROUTER_KEY': 'secret'}, clear=False),
+                  patch('agentic_openrouter._openrouter_request', side_effect=fake_request)):
+                ok, message = agentic.run_openrouter(
+                    root, task, output=root / 'result.txt', model='openai/test',
+                    api_key_env='ROUTER_KEY',
+                )
+
+        self.assertTrue(ok)
+        self.assertEqual(message, 'done')
+        self.assertEqual(bodies[0]['messages'][1]['content'], task)
+        self.assertIn('REPOSITORY GUIDANCE', bodies[0]['messages'][2]['content'])
 
     def test_openrouter_history_compacts_old_tool_results(self):
         messages = [
@@ -1692,6 +1897,24 @@ class OpenRouterTests(unittest.TestCase):
                 agentic_openrouter.OPENROUTER_COMMAND_OUTPUT_CHARS,
             )
             self.assert_process_stopped(pid)
+
+    def test_openrouter_configured_check_completes_despite_noisy_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            script = root / 'emit-output.py'
+            script.write_text(
+                'import os\n'
+                'os.write(1, b"A" * 7000 + b"TAIL")\n',
+                encoding='utf-8',
+            )
+            argv = [sys.executable, str(script)]
+            result = agentic_openrouter._openrouter_tool_call(
+                root, 'run_command', {'argv': argv}, readonly=False,
+                command_timeout=5, check_commands=[argv],
+            )
+            self.assertIn('exit 0', result)
+            self.assertIn('command output truncated; showing the tail', result)
+            self.assertTrue(result.endswith('TAIL'))
 
     def test_openrouter_tool_command_timeout_is_reported_and_process_is_stopped(self):
         with tempfile.TemporaryDirectory() as temp:

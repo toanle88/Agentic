@@ -53,6 +53,11 @@ AUTH_MODES = ("native_cli", "api_key", "both")
 ENVIRONMENT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_ALLOWED_HOSTS = frozenset({"openrouter.ai"})
+# Keep this list intentionally small: these are models validated against
+# Agentic's OpenRouter tool-calling workflow, not an exhaustive OpenRouter
+# catalog. Explicit model settings remain supported for experimentation.
+SUPPORTED_OPENROUTER_MODELS = ("openai/gpt-6-luna",)
+DEFAULT_OPENROUTER_MODEL = SUPPORTED_OPENROUTER_MODELS[0]
 # Bound worst-case repeated context cost; callers can raise this explicitly
 # for unusually large tasks.
 OPENROUTER_MAX_TURNS = 40
@@ -681,7 +686,7 @@ def default_provider_settings(provider: str) -> dict[str, Any]:
     }
     if provider == "openrouter":
         settings.update({
-            "model": "openai/gpt-5.4",
+            "model": DEFAULT_OPENROUTER_MODEL,
             "auth": "api_key",
             "api_key_env": "OPENROUTER_API_KEY",
             "base_url": DEFAULT_OPENROUTER_BASE_URL,
