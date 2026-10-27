@@ -48,8 +48,8 @@ class DashboardTests(unittest.TestCase):
             (run / "review-001.log").write_text("[REVIEW] Finished in 1s (exit 0)\n")
             (run / "review-001.jsonl").write_text('{"type":"turn.completed"}\n')
             (run / "review-history.json").write_text(json.dumps([
-                {"findings": [{"fingerprint": "same", "severity": "HIGH", "text": "Fix wiring"}]},
-                {"findings": [{"fingerprint": "same", "severity": "HIGH", "text": "Fix wiring"}]},
+                {"findings": [{"severity": "HIGH", "requirement": "Fix wiring", "text": "Fix wiring"}]},
+                {"findings": [{"severity": "HIGH", "requirement": "Fix wiring", "text": "Fix wiring"}]},
             ]))
             snapshots = agentic_dashboard.collect_runs(root)
             self.assertEqual(len(snapshots), 1)
@@ -727,8 +727,8 @@ class DashboardTests(unittest.TestCase):
                 "approved": False, "summary": "Needs work", "findings": ["Fix wiring"],
             }))
             (run / "review-history.json").write_text(json.dumps([
-                {"findings": [{"fingerprint": "same", "severity": "HIGH", "text": "Fix wiring"}]},
-                {"findings": [{"fingerprint": "same", "severity": "HIGH", "text": "Fix wiring"}]},
+                {"findings": [{"severity": "HIGH", "requirement": "Fix wiring", "text": "Fix wiring"}]},
+                {"findings": [{"severity": "HIGH", "requirement": "Fix wiring", "text": "Fix wiring"}]},
             ]))
             html = agentic_dashboard.render_dashboard(agentic_dashboard.collect_runs(root), "demo", root.name)
             self.assertIn("Recurring findings", html)
@@ -750,9 +750,9 @@ class DashboardTests(unittest.TestCase):
             }))
             huge = "x" * (agentic_dashboard_data.MAX_REVIEW_HISTORY_BYTES * 2)
             (run / "review-history.json").write_text(json.dumps([
-                {"findings": [{"fingerprint": "same", "severity": "HIGH", "text": "head"}]},
-                {"findings": [{"fingerprint": "same", "severity": "HIGH", "text": "tail"}]},
-                {"findings": [{"fingerprint": "large", "severity": "MEDIUM", "text": huge}]},
+                {"findings": [{"severity": "HIGH", "requirement": "repeat", "text": "repeat"}]},
+                {"findings": [{"severity": "HIGH", "requirement": "repeat", "text": "repeat"}]},
+                {"findings": [{"severity": "MEDIUM", "requirement": "large", "text": huge}]},
             ]))
             snapshot = agentic_dashboard.collect_runs(root)[0]
         self.assertLess(len(json.dumps(snapshot)), 50_000)

@@ -158,9 +158,8 @@ def develop(
                 item for item in previous_verdict.get("findings", [])
                 if isinstance(item, (str, dict))
             ]
-            # Older review logs may contain model-supplied or positional IDs;
-            # normalize them before they reach the next developer prompt and
-            # action/evidence validator.
+            # Normalize findings before they reach the next developer prompt
+            # and action/evidence validator.
             required_review_findings = normalize_findings(previous_findings)
     maximum_attempts = config["max_retries"] + 1
     latest_reason = "No retryable failure summary was recorded."

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from collections import deque
 import datetime
-import hashlib
 import json
 from pathlib import Path
 import re
@@ -56,17 +55,6 @@ def finding_severity(finding: str) -> str:
     return "UNSPECIFIED"
 
 
-def finding_fingerprint(finding: str) -> str:
-    """Create a stable short key for the same review finding across attempts."""
-    normalized = re.sub(r"\s+", " ", str(finding or "")).strip().lower()
-    normalized = re.sub(r"\[[^\]]+\]", " ", normalized)
-    normalized = re.sub(r"\b(?:blocker|critical|major|high|medium|minor|low|p[0-3])\b", " ", normalized)
-    normalized = re.sub(r"(?:/|\\)[^\s,:;()]+", " path ", normalized)
-    normalized = re.sub(r"\b\d+(?:-\d+)?\b", " ", normalized)
-    normalized = re.sub(r"[^a-z0-9]+", " ", normalized).strip()
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
-
-
 def _finding_text(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()
@@ -78,8 +66,21 @@ def _finding_text(value: Any) -> str:
 
 
 def _normalize_requirement(value: Any) -> str:
-    """Canonicalize requirement text before deriving a durable finding ID."""
+    """Canonicalize requirement text for bounded review feedback."""
     return re.sub(r"\s+", " ", redact_secrets(str(value or ""))).strip()[:MAX_REVIEW_HISTORY_FIELD]
+
+
+def _finding_match_text(value: Any) -> str:
+    """Build an in-memory comparison key without persisting an identifier."""
+    text = _normalize_requirement(value)
+    text = re.sub(
+        r"^\s*\[?(?:BLOCKER|CRITICAL|MAJOR|HIGH|MEDIUM|MINOR|LOW|P[0-3])\]?\s*(?:[-:—]\s*)?",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r":\d+(?:-\d+)?\b", ":<line>", text)
+    return text.casefold()
 
 
 def _finding_field(value: Any, key: str, default: str = "") -> str:
@@ -92,15 +93,9 @@ def _finding_field(value: Any, key: str, default: str = "") -> str:
 
 
 def normalize_findings(findings: list[Any]) -> list[dict[str, str]]:
-    """Give every finding a stable ID while accepting legacy string output.
-
-    Reviewer-supplied IDs are intentionally ignored. They are untrusted model
-    output and can be missing, malformed, or unstable across attempts. IDs are
-    derived from the normalized requirement at this workflow boundary so every
-    downstream consumer receives the same canonical identity.
-    """
+    """Normalize reviewer findings without assigning identifiers."""
     normalized: list[dict[str, str]] = []
-    seen: dict[str, int] = {}
+    seen: set[tuple[str, str]] = set()
     for value in findings[:MAX_REVIEW_HISTORY_FINDINGS]:
         text = _normalize_requirement(_finding_text(value))
         if not text:
@@ -110,19 +105,17 @@ def normalize_findings(findings: list[Any]) -> list[dict[str, str]]:
         )
         if not requirement:
             continue
-        fingerprint = finding_fingerprint(requirement)
-        seen[fingerprint] = seen.get(fingerprint, 0) + 1
-        suffix = f"-{seen[fingerprint]}" if seen[fingerprint] > 1 else ""
-        identifier = f"F-{fingerprint}{suffix}"
         action_target = _normalize_requirement(
             _finding_field(value, "action_target") or requirement,
         )
+        duplicate_key = (requirement.casefold(), action_target.casefold())
+        if duplicate_key in seen:
+            continue
+        seen.add(duplicate_key)
         normalized.append({
-            "id": identifier,
             "severity": finding_severity(text),
             "requirement": redact_secrets(requirement),
             "action_target": redact_secrets(action_target),
-            "fingerprint": fingerprint,
             "text": text,
         })
     return normalized
@@ -148,7 +141,7 @@ def _bounded_history_entry(value: Any) -> dict[str, Any] | None:
         if not isinstance(item, dict):
             continue
         bounded: dict[str, str] = {}
-        for key in ("id", "severity", "requirement", "action_target", "fingerprint", "text"):
+        for key in ("severity", "requirement", "action_target", "text"):
             candidate = item.get(key)
             if isinstance(candidate, str) and candidate:
                 bounded[key] = redact_secrets(candidate)[:MAX_REVIEW_HISTORY_FIELD]
@@ -250,10 +243,17 @@ def record_review_findings(folder: Path, verdict: dict[str, Any]) -> dict[str, A
         if not isinstance(entry, dict):
             continue
         for item in entry.get("findings", []):
-            if isinstance(item, dict) and isinstance(item.get("fingerprint"), str):
-                key = item["fingerprint"]
+            if isinstance(item, dict):
+                key = _finding_match_text(item.get("requirement") or item.get("text"))
+                if not key:
+                    continue
                 previous_counts[key] = previous_counts.get(key, 0) + 1
-    repeated = [item for item in details if previous_counts.get(item["fingerprint"], 0) > 0]
+    repeated = [
+        item for item in details
+        if previous_counts.get(
+            _finding_match_text(item.get("requirement") or item.get("text")), 0,
+        ) > 0
+    ]
     history.append({
         "timestamp": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
         "approved": bool(verdict.get("approved")),
@@ -279,8 +279,8 @@ def review_history_feedback(folder: Path) -> str:
         for item in entry.get("findings", []):
             if not isinstance(item, dict):
                 continue
-            key = item.get("fingerprint")
-            if not isinstance(key, str):
+            key = _finding_match_text(item.get("requirement") or item.get("text"))
+            if not key:
                 continue
             count, severity, text = counts.get(
                 key, (0, str(item.get("severity", "UNSPECIFIED")), redact_secrets(str(item.get("text", ""))))

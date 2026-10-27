@@ -133,33 +133,30 @@ def build_agent_prompt(
             "Complete current repair review findings requiring action:"
             if repair_mode else "Complete prior review findings requiring action:"
         ]
-        # Allocate the fixed feedback budget across every finding. This keeps
-        # every stable ID and action target visible instead of dropping the
-        # tail of a large review.
+        # Allocate the fixed feedback budget across every finding without
+        # introducing synthetic identifiers into the developer contract.
         per_finding = max(
             24,
             (FEEDBACK_CONTEXT_CHARS - 90) // max(1, len(required_review_findings)),
         )
-        for index, finding in enumerate(required_review_findings, 1):
+        for finding in required_review_findings:
             if isinstance(finding, dict):
-                identifier = str(finding.get("id", f"F-{index}"))
                 requirement = str(finding.get("requirement", finding.get("text", "")))
                 target = str(finding.get("action_target", requirement))
-                fixed = len(f"Finding: {identifier} | action target: ")
+                fixed = len("Finding:  | action target: ")
                 available = max(16, per_finding - fixed)
                 requirement_limit = max(8, available // 2)
                 target_limit = max(8, available - requirement_limit)
                 detail = (
-                    f"Finding: {identifier} {_bounded_text(requirement, requirement_limit)} "
+                    f"Finding: {_bounded_text(requirement, requirement_limit)} "
                     f"| action target: {_bounded_text(target, target_limit)}"
                 )
             else:
-                detail = f"Finding {index}: {finding} | action target: {finding}"
+                detail = f"Finding: {finding} | action target: {finding}"
             required_lines.append(f"- {_bounded_text(detail, per_finding)}")
         required_context = "\n".join(required_lines)
         feedback_context = required_context + ("\n\n" + feedback_context if feedback_context else "")
-        # Only the individual finding descriptions are shortened above. The
-        # combined string is deliberately not truncated, so all IDs survive.
+        # Only the individual finding descriptions are shortened above.
     issue_context = (
         "The original PR description is intentionally omitted in targeted CI "
         "repair mode; use the CI diagnostics below as the only repair scope."

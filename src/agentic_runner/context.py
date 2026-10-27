@@ -78,27 +78,26 @@ def _issue_context(value: Any, limit: int = ISSUE_CONTEXT_CHARS) -> str:
     )
 
 
-def _finding_parts(finding: Any, index: int) -> tuple[str, str, str]:
-    """Return an ID, concise requirement, and action target for one finding."""
+def _finding_parts(finding: Any) -> tuple[str, str]:
+    """Return a concise requirement and action target for one finding."""
     if isinstance(finding, dict):
-        identifier = _bounded_text(finding.get("id", ""), 64) or f"F-{index}"
         requirement = str(finding.get("requirement", finding.get("text", "")))
         action_target = str(finding.get("action_target", requirement))
-        return identifier, requirement, action_target
+        return requirement, action_target
     text = str(finding or "")
-    return f"F-{index}", text, text
+    return text, text
 
 
 def _compact_finding(finding: Any, index: int, limit: int | None = None) -> str:
-    """Render a finding while retaining its identity and action target."""
+    """Render a finding while retaining its requirement and action target."""
     if not isinstance(finding, dict):
         text = str(finding or "")
         rendered = "- " + _bounded_text(text, 500)
         if limit is None or len(rendered) <= limit:
             return rendered
         return "- " + text[:max(1, limit - 2)]
-    identifier, requirement, action_target = _finding_parts(finding, index)
-    prefix = f"- {identifier}: "
+    requirement, action_target = _finding_parts(finding)
+    prefix = "- "
     suffix = " (action: "
     closing = ")"
     if limit is None:
@@ -106,9 +105,6 @@ def _compact_finding(finding: Any, index: int, limit: int | None = None) -> str:
             prefix + _bounded_text(requirement, 400) + suffix
             + _bounded_text(action_target, 220) + closing
         )
-    # Stable IDs are mandatory context. If a caller supplies an unusually
-    # small budget, retain the full identifier and let the finding block
-    # exceed that advisory budget rather than silently changing its identity.
     if limit <= len(prefix):
         return prefix
     detail_limit = limit - len(prefix)
@@ -124,11 +120,11 @@ def _compact_finding(finding: Any, index: int, limit: int | None = None) -> str:
 
 
 def _minimum_finding_limit(finding: Any, index: int) -> int:
-    """Reserve enough room for an ID and one character of each required field."""
+    """Reserve enough room for one character of each required field."""
     if not isinstance(finding, dict):
         return 3
-    identifier, requirement, action_target = _finding_parts(finding, index)
-    minimum = len(f"- {identifier}: ")
+    requirement, action_target = _finding_parts(finding)
+    minimum = len("- ")
     if requirement:
         minimum += 1
     if action_target:
@@ -137,7 +133,7 @@ def _minimum_finding_limit(finding: Any, index: int) -> int:
 
 
 def _compact_feedback(feedback: dict[str, Any], *, limit: int | None = FEEDBACK_CONTEXT_CHARS) -> str:
-    """Render bounded feedback while preserving every finding's identity."""
+    """Render bounded feedback while preserving every finding."""
     lines: list[str] = []
     summary = str(feedback.get("summary", "")).strip()
     findings = feedback.get("findings", [])
@@ -175,7 +171,7 @@ def _compact_feedback(feedback: dict[str, Any], *, limit: int | None = FEEDBACK_
             separators = max(0, len(finding_values) - 1)
             minimum_total = sum(minimum_limits) + separators
             if available < minimum_total:
-                # There is no way to fit all mandatory IDs and fields in the
+                # There is no way to fit all mandatory fields in the
                 # nominal bound. Preserve the complete finding list and omit
                 # optional summary/skip context instead of dropping findings.
                 allocations = minimum_limits

@@ -227,12 +227,12 @@ it is materialized, so an oversized status or proposed diff fails closed
 instead of growing memory before prompt truncation. Large review prompts still
 retain the complete manifest/statistics within their documented prompt bounds.
 
-Review findings use `F-<12 lowercase hex>` IDs derived from the normalized
-requirement; duplicate fingerprints receive `-2`, `-3`, and so on. Each
-transmitted finding retains its ID, a concise requirement, and an action target.
-If their minimum representations cannot fit the normal feedback bound, the
-optional summary and skipped-validation text is omitted rather than dropping a
-finding.
+Review findings do not receive generated identifiers. Each transmitted finding
+retains a normalized requirement and action target, and exact duplicates with
+the same requirement and target are collapsed. Distinct targets remain
+separate findings. If the minimum representations cannot fit the normal
+feedback bound, the optional summary and skipped-validation text is omitted
+rather than dropping a finding.
 
 Provider usage is kept per invocation and by investigator, developer, and
 reviewer stage. Prompt, completion, total, cache-read, cache-write, and

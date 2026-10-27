@@ -799,7 +799,6 @@ class WorkflowTests(_GitRepositoryTestCase):
             (False, 'tests passed', {
                 'approved': False, 'summary': 'Missing regression test',
                 'findings': [{
-                    'id': 'F-1',
                     'requirement': 'Add a regression test',
                     'action_target': 'Cover the retry path',
                 }],
@@ -1231,7 +1230,7 @@ class WorkflowTests(_GitRepositoryTestCase):
                 'approved': False,
                 'summary': 'Production adapter is unavailable',
                 'findings': ['Wire the production adapter'],
-                '_repeated_findings': [{'fingerprint': 'same'}],
+                '_repeated_findings': [{}],
             }, 'digest-two', 'base'),
         ]
         with (patch('agentic.run_agent', side_effect=[
