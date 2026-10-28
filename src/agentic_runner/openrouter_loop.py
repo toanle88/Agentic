@@ -191,6 +191,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                    allow_runner_source: bool = False,
                    json_mode: bool = False,
                    verbose: bool = False,
+                   log_label: str | None = None,
                    sandbox: dict[str, Any] | None = None) -> tuple[bool, str]:
     """Run an OpenAI-compatible OpenRouter agent with scoped local tools."""
     if not model:
@@ -225,7 +226,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
     output.parent.mkdir(parents=True, exist_ok=True)
     log_file = output.with_suffix(".log")
     raw_file = output.with_suffix(".jsonl")
-    label = "REVIEW" if readonly else "DEVELOPER"
+    label = log_label or ("REVIEW" if readonly else "DEVELOPER")
     messages: list[dict[str, Any]] = [{
         "role": "system",
         "content": (

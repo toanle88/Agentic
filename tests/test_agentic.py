@@ -541,6 +541,7 @@ class PureTests(unittest.TestCase):
             self.assertNotIn('status', verdict)
             self.assertEqual(verdict['findings'], ['The relevant code path exists'])
             self.assertTrue(run_agent.call_args.kwargs['readonly'])
+            self.assertEqual(run_agent.call_args.kwargs['log_label'], 'INVESTIGATION')
             prompt = run_agent.call_args.args[1]
             self.assertIn('practical implementation handoff', prompt)
             self.assertIn('What does the repository do today', prompt)
