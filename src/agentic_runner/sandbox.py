@@ -4,21 +4,35 @@ from __future__ import annotations
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
+import shutil
 import subprocess
+import tempfile
+from contextlib import contextmanager
 from typing import Any
 
-from .file_boundaries import _is_reparse_or_symbolic_link
+from .file_boundaries import (
+    _is_reparse_or_symbolic_link,
+    iter_safe_regular_files,
+    open_relative_regular,
+    revalidate_single_link_regular,
+)
 from .git_policy import (
     GIT_SAFETY_ENVIRONMENT,
     hardened_git_argv,
     hardened_git_environment,
 )
+from .policy import forbidden
 
 
 SUPPORTED_ENGINES = ("docker", "podman")
 SUPPORTED_LANGUAGES = ("python", "node", "go", "rust", "java", "dotnet")
 DEFAULT_SANDBOX_IMAGE = "agentic-runner:latest"
-DEFAULT_BUILD_NETWORK = True
+DEFAULT_BUILD_NETWORK = False
+MAX_BUILD_CONTEXT_BYTES = 64 * 1024 * 1024
+MAX_BUILD_CONTEXT_FILE_BYTES = 16 * 1024 * 1024
+MAX_BUILD_CONTEXT_FILES = 10_000
+MAX_BUILD_CONTEXT_ENTRIES = 12_000
+MAX_BUILD_CONTEXT_DIRECTORIES = 2_000
 ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Keep image references in the image position of the engine argv. In
 # particular, never allow a leading dash that could be parsed as another
@@ -100,15 +114,70 @@ def validate_sandbox(raw: Any) -> dict[str, Any]:
     }
 
 
-def sandbox_build_command(settings: dict[str, Any], repo: Path) -> list[str] | None:
-    """Build a configured image using only paths inside the target repository."""
+def _assert_no_redirecting_components(root: Path, relative: str, *, label: str) -> None:
+    """Reject symlink/reparse components before resolving a repository path."""
+    current = root
+    for part in Path(relative).parts:
+        if part in ("", "."):
+            continue
+        current /= part
+        if _is_reparse_or_symbolic_link(current):
+            raise ValueError(f"sandbox.{label} cannot contain symbolic links")
+
+
+def _copy_build_context_file(
+    source_root: Path, destination_root: Path, relative: str,
+) -> int:
+    """Copy one validated context file without following links or hard links."""
+    descriptor, expected_identity = open_relative_regular(
+        source_root, relative, os.O_RDONLY, description="sandbox build context file",
+    )
+    destination = destination_root / Path(*relative.split("/"))
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    try:
+        with os.fdopen(descriptor, "rb") as source_stream:
+            descriptor = -1
+            metadata = revalidate_single_link_regular(
+                source_stream.fileno(), expected_identity,
+                description="sandbox build context file",
+            )
+            if metadata.st_size > MAX_BUILD_CONTEXT_FILE_BYTES:
+                raise RuntimeError(f"Sandbox build context file is too large: {relative}")
+            with destination.open("wb") as destination_stream:
+                while True:
+                    chunk = source_stream.read(64 * 1024)
+                    if not chunk:
+                        break
+                    copied += len(chunk)
+                    if copied > MAX_BUILD_CONTEXT_FILE_BYTES:
+                        raise RuntimeError(f"Sandbox build context file is too large: {relative}")
+                    destination_stream.write(chunk)
+            try:
+                destination.chmod(metadata.st_mode & 0o777)
+            except OSError:
+                pass
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    return copied
+
+
+def _stage_sandbox_build_context(
+    settings: dict[str, Any], repo: Path, destination: Path,
+) -> tuple[Path, Path]:
+    """Create a bounded build context and a separately staged Dockerfile."""
     policy = validate_sandbox(settings)
     dockerfile = policy.get("dockerfile")
     if not policy["enabled"] or not dockerfile:
-        return None
-    root = repo.resolve()
-    dockerfile_path = (root / dockerfile).resolve()
-    context_path = (root / policy["build_context"]).resolve()
+        raise ValueError("A Dockerfile is required to stage a sandbox build")
+    root = repo.resolve(strict=True)
+    dockerfile_source = root / dockerfile
+    context_source = root / policy["build_context"]
+    _assert_no_redirecting_components(root, dockerfile, label="dockerfile")
+    _assert_no_redirecting_components(root, policy["build_context"], label="build_context")
+    dockerfile_path = dockerfile_source.resolve()
+    context_path = context_source.resolve()
     for path, label in ((dockerfile_path, "sandbox.dockerfile"), (context_path, "sandbox.build_context")):
         try:
             path.relative_to(root)
@@ -118,11 +187,81 @@ def sandbox_build_command(settings: dict[str, Any], repo: Path) -> list[str] | N
         raise ValueError(f"Configured sandbox Dockerfile does not exist: {dockerfile}")
     if not context_path.is_dir():
         raise ValueError(f"Configured sandbox build context is not a directory: {policy['build_context']}")
+    context_relative = context_path.relative_to(root).as_posix()
+    if context_relative == ".":
+        context_relative = ""
+    if context_relative and forbidden(context_relative):
+        raise ValueError("sandbox.build_context is protected")
+    dockerfile_relative = dockerfile_path.relative_to(root).as_posix()
+    if forbidden(dockerfile_relative):
+        raise ValueError("sandbox.dockerfile is protected")
+
+    staged_context = destination / "context"
+    staged_dockerfile = destination / "Dockerfile.agentic"
+    staged_context.mkdir()
+    staged_bytes = 0
+    staged_files = 0
+    try:
+        for kind, relative, _ in iter_safe_regular_files(
+            context_path,
+            skip=lambda name: forbidden("/".join(part for part in (context_relative, name) if part)),
+            fail_on_error=True,
+            max_entries=MAX_BUILD_CONTEXT_ENTRIES,
+            max_directories=MAX_BUILD_CONTEXT_DIRECTORIES,
+        ):
+            target = staged_context / Path(*relative.split("/"))
+            if kind == "directory":
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            if staged_files >= MAX_BUILD_CONTEXT_FILES:
+                raise RuntimeError("Sandbox build context exceeded its file-count limit")
+            copied = _copy_build_context_file(context_path, staged_context, relative)
+            staged_files += 1
+            staged_bytes += copied
+            if staged_bytes > MAX_BUILD_CONTEXT_BYTES:
+                raise RuntimeError("Sandbox build context exceeded its byte limit")
+        dockerfile_source = destination / "dockerfile-source"
+        dockerfile_source.mkdir()
+        _copy_build_context_file(root, dockerfile_source, dockerfile_relative)
+        shutil.copyfile(
+            dockerfile_source / Path(*dockerfile_relative.split("/")),
+            staged_dockerfile,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise RuntimeError("Could not stage the complete sandbox build context") from exc
+    return staged_dockerfile, staged_context
+
+
+def sandbox_build_command(
+    settings: dict[str, Any], repo: Path, *,
+    dockerfile_path: Path, context_path: Path,
+) -> list[str] | None:
+    """Build a configured image from an already sanitized temporary context."""
+    policy = validate_sandbox(settings)
+    if not policy["enabled"] or not policy.get("dockerfile"):
+        return None
     network = "default" if policy["build_network"] else "none"
     return [
         policy["engine"], "build", "--pull=false", f"--network={network}", "--tag", policy["image"],
         "--file", str(dockerfile_path), str(context_path),
     ]
+
+
+@contextmanager
+def sandbox_build_context(settings: dict[str, Any], repo: Path):
+    """Yield a build command whose context is removed after the build."""
+    with tempfile.TemporaryDirectory(prefix="agentic-sandbox-build-") as temporary:
+        staged_dockerfile, staged_context = _stage_sandbox_build_context(
+            settings, repo, Path(temporary),
+        )
+        build_command = sandbox_build_command(
+            settings, repo,
+            dockerfile_path=staged_dockerfile,
+            context_path=staged_context,
+        )
+        if build_command is None:
+            raise RuntimeError("A sandbox build command could not be created")
+        yield build_command
 
 
 def _authoritative_git_common_dir(root: Path) -> Path | None:

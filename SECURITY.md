@@ -90,10 +90,13 @@ test output, and dashboards, but redaction cannot identify every possible
 secret. Treat logs as sensitive and keep them out of public issue comments.
 
 When `sandbox.dockerfile` is configured, Agentic builds it before an isolated
-run. Dockerfile `RUN` steps execute with the container engine's build
-privileges, so only build trusted files and review changes to the Dockerfile
-and build context. Runtime network access remains disabled by default;
-`sandbox.allow_network` is a separate, explicit capability.
+run from a bounded temporary context. Protected files, symbolic links, special
+files, and hard-linked files are excluded or rejected, and build networking is
+disabled by default. Dockerfile `RUN` steps still execute with the container
+engine's build privileges; set `sandbox.build_network` to `true` only after
+reviewing the Dockerfile and build inputs. Runtime network access remains
+disabled by default; `sandbox.allow_network` is a separate, explicit
+capability.
 
 ## Reporting a vulnerability
 

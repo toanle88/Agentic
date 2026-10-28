@@ -25,7 +25,7 @@ from .providers import (
     resolve_provider_executable,
     validate_provider_permission_policy,
 )
-from .sandbox import sandbox_build_command, validate_sandbox
+from .sandbox import sandbox_build_context, validate_sandbox
 from .ci_repair import validate_repair_limits
 
 
@@ -573,15 +573,16 @@ def preflight_security(
                 raise RuntimeError(
                     "A repository path is required to build sandbox.dockerfile"
                 )
-            build_command = sandbox_build_command(sandbox, repo)
+            build_context = sandbox_build_context(sandbox, repo)
         else:
-            build_command = None
-        if build_command is not None:
+            build_context = None
+        if build_context is not None:
             try:
-                result = subprocess.run(
-                    build_command, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, encoding="utf-8", errors="replace", timeout=1800, check=False,
-                )
+                with build_context as build_command:
+                    result = subprocess.run(
+                        build_command, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, encoding="utf-8", errors="replace", timeout=1800, check=False,
+                    )
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise RuntimeError(f"Sandbox image build could not start or timed out: {exc}") from exc
             if result.returncode:

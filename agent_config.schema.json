@@ -60,7 +60,7 @@
         "build_context": { "type": "string", "minLength": 1, "default": ".", "description": "Repository-relative Docker build context" },
         "language": { "enum": ["python", "node", "go", "rust", "java", "dotnet", null] },
         "allow_network": { "type": "boolean", "default": false },
-        "build_network": { "type": "boolean", "default": true, "description": "Allow repository Dockerfile builds to access the engine's default network" },
+        "build_network": { "type": "boolean", "default": false, "description": "Allow repository Dockerfile builds to access the engine's default network; explicit opt-in" },
         "pass_env": {
           "type": "array",
           "uniqueItems": true,
