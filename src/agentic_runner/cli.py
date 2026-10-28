@@ -39,6 +39,7 @@ from .config import (  # noqa: F401
     SAFE_GIT_DIFF_CHECK,
     SUPPORTED_PROVIDERS,
     _append_git_exclude_entry,
+    _git_info_exclude_path,
     default_provider_settings,
     detect_test_commands,
     detect_project_language,
@@ -52,6 +53,7 @@ from .config import (  # noqa: F401
     sandbox_env_for_providers,
     test_commands_for_profile,
 )
+from .git_policy import hardened_git_argv, hardened_git_environment
 from .context import (  # noqa: F401
     FEEDBACK_CONTEXT_CHARS,
     INSTRUCTION_CONTEXT_CHARS as _INSTRUCTION_CONTEXT_CHARS,
@@ -1136,7 +1138,11 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
     if security_mode not in SECURITY_MODES:
         raise ValueError(f"security_mode must be one of: {', '.join(SECURITY_MODES)}")
     repo = repo.resolve()
-    root_result = probe(["git", "rev-parse", "--show-toplevel"], repo)
+    root_result = probe(
+        hardened_git_argv(["git", "rev-parse", "--show-toplevel"]),
+        repo,
+        env=hardened_git_environment(),
+    )
     if not root_result[0]:
         raise RuntimeError(f"{repo} is not a Git repository")
     root = Path(root_result[1].splitlines()[-1]).resolve()
@@ -1246,6 +1252,10 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
         commands = discovery_result.fast_commands
         slow_commands = discovery_result.slow_commands
         detection = "Assisted test discovery"
+    # Validate the Git metadata boundary before writing any configuration.  A
+    # repository-controlled info/exclude symlink or special file must not
+    # leave init with a partial config artifact.
+    _git_info_exclude_path(repo)
     config = {
         "task_source": "github",
         "github_host": DEFAULT_GITHUB_HOST,

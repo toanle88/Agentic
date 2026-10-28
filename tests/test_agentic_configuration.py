@@ -236,6 +236,30 @@ class ConfigurationTests(unittest.TestCase):
                     agentic.init_repository(repo)
             self.assertFalse((repo / '.gitignore').exists())
 
+    def test_init_rejects_symlinked_git_exclude_before_writing_config(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / 'repo'
+            outside = root / 'outside.txt'
+            sh('git', 'init', '--initial-branch=main', str(repo), cwd=root)
+            outside.write_text('must remain unchanged\n', encoding='utf-8')
+            exclude = Path(sh(
+                'git', 'rev-parse', '--git-path', 'info/exclude', cwd=repo,
+            ).stdout.strip())
+            if not exclude.is_absolute():
+                exclude = (repo / exclude).resolve()
+            exclude.unlink()
+            try:
+                exclude.symlink_to(outside)
+            except OSError as exc:
+                self.skipTest(f'symlinks unavailable: {exc}')
+
+            with self.assertRaisesRegex(RuntimeError, 'Git info/exclude'):
+                agentic.init_repository(repo)
+
+            self.assertEqual(outside.read_text(encoding='utf-8'), 'must remain unchanged\n')
+            self.assertFalse((repo / 'agent_config.json').exists())
+
 
     def test_init_can_generate_provider_specific_config(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
@@ -27,6 +28,8 @@ from .providers import (
 )
 from .sandbox import sandbox_build_context, validate_sandbox
 from .ci_repair import validate_repair_limits
+from .file_boundaries import atomic_replace_relative_regular, open_relative_regular
+from .git_policy import hardened_git_argv, hardened_git_environment
 
 
 SUPPORTED_PROVIDERS = ("codex", "gemini", "claude", "copilot", "openrouter")
@@ -696,11 +699,13 @@ def detect_test_commands(repo: Path) -> tuple[list[list[str]], str]:
     return [list(SAFE_GIT_DIFF_CHECK)], "No test framework detected; using Git whitespace validation"
 
 
-def _git_info_exclude_path(repo: Path) -> Path:
-    """Resolve Git's local exclude file without assuming a directory-style ``.git``."""
+def _git_info_exclude_location(repo: Path) -> tuple[Path, Path]:
+    """Return Git's metadata root and exclude path relative to that root."""
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--git-path", "info/exclude"],
+            hardened_git_argv([
+                "git", "rev-parse", "--git-common-dir", "--git-path", "info/exclude",
+            ]),
             cwd=repo,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -709,32 +714,87 @@ def _git_info_exclude_path(repo: Path) -> Path:
             errors="replace",
             timeout=10,
             check=False,
+            env=hardened_git_environment(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(
             f"Could not resolve Git info/exclude for {repo}: {exc}"
         ) from exc
     output = result.stdout.strip()
-    if result.returncode or not output:
-        detail = output or "Git returned no path"
+    lines = output.splitlines()
+    if result.returncode or len(lines) != 2 or any(not line.strip() for line in lines):
+        detail = output or "Git returned no metadata paths"
         raise RuntimeError(
             f"Could not resolve Git info/exclude for {repo}: {detail}"
         )
-    path = Path(output.splitlines()[-1])
-    return path if path.is_absolute() else (repo / path).resolve()
+    common_dir = Path(lines[0])
+    exclude_path = Path(lines[1])
+    if not common_dir.is_absolute():
+        common_dir = repo / common_dir
+    if not exclude_path.is_absolute():
+        exclude_path = repo / exclude_path
+    try:
+        common_dir = common_dir.resolve(strict=True)
+        if not common_dir.is_dir():
+            raise ValueError("Git common directory is not a directory")
+        exclude_resolved = exclude_path.resolve(strict=False)
+        relative = exclude_path.relative_to(common_dir)
+        if not relative.parts:
+            raise ValueError("Git info/exclude path is the metadata directory")
+        if not exclude_resolved.is_relative_to(common_dir):
+            raise ValueError("Git info/exclude path escapes the Git metadata directory")
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise RuntimeError(
+            f"Could not validate Git info/exclude for {repo}: {exc}"
+        ) from exc
+    return common_dir, relative
+
+
+def _git_info_exclude_path(repo: Path) -> Path:
+    """Resolve and validate Git's local exclude file boundary."""
+    common_dir, relative = _git_info_exclude_location(repo)
+    path = common_dir / relative
+    try:
+        descriptor, _ = open_relative_regular(
+            common_dir,
+            relative,
+            os.O_RDONLY,
+            description="Git info/exclude",
+        )
+    except FileNotFoundError:
+        return path
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"Could not validate Git info/exclude {path}: {exc}") from exc
+    else:
+        os.close(descriptor)
+    return path
 
 
 def _append_git_exclude_entry(repo: Path, entry: str) -> tuple[Path, bool]:
     """Add an entry to Git's local exclude file, preserving existing content."""
-    path = _git_info_exclude_path(repo)
+    common_dir, relative = _git_info_exclude_location(repo)
+    path = common_dir / relative
+    descriptor = -1
+    identity: tuple[int, int] | None = None
+    mode: int | None = None
     try:
-        if path.exists():
-            with path.open("r", encoding="utf-8", newline="") as stream:
-                content = stream.read()
-        else:
-            content = ""
+        descriptor, identity = open_relative_regular(
+            common_dir,
+            relative,
+            os.O_RDONLY,
+            description="Git info/exclude",
+        )
+        mode = stat.S_IMODE(os.fstat(descriptor).st_mode)
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = -1
+            content = stream.read().decode("utf-8")
+    except FileNotFoundError:
+        content = ""
     except (OSError, UnicodeError) as exc:
         raise RuntimeError(f"Could not read Git info/exclude {path}: {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
     lines = {line.strip() for line in content.splitlines()}
     if entry in lines:
         return path, False
@@ -742,9 +802,16 @@ def _append_git_exclude_entry(repo: Path, entry: str) -> tuple[Path, bool]:
     prefix = "" if not content or content.endswith(("\n", "\r")) else newline
     updated = content + prefix + f"# Agentic local configuration{newline}{entry}{newline}"
     try:
-        with path.open("w", encoding="utf-8", newline="") as stream:
-            stream.write(updated)
-    except (OSError, UnicodeError) as exc:
+        atomic_replace_relative_regular(
+            common_dir,
+            relative,
+            updated.encode("utf-8"),
+            expected_identity=identity,
+            mode=mode,
+            allow_existing=identity is not None,
+            description="Git info/exclude",
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
         raise RuntimeError(f"Could not write Git info/exclude {path}: {exc}") from exc
     return path, True
 
