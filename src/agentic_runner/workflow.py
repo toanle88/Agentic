@@ -18,7 +18,7 @@ import stat
 import tempfile
 import time
 import datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from .config import (
@@ -1010,7 +1010,6 @@ def _common_repository_root(path: Path) -> Path | None:
 
 def _runner_source_change_allowed(worktree: Path, filename: str) -> bool:
     """Allow the Agentic runner source during self-hosted development."""
-    parts = [part.lower() for part in PurePosixPath(filename).parts]
     is_runner_source = filename == "agentic.py"
     if not is_runner_source:
         return False
