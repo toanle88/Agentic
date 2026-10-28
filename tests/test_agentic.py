@@ -39,8 +39,8 @@ def summary_stage_lines(rendered):
     return [
         re.sub(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ", "", line)
         for line in rendered.splitlines()
-        if line.startswith(('[DEVELOPER]', '[TESTS]', '[REVIEW]'))
-        or re.match(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[(?:DEVELOPER|TESTS|REVIEW)\]", line)
+        if line.startswith(('[DEVELOPER]', '[TESTS]', '[INVESTIGATOR]', '[REVIEW]'))
+        or re.match(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[(?:DEVELOPER|TESTS|INVESTIGATOR|REVIEW)\]", line)
     ]
 
 
@@ -100,6 +100,16 @@ class PureTests(unittest.TestCase):
                 {'prompt_tokens': 10, 'completion_tokens': 20},
                 invocation={'name': 'review-001', 'stage': 'reviewer'},
             )
+            record_usage(
+                folder, 'investigator',
+                {'prompt_tokens': 5, 'completion_tokens': 2, 'estimated_cost_usd': 0.001},
+                invocation={'name': 'investigation-001', 'stage': 'investigator', 'duration_seconds': 12},
+            )
+            record_usage(
+                folder, 'investigator',
+                {'prompt_tokens': 4, 'completion_tokens': 1, 'estimated_cost_usd': 0.001},
+                invocation={'name': 'investigation-002', 'stage': 'investigator', 'duration_seconds': 8},
+            )
             operations = [
                 ('developer', '00:00:00', '00:01:00', 60),
                 ('developer', '00:01:00', '00:02:00', 60),
@@ -123,15 +133,16 @@ class PureTests(unittest.TestCase):
                 agentic.print_run_summary(run, 'APPROVED', 'continue', logs_path=folder)
 
         rendered = output.getvalue()
-        self.assertIn('[SUMMARY] Total: 300 tokens', rendered)
-        self.assertIn('Prompt/input: 210 tokens', rendered)
-        self.assertIn('Completion/output: 90 tokens', rendered)
-        self.assertIn('Cost: $0.0300', rendered)
+        self.assertIn('[SUMMARY] Total: 312 tokens', rendered)
+        self.assertIn('Prompt/input: 219 tokens', rendered)
+        self.assertIn('Completion/output: 93 tokens', rendered)
+        self.assertIn('Cost: $0.0320', rendered)
         self.assertIn('[SUMMARY] Duration: 3m 45s', rendered)
         self.assertEqual(summary_stage_lines(rendered), [
-            '[DEVELOPER]  Runs:  2 | Tokens: 270 | Time: 2m 0s',
-            '[TESTS]      Runs:  2 | Tokens:   0 | Time: 1m 0s',
-            '[REVIEW]     Runs:  1 | Tokens:  30 | Time:   45s | Findings: 3',
+            '[DEVELOPER]    Runs:  2 | Tokens: 270 | Time: 2m 0s',
+            '[TESTS]        Runs:  2 | Tokens:   0 | Time: 1m 0s',
+            '[INVESTIGATOR] Runs:  2 | Tokens:  12 | Time:   20s',
+            '[REVIEW]       Runs:  1 | Tokens:  30 | Time:   45s | Findings: 3',
         ])
         self.assertIn('[RETRY] Attempts: 2 | Retries: 1', rendered)
         self.assertIn(f'Logs:     {folder}', rendered)
@@ -150,9 +161,10 @@ class PureTests(unittest.TestCase):
         self.assertIn('Prompt/input: unknown', rendered)
         self.assertIn('Cost: unknown', rendered)
         self.assertEqual(summary_stage_lines(rendered), [
-            '[DEVELOPER]  Runs:  0 | Tokens: unknown | Time: unknown',
-            '[TESTS]      Runs:  0 | Tokens:       0 | Time: unknown',
-            '[REVIEW]     Runs:  0 | Tokens: unknown | Time: unknown | Findings: unknown',
+            '[DEVELOPER]    Runs:  0 | Tokens: unknown | Time: unknown',
+            '[TESTS]        Runs:  0 | Tokens:       0 | Time: unknown',
+            '[INVESTIGATOR] Runs:  0 | Tokens: unknown | Time: unknown',
+            '[REVIEW]       Runs:  0 | Tokens: unknown | Time: unknown | Findings: unknown',
         ])
         self.assertIn('[RETRY] Attempts: unknown | Retries: unknown', rendered)
 
@@ -212,9 +224,10 @@ class PureTests(unittest.TestCase):
 
         rendered = output.getvalue()
         self.assertEqual(summary_stage_lines(rendered), [
-            '[DEVELOPER]  Runs:  3 | Tokens: 4,671,548 | Time: 8m 38s',
-            '[TESTS]      Runs: 12 | Tokens:         0 | Time: 2m 14s',
-            '[REVIEW]     Runs:  1 | Tokens:    89,366 | Time:    54s | Findings: 1',
+            '[DEVELOPER]    Runs:  3 | Tokens: 4,671,548 | Time:  8m 38s',
+            '[TESTS]        Runs: 12 | Tokens:         0 | Time:  2m 14s',
+            '[INVESTIGATOR] Runs:  0 | Tokens:   unknown | Time: unknown',
+            '[REVIEW]       Runs:  1 | Tokens:    89,366 | Time:     54s | Findings: 1',
         ])
 
 

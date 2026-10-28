@@ -195,6 +195,45 @@ def _stage_values(usage: dict[str, Any], stage: str) -> tuple[str, str]:
     return _number(token_value), _cost(stage_usage.get("estimated_cost_usd"))
 
 
+def _stage_duration(usage: dict[str, Any], stage: str) -> str:
+    """Format summed stage timing from invocation metadata or old operations."""
+    invocations = usage.get("by_invocation")
+    if isinstance(invocations, list):
+        matching = [
+            item for item in invocations
+            if isinstance(item, dict)
+            and (item.get("stage") == stage or item.get("role") == stage)
+        ]
+        if matching:
+            durations = [
+                float(item["duration_seconds"])
+                for item in matching
+                if isinstance(item.get("duration_seconds"), (int, float))
+                and not isinstance(item.get("duration_seconds"), bool)
+                and math.isfinite(float(item["duration_seconds"]))
+                and item["duration_seconds"] >= 0
+            ]
+            if len(durations) == len(matching):
+                return _duration(sum(durations))
+
+    metrics = usage.get("metrics")
+    operations = metrics.get("operations") if isinstance(metrics, dict) else None
+    if isinstance(operations, list):
+        durations = [
+            float(item["duration_seconds"])
+            for item in operations
+            if isinstance(item, dict)
+            and item.get("role") == stage
+            and isinstance(item.get("duration_seconds"), (int, float))
+            and not isinstance(item.get("duration_seconds"), bool)
+            and math.isfinite(float(item["duration_seconds"]))
+            and item["duration_seconds"] >= 0
+        ]
+        if durations:
+            return _duration(sum(durations))
+    return "unknown"
+
+
 def _next_action(issue: Issue, terminal: str) -> str:
     if issue.number is None:
         return "inspect the preserved run locally"
@@ -233,12 +272,19 @@ def format_completion_comment(
         if isinstance(summary, str) and summary.strip():
             issue_update = ["### Issue update", "", _clean(summary, 500), ""]
     stages = [
-        ("Developer", *_stage_values(usage, "developer")),
-        ("Tests", *_stage_values(usage, "tests")),
-        ("Review", *_stage_values(usage, "reviewer")),
-        ("Total", _number(usage.get("total_tokens")), _cost(usage.get("estimated_cost_usd"))),
+        ("Developer", *_stage_values(usage, "developer"), _stage_duration(usage, "developer")),
+        ("Tests", *_stage_values(usage, "tests"), _stage_duration(usage, "tests")),
+        ("Investigator", *_stage_values(usage, "investigator"), _stage_duration(usage, "investigator")),
+        ("Review", *_stage_values(usage, "reviewer"), _stage_duration(usage, "reviewer")),
+        (
+            "Total", _number(usage.get("total_tokens")), _cost(usage.get("estimated_cost_usd")),
+            _duration(duration),
+        ),
     ]
-    stage_rows = [f"| {label} | {tokens} | {cost} |" for label, tokens, cost in stages]
+    stage_rows = [
+        f"| {label} | {tokens} | {cost} | {stage_duration} |"
+        for label, tokens, cost, stage_duration in stages
+    ]
     heading_icon = _STATUS_PRESENTATION.get(terminal, _STATUS_PRESENTATION["unknown"])[0]
     body = "\n".join([
         _marker(run, issue, terminal),
@@ -255,8 +301,10 @@ def format_completion_comment(
         "<details>",
         "<summary>Usage and stages</summary>",
         "",
-        "| Stage | Tokens | Cost |",
-        "|---|---:|---:|",
+        "Per-stage duration is the sum of recorded invocation durations; older runs use matching operation timings. Total is the overall elapsed run duration.",
+        "",
+        "| Stage | Tokens | Cost | Duration |",
+        "|---|---:|---:|---:|",
         *stage_rows,
         "",
         "</details>",

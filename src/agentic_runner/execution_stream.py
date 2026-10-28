@@ -383,10 +383,11 @@ def _summary_stage_usage(usage: dict[str, Any], stage: str, count: int) -> dict[
 
 def _summary_stage_line(stage: str, count: int, tokens: str, duration: str,
                         suffix: str = "", *, run_width: int = 2,
-                        token_width: int = 9, duration_width: int = 7) -> str:
+                        token_width: int = 9, duration_width: int = 7,
+                        label_width: int = len("[DEVELOPER]") + 2) -> str:
     """Render one stage row from widths calculated from unstyled values."""
     label = "REVIEW" if stage == "reviewer" else stage.upper()
-    plain_label = f"[{label}]".ljust(len("[DEVELOPER]") + 2)
+    plain_label = f"[{label}]".ljust(label_width)
     plain_duration = duration.rjust(duration_width)
     rendered_label = style_text(plain_label, style_status_tokens=False)
     rendered_duration = _paint(plain_duration, "36")
@@ -423,7 +424,8 @@ def _print_execution_summary(folder: Path) -> None:
     ), style_status_tokens=False))
 
     stage_rows: list[tuple[str, int, str, str, str]] = []
-    for stage in ("developer", "tests", "reviewer"):
+    stages = ("developer", "tests", "investigator", "reviewer")
+    for stage in stages:
         count, duration = _summary_stage_data(usage, stage)
         stage_usage = _summary_stage_usage(usage, stage, count)
         tokens = _summary_stage_token_text(stage_usage.get("total_tokens"))
@@ -447,11 +449,15 @@ def _print_execution_summary(folder: Path) -> None:
     run_width = max(2, *(len(str(row[1])) for row in stage_rows))
     token_width = max(1, *(len(row[2]) for row in stage_rows))
     duration_width = max(1, *(len(row[3]) for row in stage_rows))
+    label_width = max(
+        len(f"[{('REVIEW' if stage == 'reviewer' else stage.upper())}]")
+        for stage in stages
+    ) + 1
     for stage, count, tokens, duration, suffix in stage_rows:
         _console_print(timestamped_status(_summary_stage_line(
             stage, count, tokens, duration, suffix,
             run_width=run_width, token_width=token_width,
-            duration_width=duration_width,
+            duration_width=duration_width, label_width=label_width,
         )))
 
     workflow_metrics = usage.get("workflow_metrics")

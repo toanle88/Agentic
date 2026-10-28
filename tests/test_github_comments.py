@@ -56,7 +56,7 @@ class GithubCommentTests(unittest.TestCase):
                 self.assertIn("| Tests | ❌ Failed |", body)
                 self.assertIn("| Review | ⏭️ Not reached |", body)
                 self.assertIn("<details>\n<summary>Usage and stages</summary>", body)
-                self.assertIn("| Stage | Tokens | Cost |", body)
+                self.assertIn("| Stage | Tokens | Cost | Duration |", body)
                 self.assertIn("### Next step\n\n", body)
                 self.assertIn("---\nBranch: `agent/issue-119-aabbccdd`", body)
                 self.assertNotIn("do-not-publish", body)
@@ -134,12 +134,17 @@ class GithubCommentTests(unittest.TestCase):
         record_usage(
             self.folder, "developer",
             {"total_tokens": 31_000, "estimated_cost_usd": 0.14},
-            invocation={"name": "developer-001", "stage": "developer"},
+            invocation={"name": "developer-001", "stage": "developer", "duration_seconds": 120},
         )
         record_usage(
             self.folder, "reviewer",
             {"total_tokens": 204, "estimated_cost_usd": 0.002},
-            invocation={"name": "review-001", "stage": "reviewer"},
+            invocation={"name": "review-001", "stage": "reviewer", "duration_seconds": 2},
+        )
+        record_usage(
+            self.folder, "investigator",
+            {"total_tokens": 15, "estimated_cost_usd": 0.001},
+            invocation={"name": "investigation-001", "stage": "investigator", "duration_seconds": 13},
         )
         record_operation(
             self.folder, "tests", "test-001",
@@ -156,9 +161,10 @@ class GithubCommentTests(unittest.TestCase):
         result = self._result("RETRY_EXHAUSTED")
         _, body = format_completion_comment(self.run, self.issue, self.folder, result)
         self.assertIn("| Duration | 8m 38s |", body)
-        self.assertIn("| Total | 31,204 | $0.1420 |", body)
-        self.assertIn("| Developer | 31,000 | $0.1400 |", body)
-        self.assertIn("| Review | 204 | $0.0020 |", body)
+        self.assertIn("| Total | 31,219 | $0.1430 | 8m 38s |", body)
+        self.assertIn("| Developer | 31,000 | $0.1400 | 2m 0s |", body)
+        self.assertIn("| Investigator | 15 | $0.0010 | 13s |", body)
+        self.assertIn("| Review | 204 | $0.0020 | 2s |", body)
         self.assertIn("| Tests | ❌ Failed |", body)
         self.assertIn("| Review | ❔ Unknown |", body)
 
@@ -168,7 +174,8 @@ class GithubCommentTests(unittest.TestCase):
         _, unknown_body = format_completion_comment(
             self.run, self.issue, unknown_folder, unknown,
         )
-        self.assertIn("| Total | unknown | unknown |", unknown_body)
+        self.assertIn("| Total | unknown | unknown | unknown |", unknown_body)
+        self.assertIn("| Investigator | unknown | unknown | unknown |", unknown_body)
 
     def test_duplicate_prevention_uses_local_marker_and_remote_marker(self):
         self._result("APPROVED", tests="passed", review="approved")
