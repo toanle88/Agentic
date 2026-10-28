@@ -219,13 +219,14 @@ drivers. This fail-closed behavior applies before staging, worktree creation,
 and publication; repositories using those filters must remove them or use a
 separate trusted workflow.
 
-Provider staging honors the repository's standard Git ignore rules for
-untracked paths, so dependency and build directories such as `node_modules`
-are not copied into the provider projection. Read-only native-review staging
-accepts at most 10,000 regular files, 2,000 directories, 12,000 traversed
-entries, and 64 MiB total source content. A single staged file remains limited
-to 4 MiB. Exceeding any staging bound or encountering a traversal/copy error
-fails the review rather than passing a partial tree.
+Provider staging and synchronization honor the repository's standard Git ignore
+rules for untracked paths, so dependency and build directories such as
+`node_modules` are not copied into or synchronized from the provider
+projection. Read-only native-review staging accepts at most 10,000 regular
+files, 2,000 directories, 12,000 traversed entries, and 64 MiB total source
+content. A single staged file remains limited to 4 MiB. Exceeding any staging
+bound or encountering a traversal/copy error fails the review rather than
+passing a partial tree.
 
 Dashboard collection inspects at most 2,000 candidate run folders, keeps at
 most the 500 newest inspected runs, and retains 24 newest regular artifacts

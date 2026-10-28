@@ -988,6 +988,29 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
             self.assertFalse((root / "first.py").exists())
             self.assertFalse((root / "second.py").exists())
 
+    def test_provider_sync_skips_generated_files_in_git_ignored_trees(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "worktree"
+            projection = Path(temp) / "projection"
+            root.mkdir()
+            subprocess.run(
+                ['git', 'init', '--initial-branch=main', str(root)],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            (root / '.gitignore').write_text('node_modules/\n', encoding='utf-8')
+            dependency = root / 'node_modules' / 'dependency.js'
+            dependency.parent.mkdir()
+            dependency.write_text('dependency\n', encoding='utf-8')
+            baseline = _stage_worktree(root, projection, skip=lambda _: False, read_only=False)
+
+            generated = projection / 'node_modules' / '.tmp' / 'tsconfig.app.tsbuildinfo'
+            generated.parent.mkdir(parents=True)
+            generated.write_text('generated\n', encoding='utf-8')
+
+            _sync_provider_worktree(root, projection, baseline)
+
+            self.assertFalse((root / 'node_modules' / '.tmp').exists())
+
     def test_provider_sync_preserves_mode_only_changes(self):
         if os.name == "nt":
             self.skipTest("permission mode changes are not portable on Windows")

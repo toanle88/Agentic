@@ -530,14 +530,23 @@ def _sync_provider_worktree(
     allow_self_hosted_sources: bool = False,
 ) -> None:
     """Apply only safe provider changes back to the original worktree."""
+    ignored_paths = _ignored_worktree_paths(source)
+
+    def should_skip(relative: str) -> bool:
+        normalized = relative.rstrip("/")
+        return provider_forbidden(
+            relative, allow_self_hosted_sources=allow_self_hosted_sources,
+        ) or any(
+            normalized == ignored or normalized.startswith(f"{ignored}/")
+            for ignored in ignored_paths
+        )
+
     current: dict[str, tuple[_ProjectionFile, bytes]] = {}
     current_files = 0
     current_bytes = 0
     for kind, relative, _ in iter_safe_regular_files(
         projection,
-        skip=lambda filename: provider_forbidden(
-            filename, allow_self_hosted_sources=allow_self_hosted_sources,
-        ),
+        skip=should_skip,
         fail_on_error=True,
         max_entries=MAX_PROVIDER_STAGE_ENTRIES,
         max_directories=MAX_PROVIDER_STAGE_DIRECTORIES,
