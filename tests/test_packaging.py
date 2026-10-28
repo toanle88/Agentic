@@ -104,8 +104,8 @@ class PackagingTests(unittest.TestCase):
         self.assertIn(
             output,
             {
-                "agentic.py 1.1.132",
-                f"{Path(sys.executable).name} -m agentic_runner.cli 1.1.132",
+                "agentic.py 1.1.133",
+                f"{Path(sys.executable).name} -m agentic_runner.cli 1.1.133",
             },
         )
 
@@ -130,7 +130,7 @@ class PackagingTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(probe.returncode, 0, probe.stderr)
-        self.assertEqual(probe.stdout.strip(), "1.1.132")
+        self.assertEqual(probe.stdout.strip(), "1.1.133")
 
 
 if __name__ == "__main__":
