@@ -466,6 +466,10 @@ def _dashboard_settings(repo: Path, runs: list[dict[str, Any]]) -> dict[str, Any
         "developer_model": config.get("developer_agent", {}).get("model"),
         "reviewer_provider": config.get("reviewer_agent", {}).get("provider", "codex"),
         "reviewer_model": config.get("reviewer_agent", {}).get("model"),
+        "investigator_provider": config.get("investigator_agent", {}).get(
+            "provider", config.get("reviewer_agent", {}).get("provider", "codex")
+        ),
+        "investigator_model": config.get("investigator_agent", {}).get("model"),
         "sandbox_enabled": config.get("sandbox", {}).get("enabled", False),
         "sandbox_network": config.get("sandbox", {}).get("allow_network", False),
         "test_command_count": len(config.get("test_commands", [])),

@@ -1650,9 +1650,11 @@ def _run_investigation(run: Run, issue: Issue, config: dict[str, Any],
         # Recompute the timeout for every provider attempt so a retry cannot
         # outlive the task's overall deadline.
         kwargs = {
-            "agent": config.get("reviewer_agent"),
+            "agent": config.get("investigator_agent") or config.get("reviewer_agent"),
             "timeout": _remaining_timeout(
-                deadline, config.get("effective_reviewer_timeout_seconds"),
+                deadline,
+                config.get("effective_investigator_timeout_seconds",
+                           config.get("effective_reviewer_timeout_seconds")),
             ),
             "sandbox": config.get("sandbox"),
             "verbose": verbose,

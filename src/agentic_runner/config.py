@@ -221,7 +221,9 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
                                 legacy_provider: str, legacy_model: str | None,
                                 legacy_reasoning: str | None,
                                 legacy_timeout: int | None,
-                                security_mode: str) -> AgentSettings:
+                                security_mode: str,
+                                fallback: Mapping[str, Any] | None = None) -> AgentSettings:
+    defaults = dict(fallback or {})
     raw = data.get(section)
     if raw is None and section == "developer":
         raw = data.get("agent")
@@ -240,29 +242,43 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
                 f"{section}.{secret_field} is not accepted; store credentials in the environment"
             )
 
-    provider = raw.get("provider", data.get(f"{section}_provider", legacy_provider))
-    model = raw.get("model", legacy_model)
-    reasoning = raw.get("reasoning_effort", legacy_reasoning)
-    timeout = raw.get("timeout_seconds", legacy_timeout)
-    auth = raw.get("auth")
-    api_key_env = raw.get("api_key_env")
-    base_url = raw.get("base_url")
-    allow_custom_endpoint = raw.get("allow_custom_endpoint", False)
-    executable_path = raw.get("executable_path")
-    host = _validate_host(raw.get("host"), f"{section}.host")
-    max_tool_turns = raw.get("max_tool_turns")
-    command_timeout = raw.get("command_timeout_seconds")
-    allow_network = raw.get("allow_network", False)
-    json_mode = raw.get("json_mode", False)
+    provider = raw.get(
+        "provider", data.get(f"{section}_provider", defaults.get("provider", legacy_provider))
+    )
+    provider_changed = provider != defaults.get("provider")
+    model = raw.get("model", defaults.get("model", legacy_model))
+    reasoning = raw.get("reasoning_effort", defaults.get("reasoning_effort", legacy_reasoning))
+    timeout = raw.get("timeout_seconds", defaults.get("timeout_seconds", legacy_timeout))
+
+    def provider_default(name: str, default: Any = None) -> Any:
+        if name in raw:
+            return raw[name]
+        if not provider_changed and name in defaults:
+            return defaults[name]
+        return default
+
+    auth = provider_default("auth")
+    api_key_env = provider_default("api_key_env")
+    base_url = provider_default("base_url")
+    allow_custom_endpoint = provider_default("allow_custom_endpoint", False)
+    executable_path = provider_default("executable_path")
+    host = _validate_host(provider_default("host"), f"{section}.host")
+    max_tool_turns = provider_default("max_tool_turns")
+    command_timeout = provider_default("command_timeout_seconds")
+    allow_network = provider_default("allow_network", False)
+    json_mode = provider_default("json_mode", False)
     policy_value = raw.get("permission_policy")
+    policy_explicit = policy_value is not None
     if policy_value is None:
         policy_config = data.get("permission_policy")
         if policy_config is None:
             policy_config = data.get("permissions")
         if isinstance(policy_config, dict) and section in policy_config:
             policy_value = policy_config[section]
+            policy_explicit = True
         elif policy_config is not None and not isinstance(policy_config, dict):
             policy_value = policy_config
+            policy_explicit = True
         elif isinstance(policy_config, dict) and any(
             name in policy_config for name in (
                 "read_files", "search_files", "edit_files", "create_files",
@@ -270,6 +286,9 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
             )
         ):
             policy_value = policy_config
+            policy_explicit = True
+        elif "permission_policy" in defaults:
+            policy_value = defaults["permission_policy"]
     if not isinstance(provider, str) or provider not in SUPPORTED_PROVIDERS:
         choices = ", ".join(SUPPORTED_PROVIDERS)
         raise ValueError(f"{section}.provider must be one of: {choices}")
@@ -304,6 +323,18 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
         )
     if type(allow_network) is not bool:
         raise ValueError(f"{section}.allow_network must be a boolean")
+    if section == "investigator":
+        if raw.get("allow_network") is True or (
+            policy_explicit and isinstance(policy_value, dict)
+            and policy_value.get("network") is True
+        ):
+            raise ValueError("investigator network access is not permitted")
+        # Reviewer fallback may contain network capability. It remains valid
+        # for the reviewer, but must not cross the investigator boundary.
+        allow_network = False
+        if isinstance(policy_value, dict) and policy_value.get("network"):
+            policy_value = dict(policy_value)
+            policy_value["network"] = False
     if type(json_mode) is not bool:
         raise ValueError(f"{section}.json_mode must be a boolean")
     if type(allow_custom_endpoint) is not bool:
@@ -345,7 +376,7 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
             )
     permission_policy = validate_permission_policy(
         policy_value,
-        role="developer" if section == "developer" else "reviewer",
+        role="developer" if section == "developer" else section,
         security_mode=security_mode,
         default_network=(
             bool(allow_network)
@@ -453,6 +484,11 @@ def load_config(path: Path) -> dict[str, Any]:
         legacy_reasoning=reasoning_effort, legacy_timeout=codex_timeout,
         security_mode=security_mode,
     )
+    investigator_agent = _agent_settings_from_config(
+        data, "investigator", legacy_provider="codex", legacy_model=codex_model,
+        legacy_reasoning=reasoning_effort, legacy_timeout=codex_timeout,
+        security_mode=security_mode, fallback=reviewer_agent.as_dict(),
+    )
     sandbox = validate_sandbox(data.get("sandbox"))
     if security_mode == "isolated" and not sandbox["enabled"]:
         raise ValueError("security_mode 'isolated' requires sandbox.enabled=true")
@@ -480,14 +516,19 @@ def load_config(path: Path) -> dict[str, Any]:
         "effective_reviewer_timeout_seconds": _effective_timeout(
             reviewer_agent.timeout_seconds, DEFAULT_REVIEWER_TIMEOUT
         ),
+        "effective_investigator_timeout_seconds": _effective_timeout(
+            investigator_agent.timeout_seconds, DEFAULT_REVIEWER_TIMEOUT
+        ),
         "codex_model": codex_model,
         "codex_reasoning_effort": reasoning_effort,
         "security_mode": security_mode,
         "developer_agent": developer_agent.as_dict(),
         "reviewer_agent": reviewer_agent.as_dict(),
+        "investigator_agent": investigator_agent.as_dict(),
         "permission_policy": {
             "developer": developer_agent.permission_policy,
             "reviewer": reviewer_agent.permission_policy,
+            "investigator": investigator_agent.permission_policy,
         },
         "sandbox": sandbox,
     }
@@ -747,7 +788,7 @@ def sandbox_env_for_providers(*providers: str) -> list[str]:
 def credential_environment_names(config: Mapping[str, Any]) -> list[str]:
     """Return configured provider and sandbox credential environment names."""
     names: list[str] = []
-    for role in ("developer_agent", "reviewer_agent"):
+    for role in ("developer_agent", "reviewer_agent", "investigator_agent"):
         settings = config.get(role)
         if not isinstance(settings, Mapping):
             continue

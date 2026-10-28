@@ -171,7 +171,7 @@ def _status_print(message: Any, *, file: Any = None, flush: bool = False,
 def _warn_dangerous_permissions(config: dict[str, Any]) -> None:
     """Warn whenever a run enables an explicit dangerous provider escape hatch."""
     dangerous_roles = [
-        role for role in ("developer", "reviewer")
+        role for role in ("developer", "reviewer", "investigator")
         if config.get(f"{role}_agent", {}).get("permission_policy", {}).get("allow_dangerous")
     ]
     if dangerous_roles:
@@ -650,7 +650,7 @@ def _require_manual_completion_validation(
 def _ci_repair_secret_values(config: dict[str, Any]) -> tuple[str, ...]:
     """Resolve configured credential values only for in-memory redaction."""
     names: set[str] = set()
-    for role in ("developer_agent", "reviewer_agent"):
+    for role in ("developer_agent", "reviewer_agent", "investigator_agent"):
         settings = config.get(role)
         if isinstance(settings, dict) and isinstance(settings.get("api_key_env"), str):
             names.add(settings["api_key_env"])
@@ -1266,9 +1266,11 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
         "permission_policy": {
             "developer": default_permission_policy("developer"),
             "reviewer": default_permission_policy("reviewer"),
+            "investigator": default_permission_policy("investigator"),
         },
         "developer": developer_settings,
         "reviewer": reviewer_settings,
+        "investigator": {},
         "security_mode": security_mode,
         "sandbox": sandbox,
     }
@@ -1891,7 +1893,9 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
     # provider credentials. The normal development/review path still does.
     if not args.mark_done and not args.publish:
         preflight_agent_settings(
-            config["developer_agent"], config["reviewer_agent"], sandbox=config["sandbox"]
+            config["developer_agent"], config["reviewer_agent"],
+            config.get("investigator_agent") or config["reviewer_agent"],
+            sandbox=config["sandbox"]
         )
     if args.repair_ci:
         pr_number = args.pr_number

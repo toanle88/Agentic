@@ -322,6 +322,8 @@ def record_security_policy(folder: Path, config: dict[str, Any]) -> None:
     developer: dict[str, Any] = developer_value if isinstance(developer_value, dict) else {}
     reviewer_value = config.get("reviewer_agent")
     reviewer: dict[str, Any] = reviewer_value if isinstance(reviewer_value, dict) else {}
+    investigator_value = config.get("investigator_agent")
+    investigator: dict[str, Any] = investigator_value if isinstance(investigator_value, dict) else {}
     enabled = sandbox.get("enabled") is True
     policy = {
         "mode": config.get("security_mode", "trusted"),
@@ -340,9 +342,14 @@ def record_security_policy(folder: Path, config: dict[str, Any]) -> None:
             "provider": reviewer.get("provider", "codex"),
             "filesystem": "read-only",
         },
+        "investigator": {
+            "provider": investigator.get("provider", reviewer.get("provider", "codex")),
+            "filesystem": "read-only",
+        },
         "permission_policy": {
             "developer": dict(developer.get("permission_policy", {})),
             "reviewer": dict(reviewer.get("permission_policy", {})),
+            "investigator": dict(investigator.get("permission_policy", {})),
         },
     }
     path, data = _load_run_record(folder)
