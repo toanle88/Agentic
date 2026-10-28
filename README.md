@@ -391,6 +391,7 @@ termination for every running Agentic job.
 | [Getting started](docs/getting-started.md) | Installation, authentication, first run, and target repository setup. |
 | [Five-minute quickstart](docs/quickstart.md) | A disposable local-task walkthrough. |
 | [Offline benchmarking](docs/benchmarking.md) | Deterministic argv-only benchmark cases and result format. |
+| [Provider authorization](docs/provider-authorization.md) | Provider-neutral capability matrix and command boundaries. |
 | [Configuration](docs/configuration.md) | `agent_config.json`, test commands, model settings, retries, and timeouts. |
 | [Agent instructions](docs/agent-instructions.md) | How to create and maintain a target repository's `AGENTS.md`. |
 | [Development standards](docs/development-standards.md) | Testing, naming, security, compatibility, and review conventions for Agentic changes. |

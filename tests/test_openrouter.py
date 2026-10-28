@@ -846,6 +846,11 @@ class OpenRouterTests(unittest.TestCase):
         allowed, reason = agentic_openrouter._openrouter_command_allowed(
             ['curl', 'https://example.test'], readonly=False, allow_network=True
         )
+        self.assertFalse(allowed, reason)
+        allowed, reason = agentic_openrouter._openrouter_command_allowed(
+            ['curl', 'https://example.test'], readonly=False, allow_network=True,
+            check_commands=[['curl', 'https://example.test']],
+        )
         self.assertTrue(allowed, reason)
         for argv in (
             ['git', 'status'], ['git', 'diff', '--', 'tracked.txt'],
@@ -2281,6 +2286,8 @@ class OpenRouterTests(unittest.TestCase):
             result = agentic_openrouter._openrouter_tool_call(
                 root, 'run_command', {'argv': [sys.executable, str(script)]},
                 readonly=False, command_timeout=5,
+                permission_policy={'allow_dangerous': True},
+                security_mode='isolated',
             )
             for _ in range(100):
                 if pid_file.exists():
@@ -2329,6 +2336,7 @@ class OpenRouterTests(unittest.TestCase):
             result = agentic_openrouter._openrouter_tool_call(
                 root, 'run_command', {'argv': [sys.executable, str(script)]},
                 readonly=False, command_timeout=1,
+                check_commands=[[sys.executable, str(script)]],
             )
             pid = int(pid_file.read_text(encoding='utf-8'))
             self.assertIn('timed out after 1s', result)
@@ -2365,6 +2373,7 @@ class OpenRouterTests(unittest.TestCase):
                         agentic_openrouter._openrouter_tool_call(
                             root, 'run_command', {'argv': [sys.executable, str(script)]},
                             readonly=False, command_timeout=5,
+                            check_commands=[[sys.executable, str(script)]],
                         )
             for _ in range(100):
                 if pid_file.exists():

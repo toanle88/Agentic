@@ -15,6 +15,12 @@ and three warm repetitions on the same host. A result is a regression when
 p95 is more than 20% slower or additional peak memory is more than 10% higher than the
 same-host baseline; investigate before changing a safety boundary.
 
+The checked-in [`benchmarks/dashboard-baseline.json`](../benchmarks/dashboard-baseline.json)
+is the machine-readable historical reference for the corpus dimensions and
+dashboard collection timings. It deliberately records only stable reference
+facts; host-specific p99, memory, and auxiliary case measurements belong in a
+generated result file and should be compared on the same machine.
+
 The quality benchmark below measures normalized workflow outcomes, not these
 performance budgets. Provider calls and external services are never required
 for the offline performance or schema checks.
