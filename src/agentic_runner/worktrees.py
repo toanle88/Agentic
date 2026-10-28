@@ -338,9 +338,9 @@ def issue_fingerprint(issue: Issue) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def command(argv: list[str], cwd: Path, *, timeout: int = 180,
-            check: bool = True, env: dict[str, str] | None = None,
-            max_output_bytes: int | None = None) -> subprocess.CompletedProcess[str]:
+def _run_command(argv: list[str], cwd: Path, *, timeout: int = 180,
+                 check: bool = True, env: dict[str, str] | None = None,
+                 max_output_bytes: int | None = None) -> subprocess.CompletedProcess[str]:
     """Subprocess without a shell; issue data never becomes shell code."""
     if max_output_bytes is None:
         max_output_bytes = MAX_COMMAND_OUTPUT_BYTES
@@ -421,6 +421,51 @@ def command(argv: list[str], cwd: Path, *, timeout: int = 180,
     return result
 
 
+def _is_git_command(argv: list[str]) -> bool:
+    return bool(argv) and Path(argv[0]).name.casefold() in {"git", "git.exe"}
+
+
+def _is_filter_probe(argv: list[str]) -> bool:
+    return _is_git_command(argv) and argv == git_filter_probe_argv()
+
+
+def _hardened_git_command(
+    argv: list[str], cwd: Path, *, timeout: int, check: bool,
+    env: dict[str, str] | None, max_output_bytes: int | None,
+) -> subprocess.CompletedProcess[str]:
+    """Run any Git argv through the repository-configuration safety boundary."""
+    environment = hardened_git_environment(env)
+    filter_probe = _run_command(
+        git_filter_probe_argv(argv[0]), cwd, timeout=10, check=False,
+        env=environment, max_output_bytes=MAX_COMMAND_OUTPUT_BYTES,
+    )
+    if filter_probe.returncode not in (0, 1):
+        raise RuntimeError("Could not inspect repository Git filter configuration")
+    if filter_probe.stdout.strip():
+        raise RuntimeError(
+            "Repository Git filter drivers are not supported for safe operations"
+        )
+    return _run_command(
+        hardened_git_argv(argv), cwd, timeout=timeout, check=check,
+        env=environment, max_output_bytes=max_output_bytes,
+    )
+
+
+def command(argv: list[str], cwd: Path, *, timeout: int = 180,
+            check: bool = True, env: dict[str, str] | None = None,
+            max_output_bytes: int | None = None) -> subprocess.CompletedProcess[str]:
+    """Run argv safely, routing every Git invocation through one dispatcher."""
+    if _is_git_command(argv) and not _is_filter_probe(argv):
+        return _hardened_git_command(
+            argv, cwd, timeout=timeout, check=check, env=env,
+            max_output_bytes=max_output_bytes,
+        )
+    return _run_command(
+        argv, cwd, timeout=timeout, check=check, env=env,
+        max_output_bytes=max_output_bytes,
+    )
+
+
 def git(repo: Path, *args: str, check: bool = True) -> str:
     # Repository-local Git configuration is untrusted input. These overrides
     # prevent status/diff/fetch/worktree operations from starting configured
@@ -466,6 +511,13 @@ def probe(
     env: dict[str, str] | None = None,
 ) -> tuple[bool, str]:
     """Run a small diagnostic command without turning its output into an exception."""
+    if _is_git_command(argv):
+        try:
+            result = command(argv, cwd, timeout=timeout, check=False, env=env)
+        except RuntimeError as exc:
+            return False, str(exc)
+        output = result.stdout.strip()
+        return result.returncode == 0, output
     try:
         result = subprocess.run(
             argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

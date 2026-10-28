@@ -18,8 +18,8 @@ from an environment variable and runs it without a shell:
 | `agentic` | `AGENTIC_BENCHMARK_AGENTIC_COMMAND` |
 | reviewer | `AGENTIC_BENCHMARK_REVIEWER_COMMAND` |
 
-Commands may use `{repo}`, `{task_file}`, `{result_file}`, `{reviewer}`,
-`{scenario}`, and `{task_id}` placeholders. A provider-aware command should
+Commands may use `{repo}`, `{task_file}`, `{result_file}`, `{state_dir}`,
+`{reviewer}`, `{scenario}`, and `{task_id}` placeholders. A provider-aware command should
 write the normalized JSON result to `{result_file}` and leave its final
 candidate patch in the supplied repository. If it does not write a result,
 the wrapper records only command success/failure; it never copies raw provider

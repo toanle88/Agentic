@@ -2100,6 +2100,28 @@ class OpenRouterTests(unittest.TestCase):
             self.assertEqual(len(second[0]), 50)
             build.assert_called_once()
 
+    def test_openrouter_file_list_final_page_stops_at_traversal_bound(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tree = root / "tree"
+            tree.mkdir()
+            with patch.object(
+                agentic_openrouter_tools, "OPENROUTER_LIST_FILES_PAGE_SIZE", 2,
+            ), patch.object(
+                agentic_openrouter_tools, "OPENROUTER_LIST_FILES_MAX_PAGE", 2,
+            ):
+                for index in range(4):
+                    (tree / f"file-{index}.txt").write_text("file\n")
+                agentic_openrouter_tools._FILE_LIST_CACHE.clear()
+                page, has_more = agentic_openrouter_tools._list_files_page(root / "tree", root, 2)
+                self.assertEqual(len(page), 2)
+                self.assertFalse(has_more)
+
+                (tree / "file-4.txt").write_text("file\n")
+                agentic_openrouter_tools._FILE_LIST_CACHE.clear()
+                with self.assertRaisesRegex(RuntimeError, "safety bound"):
+                    agentic_openrouter_tools._list_files_page(root / "tree", root, 2)
+
     def test_openrouter_file_list_rejects_oversized_page_before_indexing(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

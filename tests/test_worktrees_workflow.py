@@ -4,6 +4,7 @@ import contextlib
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -135,6 +136,7 @@ class WorkflowTests(_GitRepositoryTestCase):
         argv = captured["argv"]
         for setting in (
             "core.fsmonitor=false", f"core.hooksPath={os.devnull}",
+            "core.whitespace=cr-at-eol",
             "credential.helper=", "core.sshCommand=ssh",
             "core.gitProxy=none", "protocol.ext.allow=never",
             "remote.origin.uploadpack=git-upload-pack",
@@ -147,6 +149,20 @@ class WorkflowTests(_GitRepositoryTestCase):
         self.assertEqual(environment["GIT_ATTR_NOSYSTEM"], "1")
         self.assertNotIn("GIT_EXTERNAL_DIFF", environment)
 
+    def test_git_filter_probe_uses_the_requested_executable(self):
+        git_executable = shutil.which("git") or "git"
+        calls = []
+
+        def fake_run(argv, *args, **kwargs):
+            calls.append(argv)
+            return CompletedProcess(argv, 0, stdout="", stderr="")
+
+        with patch.object(agentic_worktrees, "_run_command", side_effect=fake_run):
+            agentic_worktrees.command([git_executable, "status"], self.repo)
+
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertEqual(calls[0][0], git_executable)
+
     def test_git_rejects_repository_filter_drivers_before_running_operations(self):
         subprocess.run(
             ["git", "config", "filter.malicious.clean", "sh -c evil"],
@@ -154,6 +170,30 @@ class WorkflowTests(_GitRepositoryTestCase):
         )
         with self.assertRaisesRegex(RuntimeError, "filter drivers"):
             agentic_worktrees.git(self.repo, "status")
+
+    def test_compatibility_and_workflow_git_boundaries_disable_fsmonitor(self):
+        marker = self.repo / "fsmonitor-ran"
+        helper = self.repo / "fsmonitor-helper"
+        helper.write_text(
+            f"#!/bin/sh\ntouch {marker}\nprintf 'token\\n'\n",
+            encoding="utf-8",
+        )
+        helper.chmod(0o700)
+        subprocess.run(
+            ["git", "config", "core.fsmonitor", str(helper)], cwd=self.repo,
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+        self.assertEqual(
+            agentic.git(self.repo, "status", "--short", "--untracked-files=no"),
+            "",
+        )
+        self.assertFalse(marker.exists())
+        result = agentic_workflow.command(
+            ["git", "status", "--short", "--untracked-files=no"], self.repo,
+        )
+        self.assertEqual(result.stdout, "")
+        self.assertFalse(marker.exists())
 
     def test_git_diff_output_is_bounded_before_materialization(self):
         (self.repo / "readme.md").write_text("changed\n")
