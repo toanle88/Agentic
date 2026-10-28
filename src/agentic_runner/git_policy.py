@@ -8,6 +8,11 @@ from collections.abc import Mapping
 GIT_SAFETY_CONFIG = (
     "-c", "core.fsmonitor=false",
     "-c", f"core.hooksPath={os.devnull}",
+    # Native Windows checkouts commonly use CRLF while the index stores LF.
+    # The global config is intentionally disabled below, so provide the
+    # platform's line-ending policy explicitly at the safe command boundary.
+    "-c", f"core.autocrlf={'true' if os.name == 'nt' else 'false'}",
+    "-c", "core.whitespace=cr-at-eol",
     "-c", "credential.helper=",
     "-c", "core.sshCommand=ssh",
     "-c", "core.gitProxy=none",

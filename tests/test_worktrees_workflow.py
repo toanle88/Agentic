@@ -135,6 +135,7 @@ class WorkflowTests(_GitRepositoryTestCase):
         argv = captured["argv"]
         for setting in (
             "core.fsmonitor=false", f"core.hooksPath={os.devnull}",
+            "core.whitespace=cr-at-eol",
             "credential.helper=", "core.sshCommand=ssh",
             "core.gitProxy=none", "protocol.ext.allow=never",
             "remote.origin.uploadpack=git-upload-pack",
