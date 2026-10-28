@@ -294,6 +294,27 @@ def _descriptor_digest(descriptor: int, relative: str) -> str:
         raise RuntimeError(f"Could not validate provider worktree file: {relative}") from exc
 
 
+def _snapshot_projection_descriptor(
+    descriptor: int, relative: str, identity: tuple[int, int],
+) -> _ProjectionFile:
+    """Capture a mutation snapshot from the already-open validated target."""
+    metadata = revalidate_single_link_regular(
+        descriptor, identity, description="provider worktree file",
+    )
+    digest = _descriptor_digest(descriptor, relative)
+    metadata = revalidate_single_link_regular(
+        descriptor, identity, description="provider worktree file",
+    )
+    mode = stat.S_IMODE(metadata.st_mode)
+    return _ProjectionFile(
+        identity=identity,
+        size=metadata.st_size,
+        digest=digest,
+        mode=mode,
+        source_mode=mode,
+    )
+
+
 def _write_projection_file(
     root: Path, relative: str, data: bytes, mode: int,
     expected: _ProjectionFile | None,
@@ -369,9 +390,10 @@ def _write_projection_file(
                 # must never be mistaken for our mutation.
                 mutation_snapshot = None
                 try:
-                    snapshot, _ = _read_projection_file(root, relative)
-                    if snapshot.identity == mutation_identity:
-                        mutation_snapshot = snapshot
+                    if mutation_identity is not None:
+                        mutation_snapshot = _snapshot_projection_descriptor(
+                            descriptor, relative, mutation_identity,
+                        )
                 except (FileNotFoundError, OSError, RuntimeError, ValueError):
                     pass
                 failure = RuntimeError(
