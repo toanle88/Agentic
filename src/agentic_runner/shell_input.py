@@ -1177,6 +1177,7 @@ def _interactive_input(
     output_state.set_mode(terminal_mode)
     output_history = output_state.history
     output_scroll_lines = 0
+    input_completed = False
 
     hist_entries = list(history) if history else []
     hist_index = len(hist_entries)
@@ -1481,6 +1482,26 @@ def _interactive_input(
             dismissed = True
             render()
 
+    def clear_editor() -> None:
+        """Remove the transient editor before returning control to the shell."""
+        nonlocal prev_dropdown_lines, prev_editor_lines, prev_cursor_row
+        with _OUTPUT_LOCK:
+            clear: list[str] = []
+            _clear_previous_editor(clear)
+            if clear:
+                sys.stdout.write("".join(clear))
+            if prev_editor_lines:
+                size = shutil.get_terminal_size(fallback=(80, 24))
+                output_row = max(1, size.lines - prev_editor_lines)
+                sys.stdout.write("\033[r")
+                sys.stdout.write(
+                    f"\033[{output_row};{max(1, output_state.cursor_column)}H"
+                )
+            prev_dropdown_lines = 0
+            prev_editor_lines = 0
+            prev_cursor_row = 0
+            sys.stdout.flush()
+
     def finish_input() -> None:
         """Commit a submitted line as plain transcript output."""
         with _OUTPUT_LOCK:
@@ -1557,6 +1578,7 @@ def _interactive_input(
                             continue
                         clear_dropdown()
                         finish_input()
+                        input_completed = True
                         return line
 
                     if key == "TAB":
@@ -1651,15 +1673,11 @@ def _interactive_input(
 
                     if key == "CTRL_C":
                         clear_dropdown()
-                        sys.stdout.write("\n")
-                        sys.stdout.flush()
                         raise KeyboardInterrupt
 
                     if key == "CTRL_D":
                         if not line:
                             clear_dropdown()
-                            sys.stdout.write("\n")
-                            sys.stdout.flush()
                             raise EOFError
                         render()
                         continue
@@ -1724,6 +1742,8 @@ def _interactive_input(
                         _ACTIVE_INTERACTIVE_OUTPUT = previous_output
                     output_state.set_mode(TerminalMode.OUTPUT)
                     clear_dropdown()
+                    if not input_completed:
+                        clear_editor()
                     sys.stdout.write("\033[?2004l")
                     sys.stdout.flush()
     finally:
