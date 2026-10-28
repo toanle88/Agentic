@@ -660,6 +660,112 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(config['developer_agent']['reasoning_effort'], 'max')
         self.assertEqual(config['reviewer_agent']['reasoning_effort'], 'max')
 
+    def test_investigator_defaults_to_effective_reviewer_settings(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'investigator-fallback.json'
+            path.write_text(json.dumps({
+                'test_commands': [['python', '--version']],
+                'reviewer': {
+                    'provider': 'claude', 'model': 'review-model',
+                    'reasoning_effort': 'high', 'timeout_seconds': 41,
+                    'auth': 'api_key', 'api_key_env': 'REVIEW_KEY',
+                },
+            }))
+            config = agentic.load_config(path)
+        self.assertEqual(config['investigator_agent'], config['reviewer_agent'])
+        self.assertEqual(config['effective_investigator_timeout_seconds'], 41)
+
+    def test_investigator_fields_override_reviewer_fallback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'investigator-partial.json'
+            path.write_text(json.dumps({
+                'test_commands': [['python', '--version']],
+                'reviewer': {
+                    'provider': 'codex', 'model': 'review-model',
+                    'reasoning_effort': 'high', 'timeout_seconds': 41,
+                },
+                'investigator': {'model': 'investigator-model', 'timeout_seconds': 9},
+            }))
+            config = agentic.load_config(path)
+        investigator = config['investigator_agent']
+        self.assertEqual(investigator['provider'], 'codex')
+        self.assertEqual(investigator['model'], 'investigator-model')
+        self.assertEqual(investigator['reasoning_effort'], 'high')
+        self.assertEqual(config['effective_investigator_timeout_seconds'], 9)
+
+    def test_investigator_supports_independent_provider_and_credential(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'investigator-independent.json'
+            path.write_text(json.dumps({
+                'test_commands': [['python', '--version']],
+                'reviewer': {'provider': 'claude', 'model': 'review-model'},
+                'investigator': {
+                    'provider': 'openrouter', 'model': 'openai/investigator',
+                    'reasoning_effort': 'low', 'timeout_seconds': 12,
+                    'api_key_env': 'INVESTIGATOR_KEY',
+                },
+            }))
+            config = agentic.load_config(path)
+        investigator = config['investigator_agent']
+        self.assertEqual(investigator['provider'], 'openrouter')
+        self.assertEqual(investigator['model'], 'openai/investigator')
+        self.assertEqual(investigator['reasoning_effort'], 'low')
+        self.assertEqual(investigator['timeout_seconds'], 12)
+        self.assertEqual(investigator['api_key_env'], 'INVESTIGATOR_KEY')
+        self.assertIn('INVESTIGATOR_KEY', agentic.credential_environment_names(config))
+
+    def test_investigator_preflight_checks_custom_credential(self):
+        with patch.dict(agentic.os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, 'INVESTIGATOR_KEY'):
+                agentic.preflight_agent_settings(
+                    {'provider': 'openrouter', 'model': 'openai/investigator',
+                     'api_key_env': 'INVESTIGATOR_KEY'}
+                )
+
+    def test_investigator_permission_policy_remains_read_only(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'investigator-writes.json'
+            path.write_text(json.dumps({
+                'test_commands': [['python', '--version']],
+                'investigator': {'permission_policy': {'edit_files': True}},
+            }))
+            with self.assertRaisesRegex(ValueError, 'investigator.permission_policy'):
+                agentic.load_config(path)
+
+    def test_investigator_inherited_network_settings_are_disabled(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'investigator-network-fallback.json'
+            path.write_text(json.dumps({
+                'test_commands': [['python', '--version']],
+                'reviewer': {
+                    'provider': 'openrouter', 'model': 'openai/reviewer',
+                    'allow_network': True,
+                },
+            }))
+            config = agentic.load_config(path)
+        self.assertTrue(config['reviewer_agent']['allow_network'])
+        self.assertTrue(config['reviewer_agent']['permission_policy']['network'])
+        self.assertFalse(config['investigator_agent']['allow_network'])
+        self.assertFalse(config['investigator_agent']['permission_policy']['network'])
+
+    def test_investigator_explicit_network_settings_are_rejected(self):
+        cases = (
+            {'allow_network': True},
+            {'permission_policy': {'network': True}},
+        )
+        for investigator in cases:
+            with self.subTest(investigator=investigator), tempfile.TemporaryDirectory() as temp:
+                path = Path(temp) / 'investigator-network-explicit.json'
+                path.write_text(json.dumps({
+                    'test_commands': [['python', '--version']],
+                    'investigator': {
+                        'provider': 'openrouter', 'model': 'openai/investigator',
+                        **investigator,
+                    },
+                }))
+                with self.assertRaisesRegex(ValueError, 'investigator network access'):
+                    agentic.load_config(path)
+
 
     def test_preflight_agent_settings_checks_cli_and_openrouter_credentials(self):
         with patch.dict(agentic.os.environ, {}, clear=True):
@@ -1167,7 +1273,11 @@ class ConfigurationTests(unittest.TestCase):
         ]
         self.assertEqual(
             [item['name'] for item in provider_checks],
-            ['Developer provider (copilot)', 'Reviewer provider (copilot)'],
+            [
+                'Developer provider (copilot)',
+                'Reviewer provider (copilot)',
+                'Investigator provider (copilot)',
+            ],
         )
 
 

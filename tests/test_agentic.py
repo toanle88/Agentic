@@ -627,7 +627,9 @@ class PureTests(unittest.TestCase):
             issue = agentic.Issue(24, 'Investigate retry', '')
             config = {
                 'reviewer_agent': {'provider': 'codex'},
+                'investigator_agent': {'provider': 'gemini', 'model': 'fast-readonly'},
                 'effective_reviewer_timeout_seconds': 30,
+                'effective_investigator_timeout_seconds': 11,
                 'sandbox': None,
             }
             results = [
@@ -639,8 +641,12 @@ class PureTests(unittest.TestCase):
                   patch('agentic.investigate_issue', side_effect=results) as investigate):
                 verdict = agentic._run_investigation(run, issue, config, folder, deadline=100.0)
         self.assertEqual(verdict['summary'], 'Valid retry result')
-        self.assertEqual(remaining.call_args_list, [call(100.0, 30), call(100.0, 30)])
+        self.assertEqual(remaining.call_args_list, [call(100.0, 11), call(100.0, 11)])
         self.assertEqual([item.kwargs['timeout'] for item in investigate.call_args_list], [17, 4])
+        self.assertEqual(
+            [item.kwargs['agent'] for item in investigate.call_args_list],
+            [{'provider': 'gemini', 'model': 'fast-readonly'}] * 2,
+        )
 
 
     def test_preflight_rejects_missing_test_dependency(self):

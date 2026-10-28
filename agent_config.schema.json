@@ -47,6 +47,7 @@
     "sandbox": { "$ref": "#/$defs/sandbox" },
     "developer": { "$ref": "#/$defs/developerAgent" },
     "reviewer": { "$ref": "#/$defs/reviewerAgent" },
+    "investigator": { "$ref": "#/$defs/investigatorAgent" },
     "agent": { "$ref": "#/$defs/developerAgent" }
   },
   "$defs": {
@@ -102,11 +103,18 @@
         { "properties": { "permission_policy": { "$ref": "#/$defs/reviewerPermissions" } } }
       ]
     },
+    "investigatorAgent": {
+      "allOf": [
+        { "$ref": "#/$defs/agent" },
+        { "properties": { "permission_policy": { "$ref": "#/$defs/reviewerPermissions" } } }
+      ]
+    },
     "permissionPolicy": {
       "type": "object",
       "properties": {
         "developer": { "$ref": "#/$defs/developerPermissions" },
-        "reviewer": { "$ref": "#/$defs/reviewerPermissions" }
+        "reviewer": { "$ref": "#/$defs/reviewerPermissions" },
+        "investigator": { "$ref": "#/$defs/reviewerPermissions" }
       },
       "additionalProperties": false
     },

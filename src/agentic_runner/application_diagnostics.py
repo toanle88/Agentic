@@ -120,7 +120,10 @@ def _diagnostic_redaction_values(
             data = None
         if isinstance(data, dict):
             names: set[str] = set()
-            for section in ("developer", "reviewer", "developer_agent", "reviewer_agent"):
+            for section in (
+                "developer", "reviewer", "investigator",
+                "developer_agent", "reviewer_agent", "investigator_agent",
+            ):
                 settings = data.get(section)
                 if isinstance(settings, dict) and isinstance(settings.get("api_key_env"), str):
                     names.add(settings["api_key_env"])

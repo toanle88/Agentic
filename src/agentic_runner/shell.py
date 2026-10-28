@@ -139,7 +139,10 @@ def _shell_redaction_values(config: Path | None, environment: Mapping[str, str])
         return values
     names: set[str] = set()
     if isinstance(data, dict):
-        for section in ("developer", "reviewer", "developer_agent", "reviewer_agent"):
+        for section in (
+            "developer", "reviewer", "investigator",
+            "developer_agent", "reviewer_agent", "investigator_agent",
+        ):
             settings = data.get(section)
             if isinstance(settings, dict) and isinstance(settings.get("api_key_env"), str):
                 names.add(settings["api_key_env"])

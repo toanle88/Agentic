@@ -86,6 +86,11 @@ next steps. It is passed to the developer as context for the first attempt; it
 does not produce a status or block development. Invalid investigator output or
 investigator tooling failures still stop the run.
 
+The optional `investigator` provider configuration can select a different
+provider, model, reasoning effort, or timeout. Omitted investigator fields
+inherit from the configured reviewer, while the invocation remains strictly
+read-only and advisory; only the reviewer can approve or reject a patch.
+
 The base checkout is not the development worktree. This keeps unfinished changes isolated from the user's main checkout.
 
 ## Interactive shell

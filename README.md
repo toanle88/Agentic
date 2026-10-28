@@ -134,7 +134,9 @@ agentic init --provider openrouter
 agentic init --provider codex --reviewer-provider openrouter
 ```
 
-Provider selection is configured independently for the developer and reviewer:
+Provider selection is configured independently for the developer, reviewer, and
+optional investigator. The investigator is read-only and inherits omitted
+settings from the reviewer:
 
 ```json
 {
@@ -145,6 +147,12 @@ Provider selection is configured independently for the developer and reviewer:
     "timeout_seconds": null
   },
   "reviewer": {
+    "provider": "codex",
+    "model": null,
+    "reasoning_effort": "max",
+    "timeout_seconds": null
+  },
+  "investigator": {
     "provider": "codex",
     "model": null,
     "reasoning_effort": "max",

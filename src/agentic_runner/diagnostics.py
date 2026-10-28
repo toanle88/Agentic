@@ -401,7 +401,11 @@ def run_doctor(
                         "disabled for developer and read-only reviewer",
                         required=False,
                     )
-            for role, settings in (("developer", loaded["developer_agent"]), ("reviewer", loaded["reviewer_agent"])):
+            for role, settings in (
+                ("developer", loaded["developer_agent"]),
+                ("reviewer", loaded["reviewer_agent"]),
+                ("investigator", loaded["investigator_agent"]),
+            ):
                 provider = settings["provider"]
                 role_name = role.title()
                 auth_mode = auth_mode_for_settings(settings)

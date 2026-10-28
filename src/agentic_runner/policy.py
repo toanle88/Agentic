@@ -15,7 +15,7 @@ PERMISSION_FIELDS = (
     "network",
     "allow_dangerous",
 )
-PERMISSION_ROLES = ("developer", "reviewer")
+PERMISSION_ROLES = ("developer", "reviewer", "investigator")
 
 # These names are intentionally shared by publication and API-read policy.
 # Matching is case-insensitive because repository paths are not uniformly
@@ -50,8 +50,8 @@ def _protected_basename(parts: list[str], base: str) -> bool:
 
 def default_permission_policy(role: str) -> dict[str, bool]:
     """Return the safe, provider-independent policy for one workflow role."""
-    if role not in {"developer", "reviewer"}:
-        raise ValueError("permission policy role must be developer or reviewer")
+    if role not in set(PERMISSION_ROLES):
+        raise ValueError("permission policy role must be developer, reviewer, or investigator")
     developer = role == "developer"
     return {
         "read_files": True,
@@ -104,10 +104,12 @@ def validate_permission_policy(
         if type(value) is not bool:
             raise ValueError(f"{role}.permission_policy.{name} must be a boolean")
         policy[name] = value
-    if role == "reviewer" and any(
+    if role in {"reviewer", "investigator"} and any(
         policy[name] for name in ("edit_files", "create_files", "run_checks", "allow_dangerous")
     ):
-        raise ValueError("reviewer.permission_policy must remain read-only")
+        raise ValueError(f"{role}.permission_policy must remain read-only")
+    if role == "investigator" and policy["network"]:
+        raise ValueError("investigator network access is not permitted")
     if policy["allow_dangerous"] and security_mode != "isolated":
         raise ValueError(
             f"{role}.permission_policy.allow_dangerous requires security_mode 'isolated'"

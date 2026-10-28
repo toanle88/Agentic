@@ -510,8 +510,16 @@ cannot prevent an arbitrary programming language runtime from opening a
 socket. Use isolated mode when OS-level network denial is required.
 
 The legacy `codex_*` settings remain supported for existing configurations.
-When a `developer` or `reviewer` object supplies the same setting, the nested
-value wins. New configurations should use the nested provider objects.
+When a `developer`, `reviewer`, or `investigator` object supplies the same
+setting, the nested value wins. New configurations should use the nested
+provider objects. The optional `investigator` object configures the separate
+read-only reconnaissance turn that runs before development. If it is omitted,
+each investigator setting inherits from the effective `reviewer` settings;
+explicit investigator fields override those inherited values. Investigation
+never edits files, runs project checks, accesses the network, commits, or
+publishes, and its advisory output cannot approve or reject a patch.
+Inherited reviewer network settings are disabled for the investigator; explicit
+investigator network settings are rejected.
 
 Timeout values must be between 1 second and 24 hours when set. `max_retries` is limited to 0 through 5 by the configuration validator.
 
@@ -566,8 +574,9 @@ and agent access. Repository checks cover Git, the repository and `origin`,
 and worktree path compatibility. GitHub mode separately checks repository and
 issue read access. When `task_source` is `local`, those two GitHub checks are
 reported as skipped because they are not required. Agent checks are emitted
-for the developer and reviewer independently, even when they use the same
-provider. Codex and Claude include a read-only authentication-status probe;
+for the developer, reviewer, and investigator independently, even when they
+use the same provider. The investigator remains read-only regardless of its
+selected provider. Codex and Claude include a read-only authentication-status probe;
 Gemini and Copilot report authentication as skipped because doctor does not
 invoke their documented login flows or infer provider state from unrelated
 commands. Provider output, credential values, configured command arguments, and
