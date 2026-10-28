@@ -1116,7 +1116,11 @@ def _list_files_page(target: Path, root: Path, page: int) -> tuple[list[str], bo
         _FILE_LIST_CACHE.move_to_end(key)
     offset = (page - 1) * OPENROUTER_LIST_FILES_PAGE_SIZE
     end = offset + OPENROUTER_LIST_FILES_PAGE_SIZE
-    cached.ensure(end + 1)
+    # The final supported page is exactly the traversal bound. Probing one
+    # additional entry there turns a valid 30,000-file tree into an error.
+    # Earlier pages still probe one extra item so their continuation marker is
+    # accurate; page 100 cannot expose a page 101 by contract.
+    cached.ensure(end if page == OPENROUTER_LIST_FILES_MAX_PAGE else end + 1)
     return cached.paths[offset:end], end < len(cached.paths)
 
 

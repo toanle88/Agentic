@@ -13,18 +13,11 @@
   "runners": {
     "agent-alone": [
       "python",
-      "{benchmark_root}/adapters/agent-alone.py",
-      "{repo}",
-      "{task_file}",
-      "{result_file}"
+      "{benchmark_root}/adapters/agent-alone.py"
     ],
     "agentic": [
       "python",
-      "{benchmark_root}/adapters/agentic.py",
-      "{repo}",
-      "{task_file}",
-      "{state_dir}",
-      "{result_file}"
+      "{benchmark_root}/adapters/agentic.py"
     ]
   }
 }

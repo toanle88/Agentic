@@ -21,6 +21,7 @@ PLACEHOLDERS = {
     "repo": "AGENTIC_BENCHMARK_REPO",
     "task_file": "AGENTIC_BENCHMARK_TASK_FILE",
     "result_file": "AGENTIC_BENCHMARK_RESULT_FILE",
+    "state_dir": "AGENTIC_BENCHMARK_STATE_DIR",
     "reviewer": "AGENTIC_BENCHMARK_REVIEWER",
     "scenario": "AGENTIC_BENCHMARK_SCENARIO",
     "task_id": "AGENTIC_BENCHMARK_TASK_ID",

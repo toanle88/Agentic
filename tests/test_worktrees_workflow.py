@@ -155,6 +155,30 @@ class WorkflowTests(_GitRepositoryTestCase):
         with self.assertRaisesRegex(RuntimeError, "filter drivers"):
             agentic_worktrees.git(self.repo, "status")
 
+    def test_compatibility_and_workflow_git_boundaries_disable_fsmonitor(self):
+        marker = self.repo / "fsmonitor-ran"
+        helper = self.repo / "fsmonitor-helper"
+        helper.write_text(
+            f"#!/bin/sh\ntouch {marker}\nprintf 'token\\n'\n",
+            encoding="utf-8",
+        )
+        helper.chmod(0o700)
+        subprocess.run(
+            ["git", "config", "core.fsmonitor", str(helper)], cwd=self.repo,
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+        self.assertEqual(
+            agentic.git(self.repo, "status", "--short", "--untracked-files=no"),
+            "",
+        )
+        self.assertFalse(marker.exists())
+        result = agentic_workflow.command(
+            ["git", "status", "--short", "--untracked-files=no"], self.repo,
+        )
+        self.assertEqual(result.stdout, "")
+        self.assertFalse(marker.exists())
+
     def test_git_diff_output_is_bounded_before_materialization(self):
         (self.repo / "readme.md").write_text("changed\n")
         with patch.object(agentic_worktrees, "MAX_COMMAND_OUTPUT_BYTES", 1):

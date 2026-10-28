@@ -100,8 +100,8 @@ and declares the checks and any known review defects:
   ],
   "repetitions": 3,
   "runners": {
-    "agent-alone": ["python", "adapters/agent-alone.py"],
-    "agentic": ["python", "adapters/agentic.py"]
+    "agent-alone": ["python", "{benchmark_root}/adapters/agent-alone.py"],
+    "agentic": ["python", "{benchmark_root}/adapters/agentic.py"]
   }
 }
 ```
@@ -215,7 +215,7 @@ different priorities.
 ### Supplying provider commands
 
 The checked-in adapters under `benchmarks/adapters/` are deliberately thin.
-They accept provider-specific commands through environment variables so the
+The checked-in adapters accept provider-specific commands through environment variables so the
 benchmark corpus stays free of credentials, local paths, and model-specific
 assumptions. Commands are JSON argv arrays and are never passed through a
 shell. For example:

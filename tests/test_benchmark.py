@@ -463,6 +463,17 @@ class BenchmarkTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "at least two"):
                 load_benchmark(path)
 
+    def test_checked_in_quality_example_uses_environment_adapter_contract(self):
+        path = Path(__file__).resolve().parents[1] / "benchmarks" / "agent-quality.example.json"
+        loaded = load_benchmark_config(path)
+        self.assertEqual(
+            loaded["runners"],
+            {
+                "agent-alone": ["python", "{benchmark_root}/adapters/agent-alone.py"],
+                "agentic": ["python", "{benchmark_root}/adapters/agentic.py"],
+            },
+        )
+
     def test_quality_benchmark_rejects_symlinked_paths_outside_root(self):
         with tempfile.TemporaryDirectory() as temp, tempfile.TemporaryDirectory() as outside:
             root = Path(temp)
