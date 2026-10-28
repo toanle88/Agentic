@@ -1,6 +1,7 @@
 """TTY-only presentation helpers shared by the runner and interactive shell."""
 from __future__ import annotations
 
+import datetime
 import os
 import re
 import sys
@@ -65,9 +66,10 @@ def paint(text: Any, code: str, stream: Any = None) -> str:
     return f"\033[{code}m{value}\033[0m"
 
 
-_TIMESTAMP_RE = re.compile(r"^\s*(\[\d{2}:\d{2}:\d{2}\])")
+_TIMESTAMP_PREFIX = r"\[(?:\d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]"
+_TIMESTAMP_RE = re.compile(rf"^\s*({_TIMESTAMP_PREFIX})")
 _PREFIX_RE = re.compile(
-    r"^\s*(?:\[\d{2}:\d{2}:\d{2}\]\s*)?"
+    rf"^\s*(?:{_TIMESTAMP_PREFIX}\s*)?"
     r"(\[(?:DEVELOPER|REVIEW|TESTS|RETRY|GIT|PATCH|ERROR|RESULT|SUMMARY|INVESTIGATION|BASELINE|"
     r"PUBLISH|SKIP|INIT|CLEAN|SYSTEM|COST|NO_CHANGES|CANCEL|DOCTOR|"
     r"JOB [^\]]+|DASHBOARD|MANUAL|"
@@ -76,7 +78,7 @@ _PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 _SYSTEM_PREFIX_RE = re.compile(
-    r"^\s*(?:\[\d{2}:\d{2}:\d{2}\]\s*)?"
+    rf"^\s*(?:{_TIMESTAMP_PREFIX}\s*)?"
     r"(\[[A-Za-z][A-Za-z0-9 _-]{0,39}\])(?=\s|$)"
 )
 _STRUCTURED_SUFFIX_RE = re.compile(
@@ -106,9 +108,43 @@ _DIFF_STAT_TOTAL_TOKEN_RE = re.compile(
 )
 _PATCH_SUMMARY_PREFIX = "[PATCH] Proposed changes:"
 _PATCH_SUMMARY_HEADER_RE = re.compile(
-    r"^\s*(?:\[\d{2}:\d{2}:\d{2}\]\s*)?"
+    rf"^\s*(?:{_TIMESTAMP_PREFIX}\s*)?"
     r"\[PATCH\]\s+Proposed changes:\s*$"
 )
+
+
+def timestamped_status(value: Any, *, now: datetime.datetime | None = None) -> str:
+    """Prefix every human-facing status line with the local date and time.
+
+    Existing full-date prefixes are preserved so shell replay does not add a
+    second timestamp. Legacy time-only prefixes are upgraded to the full form.
+    """
+    timestamp = (now or datetime.datetime.now()).strftime("[%Y-%m-%d %H:%M:%S]")
+    text = str(value)
+    lines = text.splitlines(keepends=True)
+    if not lines:
+        return f"{timestamp} {text}"
+    rendered: list[str] = []
+    for line in lines:
+        body = line.rstrip("\r\n")
+        ending = line[len(body):]
+        existing = _TIMESTAMP_RE.match(body)
+        if existing is None:
+            visible_body = strip_ansi(body)
+            visible_existing = _TIMESTAMP_RE.match(visible_body)
+            if visible_existing and len(visible_existing.group(1)) == len(
+                "[2026-10-28 10:36:18]"
+            ):
+                rendered.append(f"{body}{ending}")
+                continue
+        if existing:
+            prefix = existing.group(1)
+            if len(prefix) == len("[2026-10-28 10:36:18]"):
+                rendered.append(f"{body}{ending}")
+                continue
+            body = body[existing.end():].lstrip()
+        rendered.append(f"{timestamp} {body}{ending}")
+    return "".join(rendered)
 
 _PREFIX_COLORS = {
     "DEVELOPER": "36",
@@ -236,7 +272,7 @@ def _styled_spans(
         expected_text = str(system_prefix_text)
         if expected_text:
             explicit = re.compile(
-                r"^\s*(?:\[\d{2}:\d{2}:\d{2}\]\s*)?"
+                rf"^\s*(?:{_TIMESTAMP_PREFIX}\s*)?"
                 rf"({re.escape(expected_text)})",
             ).match(line)
             if explicit:
@@ -250,7 +286,7 @@ def _styled_spans(
             expected = expected[1:-1]
         if expected:
             explicit = re.compile(
-                r"^\s*(?:\[\d{2}:\d{2}:\d{2}\]\s*)?"
+                rf"^\s*(?:{_TIMESTAMP_PREFIX}\s*)?"
                 rf"(\[{re.escape(expected)}\s*\])(?=\s|$)",
                 re.IGNORECASE,
             ).match(line)
@@ -380,16 +416,22 @@ def _is_patch_header_prefix(value: str) -> bool:
     candidate = value.lstrip()
     if _PATCH_SUMMARY_PREFIX.startswith(candidate):
         return True
-    if len(candidate) <= 10:
-        timestamp_pattern = "[dd:dd:dd]"
-        return all(
-            character == expected or expected == "d" and character.isdigit()
-            for character, expected in zip(candidate, timestamp_pattern)
-        )
-    timestamp = candidate[:10]
-    if not re.fullmatch(r"\[\d{2}:\d{2}:\d{2}\]", timestamp):
-        return False
-    return _PATCH_SUMMARY_PREFIX.startswith(candidate[10:].lstrip())
+    timestamp_patterns = (
+        ("[dd:dd:dd]", r"\[\d{2}:\d{2}:\d{2}\]"),
+        ("[dddd-dd-dd dd:dd:dd]", r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]"),
+    )
+    for timestamp_shape, timestamp_regex in timestamp_patterns:
+        if len(candidate) <= len(timestamp_shape):
+            if all(
+                character == expected or expected == "d" and character.isdigit()
+                for character, expected in zip(candidate, timestamp_shape)
+            ):
+                return True
+            continue
+        timestamp = candidate[:len(timestamp_shape)]
+        if re.fullmatch(timestamp_regex, timestamp):
+            return _PATCH_SUMMARY_PREFIX.startswith(candidate[len(timestamp_shape):].lstrip())
+    return False
 
 
 class PatchSummaryStream:

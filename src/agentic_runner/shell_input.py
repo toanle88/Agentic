@@ -31,6 +31,7 @@ from .output import (
     style_system_text,
     style_shell_text,
     style_text,
+    timestamped_status,
 )
 _OUTPUT_LOCK = threading.RLock()
 _ACTIVE_INTERACTIVE_OUTPUT: Callable[[str, bool], None] | None = None
@@ -1873,10 +1874,21 @@ def _shell_print(message: Any = "", *, end: str = "\n", flush: bool = False,
     if patch_stream is not None and system_prefix is None:
         text = patch_stream.feed(str(message) + end)
     elif system_prefix is None:
-        text = style_shell_text(message, style_status_tokens=style_status_tokens) + end
+        value = str(message)
+        if "[PATCH] Proposed changes:" in value:
+            # Style the complete patch block before adding timestamps so the
+            # timestamp cannot hide the diff-stat rows from the patch parser.
+            text = timestamped_status(
+                style_shell_text(value, style_status_tokens=style_status_tokens)
+            ) + end
+        else:
+            text = style_shell_text(
+                timestamped_status(message),
+                style_status_tokens=style_status_tokens,
+            ) + end
     else:
         text = style_system_text(
-            message,
+            timestamped_status(message),
             system_prefix=system_prefix,
             style_status_tokens=style_status_tokens,
         ) + end

@@ -28,6 +28,9 @@ breakdowns, provider cost when available, stage durations and counts, retries,
 review findings, and the run-log path. Missing provider telemetry is shown as
 `unknown`; local test commands always show `0 tokens`. ANSI styling is used
 only for interactive terminal output and is never written to durable logs.
+Human-facing workflow, provider, and shell status lines use the consistent
+local `[YYYY-MM-DD HH:MM:SS]` prefix; every line of a multiline status event is
+prefixed independently. Machine-readable JSON output is unchanged.
 
 ## Repository audits
 

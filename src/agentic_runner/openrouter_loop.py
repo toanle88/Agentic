@@ -34,7 +34,7 @@ from .openrouter_tools import (
     _validate_tool_call_shape,
 )
 from .policy import default_permission_policy
-from .output import is_transient_progress, strip_ansi, style_text
+from .output import is_transient_progress, strip_ansi, style_text, timestamped_status
 from .security import redact_secrets, restricted_test_environment
 from .telemetry import combine_usage, normalize_usage, record_operation
 
@@ -347,8 +347,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
              generated_status: str | None = None,
              transient: bool = False) -> None:
         nonlocal live_status
-        now = datetime.datetime.now().strftime("%H:%M:%S")
-        line = f"[{now}] [{label}] {message}"
+        line = timestamped_status(f"[{label}] {message}")
         transient = transient or is_transient_progress(line)
         if generated_status and message.startswith(generated_status):
             status_start = len(line) - len(message)

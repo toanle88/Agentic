@@ -1,5 +1,6 @@
 """Focused publication tests."""
 import json
+import re
 import sys
 from io import StringIO
 from pathlib import Path
@@ -261,7 +262,13 @@ class PublicationTests(_GitRepositoryTestCase):
             )
 
         self.assertEqual(result, ('base-sha', 'digest', summary))
-        self.assertEqual(console.getvalue(), '[PATCH] Proposed changes:\n' + summary + '\n')
+        rendered_without_timestamps = re.sub(
+            r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ",
+            "",
+            console.getvalue(),
+            flags=re.MULTILINE,
+        )
+        self.assertEqual(rendered_without_timestamps, '[PATCH] Proposed changes:\n' + summary + '\n')
         self.assertNotIn('\033[', console.getvalue())
 
 

@@ -59,9 +59,12 @@ class InteractiveInputTests(unittest.TestCase):
                 '[FUTURE] shell message\n[REVIEW] user text',
                 system_prefix='FUTURE', style_status_tokens=False,
             )
-        self.assertEqual(
+        self.assertRegex(
             output.getvalue(),
-            '\033[90m[FUTURE]\033[0m shell message\n[REVIEW] user text\n',
+            r"\033\[90m\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\033\[0m "
+            r"\033\[90m\[FUTURE\]\033\[0m shell message\n"
+            r"\033\[90m\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\033\[0m "
+            r"\[REVIEW\] user text\n",
         )
 
     def test_terminal_mode_controls_normal_prompt_visibility(self):
@@ -257,14 +260,12 @@ class InteractiveInputTests(unittest.TestCase):
             agentic_shell._shell_write_log(' log')
             agentic_shell._shell_print('[JOB 1] finished')
 
-        self.assertEqual(
-            captured,
-            [
-                ('partial', False),
-                (' log', False),
-                ('[JOB 1] finished\n', True),
-            ],
+        self.assertEqual(captured[:2], [('partial', False), (' log', False)])
+        self.assertRegex(
+            captured[2][0],
+            r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[JOB 1\] finished\n$",
         )
+        self.assertTrue(captured[2][1])
 
     def test_transient_status_is_not_retained_in_shell_scrollback(self):
         state = agentic_shell_input._InteractiveOutputState()
@@ -554,7 +555,10 @@ class InteractiveInputTests(unittest.TestCase):
 
         self.assertEqual(result, '/run ')
         rendered = output.getvalue()
-        self.assertIn('\033[4;1H[JOB 1] finished', rendered)
+        self.assertRegex(
+            rendered,
+            r"\033\[4;1H\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[JOB 1\] finished",
+        )
         plain_output = strip_ansi(rendered)
         self.assertLess(
             plain_output.rfind('[JOB 1] finished'),

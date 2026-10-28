@@ -2,6 +2,7 @@
 import json
 import io
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -36,8 +37,10 @@ def sh(*args, cwd):
 
 def summary_stage_lines(rendered):
     return [
-        line for line in rendered.splitlines()
+        re.sub(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ", "", line)
+        for line in rendered.splitlines()
         if line.startswith(('[DEVELOPER]', '[TESTS]', '[REVIEW]'))
+        or re.match(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[(?:DEVELOPER|TESTS|REVIEW)\]", line)
     ]
 
 
