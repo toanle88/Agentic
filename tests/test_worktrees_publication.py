@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner import cli as agentic
+from agentic_runner import workflow as agentic_workflow
 from agentic_runner.telemetry import record_test_result
 from test_worktrees import _GitRepositoryTestCase, sh
 
@@ -540,6 +541,8 @@ class PublicationTests(_GitRepositoryTestCase):
 
         with (patch('agentic.check_existing_pr', return_value=[]),
               patch('agentic.prepare_patch', return_value=('base-sha', 'digest', 'summary')),
+              patch.dict(agentic_workflow._WORKFLOW_IMPLEMENTATIONS,
+                         {'_publication_identity_environment': lambda *_args: {}}),
               patch('agentic.git') as git_mock,
               patch('agentic.command', side_effect=fake_command),
               patch('builtins.input', return_value='publish'),
@@ -552,6 +555,7 @@ class PublicationTests(_GitRepositoryTestCase):
         self.assertIn(call(
             run.worktree, '-c', 'core.hooksPath=/dev/null', 'commit',
             '-m', 'fix: resolve issue #30',
+            env={},
         ), git_mock.call_args_list)
         self.assertIn(call(
             run.worktree, '-c', 'core.hooksPath=/dev/null',
@@ -682,6 +686,8 @@ class PublicationTests(_GitRepositoryTestCase):
               patch('agentic.prepare_patch', return_value=(
                   approval['base_sha'], approval['patch_digest'], 'summary',
               )),
+              patch.dict(agentic_workflow._WORKFLOW_IMPLEMENTATIONS,
+                         {'_publication_identity_environment': lambda *_args: {}}),
               patch('agentic.git'),
               patch('agentic.command', side_effect=fake_command),
               patch('builtins.input', return_value='y')):
@@ -765,10 +771,12 @@ class PublicationTests(_GitRepositoryTestCase):
             return CompletedProcess(argv, 0, stdout='')
 
         with (patch('agentic.prepare_patch', return_value=('base-sha', 'patch-digest', 'summary')),
+              patch.dict(agentic_workflow._WORKFLOW_IMPLEMENTATIONS,
+                         {'_publication_identity_environment': lambda *_args: {}}),
               patch('agentic.git') as git_mock,
               patch('agentic.command', side_effect=fake_command),
               patch('agentic._status_print')):
-            git_mock.side_effect = ['', 'pushed-sha', '']
+            git_mock.side_effect = ['', 'pushed-sha', '', '']
             pushed_head = agentic.push_existing_pr(
                 run, issue, 'owner/repo', 'main', config, folder, pull_request,
                 fetch_pr=lambda: pull_request,

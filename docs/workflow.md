@@ -570,6 +570,16 @@ publication. Only after confirmation does it commit, push the issue branch,
 and open a draft pull request. The draft state leaves a final human
 review step before merging.
 
+Publication keeps the Git safety boundary enabled. Commits use repository-local
+`user.name` and `user.email` when both are configured; otherwise Agentic resolves
+the authenticated GitHub CLI account with `gh api user` and uses its private
+noreply address when necessary. For HTTPS remotes, the push uses a temporary
+askpass program that invokes `gh auth token` only when Git requests credentials;
+the token is not stored in Git configuration, argv, logs, or a temporary file.
+SSH remotes continue to use the user's normal SSH authentication. If identity
+or GitHub CLI authentication is unavailable, publication stops with an explicit
+setup message and leaves the worktree intact.
+
 When Agentic is run from a checkout of its own repository, changes to its
 `agentic.py` runner and `.github/workflows/` CI files are allowed through patch
 validation so Agentic can develop and verify itself. The protected-file policy

@@ -439,12 +439,13 @@ def command(
 
 
 def git(repo: Path, *args: str, check: bool = True,
-        max_output_bytes: int | None = None) -> str:
+        max_output_bytes: int | None = None,
+        env: dict[str, str] | None = None) -> str:
     if max_output_bytes is None:
-        return command(["git", *args], repo, check=check).stdout.strip()
+        return command(["git", *args], repo, check=check, env=env).stdout.strip()
     return command(
         ["git", *args], repo, check=check,
-        max_output_bytes=max_output_bytes,
+        max_output_bytes=max_output_bytes, env=env,
     ).stdout.strip()
 
 

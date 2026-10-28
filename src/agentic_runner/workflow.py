@@ -2138,10 +2138,13 @@ def validate_publication_approval(run: Run, issue: Issue, base: str,
 
 def _commit_publication_and_revalidate(
     run: Run, base: str, max_files: int | None, expected_base_sha: str,
-    expected_digest: str, message: str,
+    expected_digest: str, message: str, *,
+    github_host: str = DEFAULT_GITHUB_HOST,
 ) -> None:
     """Commit without hooks, then recheck the exact approved patch."""
-    git(run.worktree, "-c", "core.hooksPath=/dev/null", "commit", "-m", message)
+    git_environment = _publication_identity_environment(run.worktree, github_host)
+    git(run.worktree, "-c", "core.hooksPath=/dev/null", "commit", "-m", message,
+        env=git_environment)
     current_base_sha, current_digest, _ = prepare_patch(
         run.worktree, base, max_files,
     )
@@ -2153,6 +2156,123 @@ def _github_environment(host: str) -> dict[str, str]:
     environment = os.environ.copy()
     environment["GH_HOST"] = host
     return environment
+
+
+_PUBLICATION_IDENTITY_LIMIT = 256
+
+
+def _valid_publication_identity_value(value: Any, *, email: bool = False) -> str | None:
+    """Return a safe single-line Git identity field, or ``None``."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or len(value) > _PUBLICATION_IDENTITY_LIMIT:
+        return None
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        return None
+    if email and ("@" not in value or any(character.isspace() for character in value)):
+        return None
+    return value
+
+
+def _publication_identity_environment(repo: Path, github_host: str) -> dict[str, str]:
+    """Resolve commit identity without re-enabling untrusted global Git config.
+
+    Repository-local identity is preferred. When it is absent or incomplete,
+    the authenticated GitHub CLI supplies the account identity and a stable
+    noreply address when the account's email is private.
+    """
+    local_name = _valid_publication_identity_value(
+        git(repo, "config", "--local", "--get", "user.name", check=False),
+    )
+    local_email = _valid_publication_identity_value(
+        git(repo, "config", "--local", "--get", "user.email", check=False),
+        email=True,
+    )
+    if local_name and local_email:
+        identity = {"name": local_name, "email": local_email}
+    else:
+        try:
+            raw_user = command(
+                ["gh", "api", "user"], repo,
+                env=_github_environment(github_host),
+                max_output_bytes=64 * 1024,
+            ).stdout
+            user = json.loads(raw_user)
+        except (RuntimeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "Cannot determine the Git commit identity. Set repository-local "
+                "user.name and user.email, or authenticate GitHub CLI with "
+                f"`gh auth login --hostname {github_host}`."
+            ) from exc
+        if not isinstance(user, dict):
+            raise RuntimeError("GitHub CLI returned an invalid user identity")
+        api_name = _valid_publication_identity_value(user.get("name"))
+        login = _valid_publication_identity_value(user.get("login"))
+        name = local_name or api_name or login
+        api_email = _valid_publication_identity_value(user.get("email"), email=True)
+        user_id = user.get("id")
+        if not api_email and login and isinstance(user_id, int) and user_id > 0:
+            api_email = _valid_publication_identity_value(
+                f"{user_id}+{login}@users.noreply.github.com", email=True,
+            )
+        email = local_email or api_email
+        if not name or not email:
+            raise RuntimeError(
+                "GitHub CLI did not provide a usable Git commit identity; set "
+                "repository-local user.name and user.email."
+            )
+        identity = {"name": name, "email": email}
+    environment = os.environ.copy()
+    environment.update({
+        "GIT_AUTHOR_NAME": identity["name"],
+        "GIT_AUTHOR_EMAIL": identity["email"],
+        "GIT_COMMITTER_NAME": identity["name"],
+        "GIT_COMMITTER_EMAIL": identity["email"],
+    })
+    return environment
+
+
+def _push_publication(repo: Path, branch: str, github_host: str) -> None:
+    """Push using GitHub CLI authentication for HTTPS remotes.
+
+    The token is fetched only when Git asks for a password and is never
+    placed in an argv, log, repository config, or temporary file.
+    """
+    remote = git(repo, "remote", "get-url", "--push", "origin", check=False)
+    if not isinstance(remote, str) or not remote.casefold().startswith(("http://", "https://")):
+        git(repo, "-c", "core.hooksPath=/dev/null", "push", "-u", "origin", branch)
+        return
+    with tempfile.TemporaryDirectory(prefix="agentic-git-askpass-") as directory:
+        askpass = Path(directory) / ("askpass.cmd" if os.name == "nt" else "askpass.sh")
+        if os.name == "nt":
+            askpass.write_text(
+                "@echo off\n"
+                "echo %~1 | findstr /I \"username\" >nul\n"
+                "if not errorlevel 1 (\n"
+                "  echo x-access-token\n"
+                "  exit /b 0\n"
+                ")\n"
+                "gh auth token --hostname \"%AGENTIC_GITHUB_HOST%\"\n",
+                encoding="utf-8",
+            )
+        else:
+            askpass.write_text(
+                "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "  *[Uu]sername*) printf '%s\\n' 'x-access-token' ;;\n"
+                "  *) exec gh auth token --hostname \"$AGENTIC_GITHUB_HOST\" ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            askpass.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+        environment = os.environ.copy()
+        environment["AGENTIC_GITHUB_HOST"] = github_host
+        environment["GIT_ASKPASS"] = str(askpass)
+        git(
+            repo, "-c", "core.hooksPath=/dev/null", "push", "-u", "origin", branch,
+            env=environment,
+        )
 
 
 def check_existing_pr(
@@ -2206,6 +2326,7 @@ def push_existing_pr(run: Run, issue: Issue, github_repo: str, base: str,
     _base_sha, digest, _summary = validate_publication_approval(
         run, issue, base, config, approval, folder,
     )
+    github_host = config.get("github_host", DEFAULT_GITHUB_HOST)
     lookup = fetch_pr or (lambda: get_pull_request(
         run.worktree, github_repo, pull_request.number, config.get("github_host", DEFAULT_GITHUB_HOST),
     ))
@@ -2228,6 +2349,7 @@ def push_existing_pr(run: Run, issue: Issue, github_repo: str, base: str,
         _commit_publication_and_revalidate(
             run, base, config["max_files"], _new_base_sha, new_digest,
             f"fix: repair PR #{pull_request.number}",
+            github_host=github_host,
         )
     else:
         current_base_sha, current_digest, _ = prepare_patch(
@@ -2240,7 +2362,7 @@ def push_existing_pr(run: Run, issue: Issue, github_repo: str, base: str,
         raise RuntimeError("Could not determine the reviewed commit before pushing")
     current = lookup()
     _validate_pull_request_identity(pull_request, current)
-    git(run.worktree, "-c", "core.hooksPath=/dev/null", "push", "-u", "origin", run.branch)
+    _push_publication(run.worktree, run.branch, github_host)
     _status_print(f"[PUBLISH] Completed: updated PR #{pull_request.number}: {pull_request.url}")
     return pushed_head_sha
 
@@ -2520,6 +2642,7 @@ def _publish(run: Run, issue: Issue, github_repo: str, base: str,
         )
         _commit_publication_and_revalidate(
             run, base, config["max_files"], base_sha, digest, message,
+            github_host=github_host,
         )
     else:
         current_base_sha, current_digest, _ = prepare_patch(
@@ -2527,7 +2650,7 @@ def _publish(run: Run, issue: Issue, github_repo: str, base: str,
         )
         if current_base_sha != base_sha or current_digest != digest:
             raise RuntimeError("Patch changed before publication push; not publishing")
-    git(run.worktree, "-c", "core.hooksPath=/dev/null", "push", "-u", "origin", run.branch)
+    _push_publication(run.worktree, run.branch, github_host)
     if issue.is_audit:
         audit = load_audit_report(folder, issue.audit_key or AUDIT_KEY) or {}
         audit_findings = audit.get("findings", [])

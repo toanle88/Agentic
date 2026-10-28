@@ -6,6 +6,7 @@ The compatibility-facing agentic module re-exports these helpers.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from collections.abc import Mapping
 import datetime as dt
 import hashlib
 import json
@@ -466,13 +467,14 @@ def command(argv: list[str], cwd: Path, *, timeout: int = 180,
     )
 
 
-def git(repo: Path, *args: str, check: bool = True) -> str:
+def git(repo: Path, *args: str, check: bool = True,
+        env: Mapping[str, str] | None = None) -> str:
     # Repository-local Git configuration is untrusted input. These overrides
     # prevent status/diff/fetch/worktree operations from starting configured
     # fsmonitor, external-diff, credential, proxy, SSH, or transport helpers.
     # Keep the environment explicit as well: Git gives several environment
     # variables precedence over configuration files.
-    environment = hardened_git_environment()
+    environment = hardened_git_environment(env)
     filter_probe = command(
         git_filter_probe_argv(),
         repo, timeout=10, check=False, env=environment,
