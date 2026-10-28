@@ -4,6 +4,7 @@ import contextlib
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -147,6 +148,20 @@ class WorkflowTests(_GitRepositoryTestCase):
         self.assertEqual(environment["GIT_CONFIG_GLOBAL"], os.devnull)
         self.assertEqual(environment["GIT_ATTR_NOSYSTEM"], "1")
         self.assertNotIn("GIT_EXTERNAL_DIFF", environment)
+
+    def test_git_filter_probe_uses_the_requested_executable(self):
+        git_executable = shutil.which("git") or "git"
+        calls = []
+
+        def fake_run(argv, *args, **kwargs):
+            calls.append(argv)
+            return CompletedProcess(argv, 0, stdout="", stderr="")
+
+        with patch.object(agentic_worktrees, "_run_command", side_effect=fake_run):
+            agentic_worktrees.command([git_executable, "status"], self.repo)
+
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertEqual(calls[0][0], git_executable)
 
     def test_git_rejects_repository_filter_drivers_before_running_operations(self):
         subprocess.run(

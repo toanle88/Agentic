@@ -96,10 +96,10 @@ def hardened_git_argv(argv: list[str]) -> list[str]:
     return [argv[0], *GIT_SAFETY_CONFIG, *_without_git_config_options(argv)[1:]]
 
 
-def git_filter_probe_argv() -> list[str]:
+def git_filter_probe_argv(executable: str = "git") -> list[str]:
     """Return a hardened argv for detecting repository-configured filters."""
     return hardened_git_argv([
-        "git", "config", "--local", "--name-only", "--get-regexp",
+        executable, "config", "--local", "--name-only", "--get-regexp",
         GIT_FILTER_CONFIG_PATTERN,
     ])
 

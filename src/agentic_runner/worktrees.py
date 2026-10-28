@@ -436,7 +436,7 @@ def _hardened_git_command(
     """Run any Git argv through the repository-configuration safety boundary."""
     environment = hardened_git_environment(env)
     filter_probe = _run_command(
-        git_filter_probe_argv(), cwd, timeout=10, check=False,
+        git_filter_probe_argv(argv[0]), cwd, timeout=10, check=False,
         env=environment, max_output_bytes=MAX_COMMAND_OUTPUT_BYTES,
     )
     if filter_probe.returncode not in (0, 1):
