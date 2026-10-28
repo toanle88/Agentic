@@ -720,6 +720,13 @@ class PureTests(unittest.TestCase):
         self.assertFalse(agentic.retryable_test_failure(
             "error: not a valid path: /tmp/project/worktree"
         ))
+        self.assertFalse(agentic.retryable_test_failure(
+            "pnpm: Cannot use 'in' operator to search for 'directory' in undefined\n"
+            "at runDepsStatusCheck"
+        ))
+        self.assertFalse(agentic.retryable_test_failure(
+            "go: no required module provides package example.test/missing"
+        ))
         self.assertTrue(agentic.retryable_test_failure('AssertionError: expected 2, got 3'))
 
     def test_nested_environment_text_does_not_hide_outer_test_failure(self):

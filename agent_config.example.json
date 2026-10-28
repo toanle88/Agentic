@@ -7,6 +7,8 @@
     ["python", "-m", "unittest", "discover", "-s", "tests", "-q"]
   ],
   "slow_test_commands": [],
+  "dependency_files": [],
+  "dependency_setup_commands": [],
   "max_retries": 3,
   "ci_repair": {
     "max_attempts": 2,

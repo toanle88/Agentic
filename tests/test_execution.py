@@ -704,6 +704,71 @@ class StreamingTests(unittest.TestCase):
         self.assertTrue(passed)
         self.assertLessEqual(len(report), agentic_workflow.MAX_TEST_REPORT_CHARS)
 
+    def test_test_runner_prepares_dependencies_when_inputs_change(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            sh('git', 'init', cwd=root)
+            manifest = root / 'dependency-manifest.txt'
+            manifest.write_text('one\n', encoding='utf-8')
+            calls = []
+
+            def fake_stream(argv, *args, **kwargs):
+                calls.append(argv)
+                return CompletedProcess(argv, 0, stdout='ok', stderr='')
+
+            with patch('agentic.streamed_command', side_effect=fake_stream):
+                passed, _ = agentic.run_tests(
+                    root,
+                    [[sys.executable, '-c', 'pass']],
+                    folder=root,
+                    dependency_files=['dependency-manifest.txt'],
+                    dependency_setup_commands=[[sys.executable, '-c', 'pass']],
+                )
+            self.assertTrue(passed)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0][0], sys.executable)
+
+            manifest.write_text('two\n', encoding='utf-8')
+            calls.clear()
+            with patch('agentic.streamed_command', side_effect=fake_stream):
+                passed, _ = agentic.run_tests(
+                    root,
+                    [[sys.executable, '-c', 'pass']],
+                    folder=root,
+                    dependency_files=['dependency-manifest.txt'],
+                    dependency_setup_commands=[[sys.executable, '-c', 'pass']],
+                )
+
+        self.assertTrue(passed)
+        self.assertEqual(len(calls), 2)
+
+    def test_test_runner_blocks_changed_dependencies_without_setup_command(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            sh('git', 'init', cwd=root)
+            manifest = root / 'dependency-manifest.txt'
+            manifest.write_text('one\n', encoding='utf-8')
+            command = [sys.executable, '-c', 'pass']
+            with patch('agentic.streamed_command', return_value=CompletedProcess(
+                command, 0, stdout='ok', stderr=''
+            )):
+                passed, _ = agentic.run_tests(
+                    root, [command], folder=root,
+                    dependency_files=['dependency-manifest.txt'],
+                )
+            self.assertTrue(passed)
+            manifest.write_text('two\n', encoding='utf-8')
+            with patch('agentic.streamed_command') as streamed:
+                passed, report = agentic.run_tests(
+                    root, [command], folder=root,
+                    dependency_files=['dependency-manifest.txt'],
+                )
+
+        self.assertFalse(passed)
+        streamed.assert_not_called()
+        self.assertIn('dependency inputs changed', report)
+        self.assertIn('Validation check 1 — unavailable', report)
+
     def test_test_runner_removes_configured_credentials_from_child_environment(self):
         from io import StringIO
         value = 'custom-test-credential-123456'
