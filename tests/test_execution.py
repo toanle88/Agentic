@@ -1,5 +1,6 @@
 """Streaming and command-runner tests."""
 import json
+import datetime
 import os
 import subprocess
 import shutil
@@ -25,6 +26,7 @@ from agentic_runner.output import (
     style_patch_summary,
     style_system_text,
     style_text,
+    timestamped_status,
 )
 from agentic_runner.execution_stream import MAX_RAW_LOG_BYTES
 import agentic_runner.execution_stream as execution_stream
@@ -35,6 +37,30 @@ def sh(*args, cwd):
 
 
 class StreamingTests(unittest.TestCase):
+    def test_timestamped_status_prefixes_every_line_with_full_local_datetime(self):
+        value = timestamped_status(
+            "[AUDIT] started\n[AUDIT] finished",
+            now=datetime.datetime(2026, 10, 28, 10, 36, 18),
+        )
+        self.assertEqual(
+            value,
+            "[2026-10-28 10:36:18] [AUDIT] started\n"
+            "[2026-10-28 10:36:18] [AUDIT] finished",
+        )
+
+    def test_timestamped_status_preserves_ansi_wrapped_full_timestamp(self):
+        value = "\033[90m[2026-10-28 10:36:18]\033[0m [PATCH] Proposed changes:"
+        self.assertEqual(timestamped_status(value), value)
+
+    def test_patch_summary_accepts_chunked_full_timestamp_prefix(self):
+        stream = PatchSummaryStream()
+        self.assertEqual(stream.feed("[2026-10"), "")
+        self.assertEqual(
+            stream.feed("-28 10:36:18] [PATCH] Proposed changes:\n"),
+            "[2026-10-28 10:36:18] [PATCH] Proposed changes:\n",
+        )
+        self.assertTrue(stream._active)
+
     def test_provider_facade_serializes_compatibility_mutation_and_restores_on_failure(self):
         sentinel_streamed = object()
         sentinel_codex = object()

@@ -29,7 +29,7 @@ from .git_policy import (
 )
 from .models import DEFAULT_GITHUB_HOST, Issue, PullRequest, Run, StatePaths
 from .security import redact_secrets
-from .output import style_system_text, style_text
+from .output import style_system_text, style_text, timestamped_status
 
 BRANCH_RE = re.compile(
     r"^agent/issue-(?P<number>\d+)-"
@@ -60,6 +60,7 @@ class UserCancelled(RuntimeError):
 
 def _status_print(message: Any, *, file: Any = None, flush: bool = False,
                   system_prefix: str | None = None) -> None:
+    message = timestamped_status(message)
     if system_prefix is not None:
         rendered = style_system_text(message, file, system_prefix=system_prefix)
     else:

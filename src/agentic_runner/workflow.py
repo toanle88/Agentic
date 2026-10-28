@@ -37,7 +37,6 @@ from .context import (
     _issue_context,
 )
 from .execution import (
-    _console_print,
     _paths_equal,
     _remaining_timeout,
     _short,
@@ -50,7 +49,10 @@ from .execution import (
 )
 from .models import DEFAULT_GITHUB_HOST, AgentSettings, Issue, PullRequest, Run
 from .openrouter import run_openrouter
-from .output import strip_ansi, style_patch_summary, style_system_text, style_text
+from .output import (
+    strip_ansi, style_patch_summary, style_system_text, style_text,
+    timestamped_status,
+)
 from .persistence import (
     atomic_write_json,
     atomic_write_text,
@@ -222,8 +224,13 @@ def _status_print(message: Any, *, file: Any = None, flush: bool = False,
         render_kwargs["style_status_tokens"] = style_status_tokens
         if system_prefix is not None:
             render_kwargs["system_prefix"] = system_prefix
+    rendered = renderer(
+        message if style_patch_stat else timestamped_status(message),
+        file,
+        **render_kwargs,
+    )
     _console_print(
-        renderer(message, file, **render_kwargs),
+        timestamped_status(rendered) if style_patch_stat else rendered,
         file=file,
         flush=flush,
     )
@@ -1973,9 +1980,11 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
     if not passed:
         _status_print("[TESTS] Failed")
         bounded_report = strip_ansi(report[-2500:])
-        _console_print("\n".join(
-            f"[TESTS] {line}" for line in bounded_report.splitlines()
-        ) or "[TESTS] (no diagnostic output)")
+        _status_print(
+            "\n".join(f"[TESTS] {line}" for line in bounded_report.splitlines())
+            or "[TESTS] (no diagnostic output)",
+            style_status_tokens=False,
+        )
         return False, report, {}, "", ""
     base_sha, digest, summary = prepare_patch(run.worktree, base, config["max_files"])
     _status_print(

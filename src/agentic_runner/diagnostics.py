@@ -25,7 +25,7 @@ from .config import (
 )
 from .execution import _doctor_public_detail
 from .models import DEFAULT_GITHUB_HOST
-from .output import style_system_text
+from .output import style_system_text, timestamped_status
 from .providers import (
     display_provider_path,
     resolve_provider_executable,
@@ -35,6 +35,19 @@ from .security import restricted_test_environment
 
 
 AGENT_CONFIG_FILENAME = "agent_config.json"
+
+
+def _doctor_print(message: str, *, system_prefix: str | None = None,
+                  flush: bool = False) -> None:
+    """Print human-readable doctor output with the standard status timestamp."""
+    value = timestamped_status(message)
+    if system_prefix is not None:
+        value = style_system_text(
+            value,
+            system_prefix=system_prefix,
+            style_status_tokens=False,
+        )
+    print(value, flush=flush)
 
 
 def _github_environment(host: str) -> dict[str, str]:
@@ -596,11 +609,9 @@ def run_doctor(
                     with (command_lock(command_worktree) if command_lock else nullcontext()):
                         for argv in commands:
                             if not json_output:
-                                print(
-                                    style_system_text(
-                                        f"[DOCTOR] Running: {shlex.join(argv)}",
-                                        system_prefix="DOCTOR",
-                                    ),
+                                _doctor_print(
+                                    f"[DOCTOR] Running: {shlex.join(argv)}",
+                                    system_prefix="DOCTOR",
                                     flush=True,
                                 )
                             command_results.append(_run_configured_command(
@@ -644,10 +655,10 @@ def run_doctor(
             "command_results": _public_command_results(command_results),
         }, indent=2))
     else:
-        print("Agentic doctor")
-        print(f"Repository: {repo}")
+        _doctor_print("Agentic doctor")
+        _doctor_print(f"Repository: {repo}")
         if run_commands:
-            print(f"Command worktree: {command_worktree}")
+            _doctor_print(f"Command worktree: {command_worktree}")
         category_titles = {
             "repository": "Repository prerequisites",
             "github": "GitHub task access",
@@ -657,28 +668,22 @@ def run_doctor(
         for check in public_checks:
             category = str(check["category"])
             if category != current_category:
-                print(category_titles.get(category, category.title()))
+                _doctor_print(category_titles.get(category, category.title()))
                 current_category = category
             label = str(check["name"])
             detail = str(check["detail"])
             state = str(check["status"]).upper()
-            print(
-                style_system_text(
-                    f"[{state:<4}] {label}: {detail}",
-                    system_prefix=state,
-                    style_status_tokens=False,
-                )
+            _doctor_print(
+                f"[{state:<4}] {label}: {detail}",
+                system_prefix=state,
             )
         if command_results:
-            print("Configured commands:")
+            _doctor_print("Configured commands:")
             for index, result in enumerate(command_results, start=1):
                 status = str(result["status"]).upper()
                 duration = result["duration_seconds"]
-                print(
-                    style_system_text(
-                        f"[{status:<11}] configured command #{index} ({duration}s)",
-                        system_prefix=status,
-                        style_status_tokens=False,
-                    )
+                _doctor_print(
+                    f"[{status:<11}] configured command #{index} ({duration}s)",
+                    system_prefix=status,
                 )
     return 0 if success else 1

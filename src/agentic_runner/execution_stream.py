@@ -26,6 +26,7 @@ from .output import (
     strip_ansi,
     style_system_text,
     style_text,
+    timestamped_status,
 )
 from .sandbox import sandbox_command
 from .security import redact_secrets
@@ -173,7 +174,7 @@ def _record_provider_usage(output: Path, readonly: bool, usage: dict[str, Any], 
             parts.append(f"${cost:.4f}")
         _console_print(
             style_system_text(
-                f"[COST] {role.title()}: {' '.join(parts)}",
+                timestamped_status(f"[COST] {role.title()}: {' '.join(parts)}"),
                 system_prefix="COST",
             ),
             flush=True,
@@ -244,52 +245,61 @@ def _paint(text: str, code: str) -> str:
 def print_run_header(issue: Issue, run: Run, fresh: bool) -> None:
     state = "NEW" if fresh else "RESUME"
     separator = _unicode_or_ascii("─" * 72, "-" * 72)
-    _console_print("\n" + separator)
-    _console_print(f"AGENTIC  |  {issue.reference}  |  {_paint(state, '36' if fresh else '33')}")
-    _console_print(f"Title:    {_short(issue.title, 100)}")
-    _console_print(f"Branch:   {run.branch}")
-    _console_print(f"Worktree: {run.worktree}")
-    _console_print(separator, flush=True)
+    _console_print(timestamped_status("\n" + separator))
+    _console_print(timestamped_status(
+        f"AGENTIC  |  {issue.reference}  |  {_paint(state, '36' if fresh else '33')}"
+    ))
+    _console_print(timestamped_status(f"Title:    {_short(issue.title, 100)}"))
+    _console_print(timestamped_status(f"Branch:   {run.branch}"))
+    _console_print(timestamped_status(f"Worktree: {run.worktree}"))
+    _console_print(timestamped_status(separator), flush=True)
 
 
 def print_review_summary(verdict: dict[str, Any]) -> None:
     approved = bool(verdict.get("approved"))
     status = _paint("APPROVED", "32") if approved else _paint("REJECTED", "31")
-    _console_print(style_text(f"[REVIEW] {status}"))
+    _console_print(style_text(timestamped_status(f"[REVIEW] {status}")))
     summary = str(verdict.get("summary", "")).strip()
     if summary:
-        _console_print(style_text(f"[REVIEW] {_short(summary, 500)}", style_status_tokens=False))
+        _console_print(style_text(timestamped_status(
+            f"[REVIEW] {_short(summary, 500)}"
+        ), style_status_tokens=False))
     findings = verdict.get("findings", [])
     if isinstance(findings, list):
         bullet = _unicode_or_ascii("•", "-")
         for finding in findings[:3]:
-            _console_print(style_text(f"  {bullet} {_short(finding, 260)}", style_status_tokens=False))
+            _console_print(style_text(timestamped_status(
+                f"  {bullet} {_short(finding, 260)}"
+            ), style_status_tokens=False))
         if len(findings) > 3:
-            _console_print(style_text(
-                f"  {bullet} ... and {len(findings) - 3} more; see the review JSON log",
-                style_status_tokens=False,
-            ))
+            _console_print(style_text(timestamped_status(
+                f"  {bullet} ... and {len(findings) - 3} more; see the review JSON log"
+            ), style_status_tokens=False))
     skipped = verdict.get("skipped", [])
     if isinstance(skipped, list) and skipped:
-        _console_print(style_text(f"[REVIEW] Skipped validation: {len(skipped)}"))
+        _console_print(style_text(timestamped_status(
+            f"[REVIEW] Skipped validation: {len(skipped)}"
+        )))
         for item in skipped[:3]:
-            _console_print(style_text(f"  {bullet} {_short(item, 260)}", style_status_tokens=False))
+            _console_print(style_text(timestamped_status(
+                f"  {bullet} {_short(item, 260)}"
+            ), style_status_tokens=False))
         if len(skipped) > 3:
-            _console_print(style_text(
-                f"  {bullet} ... and {len(skipped) - 3} more; see the review JSON log",
-                style_status_tokens=False,
-            ))
+            _console_print(style_text(timestamped_status(
+                f"  {bullet} ... and {len(skipped) - 3} more; see the review JSON log"
+            ), style_status_tokens=False))
     repeated = verdict.get("_repeated_findings", [])
     if isinstance(repeated, list) and repeated:
-        _console_print(style_text(f"[REVIEW] Repeated findings from earlier attempts: {len(repeated)}"))
+        _console_print(style_text(timestamped_status(
+            f"[REVIEW] Repeated findings from earlier attempts: {len(repeated)}"
+        )))
         repeat_marker = _unicode_or_ascii("↻", "*")
         for item in repeated[:3]:
             if isinstance(item, dict):
-                _console_print(style_text(
+                _console_print(style_text(timestamped_status(
                     f"  {repeat_marker} [{item.get('severity', 'UNSPECIFIED')}] "
-                    f"{_short(item.get('text', ''), 240)}",
-                    style_status_tokens=False,
-                ))
+                    f"{_short(item.get('text', ''), 240)}"
+                ), style_status_tokens=False))
 
 
 def _summary_token_text(value: Any) -> str:
@@ -404,15 +414,13 @@ def _print_execution_summary(folder: Path) -> None:
         cost = "unknown"
     metrics = usage.get("metrics")
     total_duration = metrics.get("duration_seconds") if isinstance(metrics, dict) else None
-    _console_print(style_text(
+    _console_print(style_text(timestamped_status(
         f"[SUMMARY] Total: {total} | Prompt/input: {prompt} | "
-        f"Completion/output: {completion} | Cost: {cost}",
-        style_status_tokens=False,
-    ))
-    _console_print(style_text(
-        f"[SUMMARY] Duration: {_summary_duration_text(total_duration)}",
-        style_status_tokens=False,
-    ))
+        f"Completion/output: {completion} | Cost: {cost}"
+    ), style_status_tokens=False))
+    _console_print(style_text(timestamped_status(
+        f"[SUMMARY] Duration: {_summary_duration_text(total_duration)}"
+    ), style_status_tokens=False))
 
     stage_rows: list[tuple[str, int, str, str, str]] = []
     for stage in ("developer", "tests", "reviewer"):
@@ -440,11 +448,11 @@ def _print_execution_summary(folder: Path) -> None:
     token_width = max(1, *(len(row[2]) for row in stage_rows))
     duration_width = max(1, *(len(row[3]) for row in stage_rows))
     for stage, count, tokens, duration, suffix in stage_rows:
-        _console_print(_summary_stage_line(
+        _console_print(timestamped_status(_summary_stage_line(
             stage, count, tokens, duration, suffix,
             run_width=run_width, token_width=token_width,
             duration_width=duration_width,
-        ))
+        )))
 
     workflow_metrics = usage.get("workflow_metrics")
     attempts = workflow_metrics.get("attempts") if isinstance(workflow_metrics, dict) else None
@@ -455,10 +463,9 @@ def _print_execution_summary(folder: Path) -> None:
     retries_text = (
         str(retries) if isinstance(retries, int) and not isinstance(retries, bool) else "unknown"
     )
-    _console_print(style_text(
-        f"[RETRY] Attempts: {attempts_text} | Retries: {retries_text}",
-        style_status_tokens=False,
-    ))
+    _console_print(style_text(timestamped_status(
+        f"[RETRY] Attempts: {attempts_text} | Retries: {retries_text}"
+    ), style_status_tokens=False))
 
 
 def print_run_summary(run: Run, status: str, next_action: str, *,
@@ -467,10 +474,10 @@ def print_run_summary(run: Run, status: str, next_action: str, *,
                       reason: str = "",
                       logs_path: Path | None = None) -> None:
     separator = _unicode_or_ascii("─" * 72, "-" * 72)
-    _console_print("\n" + separator)
-    _console_print(style_text(f"[RESULT] {status}"))
-    _console_print(f"Branch:   {run.branch}")
-    _console_print(f"Worktree: {run.worktree}")
+    _console_print(timestamped_status("\n" + separator))
+    _console_print(style_text(timestamped_status(f"[RESULT] {status}")))
+    _console_print(timestamped_status(f"Branch:   {run.branch}"))
+    _console_print(timestamped_status(f"Worktree: {run.worktree}"))
     if attempts is not None:
         retry_detail = (
             f" (configured retries: {max_retries})"
@@ -479,15 +486,17 @@ def print_run_summary(run: Run, status: str, next_action: str, *,
         configured_attempts = (
             f"/{max_retries + 1}" if max_retries is not None else ""
         )
-        _console_print(f"Attempts: {attempts}{configured_attempts}{retry_detail}")
+        _console_print(timestamped_status(
+            f"Attempts: {attempts}{configured_attempts}{retry_detail}"
+        ))
     if reason:
-        _console_print(f"Reason:   {reason}")
+        _console_print(timestamped_status(f"Reason:   {reason}"))
     if logs_path is not None:
-        _console_print(f"Logs:     {logs_path}")
+        _console_print(timestamped_status(f"Logs:     {logs_path}"))
     if logs_path is not None and status.upper() in {"APPROVED", "VALIDATED", "MANUALLY APPROVED"}:
         _print_execution_summary(logs_path)
-    _console_print(f"Next:     {next_action}")
-    _console_print(separator, flush=True)
+    _console_print(timestamped_status(f"Next:     {next_action}"))
+    _console_print(timestamped_status(separator), flush=True)
 
 
 def _codex_progress(line: str) -> str | None:
@@ -717,9 +726,7 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                         transient: bool = False, persist: bool = True,
                         show_on_terminal: bool = True) -> None:
                 nonlocal human_log_truncated, last_notice, live_status
-                now = datetime.datetime.now().strftime("%H:%M:%S")
-                prefix = f"[{now}] [{label}]"
-                formatted = strip_ansi(f"{prefix} {message}")
+                formatted = strip_ansi(timestamped_status(f"[{label}] {message}"))
                 if generated_status_spans is not None:
                     rendered = _style_generated_progress(
                         formatted, message, generated_status_spans,
@@ -861,8 +868,7 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
     except KeyboardInterrupt:
         _append_bounded_human_log(
             log_file,
-            f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
-            f"[{label}] Cancelled by user.\n",
+            timestamped_status(f"[{label}] Cancelled by user.") + "\n",
         )
         _stop_process_tree(proc)
         proc.wait()

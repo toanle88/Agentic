@@ -26,6 +26,7 @@ from .cli import (
     state_paths,
 )
 from .application_diagnostics import run_with_diagnostics
+from .output import timestamped_status
 from .persistence import atomic_write_text
 
 
@@ -601,8 +602,10 @@ def _serve_dashboard(output: Path, render_current: Any, host: str, port: int,
         server.socket = tls_context.wrap_socket(server.socket, server_side=True)
     url_host = "localhost" if host in {"0.0.0.0", "::"} else host
     scheme = "https" if tls_context is not None else "http"
-    print(f"Dashboard serving at {scheme}://{url_host}:{server.server_port}/{output_name}")
-    print("Press Ctrl-C to stop the read-only dashboard server.")
+    print(timestamped_status(
+        f"Dashboard serving at {scheme}://{url_host}:{server.server_port}/{output_name}"
+    ))
+    print(timestamped_status("Press Ctrl-C to stop the read-only dashboard server."))
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -659,14 +662,14 @@ def _main(argv: list[str] | None = None) -> int:
     atomic_write_text(output, render_dashboard(
         runs, repo.name, logs_root.name, settings=_dashboard_settings(repo, runs),
     ), redact=False)
-    print(f"Dashboard written to {output}")
-    print(f"Runs found: {len(runs)}")
+    print(timestamped_status(f"Dashboard written to {output}"))
+    print(timestamped_status(f"Runs found: {len(runs)}"))
     if args.serve:
         if args.host not in {"127.0.0.1", "localhost", "::1"}:
-            print(
+            print(timestamped_status(
                 "WARNING: dashboard is remotely reachable; protect the listener and keep "
                 f"${args.auth_token_env} secret."
-            )
+            ))
         _serve_dashboard(
             output,
             lambda: _render_current_dashboard(repo, state_dir, logs_argument),

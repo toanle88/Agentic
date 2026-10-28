@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -17,6 +18,15 @@ from agentic_runner import shell as agentic_shell
 from agentic_runner import shell_jobs as agentic_shell_jobs
 from agentic_runner import shell_input as agentic_shell_input
 from agentic_runner.cli import state_paths
+
+
+def _without_status_dates(value):
+    return re.sub(
+        r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ",
+        "",
+        value,
+        flags=re.MULTILINE,
+    )
 
 
 WINDOWS_TREE_CHILD = (
@@ -916,7 +926,7 @@ class ShellTests(unittest.TestCase):
 
             job.process.wait(timeout=5)
             rendered = output.getvalue()
-            lines = rendered.splitlines()
+            lines = _without_status_dates(rendered).splitlines()
             self.assertIn('[DEVELOPER] Agent is working', lines)
             self.assertNotIn('[DEVELOPER] Still running (1s elapsed)...', lines)
             self.assertIn('[DEVELOPER] Finished in 1s (exit 0)', lines)
@@ -958,7 +968,7 @@ class ShellTests(unittest.TestCase):
             with redirect_stdout(plain):
                 shell.show_logs(['/logs', str(job.number), '5'])
             self.assertNotIn('\033[', plain.getvalue())
-            self.assertIn(summary, plain.getvalue())
+            self.assertIn(summary, _without_status_dates(plain.getvalue()))
 
 
     def test_runner_command_forwarding_uses_terminal_styling(self):
@@ -1585,7 +1595,10 @@ class ShellTests(unittest.TestCase):
             running = shell._launch([sys.executable, '-c', 'import time; time.sleep(5)'])
             try:
                 output = _capture_ps(shell)
-                rows = [line for line in output.splitlines() if line.startswith(('1 ', '2 '))]
+                rows = [
+                    line for line in _without_status_dates(output).splitlines()
+                    if line.startswith(('1 ', '2 '))
+                ]
                 self.assertEqual(len(rows), 2)
                 self.assertTrue(rows[0].startswith(f'{running.number:<3}'))
                 self.assertIn('RUNNING', rows[0])
@@ -1805,7 +1818,7 @@ class ShellTests(unittest.TestCase):
             argv = run.call_args.args[0]
             self.assertIn('--list', argv)
             self.assertEqual(Path(run.call_args.kwargs['cwd']).resolve(), root.resolve())
-            self.assertEqual(output.getvalue(), '#1 Fix it\n')
+            self.assertEqual(_without_status_dates(output.getvalue()), '#1 Fix it\n')
 
 
     def test_list_rejects_arguments(self):
@@ -2177,7 +2190,7 @@ class ShellTests(unittest.TestCase):
             verbose = StringIO()
             with redirect_stdout(verbose):
                 shell.show_logs(['/logs', str(job.number), '--verbose'])
-            self.assertIn(raw_output, verbose.getvalue())
+            self.assertIn(raw_output, _without_status_dates(verbose.getvalue()))
 
     def test_foreground_publish_waiting_prompts_are_editable(self):
         prompts = (

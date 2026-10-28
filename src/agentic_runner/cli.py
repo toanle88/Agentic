@@ -115,7 +115,7 @@ from .ci_repair import (
     verify_worktree_for_pr,
     worktree_change_fingerprint,
 )
-from .output import style_system_text, style_text
+from .output import style_system_text, style_text, timestamped_status
 from .persistence import read_text_bounded, read_text_tail
 from .trust import (
     TrustChoice,
@@ -163,6 +163,7 @@ DEFAULT_SECURITY_MODE = _agentic_config.DEFAULT_SECURITY_MODE
 def _status_print(message: Any, *, file: Any = None, flush: bool = False,
                   system_prefix: str | None = None) -> None:
     """Print human-facing status with TTY-only styling."""
+    message = timestamped_status(message)
     if system_prefix is None:
         rendered = style_text(message, file)
     else:

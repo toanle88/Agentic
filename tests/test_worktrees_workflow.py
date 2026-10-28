@@ -2,6 +2,7 @@
 import json
 import contextlib
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -17,6 +18,7 @@ import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner import cli as agentic
 from agentic_runner import workflow as agentic_workflow
 from agentic_runner import worktrees as agentic_worktrees
+from agentic_runner.output import strip_ansi
 from agentic_runner.telemetry import record_test_result
 from test_worktrees import _GitRepositoryTestCase
 
@@ -684,7 +686,7 @@ class WorkflowTests(_GitRepositoryTestCase):
         review.assert_not_called()
         rendered = console.getvalue()
         self.assertIn('\033[31m[TESTS]\033[0m \033[31mFailed\033[0m', rendered)
-        self.assertIn('[TESTS] [REVIEW] AssertionError', rendered)
+        self.assertIn('[TESTS] [REVIEW] AssertionError', strip_ansi(rendered))
         self.assertNotIn('\033[31mFAILED\033[0m', rendered)
         self.assertNotIn('\033[32mPASSED\033[0m', rendered)
         self.assertNotIn('\033[35m[REVIEW]\033[0m', rendered)
@@ -747,7 +749,13 @@ class WorkflowTests(_GitRepositoryTestCase):
 
         self.assertTrue(passed)
         rendered = console.getvalue()
-        self.assertIn('[PATCH] Proposed changes:\n' + summary, rendered)
+        rendered_without_timestamps = re.sub(
+            r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ",
+            "",
+            rendered,
+            flags=re.MULTILINE,
+        )
+        self.assertIn('[PATCH] Proposed changes:\n' + summary, rendered_without_timestamps)
         self.assertNotIn('\033[', rendered)
 
 
