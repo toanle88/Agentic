@@ -357,11 +357,15 @@ class ProviderCommandTests(unittest.TestCase):
 
     def test_dangerous_provider_modes_are_explicit(self):
         policy = {"allow_dangerous": True}
+        for provider in ("gemini", "claude", "copilot"):
+            with self.subTest(provider=provider):
+                with self.assertRaisesRegex(ValueError, "require security_mode 'isolated'"):
+                    cli_provider_command(provider, "develop", permission_policy=policy)
         claude, _ = cli_provider_command(
-            "claude", "develop", permission_policy=policy,
+            "claude", "develop", permission_policy=policy, security_mode="isolated",
         )
         copilot, _ = cli_provider_command(
-            "copilot", "develop", permission_policy=policy,
+            "copilot", "develop", permission_policy=policy, security_mode="isolated",
         )
         self.assertIn("--dangerously-skip-permissions", claude)
         self.assertIn("--allow-all-tools", copilot)

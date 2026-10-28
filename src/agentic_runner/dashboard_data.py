@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Iterable, NamedTuple
 
 from .review import finding_severity
+from .file_boundaries import _is_reparse_or_symbolic_link
 from .persistence import read_text_bounded, read_text_prefix, read_text_tail
 from .telemetry import read_issue_history, read_run_usage
 
@@ -1141,7 +1142,7 @@ def collect_runs(logs_root: Path) -> list[dict[str, Any]]:
     candidate_count = 0
     try:
         for folder in logs_root.iterdir():
-            if not folder.is_dir():
+            if _is_reparse_or_symbolic_link(folder) or not folder.is_dir():
                 continue
             candidate_count += 1
             if candidate_count > MAX_DASHBOARD_CANDIDATE_FOLDERS:

@@ -660,6 +660,7 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
                      timeout: int | None = None,
                      model: str | None = None,
                      permission_policy: dict[str, bool] | None = None,
+                     security_mode: str = "trusted",
                      check_commands: list[list[str]] | None = None,
                      executable_path: str | None = None,
                      host: str | None = None,
@@ -685,6 +686,8 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
             command_kwargs["executable_path"] = effective_path
     if permission_policy is not None:
         command_kwargs["permission_policy"] = permission_policy
+    if security_mode != "trusted":
+        command_kwargs["security_mode"] = security_mode
     if check_commands is not None:
         command_kwargs["check_commands"] = check_commands
     effective_sandbox = dict(sandbox) if sandbox is not None else None

@@ -84,7 +84,7 @@ class PackagingTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(probe.returncode, 0, probe.stderr)
-            self.assertEqual(probe.stdout.strip(), "1.1.127")
+            self.assertEqual(probe.stdout.strip(), "1.1.128")
 
     def test_root_command_wrappers_remain_thin_compatibility_entrypoints(self):
         wrapper = (ROOT / "agentic.py").read_text(encoding="utf-8")
@@ -104,8 +104,8 @@ class PackagingTests(unittest.TestCase):
         self.assertIn(
             output,
             {
-                "agentic.py 1.1.127",
-                f"{Path(sys.executable).name} -m agentic_runner.cli 1.1.127",
+                "agentic.py 1.1.128",
+                f"{Path(sys.executable).name} -m agentic_runner.cli 1.1.128",
             },
         )
 
@@ -130,7 +130,7 @@ class PackagingTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(probe.returncode, 0, probe.stderr)
-        self.assertEqual(probe.stdout.strip(), "1.1.127")
+        self.assertEqual(probe.stdout.strip(), "1.1.128")
 
 
 if __name__ == "__main__":

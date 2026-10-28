@@ -76,7 +76,7 @@ def run_cli_provider(*args, **kwargs):
                             name for name in (
                                 "executable_path", "worktree", "sandbox_enabled",
                                 "sandbox_allow_network", "check_commands",
-                                "permission_policy",
+                                "permission_policy", "security_mode",
                             )
                             if (
                                 name in command_kwargs

@@ -20,6 +20,7 @@ from .git_policy import (
     GIT_SAFETY_ENVIRONMENT,
     hardened_git_argv,
     hardened_git_environment,
+    is_blocked_git_environment_name,
 )
 from .policy import forbidden
 
@@ -449,13 +450,8 @@ def sandbox_command(
             replacements.append((output, "/agentic-output"))
     source_env = os.environ if env is None else env
     git_command = command_uses_git_metadata(argv)
-    blocked_git_environment = {
-        "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
-        "GIT_EXTERNAL_DIFF", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND",
-        *(name for name, _ in GIT_SAFETY_ENVIRONMENT),
-    }
     for name in policy["pass_env"] if pass_env is None else pass_env:
-        if git_command and (name.startswith("GIT_CONFIG_") or name in blocked_git_environment):
+        if git_command and is_blocked_git_environment_name(name):
             continue
         if name in source_env:
             command.extend(["--env", name])

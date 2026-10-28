@@ -10,6 +10,9 @@ _SENSITIVE_ENV_NAME = re.compile(
     r"(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)", re.IGNORECASE
 )
 _BEARER = re.compile(r"(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]{8,}")
+_URL_USERINFO = re.compile(
+    r"(?i)\b([A-Za-z][A-Za-z0-9+.-]*://)([^/?#\s@]+)@"
+)
 _CREDENTIAL_KEY = (
     r"(?:api[_-]?key|access[_-]?token|auth(?:orization)?|"
     r"password|passwd|secret|token|credential|key|"
@@ -86,7 +89,8 @@ def redact_secrets(text: str, extra_values: Iterable[str] = ()) -> str:
     """
     if not text:
         return text
-    redacted = _BEARER.sub(r"\1[REDACTED]", text)
+    redacted = _URL_USERINFO.sub(r"\1[REDACTED]@", text)
+    redacted = _BEARER.sub(r"\1[REDACTED]", redacted)
 
     def redact_key_value(match: re.Match[str]) -> str:
         # ``audit_key`` is a stable run identifier, not a credential.  It is

@@ -356,6 +356,7 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
               sandbox: dict[str, Any] | None = None,
               check_commands: list[list[str]] | None = None,
               credential_names: list[str] | None = None,
+              security_mode: str | None = None,
               verbose: bool = False,
               log_label: str | None = None) -> tuple[bool, str]:
     """Dispatch one configured provider turn with an explicit log label."""
@@ -364,6 +365,7 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
     else:
         selected = dict(settings or {})
     provider = str(selected.get("provider", "codex"))
+    effective_security_mode = security_mode or str(selected.get("security_mode", "trusted"))
     permission_policy = selected.get("permission_policy")
     policy_explicit = isinstance(permission_policy, dict) and bool(permission_policy)
     if not isinstance(permission_policy, dict) or not permission_policy:
@@ -445,6 +447,8 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
         cli_kwargs["executable_path"] = selected["executable_path"]
     if provider == "copilot" and selected.get("host") is not None:
         cli_kwargs["host"] = selected["host"]
+    if effective_security_mode != "trusted":
+        cli_kwargs["security_mode"] = effective_security_mode
     if check_commands is not None:
         cli_kwargs["check_commands"] = check_commands
     if provider == "copilot" and selected.get("host") and provider_sandbox is not None:
@@ -1079,7 +1083,8 @@ def investigate_issue(worktree: Path, issue: Issue, folder: Path, *,
                       agent: dict[str, Any] | AgentSettings | None = None,
                       verbose: bool = False,
                       sandbox: dict[str, Any] | None = None,
-                      credential_names: list[str] | None = None) -> dict[str, Any]:
+                      credential_names: list[str] | None = None,
+                      security_mode: str = "trusted") -> dict[str, Any]:
     """Investigate an issue and record feedback for the development turn."""
     schema = folder / "investigation-schema.json"
     atomic_write_json(schema, INVESTIGATION_SCHEMA)
@@ -1128,6 +1133,8 @@ paths and test names when they support the observation.
         run_kwargs["sandbox"] = sandbox
     if credential_names:
         run_kwargs["credential_names"] = credential_names
+    if security_mode != "trusted":
+        run_kwargs["security_mode"] = security_mode
     ok, message = run_agent(
         worktree, prompt, readonly=True, schema=schema, output=output,
         settings=agent, log_label="INVESTIGATION", **run_kwargs,
@@ -1491,7 +1498,8 @@ def audit_repository(worktree: Path, issue: Issue, folder: Path, *,
                      agent: dict[str, Any] | AgentSettings | None = None,
                      verbose: bool = False,
                      sandbox: dict[str, Any] | None = None,
-                     credential_names: list[str] | None = None) -> dict[str, Any]:
+                     credential_names: list[str] | None = None,
+                     security_mode: str = "trusted") -> dict[str, Any]:
     """Run the bounded, read-only repository audit and persist its report."""
     if not issue.is_audit or not issue.audit_key:
         raise ValueError("audit_repository requires an audit work item")
@@ -1530,6 +1538,8 @@ pass/fail decision about a patch.
         run_kwargs["sandbox"] = sandbox
     if credential_names:
         run_kwargs["credential_names"] = credential_names
+    if security_mode != "trusted":
+        run_kwargs["security_mode"] = security_mode
     ok, message = run_agent(
         worktree, prompt, readonly=True, schema=schema, output=output,
         settings=agent, log_label="AUDIT", **run_kwargs,
@@ -1584,6 +1594,7 @@ def _run_audit(run: Run, issue: Issue, config: dict[str, Any], folder: Path, *,
             ),
             sandbox=config.get("sandbox"), verbose=verbose,
             credential_names=credential_environment_names(config),
+            security_mode=config.get("security_mode", "trusted"),
         )
 
     report = run_once()
@@ -1691,6 +1702,7 @@ def _run_investigation(run: Run, issue: Issue, config: dict[str, Any],
             "sandbox": config.get("sandbox"),
             "verbose": verbose,
             "credential_names": credential_environment_names(config),
+            "security_mode": config.get("security_mode", "trusted"),
         }
         return investigate_issue(run.worktree, issue, folder, **kwargs)
 
@@ -1725,7 +1737,8 @@ def review(worktree: Path, issue: Issue, folder: Path, base_sha: str,
            system_prompt: str | None = None,
            verbose: bool = False,
            repair_mode: bool = False,
-           repair_scope: str | None = None) -> dict[str, Any]:
+           repair_scope: str | None = None,
+           security_mode: str = "trusted") -> dict[str, Any]:
     if not developer_report:
         developer_report = load_latest_developer_report(folder)
     if instruction is None:
@@ -1806,6 +1819,8 @@ verdict.
         run_kwargs["sandbox"] = sandbox
     if credential_names:
         run_kwargs["credential_names"] = credential_names
+    if security_mode != "trusted":
+        run_kwargs["security_mode"] = security_mode
     ok, message = run_agent(
         worktree, prompt, readonly=True, schema=schema, output=output,
         settings=agent, **run_kwargs,
@@ -2007,6 +2022,7 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
         verbose=verbose,
         repair_mode=repair_mode,
         repair_scope=repair_scope,
+        security_mode=config.get("security_mode", "trusted"),
     )
     if verdict.get("_tooling_error"):
         _status_print("[REVIEW] Reviewer result was invalid; retrying read-only review")
@@ -2025,6 +2041,7 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
             verbose=verbose,
             repair_mode=repair_mode,
             repair_scope=repair_scope,
+            security_mode=config.get("security_mode", "trusted"),
         )
     if verdict.get("_tooling_error"):
         raise RuntimeError(
