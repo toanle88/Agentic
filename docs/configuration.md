@@ -424,7 +424,7 @@ isolated checks and provider processes start:
     "build_context": ".",
     "language": "python",
     "allow_network": false,
-    "build_network": true,
+    "build_network": false,
     "pass_env": ["OPENAI_API_KEY"]
   }
 }
@@ -439,10 +439,11 @@ include comments for adding project dependencies, native packages, test tools,
 and the selected provider CLI.
 
 `build_network` controls network access while the configured Dockerfile is
-built. It defaults to `true` so Dockerfiles that install dependencies remain
-functional; set it to `false` for a network-disabled build when the Dockerfile
-uses only locally available inputs. This build setting is separate from
-`allow_network`, which controls runtime containers.
+built. It defaults to `false`; set it to `true` only when the repository's
+Dockerfile and build inputs are trusted and dependency downloads are required.
+This build setting is separate from `allow_network`, which controls runtime
+containers. Builds use a bounded temporary context that excludes protected
+files and non-regular entries.
 
 `agentic init` records a best-effort language hint from common project markers.
 Use `--sandbox-language` or set `sandbox.language` to override it. Detection is

@@ -28,11 +28,13 @@ Agentic uses bounded observation with explicit continuation:
   a continuation marker when another page exists. Calls beyond page 100 are
   rejected before repository traversal. Protected paths remain filtered on
   every page.
-- Configured sandbox image builds use the engine's default network by default
-  so dependency installation remains functional. `sandbox.build_network: false`
-  explicitly passes `--network=none`. This is independent of runtime
-  `sandbox.allow_network`; build operations remain a trusted-host/daemon
-  boundary and do not receive configured pass-through environment variables.
+- Configured sandbox image builds use a bounded temporary context containing
+  only safe regular files that pass the protected-path policy. Symlinks,
+  special files, and hard-linked files cannot cross the context boundary.
+  Build networking is disabled by default; `sandbox.build_network: true` is an
+  explicit opt-in that passes the engine's default network. This is independent
+  of runtime `sandbox.allow_network`; build operations do not receive
+  configured pass-through environment variables.
 
 ## Alternatives considered
 
@@ -43,9 +45,10 @@ Agentic uses bounded observation with explicit continuation:
   files beyond the first page. A cursor was considered, but a stable page
   number over deterministic sorted traversal keeps the tool schema small and
   preserves the existing newline-delimited output format.
-- Disabling build networking unconditionally was rejected because ordinary
-  Dockerfiles that install dependencies would fail. Runtime network policy is
-  not weakened by the build default.
+- Passing the repository directly as context was rejected because a malicious
+  Dockerfile could copy protected files during a networked build. Disabling
+  build networking by default preserves a fail-closed boundary while allowing
+  trusted repositories to opt in when dependency installation requires it.
 
 ## Consequences
 

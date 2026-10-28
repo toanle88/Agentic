@@ -1173,7 +1173,7 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
         "build_context": sandbox_context,
         "language": sandbox_language,
         "allow_network": False,
-        "build_network": True,
+        "build_network": False,
         "pass_env": sandbox_env_for_providers(provider, reviewer_provider),
     })
     slow_commands: list[list[str]] = []

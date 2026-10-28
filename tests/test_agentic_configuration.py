@@ -854,7 +854,7 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(config['sandbox']['dockerfile'], 'Dockerfile.agentic')
         self.assertEqual(config['sandbox']['build_context'], 'container')
         self.assertEqual(config['sandbox']['language'], 'python')
-        self.assertTrue(config['sandbox']['build_network'])
+        self.assertFalse(config['sandbox']['build_network'])
 
         base = {'test_commands': [['python', '-m', 'unittest']], 'sandbox': {
             'enabled': True, 'image': 'project:latest',
@@ -873,21 +873,68 @@ class ConfigurationTests(unittest.TestCase):
             repo = Path(temp)
             dockerfile = repo / 'Dockerfile.agentic'
             dockerfile.write_text('FROM python:3.12.7-slim-bookworm\n')
+            (repo / 'safe.txt').write_text('safe\n')
+            (repo / '.env').write_text('secret\n')
             sandbox = {
                 'enabled': True, 'engine': 'docker', 'image': 'project:latest',
                 'dockerfile': 'Dockerfile.agentic', 'build_context': '.',
             }
             completed = CompletedProcess([], 0, stdout='built\n')
+            observed = {}
+
+            def run_build(argv, **kwargs):
+                context = Path(argv[-1])
+                observed['context'] = context
+                observed['dockerfile'] = Path(argv[argv.index('--file') + 1])
+                observed['files'] = sorted(
+                    path.relative_to(context).as_posix()
+                    for path in context.rglob('*') if path.is_file()
+                )
+                return completed
+
             with (patch('agentic_config.shutil.which', return_value='/usr/bin/docker'),
-                  patch('agentic_config.subprocess.run', return_value=completed) as run):
+                  patch('agentic_config.subprocess.run', side_effect=run_build) as run):
                 agentic.preflight_security('isolated', sandbox, repo=repo)
-        run.assert_called_once_with(
-            ['docker', 'build', '--pull=false', '--network=default', '--tag', 'project:latest',
-             '--file', str(dockerfile.resolve()), str(repo.resolve())],
-            cwd=repo, stdout=agentic_config.subprocess.PIPE,
-            stderr=agentic_config.subprocess.STDOUT, text=True, encoding='utf-8',
-            errors='replace', timeout=1800, check=False,
-        )
+        run.assert_called_once()
+        command = run.call_args.args[0]
+        self.assertEqual(command[:7], [
+            'docker', 'build', '--pull=false', '--network=none', '--tag', 'project:latest',
+            '--file',
+        ])
+        self.assertEqual(Path(command[7]), observed['dockerfile'])
+        self.assertEqual(Path(command[8]), observed['context'])
+        self.assertEqual(run.call_args.kwargs, {
+            'cwd': repo, 'stdout': agentic_config.subprocess.PIPE,
+            'stderr': agentic_config.subprocess.STDOUT, 'text': True, 'encoding': 'utf-8',
+            'errors': 'replace', 'timeout': 1800, 'check': False,
+        })
+        self.assertEqual(observed['files'], ['Dockerfile.agentic', 'safe.txt'])
+        self.assertNotIn(str(repo.resolve()), str(observed['context']))
+        self.assertFalse(observed['context'].exists())
+        self.assertFalse(observed['dockerfile'].exists())
+
+
+    def test_sandbox_build_context_filters_links_and_special_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            (repo / 'Dockerfile.agentic').write_text('FROM scratch\n')
+            (repo / 'safe.txt').write_text('safe\n')
+            try:
+                (repo / 'linked.txt').symlink_to(repo / 'safe.txt')
+                os.mkfifo(repo / 'pipe')
+            except (AttributeError, NotImplementedError, OSError):
+                self.skipTest('symbolic links or FIFOs are unavailable')
+            sandbox = {
+                'enabled': True, 'engine': 'docker', 'image': 'project:latest',
+                'dockerfile': 'Dockerfile.agentic', 'build_context': '.',
+            }
+            with agentic_config.sandbox_build_context(sandbox, repo) as command:
+                context = Path(command[-1])
+                files = sorted(
+                    path.relative_to(context).as_posix()
+                    for path in context.rglob('*') if path.is_file()
+                )
+                self.assertEqual(files, ['Dockerfile.agentic', 'safe.txt'])
 
 
     def test_preflight_can_disable_sandbox_build_network(self):
@@ -905,6 +952,9 @@ class ConfigurationTests(unittest.TestCase):
                   patch('agentic_config.subprocess.run', return_value=completed) as run):
                 agentic.preflight_security('isolated', sandbox, repo=repo)
         self.assertIn('--network=none', run.call_args.args[0])
+        self.assertTrue(agentic.validate_sandbox({
+            'enabled': True, 'image': 'project:latest', 'build_network': True,
+        })['build_network'])
 
 
     def test_project_language_detection_supports_explicit_markers(self):
