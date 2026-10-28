@@ -709,7 +709,12 @@ class AgenticShell:
     def _runner_prefix(self) -> list[str]:
         if self.runner.suffix == ".py":
             return [sys.executable, "-u", str(self.runner)]
-        if self.runner == Path(sys.executable):
+        # ``AgenticShell`` resolves the configured runner during
+        # initialization. Virtual-environment interpreters are often
+        # symlinks, so compare against the resolved interpreter too; without
+        # this, a fallback runner becomes ``python audit`` and Python treats
+        # the subcommand as a script path in the target repository.
+        if self.runner == Path(sys.executable).resolve():
             return [sys.executable, "-u", "-m", "agentic_runner.cli"]
         return [str(self.runner)]
 
