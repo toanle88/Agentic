@@ -21,6 +21,12 @@ from typing import Any
 
 from .execution import _console_print
 from .execution_stream import _process_group_kwargs, _stop_process_tree
+from .git_policy import (
+    GIT_SAFETY_CONFIG,
+    hardened_git_environment,
+    hardened_git_argv,
+    git_filter_probe_argv,
+)
 from .models import DEFAULT_GITHUB_HOST, Issue, PullRequest, Run, StatePaths
 from .security import redact_secrets
 from .output import style_system_text, style_text
@@ -45,17 +51,7 @@ AUDIT_KEY = hashlib.sha256(b"agentic-repository-audit-v1").hexdigest()[:12]
 MAX_SELECTION_RUNS = 5
 RELATIVE_WORKTREE_GIT = (2, 48, 0)
 MAX_COMMAND_OUTPUT_BYTES = 8 * 1024 * 1024
-_GIT_SAFETY_CONFIG = (
-    "-c", "core.fsmonitor=false",
-    "-c", f"core.hooksPath={os.devnull}",
-    "-c", "credential.helper=",
-    "-c", "core.sshCommand=ssh",
-    "-c", "core.gitProxy=none",
-    "-c", "protocol.ext.allow=never",
-    "-c", "remote.origin.uploadpack=git-upload-pack",
-    "-c", "remote.origin.receivepack=git-receive-pack",
-    "-c", "diff.external=",
-)
+_GIT_SAFETY_CONFIG = GIT_SAFETY_CONFIG
 
 
 class UserCancelled(RuntimeError):
@@ -430,24 +426,9 @@ def git(repo: Path, *args: str, check: bool = True) -> str:
     # fsmonitor, external-diff, credential, proxy, SSH, or transport helpers.
     # Keep the environment explicit as well: Git gives several environment
     # variables precedence over configuration files.
-    environment = os.environ.copy()
-    for name in list(environment):
-        if name.startswith("GIT_CONFIG_"):
-            environment.pop(name, None)
-    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"):
-        environment.pop(name, None)
-    environment.update({
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_GLOBAL": os.devnull,
-        "GIT_ATTR_NOSYSTEM": "1",
-        "GIT_OPTIONAL_LOCKS": "0",
-        "GIT_TERMINAL_PROMPT": "0",
-    })
-    for name in ("GIT_EXTERNAL_DIFF", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND"):
-        environment.pop(name, None)
+    environment = hardened_git_environment()
     filter_probe = command(
-        ["git", "config", "--local", "--name-only", "--get-regexp",
-         r"^filter\..+\.(clean|smudge|process|required)$"],
+        git_filter_probe_argv(),
         repo, timeout=10, check=False, env=environment,
         max_output_bytes=MAX_COMMAND_OUTPUT_BYTES,
     )
@@ -458,7 +439,7 @@ def git(repo: Path, *args: str, check: bool = True) -> str:
             "Repository Git filter drivers are not supported for safe operations"
         )
     return command(
-        ["git", *_GIT_SAFETY_CONFIG, *args], repo,
+        hardened_git_argv(["git", *args]), repo,
         check=check, env=environment,
     ).stdout.strip()
 
