@@ -36,7 +36,7 @@ from agentic_runner import file_boundaries
 from agentic_runner import worktrees as agentic_worktrees
 from agentic_runner.config import PROVIDER_API_KEY_ENV, provider_process_environment
 from agentic_runner.policy import provider_forbidden
-from agentic_runner.sandbox import sandbox_command, validate_sandbox
+from agentic_runner.sandbox import sandbox_build_command, sandbox_command, validate_sandbox
 from agentic_runner.security import (
     configured_environment_values,
     redact_secrets,
@@ -1773,6 +1773,26 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
         self.assertIn("test-image", command)
         self.assertEqual(command[command.index("--entrypoint") + 1], "python")
         self.assertEqual(command[command.index("test-image") + 1:], ["-m", "unittest"])
+
+    def test_sandbox_image_build_network_is_disabled_unless_explicitly_enabled(self):
+        dockerfile = Path("/tmp/build/Dockerfile.agentic")
+        context = Path("/tmp/build/context")
+        settings = validate_sandbox({
+            "enabled": True, "engine": "docker", "image": "test-image",
+            "dockerfile": "Dockerfile.agentic",
+        })
+        command = sandbox_build_command(
+            settings, Path("/tmp/worktree"),
+            dockerfile_path=dockerfile, context_path=context,
+        )
+        self.assertIn("--network=none", command)
+
+        settings["build_network"] = True
+        command = sandbox_build_command(
+            settings, Path("/tmp/worktree"),
+            dockerfile_path=dockerfile, context_path=context,
+        )
+        self.assertIn("--network=default", command)
 
     def test_sandbox_git_command_disables_repository_controlled_helpers(self):
         settings = validate_sandbox({"enabled": True, "engine": "docker", "image": "test-image"})

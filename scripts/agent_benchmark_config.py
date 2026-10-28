@@ -11,6 +11,8 @@ from pathlib import Path
 import re
 from typing import Any, Iterable
 
+from agentic_runner.persistence import read_text_bounded
+
 
 SCHEMA_VERSION = 1
 RUNNERS = ("agent-alone", "agentic")
@@ -24,6 +26,7 @@ MAX_CHECKS_PER_TASK = 100
 MAX_DEFECTS_PER_TASK = 100
 MAX_REVIEWERS = 20
 MAX_SCENARIO_RECORDS = 100_000
+MAX_BENCHMARK_BYTES = 256_000
 
 
 def _argv(value: Any, label: str) -> list[str]:
@@ -80,10 +83,14 @@ def _validate_placeholders(command: list[str], label: str) -> None:
 
 def load_benchmark(path: Path) -> dict[str, Any]:
     """Load and validate a benchmark corpus plus its scenario adapters."""
+    text = read_text_bounded(path, MAX_BENCHMARK_BYTES)
+    if text is None:
+        raise ValueError(
+            "could not read benchmark: missing, unreadable, or exceeds "
+            f"{MAX_BENCHMARK_BYTES}-byte limit"
+        )
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except OSError as exc:
-        raise ValueError(f"could not read benchmark: {exc}") from exc
+        raw = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ValueError(f"benchmark is not valid JSON: {exc}") from exc
     if not isinstance(raw, dict):

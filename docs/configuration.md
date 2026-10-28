@@ -1,6 +1,6 @@
 # Configuration
 
-Agentic reads the personal, target-specific `agent_config.json` from the target repository unless `--config` points to another file. The repository contains [`agent_config.example.json`](../agent_config.example.json) as a structural example; it is not a universal configuration.
+Agentic reads the personal, target-specific `agent_config.json` from the target repository unless `--config` points to another file. Configuration files are bounded to 256,000 bytes before JSON parsing; larger files fail closed. The repository contains [`agent_config.example.json`](../agent_config.example.json) as a structural example; it is not a universal configuration.
 
 For editor validation, use the checked-in [`agent_config.schema.json`](../agent_config.schema.json) as the JSON Schema. The schema is a convenience for editors; Agentic remains the source of truth and validates configuration before a run.
 
