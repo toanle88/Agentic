@@ -1291,6 +1291,23 @@ class InteractiveInputTests(unittest.TestCase):
                     key_reader_factory=reader_d,
                 )
 
+    def test_interactive_input_ctrl_c_clears_transient_editor(self):
+        reader = _create_mock_reader([('CHAR', 'x'), ('CTRL_C', '\003')])
+        output = StringIO()
+        with patch('sys.stdout', output), \
+             patch('agentic_shell_input.shutil.get_terminal_size',
+                   return_value=os.terminal_size((20, 8))):
+            with self.assertRaises(KeyboardInterrupt):
+                agentic_shell._interactive_input(
+                    'agentic> ',
+                    agentic_shell._completion_items,
+                    key_reader_factory=reader,
+                )
+
+        cleanup_tail = output.getvalue().rsplit('\033[r', 1)[-1]
+        self.assertIn('\033[5;1H', cleanup_tail)
+        self.assertNotIn('agentic> x', strip_ansi(cleanup_tail))
+
     def test_interactive_input_accepts_bracketed_paste_as_multiline_text(self):
         keys = [('PASTE', 'first line\nsecond line'), ('ENTER', '\n')]
         reader = _create_mock_reader(keys)
