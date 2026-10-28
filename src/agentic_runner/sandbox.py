@@ -8,6 +8,11 @@ import subprocess
 from typing import Any
 
 from .file_boundaries import _is_reparse_or_symbolic_link
+from .git_policy import (
+    GIT_SAFETY_ENVIRONMENT,
+    hardened_git_argv,
+    hardened_git_environment,
+)
 
 
 SUPPORTED_ENGINES = ("docker", "podman")
@@ -124,13 +129,14 @@ def _authoritative_git_common_dir(root: Path) -> Path | None:
     """Ask Git which common directory belongs to this checkout."""
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--git-common-dir"],
+            hardened_git_argv(["git", "-C", str(root), "rev-parse", "--git-common-dir"]),
             cwd=root,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
             check=False,
+            env=hardened_git_environment(),
         )
     except OSError:
         return None
@@ -303,9 +309,20 @@ def sandbox_command(
             command.extend(["-v", f"{output}:/agentic-output:rw"])
             replacements.append((output, "/agentic-output"))
     source_env = os.environ if env is None else env
+    git_command = command_uses_git_metadata(argv)
+    blocked_git_environment = {
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+        "GIT_EXTERNAL_DIFF", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND",
+        *(name for name, _ in GIT_SAFETY_ENVIRONMENT),
+    }
     for name in policy["pass_env"] if pass_env is None else pass_env:
+        if git_command and (name.startswith("GIT_CONFIG_") or name in blocked_git_environment):
+            continue
         if name in source_env:
             command.extend(["--env", name])
+    if git_command:
+        for name, value in GIT_SAFETY_ENVIRONMENT:
+            command.extend(["--env", f"{name}={value}"])
     # The sandbox normally runs as the invoking non-root UID.  Minimal images
     # often only define /root, which leaves Git and other tools with an
     # unwritable or nonexistent home when Docker's --user flag is applied.

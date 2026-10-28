@@ -21,7 +21,7 @@ from agentic_runner import openrouter as agentic_openrouter
 from agentic_runner import file_boundaries
 from agentic_runner.context import compact_openrouter_request
 from agentic_runner import openrouter_tools as agentic_openrouter_tools
-from agentic_runner.git_policy import GIT_LOG_METADATA_FORMAT
+from agentic_runner.git_policy import GIT_LOG_METADATA_FORMAT, hardened_git_environment
 
 
 class OpenRouterTests(unittest.TestCase):
@@ -1029,7 +1029,11 @@ class OpenRouterTests(unittest.TestCase):
 
             with patch(
                 'agentic_openrouter_tools._bounded_command_capture',
-                return_value=(0, 'public\n', False, False),
+                side_effect=lambda argv, *args, **kwargs: (
+                    (1, '', False, False)
+                    if 'config' in argv and '--local' in argv
+                    else (0, 'public\n', False, False)
+                ),
             ) as capture:
                 result = agentic_openrouter._openrouter_tool_call(
                     root, 'run_command',
@@ -1037,7 +1041,7 @@ class OpenRouterTests(unittest.TestCase):
                     readonly=True,
                 )
             self.assertIn('exit 0', result)
-            capture.assert_called_once()
+            self.assertEqual(capture.call_count, 2)
 
     def test_openrouter_git_log_rejects_history_content_after_protected_rename(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1143,6 +1147,143 @@ class OpenRouterTests(unittest.TestCase):
             )
             self.assertNotIn('ERROR:', result)
             self.assertFalse(marker.exists(), result)
+
+    def test_openrouter_git_status_disables_repository_fsmonitor_helper(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            marker = root / 'fsmonitor-ran'
+            helper = root / 'fsmonitor-helper'
+            helper.write_text(
+                f'#!/bin/sh\ntouch {marker}\nprintf "token\\n"\n', encoding='utf-8',
+            )
+            helper.chmod(0o700)
+
+            def run(*argv):
+                return subprocess.run(
+                    ['git', *argv], cwd=root, check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+
+            run('init', '-q')
+            run('config', 'core.fsmonitor', str(helper))
+            (root / 'tracked.txt').write_text('tracked\n', encoding='utf-8')
+            run('add', 'tracked.txt')
+            marker.unlink(missing_ok=True)
+            result = agentic_openrouter._openrouter_tool_call(
+                root, 'run_command',
+                {'argv': ['git', 'status', '--short', '--untracked-files=no']},
+                readonly=True,
+            )
+            self.assertNotIn('ERROR:', result)
+            self.assertFalse(marker.exists(), result)
+
+    def test_openrouter_git_rejects_repository_filter_helpers(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            marker = root / 'filter-ran'
+            helper = root / 'filter-helper'
+            helper.write_text(
+                f'#!/bin/sh\ntouch {marker}\n', encoding='utf-8',
+            )
+            helper.chmod(0o700)
+
+            def run(*argv):
+                return subprocess.run(
+                    ['git', *argv], cwd=root, check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+
+            run('init', '-q')
+            for action in ('clean', 'smudge', 'process'):
+                run('config', f'filter.malicious.{action}', str(helper))
+            (root / 'tracked.txt').write_text('tracked\n', encoding='utf-8')
+            run('add', 'tracked.txt')
+            marker.unlink(missing_ok=True)
+
+            result = agentic_openrouter._openrouter_tool_call(
+                root, 'run_command',
+                {'argv': ['git', 'status', '--short', '--untracked-files=no']},
+                readonly=True,
+            )
+            self.assertIn('ERROR: repository Git filter drivers', result)
+            self.assertFalse(marker.exists(), result)
+
+    def test_openrouter_git_show_preflight_rejects_repository_filter_helpers(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            marker = root / 'filter-show-ran'
+            helper = root / 'filter-helper'
+            helper.write_text(
+                f'#!/bin/sh\ntouch {marker}\n', encoding='utf-8',
+            )
+            helper.chmod(0o700)
+
+            def run(*argv):
+                return subprocess.run(
+                    ['git', *argv], cwd=root, check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+
+            run('init', '-q')
+            (root / 'tracked.txt').write_text('tracked\n', encoding='utf-8')
+            run('add', 'tracked.txt')
+            run('config', 'filter.malicious.process', str(helper))
+            marker.unlink(missing_ok=True)
+
+            result = agentic_openrouter._openrouter_tool_call(
+                root, 'run_command',
+                {'argv': ['git', 'show', 'HEAD:tracked.txt']},
+                readonly=True,
+            )
+            self.assertIn('ERROR:', result)
+            self.assertFalse(marker.exists(), result)
+
+    def test_hardened_git_argv_rejects_late_git_config_overrides(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            marker = root / 'fsmonitor-override-ran'
+            helper = root / 'fsmonitor-override'
+            helper.write_text(
+                f'#!/bin/sh\ntouch {marker}\nprintf "token\\n"\n', encoding='utf-8',
+            )
+            helper.chmod(0o700)
+
+            def run(*argv):
+                return subprocess.run(
+                    ['git', *argv], cwd=root, check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+
+            run('init', '-q')
+            run('config', 'core.fsmonitor', str(helper))
+            (root / 'tracked.txt').write_text('tracked\n', encoding='utf-8')
+            run('add', 'tracked.txt')
+            marker.unlink(missing_ok=True)
+
+            config_overrides = [
+                ['-c', f'core.fsmonitor={helper}'],
+                [f'-ccore.fsmonitor={helper}'],
+                ['--config', f'core.fsmonitor={helper}'],
+                [f'--config=core.fsmonitor={helper}'],
+                ['--config-env', 'core.fsmonitor=AGENTIC_FS_MONITOR'],
+                ['--config-env=core.fsmonitor=AGENTIC_FS_MONITOR'],
+            ]
+            for config_override in config_overrides:
+                marker.unlink(missing_ok=True)
+                argv = agentic_openrouter_tools._safe_readonly_git_argv([
+                    'git', *config_override,
+                    'status', '--short', '--untracked-files=no',
+                ])
+                environment = hardened_git_environment()
+                environment['AGENTIC_FS_MONITOR'] = str(helper)
+                result = subprocess.run(
+                    argv, cwd=root, check=False, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                    env=environment,
+                )
+                self.assertEqual(result.returncode, 0, (config_override, result.stderr))
+                self.assertFalse(marker.exists(), config_override)
+                self.assertNotIn(str(helper), argv)
 
     def test_openrouter_git_show_rejects_historical_directories(self):
         with tempfile.TemporaryDirectory() as temp:

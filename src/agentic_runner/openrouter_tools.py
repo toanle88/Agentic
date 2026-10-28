@@ -32,6 +32,9 @@ from .file_boundaries import (
 from .git_policy import (
     GIT_LOG_CONTENT_OPTIONS,
     GIT_LOG_METADATA_FORMAT_OPTIONS,
+    hardened_git_argv,
+    hardened_git_environment,
+    git_filter_probe_argv,
     git_log_option_exposes_history,
 )
 from .sandbox import command_uses_git_metadata, sandbox_command
@@ -82,6 +85,7 @@ OPENROUTER_READ_FILE_SCAN_LIMIT_MARKER = (
     "\n...[scan limit reached; use a closer start_line/end_line range]"
 )
 OPENROUTER_GIT_OBJECT_CHECK_TIMEOUT_SECONDS = 1.0
+OPENROUTER_GIT_FILTER_CHECK_TIMEOUT_SECONDS = 10
 OPENROUTER_HTTP_RESPONSE_BYTES = 2_000_000
 NETWORK_COMMANDS = {"curl", "wget", "ssh", "scp", "sftp", "ftp", "nc", "netcat", "telnet", "gh"}
 ALWAYS_BLOCKED_COMMANDS = {"gh", "ssh", "scp", "sftp"}
@@ -336,6 +340,25 @@ def _git_patch_option(part: str) -> bool:
     return git_log_option_exposes_history(part)
 
 
+def _repository_git_filters_are_safe(worktree: Path) -> bool:
+    """Return whether repository-local Git filters are absent and inspectable."""
+    try:
+        result = subprocess.run(
+            git_filter_probe_argv(),
+            cwd=worktree,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+            timeout=OPENROUTER_GIT_FILTER_CHECK_TIMEOUT_SECONDS,
+            env=hardened_git_environment(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode in (0, 1) and not result.stdout.strip()
+
+
 def _git_show_path_is_directory(worktree: Path, argv: list[str], relative: str) -> bool:
     """Reject ``git show REV:path`` when Git resolves the path to a tree."""
     if len(argv) < 3 or argv[1] != "show":
@@ -346,12 +369,17 @@ def _git_show_path_is_directory(worktree: Path, argv: list[str], relative: str) 
     ]
     if not any(spec.split(":", 1)[1] == relative for spec in specs):
         return False
+    # This preflight is itself a Git inspection subprocess. Apply the same
+    # filter-driver rejection as the final OpenRouter Git command before
+    # invoking cat-file, so repository configuration cannot cross this path.
+    if not _repository_git_filters_are_safe(worktree):
+        return True
     try:
         for spec in specs:
             if spec.split(":", 1)[1] != relative:
                 continue
             object_type = subprocess.run(
-                ["git", "cat-file", "-t", spec],
+                hardened_git_argv(["git", "cat-file", "-t", spec]),
                 cwd=worktree,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
@@ -359,6 +387,7 @@ def _git_show_path_is_directory(worktree: Path, argv: list[str], relative: str) 
                 text=True,
                 check=False,
                 timeout=OPENROUTER_GIT_OBJECT_CHECK_TIMEOUT_SECONDS,
+                env=hardened_git_environment(),
             )
             if object_type.returncode != 0:
                 return True
@@ -599,9 +628,10 @@ def _developer_inspection_command_allowed(
 
 def _safe_readonly_git_argv(argv: list[str]) -> list[str]:
     """Disable Git helpers before running native read-only inspection."""
+    safe_argv = list(argv)
     if len(argv) >= 2 and argv[1] in {"diff", "show"}:
-        return [argv[0], argv[1], "--no-ext-diff", "--no-textconv", *argv[2:]]
-    return list(argv)
+        safe_argv = [argv[0], argv[1], "--no-ext-diff", "--no-textconv", *argv[2:]]
+    return hardened_git_argv(safe_argv)
 
 
 def _openrouter_tools(
@@ -1691,13 +1721,39 @@ def _openrouter_tool_call(worktree: Path, name: Any, arguments: Any,
             )
             if not allowed:
                 return "ERROR: " + reason
+            git_command = command_uses_git_metadata(argv)
+            command_env = hardened_git_environment(env) if git_command else env
+            if git_command:
+                filter_probe = sandbox_command(
+                    git_filter_probe_argv(), worktree, sandbox, read_only=readonly,
+                    pass_env=[], restricted=not allow_network, env=command_env,
+                    preserve_git_metadata=True,
+                )
+                try:
+                    filter_returncode, filter_output, filter_truncated, filter_timed_out = (
+                        _bounded_command_capture(
+                            filter_probe, worktree, OPENROUTER_GIT_FILTER_CHECK_TIMEOUT_SECONDS,
+                            env=command_env,
+                        )
+                    )
+                except OSError:
+                    return "ERROR: could not inspect repository Git filter configuration"
+                if (
+                    filter_timed_out or filter_truncated
+                    or filter_returncode not in (0, 1)
+                ):
+                    return "ERROR: could not inspect repository Git filter configuration"
+                if filter_output.strip():
+                    return "ERROR: repository Git filter drivers are not supported for safe operations"
             process_argv = sandbox_command(
-                _safe_readonly_git_argv(argv), worktree, sandbox, read_only=readonly,
-                pass_env=[], restricted=not allow_network, env=env,
-                preserve_git_metadata=command_uses_git_metadata(argv),
+                _safe_readonly_git_argv(argv) if git_command else list(argv),
+                worktree, sandbox, read_only=readonly,
+                pass_env=[], restricted=not allow_network,
+                env=command_env,
+                preserve_git_metadata=git_command,
             )
             returncode, output, truncated, timed_out = _bounded_command_capture(
-                process_argv, worktree, command_timeout, env=env,
+                process_argv, worktree, command_timeout, env=command_env,
                 terminate_on_output_limit=check_commands is None,
             )
             if timed_out:

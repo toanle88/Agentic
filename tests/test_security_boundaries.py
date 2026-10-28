@@ -1380,6 +1380,36 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
         self.assertEqual(command[command.index("--entrypoint") + 1], "python")
         self.assertEqual(command[command.index("test-image") + 1:], ["-m", "unittest"])
 
+    def test_sandbox_git_command_disables_repository_controlled_helpers(self):
+        settings = validate_sandbox({"enabled": True, "engine": "docker", "image": "test-image"})
+        command = sandbox_command(
+            ["git", "status"], Path("/tmp/worktree"), settings,
+            pass_env=["GIT_CONFIG_GLOBAL", "GIT_EXTERNAL_DIFF"],
+            env={"GIT_CONFIG_GLOBAL": "/tmp/unsafe", "GIT_EXTERNAL_DIFF": "/tmp/helper"},
+        )
+        self.assertIn("GIT_CONFIG_NOSYSTEM=1", command)
+        self.assertIn(f"GIT_CONFIG_GLOBAL={os.devnull}", command)
+        self.assertIn("GIT_ATTR_NOSYSTEM=1", command)
+        self.assertEqual(
+            sum(part.startswith("GIT_CONFIG_GLOBAL=") for part in command), 1,
+        )
+        self.assertNotIn("GIT_EXTERNAL_DIFF", command)
+
+    def test_sandbox_git_metadata_probe_uses_hardened_git_execution(self):
+        root = Path("/tmp/worktree")
+        with patch.object(
+            agentic_sandbox.subprocess, "run",
+            return_value=CompletedProcess([], 0, stdout=".git\n"),
+        ) as run:
+            self.assertEqual(
+                agentic_sandbox._authoritative_git_common_dir(root),
+                root.resolve() / ".git",
+            )
+        argv = run.call_args.args[0]
+        self.assertIn("core.fsmonitor=false", argv)
+        self.assertEqual(run.call_args.kwargs["env"]["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(run.call_args.kwargs["env"]["GIT_CONFIG_GLOBAL"], os.devnull)
+
     def test_sandbox_preserves_relative_argv_values_for_current_worktree(self):
         settings = validate_sandbox({"enabled": True, "engine": "docker", "image": "test-image"})
         code = "import os; print(os.getuid())"

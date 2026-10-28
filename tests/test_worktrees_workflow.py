@@ -117,9 +117,10 @@ class WorkflowTests(_GitRepositoryTestCase):
         captured = {}
 
         def fake_command(argv, cwd, **kwargs):
+            filter_probe = "config" in argv and "--local" in argv
             result = CompletedProcess(
                 argv, 0,
-                stdout="" if argv[1:3] == ["config", "--local"] else "ok\n",
+                stdout="" if filter_probe else "ok\n",
                 stderr="",
             )
             if result.stdout:
