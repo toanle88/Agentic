@@ -1401,7 +1401,10 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
             agentic_sandbox.subprocess, "run",
             return_value=CompletedProcess([], 0, stdout=".git\n"),
         ) as run:
-            self.assertEqual(agentic_sandbox._authoritative_git_common_dir(root), root / ".git")
+            self.assertEqual(
+                agentic_sandbox._authoritative_git_common_dir(root),
+                root.resolve() / ".git",
+            )
         argv = run.call_args.args[0]
         self.assertIn("core.fsmonitor=false", argv)
         self.assertEqual(run.call_args.kwargs["env"]["GIT_CONFIG_NOSYSTEM"], "1")
