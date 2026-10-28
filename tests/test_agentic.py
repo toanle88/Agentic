@@ -512,6 +512,17 @@ class PureTests(unittest.TestCase):
         )
 
 
+    def test_developer_review_action_validation_accepts_inline_evidence(self):
+        report = (
+            'Finding: first\n'
+            'Action: fixed. Evidence: regression test passes.\n'
+        )
+        self.assertEqual(
+            agentic.validate_developer_review_actions(report, ['first']),
+            '',
+        )
+
+
     def test_issue_investigation_returns_structured_feedback(self):
         with tempfile.TemporaryDirectory() as temp:
             worktree = Path(temp)

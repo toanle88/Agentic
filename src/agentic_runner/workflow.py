@@ -1885,9 +1885,13 @@ def validate_developer_review_actions(report: str, findings: list[Any]) -> str:
     for index, start in enumerate(starts):
         end = starts[index + 1].start() if index + 1 < len(starts) else len(report)
         entry = report[start.start():end]
-        if not re.search(r"(?im)^\s*(?:[-*]\s*)?Action\s*:", entry):
+        # Accept both the documented one-field-per-line form and compact
+        # provider output such as ``Action: fixed. Evidence: tests pass.``.
+        # Keep the whitespace inside each label horizontal so compact fields
+        # are recognized without allowing a label to span arbitrary text.
+        if not re.search(r"(?im)(?<!\S)Action[ \t]*:", entry):
             return f"Review-finding action entry {index + 1} is missing Action:."
-        if not re.search(r"(?im)^\s*(?:[-*]\s*)?Evidence\s*:", entry):
+        if not re.search(r"(?im)(?<!\S)Evidence[ \t]*:", entry):
             return f"Review-finding action entry {index + 1} is missing Evidence:."
     return ""
 
