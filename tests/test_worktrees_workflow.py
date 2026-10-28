@@ -830,6 +830,36 @@ class WorkflowTests(_GitRepositoryTestCase):
         self.assertEqual(result['status'], 'APPROVED')
 
 
+    def test_develop_accepts_compact_review_actions_without_retrying(self):
+        run = agentic.create_worktree(self.repo, 'main', 34)
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(34, 'Compact review handoff', 'Implement it')
+        config = {
+            'max_retries': 5,
+            'max_files': None,
+            'developer_agent': {'provider': 'codex'},
+        }
+        report = (
+            'implemented\nReview finding actions:\n'
+            '- Finding: reliability-timeout-coverage\n'
+            '  Action: fixed. Evidence: added regression coverage\n'
+        )
+        verdict = {
+            'approved': True, 'summary': 'Good', 'findings': [], 'skipped': [],
+        }
+        with (patch('agentic.run_agent', return_value=(True, report)) as run_agent,
+              patch('agentic.verify_and_review', return_value=(
+                  True, 'tests passed', verdict, 'digest', 'base-sha',
+              )) as verify):
+            self.assertTrue(agentic.develop(run, issue, 'main', config, folder))
+
+        run_agent.assert_called_once()
+        verify.assert_called_once()
+        self.assertEqual(
+            verify.call_args.kwargs['developer_report'], report.strip(),
+        )
+
+
     def test_develop_reports_attempts_and_stops_after_five_retries(self):
         run = agentic.create_worktree(self.repo, 'main', 38)
         folder = agentic.logs_path(self.repo, run)

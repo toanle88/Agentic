@@ -242,8 +242,9 @@ At the end, explicitly report:
 - Verified: checks that actually ran and their results.
 - Review finding actions: output {finding_instruction} For each entry include
   `Finding:`, `Action:` (`fixed`, `not applicable`,
-  `skipped`, or `blocked`), and `Evidence:`. Do not combine multiple findings
-  into one entry. If there was no prior review, write `none`.
+  `skipped`, or `blocked`), and `Evidence:`. Put each label at the start of
+  its own line; do not combine multiple findings into one entry. If there was
+  no prior review, write `none`.
 - Skipped: requested checks or work items not performed, with a reason.
 - Not implemented: any review finding or requirement left unresolved.
 - Blocker or scope conflict: why it could not be implemented, if applicable,
