@@ -1281,6 +1281,18 @@ class ShellTests(unittest.TestCase):
                 self.assertEqual(run.call_args.args[0][-1], '--version')
 
 
+    def test_resolved_python_runner_uses_agentic_module(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable).resolve(), session_dir=root / 'logs',
+            )
+            self.assertEqual(
+                shell._runner_prefix(),
+                [sys.executable, '-u', '-m', 'agentic_runner.cli'],
+            )
+
+
     def test_run_accepts_existing_local_task_file(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
