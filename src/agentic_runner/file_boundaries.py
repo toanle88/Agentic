@@ -360,6 +360,14 @@ def _atomic_replace_windows(
                 raise ValueError(f"{description} changed while it was being replaced")
             os.close(target_descriptor)
             target_descriptor = -1
+            # Closing the validated descriptor is required before Windows
+            # replacement. Re-check the pathname after that close so a
+            # concurrent replacement fails closed.
+            assert target_path is not None
+            path_metadata = os.stat(target_path, follow_symlinks=False)
+            _validate_single_link_regular(path_metadata, description=description)
+            if _identity(path_metadata) != expected_identity:
+                raise ValueError(f"{description} changed while it was being replaced")
 
         assert temporary_path is not None
         assert target_path is not None
@@ -837,6 +845,14 @@ def atomic_replace_relative_regular(
             # closing the descriptor and committing the replacement.
             os.close(target_descriptor)
             target_descriptor = -1
+            # Re-check after closing the descriptor.  A concurrent pathname
+            # swap can happen during that close, and the replacement must
+            # fail closed rather than commit against the new directory entry.
+            assert parent >= 0
+            path_metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            _validate_single_link_regular(path_metadata, description=description)
+            if _identity(path_metadata) != expected_identity:
+                raise ValueError(f"{description} changed while it was being replaced")
         if target_was_absent:
             # A create-only write must not clobber a file that appeared after
             # the initial absence check.  Linking the fully written temporary
@@ -1070,6 +1086,10 @@ def unlink_relative_regular(
                 validate_descriptor(descriptor, identity)
                 if identity != expected_identity:
                     raise ValueError(f"{description} changed while it was being removed")
+                path_metadata = os.stat(target, follow_symlinks=False)
+                _validate_single_link_regular(path_metadata, description=description)
+                if _identity(path_metadata) != expected_identity:
+                    raise ValueError(f"{description} changed while it was being removed")
                 os.unlink(target)
         finally:
             os.close(descriptor)
@@ -1086,6 +1106,10 @@ def unlink_relative_regular(
                 identity = _identity(os.fstat(descriptor))
                 validate_descriptor(descriptor, identity)
                 if identity != expected_identity:
+                    raise ValueError(f"{description} changed while it was being removed")
+                path_metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                _validate_single_link_regular(path_metadata, description=description)
+                if _identity(path_metadata) != expected_identity:
                     raise ValueError(f"{description} changed while it was being removed")
                 os.unlink(name, dir_fd=parent)
         finally:

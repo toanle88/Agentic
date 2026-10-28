@@ -43,6 +43,30 @@ class PersistenceRecoveryTests(unittest.TestCase):
             atomic_write_text(Path(temp) / "state.txt", "complete\n")
         sync_parent.assert_called_once()
 
+    def test_atomic_replacement_fails_closed_when_artifact_swaps_before_commit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "state.txt"
+            path.write_text("previous complete state\n", encoding="utf-8")
+            unrelated = Path(temp) / "unrelated.txt"
+            swapped = False
+            import agentic_runner.persistence as persistence
+            original_stat = persistence.os.stat
+
+            def swap_target(name, *args, **kwargs):
+                nonlocal swapped
+                if not swapped and name == "state.txt" and kwargs.get("dir_fd") is not None:
+                    path.unlink()
+                    unrelated.write_text("unrelated\n", encoding="utf-8")
+                    unrelated.replace(path)
+                    swapped = True
+                return original_stat(name, *args, **kwargs)
+
+            with patch.object(persistence.os, "stat", side_effect=swap_target):
+                with self.assertRaisesRegex(OSError, "changed while being replaced"):
+                    atomic_write_text(path, "new state\n")
+
+            self.assertEqual(path.read_text(encoding="utf-8"), "unrelated\n")
+
     def test_each_durable_artifact_format_preserves_previous_state(self):
         artifacts = (
             ("run.json", atomic_write_json, {"schema_version": 1}),

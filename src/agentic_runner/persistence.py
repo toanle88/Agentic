@@ -436,6 +436,14 @@ def _atomic_write_bytes_anchored(path: Path, payload: bytes) -> None:
                 raise OSError(f"durable log changed while being replaced: {path}")
             os.close(target)
             target = -1
+            # The descriptor check cannot protect the pathname once the
+            # descriptor is closed.  Revalidate the anchored parent entry at
+            # the final mutation boundary so a swapped artifact fails closed.
+            path_metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if not stat.S_ISREG(path_metadata.st_mode) or path_metadata.st_nlink != 1:
+                raise OSError(f"durable log target changed while being replaced: {path}")
+            if (int(path_metadata.st_dev), int(path_metadata.st_ino)) != expected_identity:
+                raise OSError(f"durable log changed while being replaced: {path}")
             os.replace(temporary_name, name, src_dir_fd=parent, dst_dir_fd=parent)
         else:
             os.link(temporary_name, name, src_dir_fd=parent, dst_dir_fd=parent)
