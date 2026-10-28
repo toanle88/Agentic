@@ -1060,7 +1060,9 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
 
             def swap_target(path, *args, **kwargs):
                 nonlocal swapped
-                if not swapped and path == "target.txt" and kwargs.get("dir_fd") is not None:
+                relative_target = path == "target.txt" and kwargs.get("dir_fd") is not None
+                windows_target = os.name == "nt" and Path(path) == target
+                if not swapped and (relative_target or windows_target):
                     target.unlink()
                     unrelated.write_text("unrelated\n", encoding="utf-8")
                     unrelated.replace(target)
@@ -1153,7 +1155,9 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
 
             def swap_target(path, *args, **kwargs):
                 nonlocal swapped
-                if not swapped and path == "source.py" and kwargs.get("dir_fd") is not None:
+                relative_target = path == "source.py" and kwargs.get("dir_fd") is not None
+                windows_target = os.name == "nt" and Path(path) == target
+                if not swapped and (relative_target or windows_target):
                     target.unlink()
                     target.write_text("unrelated\n", encoding="utf-8")
                     swapped = True

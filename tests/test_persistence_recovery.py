@@ -1,5 +1,6 @@
 """Crash and partial-write coverage for durable run artifacts."""
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -54,7 +55,9 @@ class PersistenceRecoveryTests(unittest.TestCase):
 
             def swap_target(name, *args, **kwargs):
                 nonlocal swapped
-                if not swapped and name == "state.txt" and kwargs.get("dir_fd") is not None:
+                relative_target = name == "state.txt" and kwargs.get("dir_fd") is not None
+                windows_target = os.name == "nt" and Path(name) == path
+                if not swapped and (relative_target or windows_target):
                     path.unlink()
                     unrelated.write_text("unrelated\n", encoding="utf-8")
                     unrelated.replace(path)
