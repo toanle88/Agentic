@@ -1090,9 +1090,18 @@ def unlink_relative_regular(
                 _validate_single_link_regular(path_metadata, description=description)
                 if _identity(path_metadata) != expected_identity:
                     raise ValueError(f"{description} changed while it was being removed")
-                os.unlink(target)
-        finally:
+            # Windows does not permit unlinking a file while this CRT
+            # descriptor is open, even though the descriptor was validated.
             os.close(descriptor)
+            descriptor = -1
+            path_metadata = os.stat(target, follow_symlinks=False)
+            _validate_single_link_regular(path_metadata, description=description)
+            if _identity(path_metadata) != expected_identity:
+                raise ValueError(f"{description} changed while it was being removed")
+            os.unlink(target)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
         return
     parent, name = _walk_to_parent(root, parts, create=False)
     try:
