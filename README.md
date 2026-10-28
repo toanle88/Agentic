@@ -316,7 +316,8 @@ the full-log path printed by `/logs` for the complete captured output.
 
 Interactive input keeps a two-line status prompt with the developer provider
 and model, working directory, and active task. Up/Down recalls command history;
-Ctrl+C cancels the current input, Esc dismisses completion, and bracketed
+Ctrl+C cancels the current input; press it twice within one second to exit the shell.
+Esc dismisses completion, and bracketed
 terminal paste or Shift+Enter inserts multiline text. The editable prompt stays
 at the bottom of an interactive terminal; status and command output remain
 above it, and completion suggestions appear immediately above the prompt. The

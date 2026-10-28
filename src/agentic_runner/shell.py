@@ -107,6 +107,7 @@ MAX_SHELL_RECORD_BYTES = 256_000
 MAX_PERSISTED_JOB_ARGV = 128
 MAX_PERSISTED_JOB_ARG_CHARS = 16_384
 MAX_PERSISTED_JOB_PATH_CHARS = 4_096
+CTRL_C_EXIT_WINDOW_SECONDS = 1.0
 
 def _windows_path(path: Path) -> str:
     """Return a Windows spelling when WSL can provide one."""
@@ -1547,6 +1548,7 @@ class AgenticShell:
             else None
         )
         completion_state = None
+        last_interrupt_at: float | None = None
         try:
             _welcome_banner(
                 self.repo,
@@ -1561,12 +1563,21 @@ class AgenticShell:
                 self.refresh()
                 try:
                     line = self._input("› ", self._status_line())
+                    last_interrupt_at = None
                 except EOFError:
                     print()
                     break
                 except KeyboardInterrupt:
-                    # Ctrl+C cancels the editable buffer; it does not end the
-                    # supervisor session. EOF remains the explicit exit path.
+                    now = time.monotonic()
+                    if (
+                        last_interrupt_at is not None
+                        and now - last_interrupt_at < CTRL_C_EXIT_WINDOW_SECONDS
+                    ):
+                        _shell_print("Exiting shell")
+                        break
+                    last_interrupt_at = now
+                    # The first Ctrl+C cancels the editable buffer; a second
+                    # Ctrl+C within the exit window exits the supervisor session.
                     _shell_print("Input cancelled")
                     continue
                 if not self.execute(line):

@@ -1082,6 +1082,65 @@ class ShellTests(unittest.TestCase):
                 self.assertEqual(shell.run(), 0)
             shell_print.assert_any_call('Input cancelled')
 
+    def test_two_consecutive_ctrl_c_exits_shell(self):
+        with tempfile.TemporaryDirectory() as temp:
+            shell = agentic_shell.AgenticShell(
+                Path(temp), Path(sys.executable), session_dir=Path(temp) / 'logs'
+            )
+            with patch.object(shell, '_input', side_effect=[KeyboardInterrupt, KeyboardInterrupt]), \
+                 patch.object(agentic_shell.time, 'monotonic', side_effect=[0.0, 0.2]), \
+                 patch.object(agentic_shell, '_welcome_banner'), \
+                 patch.object(agentic_shell, '_print_help'), \
+                 patch('agentic_shell._shell_print') as shell_print:
+                self.assertEqual(shell.run(), 0)
+            shell_print.assert_any_call('Input cancelled')
+            shell_print.assert_any_call('Exiting shell')
+
+    def test_nonconsecutive_ctrl_c_does_not_exit_shell(self):
+        with tempfile.TemporaryDirectory() as temp:
+            shell = agentic_shell.AgenticShell(
+                Path(temp), Path(sys.executable), session_dir=Path(temp) / 'logs'
+            )
+            with patch.object(
+                shell, '_input',
+                side_effect=[KeyboardInterrupt, 'normal command', KeyboardInterrupt, '/quit'],
+            ), patch.object(shell, 'execute', side_effect=[True, False]) as execute, \
+                 patch.object(agentic_shell.time, 'monotonic', side_effect=[0.0, 2.0]), \
+                 patch.object(agentic_shell, '_welcome_banner'), \
+                 patch.object(agentic_shell, '_print_help'), \
+                 patch('agentic_shell._shell_print') as shell_print:
+                self.assertEqual(shell.run(), 0)
+            self.assertEqual(
+                [call_args.args for call_args in execute.call_args_list],
+                [('normal command',), ('/quit',)],
+            )
+            shell_print.assert_any_call('Input cancelled')
+            self.assertNotIn(
+                ('Exiting shell',),
+                [call_args.args for call_args in shell_print.call_args_list],
+            )
+
+    def test_delayed_ctrl_c_does_not_exit_shell(self):
+        with tempfile.TemporaryDirectory() as temp:
+            shell = agentic_shell.AgenticShell(
+                Path(temp), Path(sys.executable), session_dir=Path(temp) / 'logs'
+            )
+            with patch.object(
+                shell, '_input',
+                side_effect=[KeyboardInterrupt, KeyboardInterrupt, '/quit'],
+            ), patch.object(shell, 'execute', return_value=False) as execute, \
+                 patch.object(agentic_shell.time, 'monotonic', side_effect=[0.0, 2.0]), \
+                 patch.object(agentic_shell, '_welcome_banner'), \
+                 patch.object(agentic_shell, '_print_help'), \
+                 patch('agentic_shell._shell_print') as shell_print:
+                self.assertEqual(shell.run(), 0)
+            execute.assert_called_once_with('/quit')
+            self.assertEqual(shell_print.call_args_list.count((("Input cancelled",), {})), 2)
+            self.assertNotIn(
+                ('Exiting shell',),
+                [call_args.args for call_args in shell_print.call_args_list],
+            )
+
     def test_execute_records_submitted_history_for_arrow_navigation(self):
         with tempfile.TemporaryDirectory() as temp:
             shell = agentic_shell.AgenticShell(
