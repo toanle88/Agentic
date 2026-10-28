@@ -1049,6 +1049,38 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
             self.assertEqual(target.read_text(encoding="utf-8"), "concurrent\n")
             self.assertEqual(list(root.glob(".target.txt.agentic-*.tmp")), [])
 
+    def test_atomic_replace_fails_closed_when_target_swaps_before_commit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target.txt"
+            unrelated = root / "unrelated.txt"
+            target.write_text("original\n", encoding="utf-8")
+            swapped = False
+            original_stat = file_boundaries.os.stat
+
+            def swap_target(path, *args, **kwargs):
+                nonlocal swapped
+                relative_target = path == "target.txt" and kwargs.get("dir_fd") is not None
+                windows_target = (
+                    os.name == "nt"
+                    and Path(path).name.casefold() == target.name.casefold()
+                )
+                if not swapped and (relative_target or windows_target):
+                    target.unlink()
+                    unrelated.write_text("unrelated\n", encoding="utf-8")
+                    unrelated.replace(target)
+                    swapped = True
+                return original_stat(path, *args, **kwargs)
+
+            with patch.object(file_boundaries.os, "stat", side_effect=swap_target):
+                with self.assertRaisesRegex(ValueError, "changed while it was being replaced"):
+                    file_boundaries.atomic_replace_relative_regular(
+                        root, "target.txt", b"replacement\n", allow_existing=True,
+                    )
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "unrelated\n")
+            self.assertEqual(list(root.glob(".target.txt.agentic-*.tmp")), [])
+
     def test_provider_write_holds_mutation_lock_until_sync_is_complete(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "worktree"
@@ -1113,6 +1145,42 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
                     description="provider worktree file",
                 )
             self.assertEqual(target.read_text(encoding="utf-8"), "concurrent\n")
+
+    def test_provider_delete_fails_closed_when_target_swaps_before_unlink(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "worktree"
+            root.mkdir()
+            target = root / "source.py"
+            target.write_text("original\n", encoding="utf-8")
+            expected, _ = _read_projection_file(root, "source.py")
+            swapped = False
+            original_stat = file_boundaries.os.stat
+
+            def swap_target(path, *args, **kwargs):
+                nonlocal swapped
+                relative_target = path == "source.py" and kwargs.get("dir_fd") is not None
+                windows_target = (
+                    os.name == "nt"
+                    and Path(path).name.casefold() == target.name.casefold()
+                )
+                if not swapped and (relative_target or windows_target):
+                    target.unlink()
+                    target.write_text("unrelated\n", encoding="utf-8")
+                    swapped = True
+                return original_stat(path, *args, **kwargs)
+
+            with patch.object(file_boundaries.os, "stat", side_effect=swap_target):
+                with self.assertRaisesRegex(ValueError, "changed while it was being removed"):
+                    file_boundaries.unlink_relative_regular(
+                        root,
+                        "source.py",
+                        expected.identity,
+                        expected_digest=expected.digest,
+                        expected_size=expected.size,
+                        description="provider worktree file",
+                    )
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "unrelated\n")
 
     def test_streamed_command_opens_logs_before_starting_process(self):
         with tempfile.TemporaryDirectory() as temp:
