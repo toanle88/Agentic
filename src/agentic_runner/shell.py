@@ -610,6 +610,7 @@ class AgenticShell:
 
         tests_status = "unknown"
         review_status = "unknown"
+        review_summary = ""
         duration: Any = None
         total_tokens: Any = None
         cost: Any = None
@@ -620,6 +621,9 @@ class AgenticShell:
             review = snapshot.get("review")
             if isinstance(review, dict) and isinstance(review.get("status"), str):
                 review_status = review["status"]
+                review_summary = sanitize_terminal_text(
+                    str(review.get("summary", ""))
+                ).replace("\n", " ").replace("\r", " ").strip()[:500]
             usage = snapshot.get("usage")
             if isinstance(usage, dict):
                 total_tokens = usage.get("total_tokens")
@@ -628,7 +632,7 @@ class AgenticShell:
                 if isinstance(metrics, dict):
                     duration = metrics.get("duration_seconds")
 
-        return [
+        lines = [
             f"Result: {result_status}",
             f"Tests: {tests_status}",
             f"Review: {review_status}",
@@ -637,6 +641,9 @@ class AgenticShell:
             f"Cost: {_completion_cost(cost)}",
             f"Logs: {job.log_path}",
         ]
+        if review_summary:
+            lines.insert(3, f"Review summary: {review_summary}")
+        return lines
 
     def _refresh(self, job: Job, *, show_failure_tail: bool = True) -> None:
         if job.finished is not None:

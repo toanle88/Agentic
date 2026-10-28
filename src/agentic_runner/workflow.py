@@ -126,6 +126,7 @@ MAX_INVESTIGATION_FINDING_CHARS = 1_500
 MAX_INVESTIGATION_FINDINGS = 40
 MAX_PUBLICATION_REPORT_BYTES = 64_000
 MAX_TEST_REPORT_CHARS = 50_000
+MAX_TEST_FAILURE_OUTPUT_CHARS = 6_000
 
 
 def _prioritized_diff_hunks(diff: str, limit: int) -> tuple[str, int]:
@@ -742,6 +743,7 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
                                       timeout=_remaining_timeout(deadline, timeout),
                                       heartbeat=15, sandbox=sandbox, sandbox_pass_env=[],
                                       metrics_folder=folder, verbose=verbose,
+                                      display_output=verbose,
                                       env=test_environment,
                                       redaction_values=redaction_values,
                                       preserve_git_metadata=command_uses_git_metadata(argv))
@@ -763,6 +765,18 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
             f"Validation check {index} — {status}\n{result.stdout[-6000:]}"
         )
         if result.returncode:
+            diagnostic = str(result.stdout or "").strip()
+            if diagnostic:
+                if len(diagnostic) > MAX_TEST_FAILURE_OUTPUT_CHARS:
+                    diagnostic = (
+                        "[… earlier test output omitted …]\n"
+                        + diagnostic[-MAX_TEST_FAILURE_OUTPUT_CHARS:]
+                    )
+                _status_print(
+                    "[TESTS] Failure diagnostics (bounded):\n" + diagnostic,
+                    style_status_tokens=False,
+                    flush=True,
+                )
             _status_print(f"[TESTS] FAILED (exit {result.returncode})", flush=True)
         else:
             _status_print("[TESTS] PASSED", flush=True)

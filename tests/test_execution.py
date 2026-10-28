@@ -695,7 +695,7 @@ class StreamingTests(unittest.TestCase):
                     credential_names=['SERVICE_VALUE'],
                 )
             self.assertTrue(passed)
-            self.assertIn('missing', output.getvalue())
+            self.assertNotIn('missing', output.getvalue())
             self.assertIn('missing', report)
             self.assertNotIn(value, output.getvalue())
             self.assertNotIn(value, report)
@@ -859,6 +859,46 @@ class StreamingTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0)
             self.assertIn('ok', result.stdout)
+
+    def test_streamed_command_can_hide_child_output_without_losing_the_log(self):
+        from io import StringIO
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            log = root / 'tests.log'
+            with patch('sys.stdout', new_callable=StringIO) as out:
+                result = agentic.streamed_command(
+                    [sys.executable, '-c', 'print("nested test output")'],
+                    root, label='TESTS', log_file=log, timeout=10,
+                    display_output=False,
+                )
+            self.assertEqual(result.returncode, 0)
+            self.assertNotIn('nested test output', out.getvalue())
+            self.assertIn('nested test output', log.read_text(encoding='utf-8'))
+            self.assertIn('Finished in', out.getvalue())
+
+    def test_test_runner_hides_successful_child_output_and_shows_bounded_failures(self):
+        from io import StringIO
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            sh('git', 'init', cwd=root)
+            with patch('sys.stdout', new_callable=StringIO) as output:
+                passed, _ = agentic.run_tests(
+                    root, [[sys.executable, '-c', 'print("nested success output")']],
+                    folder=root,
+                )
+            self.assertTrue(passed)
+            self.assertNotIn('nested success output', output.getvalue())
+            test_log = next(root.glob('test-command-*.txt'))
+            self.assertIn('nested success output', test_log.read_text(encoding='utf-8'))
+
+            with patch('sys.stdout', new_callable=StringIO) as output:
+                failed, _ = agentic.run_tests(
+                    root, [[sys.executable, '-c', 'print("failure detail"); raise SystemExit(2)']],
+                    folder=root,
+                )
+            self.assertFalse(failed)
+            self.assertIn('Failure diagnostics (bounded)', output.getvalue())
+            self.assertIn('failure detail', output.getvalue())
 
     def test_test_runner_writes_logs_outside_worktree(self):
         with tempfile.TemporaryDirectory() as dirname:
