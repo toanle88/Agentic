@@ -349,8 +349,9 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
               sandbox: dict[str, Any] | None = None,
               check_commands: list[list[str]] | None = None,
               credential_names: list[str] | None = None,
-              verbose: bool = False) -> tuple[bool, str]:
-    """Dispatch one developer/reviewer turn to the configured provider."""
+              verbose: bool = False,
+              log_label: str | None = None) -> tuple[bool, str]:
+    """Dispatch one configured provider turn with an explicit log label."""
     if isinstance(settings, AgentSettings):
         selected = settings.as_dict()
     else:
@@ -385,6 +386,7 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
     if selected.get("timeout_seconds") is not None:
         timeout = selected["timeout_seconds"]
     progress_kwargs = {"verbose": True} if verbose else {}
+    label_kwargs = {"log_label": log_label} if log_label is not None else {}
     allow_self_hosted_sources = _runner_source_change_allowed(worktree, "agentic.py")
     projection_kwargs = (
         {"allow_self_hosted_sources": True}
@@ -394,6 +396,7 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
         return run_codex(
             worktree, prompt, output=output, readonly=readonly, schema=schema,
             timeout=timeout, model=model, reasoning_effort=reasoning_effort,
+            **label_kwargs,
             **({"api_key_env": selected_env} if selected_env else {}),
             **progress_kwargs,
             **policy_kwargs,
@@ -424,6 +427,7 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
         return run_openrouter(
             worktree, prompt, output=output, readonly=readonly, schema=schema,
             timeout=timeout, model=model, reasoning_effort=reasoning_effort,
+            **label_kwargs,
             **progress_kwargs,
             **router_kwargs,
             **policy_kwargs,
@@ -444,6 +448,7 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
     return run_cli_provider(
         worktree, prompt, output=output, provider=provider,
         readonly=readonly, timeout=timeout, model=model,
+        **label_kwargs,
         **progress_kwargs,
         **({"api_key_env": selected_env} if selected_env else {}),
         **policy_kwargs,
@@ -1118,7 +1123,7 @@ paths and test names when they support the observation.
         run_kwargs["credential_names"] = credential_names
     ok, message = run_agent(
         worktree, prompt, readonly=True, schema=schema, output=output,
-        settings=agent, **run_kwargs,
+        settings=agent, log_label="INVESTIGATION", **run_kwargs,
     )
     if not ok:
         return {
@@ -1520,7 +1525,7 @@ pass/fail decision about a patch.
         run_kwargs["credential_names"] = credential_names
     ok, message = run_agent(
         worktree, prompt, readonly=True, schema=schema, output=output,
-        settings=agent, **run_kwargs,
+        settings=agent, log_label="AUDIT", **run_kwargs,
     )
     if not ok:
         return {"summary": "Repository audit failed", "findings": [], "measurements": [],
@@ -1562,8 +1567,14 @@ def _run_audit(run: Run, issue: Issue, config: dict[str, Any], folder: Path, *,
     def run_once() -> dict[str, Any]:
         return audit_repository(
             run.worktree, issue, folder,
-            agent=config.get("reviewer_agent"),
-            timeout=_remaining_timeout(deadline, config.get("effective_reviewer_timeout_seconds")),
+            agent=config.get("investigator_agent") or config.get("reviewer_agent"),
+            timeout=_remaining_timeout(
+                deadline,
+                config.get(
+                    "effective_investigator_timeout_seconds",
+                    config.get("effective_reviewer_timeout_seconds"),
+                ),
+            ),
             sandbox=config.get("sandbox"), verbose=verbose,
             credential_names=credential_environment_names(config),
         )

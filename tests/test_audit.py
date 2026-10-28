@@ -67,6 +67,7 @@ class AuditTests(unittest.TestCase):
             run_agent.assert_called_once()
             self.assertTrue(run_agent.call_args.kwargs["readonly"])
             self.assertEqual(run_agent.call_args.kwargs["schema"].name, "audit-schema.json")
+            self.assertEqual(run_agent.call_args.kwargs["log_label"], "AUDIT")
             persisted = json.loads((folder / "audit-report.json").read_text())
             self.assertEqual(persisted["schema_version"], 1)
             self.assertEqual(persisted["audit_key"], issue.audit_key)
@@ -143,6 +144,27 @@ class AuditTests(unittest.TestCase):
                 result = audit_workflow._run_audit(run, issue, config, folder)
             self.assertEqual(result["summary"], "cached")
             provider.assert_not_called()
+
+    def test_audit_uses_investigator_settings_and_timeout(self):
+        issue = Issue.for_audit("0123456789ab", "Audit scope")
+        run = Run(None, "agent/audit-0123456789ab", Path("/tmp/audit"), audit_key=issue.audit_key)
+        config = {
+            "reviewer_agent": {"provider": "codex", "model": "review-model"},
+            "investigator_agent": {"provider": "gemini", "model": "audit-model"},
+            "effective_reviewer_timeout_seconds": 10,
+            "effective_investigator_timeout_seconds": 23,
+            "sandbox": None,
+        }
+        report = {"summary": "recorded", "findings": [], "measurements": [], "skipped": []}
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            with patch.object(audit_workflow, "_latest_investigation", return_value=None), \
+                 patch.object(audit_workflow, "audit_repository", return_value=report) as provider:
+                result = audit_workflow._run_audit(run, issue, config, folder)
+        self.assertEqual(result, report)
+        provider.assert_called_once()
+        self.assertEqual(provider.call_args.kwargs["agent"], config["investigator_agent"])
+        self.assertEqual(provider.call_args.kwargs["timeout"], 23)
 
     def test_audit_command_starts_fresh_attempt_without_developer_or_checks(self):
         issue = Issue.for_audit("0123456789ab", "Audit scope")

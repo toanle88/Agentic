@@ -478,7 +478,8 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
               permission_policy: dict[str, bool] | None = None,
               verbose: bool = False,
               sandbox: dict[str, Any] | None = None,
-              allow_self_hosted_sources: bool = False) -> tuple[bool, str]:
+              allow_self_hosted_sources: bool = False,
+              log_label: str | None = None) -> tuple[bool, str]:
     # Each invocation creates a fresh session. The repository is the memory.
     prompt = guidance_prompt(
         worktree, prompt, readonly=readonly, audit_folder=output.parent,
@@ -520,7 +521,7 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
             worktree_is_projection=developer_baseline is not None,
             **command_kwargs,
         )
-        label = "REVIEW" if readonly else "DEVELOPER"
+        label = log_label or ("REVIEW" if readonly else "DEVELOPER")
         invocation_started = time.monotonic()
         result = streamed_command(
             args, provider_worktree, label=label, log_file=output.with_suffix(".log"),
@@ -665,7 +666,8 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
                      api_key_env: str | None = None,
                      verbose: bool = False,
                      sandbox: dict[str, Any] | None = None,
-                     allow_self_hosted_sources: bool = False) -> tuple[bool, str]:
+                     allow_self_hosted_sources: bool = False,
+                     log_label: str | None = None) -> tuple[bool, str]:
     """Run a locally installed coding CLI in its non-interactive mode."""
     prompt = guidance_prompt(
         worktree, prompt, readonly=readonly, audit_folder=output.parent,
@@ -690,7 +692,7 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
     command_kwargs["sandbox_allow_network"] = bool(
         effective_sandbox and effective_sandbox.get("allow_network")
     )
-    label = "REVIEW" if readonly else "DEVELOPER"
+    label = log_label or ("REVIEW" if readonly else "DEVELOPER")
     invocation_started = time.monotonic()
     sandbox_pass_env = list((sandbox or {}).get("pass_env", []))
     if provider == "copilot" and host and "COPILOT_GH_HOST" not in sandbox_pass_env:

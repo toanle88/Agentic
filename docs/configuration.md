@@ -172,12 +172,13 @@ them. A failure preserves the completed run, worktree, and logs for manual
 | `workflow_mode` | `quick`, `standard`, or `strict` | `standard` | `quick` skips automatic investigation only for conservatively classified low-risk tasks; `standard` preserves the normal flow; `strict` always performs independent investigation. High-risk tasks always require investigation. The CLI `--workflow-mode` overrides this setting for one run. |
 | `github_host` | hostname | `github.com` | Host used explicitly for GitHub CLI repository, issue, and publication operations. This is independent of provider hosts. |
 | `automation.auto_publish` | boolean | `false` | Opt in to automatic publication of eligible completed audits, approved issue/local-task runs, and reviewed CI-repair patches. For CI repair, this authorizes the guarded same-branch commit and push; it does not suppress non-code failure confirmation. |
-| `system_prompt` | nonempty string or `null` | `null` | Optional persistent project guidance included as bounded, untrusted context in developer and reviewer prompts. |
-| `permission_policy` | object | safe role defaults | Provider-independent capabilities for `developer` and `reviewer`; legacy configurations are normalized to these defaults. |
+| `system_prompt` | nonempty string or `null` | `null` | Optional persistent project guidance included as bounded, untrusted context in developer, investigator, audit, and reviewer prompts. |
+| `permission_policy` | object | safe role defaults | Provider-independent capabilities for `developer`, `investigator`, and `reviewer`; legacy configurations are normalized to these defaults. |
 | `security_mode` | `trusted` or `isolated` | `trusted` | `isolated` requires the configured Docker/Podman engine and image and fails closed when either is unavailable. The first trusted execution requires external repository-trust consent. |
 | `sandbox` | object | disabled | Optional Docker/Podman isolation for provider, OpenRouter tool, and test processes. `pass_env` names explicit credential variables to pass into the container. |
 | `developer` | object | Codex defaults | Provider settings for the coding agent. |
 | `reviewer` | object | Codex defaults | Provider settings for the independent reviewer. |
+| `investigator` | object | Reviewer settings | Provider settings for read-only issue investigation and repository audits. If omitted, investigator settings inherit from the effective reviewer settings. |
 
 Each provider object supports these fields:
 
@@ -186,7 +187,7 @@ Each provider object supports these fields:
 | `provider` | string | `codex`, `gemini`, `claude`, `copilot`, or `openrouter`. |
 | `model` | string or `null` | Provider model; `null` uses the native CLI default. OpenRouter requires a model. |
 | `reasoning_effort` | string or `null` | Optional reasoning setting used by Codex/OpenRouter, such as `max`; native CLIs use their own options. |
-| `timeout_seconds` | integer or `null` | Per developer/reviewer invocation limit; `null` uses 600 seconds for developers or 300 seconds for reviewers. |
+| `timeout_seconds` | integer or `null` | Per developer/investigator/reviewer invocation limit; `null` uses 600 seconds for developers or 300 seconds for investigator and reviewer turns. |
 | `executable_path` | string or `null` | Copilot only: optional explicit executable path. In trusted mode, `COPILOT_PATH` and the GitHub CLI download at `~/.local/share/gh/copilot/copilot` are also detected automatically. In isolated mode, set an image-visible path because host paths are not mounted. |
 | `host` | hostname or `null` | Copilot only: host used for Copilot authentication and model access. Agentic sets the per-process `COPILOT_GH_HOST` environment variable and never changes global `GH_HOST`. |
 | `auth` | `native_cli`, `api_key`, or `both` | Authentication mode. Omitted values preserve native CLI authentication unless `api_key_env` is present; OpenRouter always uses `api_key`. |
