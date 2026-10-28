@@ -28,6 +28,7 @@ from .file_boundaries import (
 )
 from .guidance import guidance_phase, guidance_prompt
 from .config import PROVIDER_API_KEY_ENV, provider_process_environment
+from .git_policy import hardened_git_argv, hardened_git_environment
 from .persistence import atomic_write_text
 from .persistence import read_text_tail
 from .policy import provider_forbidden
@@ -47,6 +48,7 @@ MAX_PROVIDER_STAGE_BYTES = 64 * 1024 * 1024
 MAX_PROVIDER_STAGE_FILES = 10_000
 MAX_PROVIDER_STAGE_ENTRIES = 12_000
 MAX_PROVIDER_STAGE_DIRECTORIES = 2_000
+MAX_PROVIDER_IGNORE_OUTPUT_BYTES = 8 * 1024 * 1024
 PROVIDER_MESSAGE_TRUNCATION_MARKER = "\n[agentic_provider_message_truncated]\n"
 
 
@@ -194,6 +196,43 @@ def _remove_staging_tree(destination: Path) -> None:
     shutil.rmtree(destination, onerror=_retry_after_clearing_read_only)
 
 
+def _ignored_worktree_paths(source: Path) -> frozenset[str]:
+    """Return ignored untracked paths so projections do not copy dependencies."""
+    git_metadata = source / ".git"
+    if git_metadata.is_file():
+        try:
+            with git_metadata.open("r", encoding="utf-8", errors="replace") as stream:
+                if stream.read(len("gitdir:")) != "gitdir:":
+                    return frozenset()
+        except OSError:
+            return frozenset()
+    elif not (git_metadata.is_dir() and (git_metadata / "HEAD").is_file()):
+        return frozenset()
+    # Import lazily to avoid coupling provider adapters to the worktree
+    # lifecycle during module initialization.  The shared command boundary
+    # keeps Git argv, configuration, environment, and output bounded.
+    from .worktrees import command as git_command
+
+    result = git_command(
+        hardened_git_argv([
+            "git", "ls-files", "--others", "--ignored", "--exclude-standard",
+            "--directory", "-z",
+        ]),
+        source,
+        timeout=30,
+        check=False,
+        env=hardened_git_environment(),
+        max_output_bytes=MAX_PROVIDER_IGNORE_OUTPUT_BYTES,
+    )
+    if result.returncode:
+        raise RuntimeError("Could not inspect Git ignored paths before provider staging")
+    return frozenset(
+        path.rstrip("/")
+        for path in result.stdout.split("\x00")
+        if path.rstrip("/")
+    )
+
+
 def _stage_worktree(
     source: Path, destination: Path, *, skip: Callable[[str], bool], read_only: bool,
 ) -> dict[str, _ProjectionFile]:
@@ -203,8 +242,17 @@ def _stage_worktree(
     destination.mkdir(parents=True, exist_ok=True)
     baseline: dict[str, _ProjectionFile] = {}
     try:
+        ignored_paths = _ignored_worktree_paths(source)
+
+        def should_skip(relative: str) -> bool:
+            normalized = relative.rstrip("/")
+            return skip(relative) or any(
+                normalized == ignored or normalized.startswith(f"{ignored}/")
+                for ignored in ignored_paths
+            )
+
         entries = iter_safe_regular_files(
-            source, skip=skip, fail_on_error=True,
+            source, skip=should_skip, fail_on_error=True,
             max_entries=MAX_PROVIDER_STAGE_ENTRIES,
             max_directories=MAX_PROVIDER_STAGE_DIRECTORIES,
         )

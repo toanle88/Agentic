@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import subprocess
 import tempfile
 import unittest
 from contextlib import contextmanager
@@ -875,6 +876,27 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, 'complete read-only worktree'):
                 _stage_readonly_worktree(root, Path(temp) / 'review-worktree')
+
+    def test_provider_staging_skips_git_ignored_dependency_trees(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'worktree'
+            projection = Path(temp) / 'projection'
+            root.mkdir()
+            subprocess.run(
+                ['git', 'init', '--initial-branch=main', str(root)],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            (root / '.gitignore').write_text('node_modules/\n', encoding='utf-8')
+            (root / 'src.py').write_text('print(1)\n', encoding='utf-8')
+            dependency = root / 'node_modules' / 'dependency.js'
+            dependency.parent.mkdir()
+            dependency.write_text('ignored\n', encoding='utf-8')
+
+            baseline = _stage_worktree(root, projection, skip=lambda _: False, read_only=False)
+
+            self.assertIn('src.py', baseline)
+            self.assertTrue((projection / 'src.py').is_file())
+            self.assertFalse((projection / 'node_modules').exists())
 
     def test_provider_staging_fails_closed_on_operational_copy_errors(self):
         with tempfile.TemporaryDirectory() as temp:
