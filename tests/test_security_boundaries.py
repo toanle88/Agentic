@@ -735,13 +735,14 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
             "agent_config.json": "configuration",
             "agentic.py": "runner",
             ".git/config": "git-config",
-            ".github/workflows/ci.yml": "workflow",
         }
         script = (
             "from pathlib import Path\n"
             "protected = ['.env', 'private.pem', 'AGENTS.md', 'agent_config.json', 'agentic.py', "
-            "'.git/config', '.github/workflows/ci.yml']\n"
+            "'.git/config']\n"
             "print('protected=' + str(any(Path(path).exists() for path in protected)))\n"
+            "print('workflow=' + str(Path('.github/workflows/ci.yml').exists()))\n"
+            "Path('.github/workflows/ci.yml').write_text('provider workflow\\n')\n"
             "Path('safe.py').write_text('changed\\n')\n"
             "Path('new.py').write_text('new\\n')\n"
             "for path in protected:\n"
@@ -752,6 +753,9 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
             with self.subTest(provider=provider), tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
                 (root / "safe.py").write_text("original\n", encoding="utf-8")
+                workflow = root / ".github/workflows/ci.yml"
+                workflow.parent.mkdir(parents=True, exist_ok=True)
+                workflow.write_text("original workflow\n", encoding="utf-8")
                 for relative, content in protected.items():
                     path = root / relative
                     path.parent.mkdir(parents=True, exist_ok=True)
@@ -761,8 +765,12 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
                     def fake_stream(argv, cwd, **kwargs):
                         self.assertNotEqual(cwd, root)
                         self.assertFalse((cwd / ".env").exists())
+                        self.assertTrue((cwd / ".github/workflows/ci.yml").exists())
                         (cwd / "safe.py").write_text("changed\n", encoding="utf-8")
                         (cwd / "new.py").write_text("new\n", encoding="utf-8")
+                        (cwd / ".github/workflows/ci.yml").write_text(
+                            "provider workflow\n", encoding="utf-8",
+                        )
                         self.assertFalse((cwd / "AGENTS.md").exists())
                         self.assertFalse((cwd / "agentic.py").exists())
                         result_path = Path(argv[argv.index("--output-last-message") + 1])
@@ -784,14 +792,16 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
                 self.assertTrue(ok)
                 if provider != "codex":
                     self.assertIn("protected=False", message)
+                    self.assertIn("workflow=True", message)
                 else:
                     self.assertEqual(message, "codex done")
                 self.assertEqual((root / "safe.py").read_text(encoding="utf-8"), "changed\n")
                 self.assertEqual((root / "new.py").read_text(encoding="utf-8"), "new\n")
+                self.assertEqual(workflow.read_text(encoding="utf-8"), "provider workflow\n")
                 for relative, content in protected.items():
                     self.assertEqual((root / relative).read_text(encoding="utf-8"), content)
 
-    def test_self_hosted_projection_includes_runner_sources_only(self):
+    def test_self_hosted_projection_includes_runner_source_and_workflows(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "worktree"
             projection = Path(temp) / "projection"

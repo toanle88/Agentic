@@ -1111,12 +1111,12 @@ class OpenRouterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / '.github' / 'workflows').mkdir(parents=True)
-            for relative in ('agentic.py', 'agent_config.json', '.github/workflows/ci.yml'):
+            for relative in ('agentic.py', 'agent_config.json'):
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text('protected', encoding='utf-8')
 
-            for relative in ('agentic.py', 'agent_config.json', '.github/workflows/ci.yml'):
+            for relative in ('agentic.py', 'agent_config.json'):
                 with self.subTest(relative=relative):
                     result = agentic_openrouter._openrouter_tool_call(
                         root, 'read_file', {'path': relative}, readonly=True,
@@ -1127,6 +1127,15 @@ class OpenRouterTests(unittest.TestCase):
                         readonly=True, worktree=root,
                     )
                     self.assertFalse(allowed, (relative, reason))
+
+            workflow = root / '.github/workflows/ci.yml'
+            workflow.write_text('workflow', encoding='utf-8')
+            self.assertEqual(
+                agentic_openrouter._openrouter_tool_call(
+                    root, 'read_file', {'path': '.github/workflows/ci.yml'}, readonly=True,
+                ),
+                'workflow',
+            )
 
     def test_openrouter_git_diff_disables_malicious_external_diff_config(self):
         with tempfile.TemporaryDirectory() as temp:

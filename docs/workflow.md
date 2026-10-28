@@ -12,7 +12,7 @@ newest timestamp first. Legacy branch names remain supported.
 
 1. Resolve the repository's base branch; GitHub mode also loads the GitHub issue.
 2. Create or reuse an isolated worktree for the issue or deterministic local task.
-3. Ask an independent read-only configured investigator to analyze the issue and repository. The default `standard` mode does this for every task; `quick` may skip it only for conservatively classified low-risk tasks, while `strict` always retains it. Security, credential, data, migration, publication, and protected-workflow tasks are never eligible for the quick skip.
+3. Ask an independent read-only configured investigator to analyze the issue and repository. The default `standard` mode does this for every task; `quick` may skip it only for conservatively classified low-risk tasks, while `strict` always retains it. Security, credential, data, migration, publication, and workflow tasks are never eligible for the quick skip.
 4. Record the investigation feedback and pass it to the developer automatically.
 5. Give the task and repository instructions to the configured developer provider.
 6. Run every configured test command. Agentic removes extra final blank lines

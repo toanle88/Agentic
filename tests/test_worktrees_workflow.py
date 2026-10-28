@@ -502,12 +502,12 @@ class WorkflowTests(_GitRepositoryTestCase):
             self.assertIn('--no-textconv', argv)
             self.assertIn('diff.external=', argv)
 
-    def test_self_hosted_exception_allows_ci_workflows_but_not_policy_files(self):
+    def test_self_hosted_exception_allows_runner_but_not_policy_files(self):
         with patch.object(agentic_workflow, 'SCRIPT_DIR', self.repo):
             self.assertTrue(agentic_workflow._runner_source_change_allowed(
                 self.repo, 'agentic.py',
             ))
-            self.assertTrue(agentic_workflow._runner_source_change_allowed(
+            self.assertFalse(agentic_workflow._runner_source_change_allowed(
                 self.repo, '.github/workflows/ci.yml',
             ))
             self.assertFalse(agentic_workflow._runner_source_change_allowed(
