@@ -403,7 +403,18 @@ def _write_projection_file(
                 setattr(failure, "_agentic_mutation_snapshot", mutation_snapshot)
                 raise failure from exc
     except FileExistsError:
+        if descriptor >= 0:
+            os.close(descriptor)
+            descriptor = -1
         raise RuntimeError(f"Provider worktree file appeared during sync: {relative}")
+    except Exception:
+        # Release the source handle before the caller begins rollback.  Windows
+        # otherwise rejects deletion of a newly-created file that this helper
+        # just proved was ours.
+        if descriptor >= 0:
+            os.close(descriptor)
+            descriptor = -1
+        raise
     finally:
         if descriptor >= 0:
             os.close(descriptor)
