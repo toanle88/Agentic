@@ -42,6 +42,7 @@ from agentic_runner.security import (
     restricted_test_environment,
 )
 from agentic_runner.execution_stream import streamed_command
+from agentic_runner.git_policy import hardened_git_environment
 from agentic_runner.persistence import BoundedAppendWriter, atomic_write_text
 from agentic_runner.worktrees import (
     default_state_dir,
@@ -438,6 +439,27 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
             redacted = redact_secrets(payload, extra_values=[value])
         self.assertNotIn(value, redacted)
         self.assertGreaterEqual(redacted.count("[REDACTED]"), 3)
+
+    def test_url_embedded_credentials_are_redacted_without_losing_url_target(self):
+        value = "https://build-user:build-secret@example.test:8443/api/status?full=1#top"
+        redacted = redact_secrets(f"provider endpoint: {value}")
+        self.assertNotIn("build-user", redacted)
+        self.assertNotIn("build-secret", redacted)
+        self.assertIn("https://[REDACTED]@example.test:8443/api/status?full=1#top", redacted)
+
+    def test_git_safety_environment_filters_case_variants(self):
+        environment = hardened_git_environment({
+            "git_config_global": "/tmp/unsafe-global",
+            "Git_Ssh_Command": "/tmp/unsafe-ssh",
+            "gIt_DiR": "/tmp/unsafe-dir",
+            "Git_Optional_Locks": "1",
+            "ordinary": "kept",
+        })
+        self.assertNotIn("git_config_global", environment)
+        self.assertNotIn("Git_Ssh_Command", environment)
+        self.assertNotIn("gIt_DiR", environment)
+        self.assertNotIn("Git_Optional_Locks", environment)
+        self.assertEqual(environment["ordinary"], "kept")
 
     def test_explicit_short_credentials_are_redacted(self):
         with patch.dict("os.environ", {"SERVICE_VALUE": "tiny"}, clear=True):
@@ -1462,6 +1484,23 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
             sum(part.startswith("GIT_CONFIG_GLOBAL=") for part in command), 1,
         )
         self.assertNotIn("GIT_EXTERNAL_DIFF", command)
+
+    def test_sandbox_git_command_filters_case_variants_of_blocked_environment(self):
+        settings = validate_sandbox({"enabled": True, "engine": "docker", "image": "test-image"})
+        command = sandbox_command(
+            ["git", "status"], Path("/tmp/worktree"), settings,
+            pass_env=["git_config_global", "Git_Ssh_Command", "gIt_DiR", "ordinary"],
+            env={
+                "git_config_global": "/tmp/unsafe",
+                "Git_Ssh_Command": "/tmp/helper",
+                "gIt_DiR": "/tmp/unsafe-dir",
+                "ordinary": "kept",
+            },
+        )
+        self.assertNotIn("git_config_global", command)
+        self.assertNotIn("Git_Ssh_Command", command)
+        self.assertNotIn("gIt_DiR", command)
+        self.assertIn("ordinary", command)
 
     def test_sandbox_git_metadata_probe_uses_hardened_git_execution(self):
         root = Path("/tmp/worktree")

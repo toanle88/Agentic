@@ -224,6 +224,20 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(snapshot["review"]["status"], "not-run")
         self.assertNotIn("outside audit", json.dumps(snapshot))
 
+    def test_dashboard_ignores_symlinked_run_directories(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            root.mkdir(parents=True)
+            outside = Path(temp) / "outside-run"
+            outside.mkdir()
+            (outside / "developer-001.txt").write_text("outside run\n")
+            linked_run = root / "agent-issue-999-ab12cd34"
+            try:
+                linked_run.symlink_to(outside, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"directory links unavailable: {exc}")
+            self.assertEqual(agentic_dashboard_data.collect_runs(root), [])
+
     def test_dashboard_cache_invalidates_when_an_older_artifact_changes(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / ".demo-agent-runs"

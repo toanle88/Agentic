@@ -424,12 +424,17 @@ def cli_provider_command(
     worktree: Path | None = None,
     sandbox_enabled: bool = False,
     sandbox_allow_network: bool = False,
+    security_mode: str = "trusted",
     check_commands: list[list[str]] | None = None,
 ) -> tuple[list[str], bool]:
     """Build a native CLI provider command and report whether it is JSON-streamed."""
     policy = _provider_permission_policy(permission_policy, readonly=readonly)
     validate_provider_permission_policy(provider, policy)
     dangerous = bool(policy.get("allow_dangerous")) and not readonly
+    if dangerous and security_mode != "isolated":
+        raise ValueError(
+            "dangerous provider permissions require security_mode 'isolated'"
+        )
     can_write = bool(policy.get("edit_files") or policy.get("create_files")) and not readonly
     if provider == "gemini":
         args = [

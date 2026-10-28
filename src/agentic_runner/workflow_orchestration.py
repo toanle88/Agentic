@@ -184,6 +184,8 @@ def develop(
             agent_kwargs["check_commands"] = test_commands
         if config.get("sandbox", {}).get("enabled"):
             agent_kwargs["sandbox"] = config["sandbox"]
+        if config.get("security_mode", "trusted") != "trusted":
+            agent_kwargs["security_mode"] = config["security_mode"]
         ok, message = run_agent(
             run.worktree,
             agent_prompt(

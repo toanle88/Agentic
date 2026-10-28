@@ -24,6 +24,23 @@ GIT_SAFETY_ENVIRONMENT = (
     ("GIT_TERMINAL_PROMPT", "0"),
 )
 GIT_FILTER_CONFIG_PATTERN = r"^filter\..+\.(clean|smudge|process|required)$"
+_BLOCKED_GIT_ENVIRONMENT_NAMES = frozenset({
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+    "GIT_EXTERNAL_DIFF", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND",
+    *(name for name, _ in GIT_SAFETY_ENVIRONMENT),
+})
+_BLOCKED_GIT_ENVIRONMENT_NAMES_CASEFOLDED = frozenset(
+    name.casefold() for name in _BLOCKED_GIT_ENVIRONMENT_NAMES
+)
+
+
+def is_blocked_git_environment_name(name: str) -> bool:
+    """Return whether an environment name can override hardened Git behavior."""
+    normalized = name.casefold()
+    return (
+        normalized.startswith("git_config_")
+        or normalized in _BLOCKED_GIT_ENVIRONMENT_NAMES_CASEFOLDED
+    )
 
 
 def _without_git_config_options(argv: list[str]) -> list[str]:
@@ -61,12 +78,8 @@ def hardened_git_environment(
     """Remove Git environment overrides and disable untrusted config sources."""
     environment = dict(os.environ if environ is None else environ)
     for name in list(environment):
-        if name.startswith("GIT_CONFIG_"):
+        if is_blocked_git_environment_name(name):
             environment.pop(name, None)
-    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"):
-        environment.pop(name, None)
-    for name in ("GIT_EXTERNAL_DIFF", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND"):
-        environment.pop(name, None)
     environment.update(dict(GIT_SAFETY_ENVIRONMENT))
     return environment
 
