@@ -69,7 +69,7 @@ class PersistenceRecoveryTests(unittest.TestCase):
 
             with patch.object(persistence.os, "stat", side_effect=swap_target):
                 with self.assertRaisesRegex(
-                    (OSError, ValueError), "changed while being replaced"
+                    (OSError, ValueError), r"changed while .*being replaced"
                 ):
                     atomic_write_text(path, "new state\n")
 
