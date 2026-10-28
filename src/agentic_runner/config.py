@@ -30,6 +30,7 @@ from .sandbox import sandbox_build_context, validate_sandbox
 from .ci_repair import validate_repair_limits
 from .file_boundaries import atomic_replace_relative_regular, open_relative_regular
 from .git_policy import hardened_git_argv, hardened_git_environment
+from .persistence import read_text_bounded
 
 
 SUPPORTED_PROVIDERS = ("codex", "gemini", "claude", "copilot", "openrouter")
@@ -98,6 +99,7 @@ OPENROUTER_COMMAND_TIMEOUT = (1, 86400)
 DEFAULT_TEST_TIMEOUT = 300
 DEFAULT_DEVELOPER_TIMEOUT = 600
 DEFAULT_REVIEWER_TIMEOUT = 300
+MAX_CONFIG_BYTES = 256_000
 DEFAULT_TASK_TIMEOUT = 1800
 MAX_TASK_TIMEOUT = 86400
 DEFAULT_OPENROUTER_COMMAND_TIMEOUT = 300
@@ -407,7 +409,12 @@ def _agent_settings_from_config(data: dict[str, Any], section: str, *,
 
 
 def load_config(path: Path) -> dict[str, Any]:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    raw = read_text_bounded(path, MAX_CONFIG_BYTES)
+    if raw is None:
+        raise ValueError(
+            f"configuration is missing, unreadable, or exceeds {MAX_CONFIG_BYTES}-byte limit"
+        )
+    data = json.loads(raw)
     if not isinstance(data, dict):
         raise ValueError("configuration root must be an object")
     for field_name in ("permission_policy", "permissions"):

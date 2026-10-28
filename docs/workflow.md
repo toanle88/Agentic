@@ -562,7 +562,8 @@ unavailable, the body retains the final-patch fallback and the validation,
 review-status, and run-log notes.
 
 For a local task, use `agentic --task-file task.md --publish` or resume from
-the saved task file created by the interactive shell.
+the saved task file created by the interactive shell. Local task files are
+bounded to 256,000 bytes before hashing and parsing.
 
 Agentic verifies that the patch still matches its recorded approval and asks
 for the safe default-no confirmation. It does not run tests or review during
@@ -576,6 +577,10 @@ the authenticated GitHub CLI account with `gh api user` and uses its private
 noreply address when necessary. For HTTPS remotes, the push uses a temporary
 askpass program that invokes `gh auth token` only when Git requests credentials;
 the token is not stored in Git configuration, argv, logs, or a temporary file.
+Publication accepts only a configured-host HTTPS remote or an approved
+`git@host:owner/repository.git` / `ssh://git@host/owner/repository.git` remote;
+HTTP, embedded credentials, unrelated hosts, and malformed repository paths are
+rejected before any push.
 SSH remotes continue to use the user's normal SSH authentication. If identity
 or GitHub CLI authentication is unavailable, publication stops with an explicit
 setup message and leaves the worktree intact.

@@ -21,6 +21,13 @@ from test_agentic import sh
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_configuration_rejects_oversized_json_before_parsing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "agent_config.json"
+            path.write_text("{" + " " * agentic_config.MAX_CONFIG_BYTES + "}", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "256000-byte limit"):
+                agentic.load_config(path)
+
     def setUp(self):
         # These tests exercise doctor command execution; model the new
         # explicit consent rather than allowing a host check implicitly.

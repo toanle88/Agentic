@@ -18,7 +18,7 @@ from scripts.agent_benchmark import (
     run_benchmark,
     validate_benchmark_files,
 )
-from scripts.agent_benchmark_config import load_benchmark as load_benchmark_config
+from scripts.agent_benchmark_config import MAX_BENCHMARK_BYTES, load_benchmark as load_benchmark_config
 from scripts.agent_benchmark_scenarios import (
     MAX_RESULT_BYTES, _read_result, _run_bounded_git_command, _run_checks,
     _run_git, _scenario_record, run_scenario,
@@ -30,6 +30,13 @@ from scripts.dashboard_benchmark import generate_corpus, measure, percentile
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_benchmark_rejects_oversized_corpus_before_parsing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "benchmark.json"
+            path.write_text("{" + " " * MAX_BENCHMARK_BYTES + "}", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "256000-byte limit"):
+                load_benchmark_config(path)
+
     def test_benchmark_git_output_is_bounded_before_materialization(self):
         class FakeProcess:
             def __init__(self):

@@ -239,12 +239,12 @@ def sort_runs(runs: Iterable[dict[str, Any]], *, sort_by: str = "last_activity",
         except (TypeError, ValueError):
             return False, 0.0
 
-    values = list(runs)
-    known = [run for run in values if value(run)[0]]
-    unknown = [run for run in values if not value(run)[0]]
-    known.sort(key=lambda run: (value(run)[1], str(run.get("id", ""))), reverse=descending)
-    unknown.sort(key=lambda run: str(run.get("id", "")))
-    return known + unknown
+    decorated = [(run, value(run)) for run in runs]
+    known = [item for item in decorated if item[1][0]]
+    unknown = [item for item in decorated if not item[1][0]]
+    known.sort(key=lambda item: (item[1][1], str(item[0].get("id", ""))), reverse=descending)
+    unknown.sort(key=lambda item: str(item[0].get("id", "")))
+    return [run for run, _ in known + unknown]
 
 
 def summary_row(run: dict[str, Any]) -> dict[str, Any]:

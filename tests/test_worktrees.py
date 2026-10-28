@@ -42,6 +42,13 @@ class _GitRepositoryTestCase(unittest.TestCase):
 
 
 class GitTest(_GitRepositoryTestCase):
+    def test_local_task_rejects_oversized_file_before_hashing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "task.md"
+            path.write_text("x" * (agentic_worktrees.MAX_LOCAL_TASK_BYTES + 1), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "256000-byte limit"):
+                agentic_worktrees.load_local_task(path)
+
     def test_missing_worktree_lock_is_an_infrastructure_error(self):
         run = agentic.Run(42, 'agent/issue-42-missing', self.repo / 'missing-worktree')
         with self.assertRaisesRegex(RuntimeError, 'worktree is missing.*retries skipped'):

@@ -253,6 +253,70 @@ class WorkflowTests(_GitRepositoryTestCase):
         self.assertIn("gh auth token --hostname", captured["script"])
         self.assertNotIn("token-value", captured["script"])
 
+    def test_http_publication_remote_fails_closed_before_push(self):
+        calls = []
+
+        def fake_git(_repo, *args, **kwargs):
+            calls.append(args)
+            if args[:4] == ("remote", "get-url", "--push", "origin"):
+                return "http://github.example/owner/repo.git"
+            return ""
+
+        with patch.object(agentic_workflow, "git", side_effect=fake_git):
+            with self.assertRaisesRegex(RuntimeError, "over HTTP"):
+                agentic_workflow._push_publication(self.repo, "agent/test", "github.example")
+
+        self.assertEqual(len(calls), 1)
+
+    def test_publication_rejects_unrelated_https_host(self):
+        def fake_git(_repo, *args, **_kwargs):
+            if args[:4] == ("remote", "get-url", "--push", "origin"):
+                return "https://other.example/owner/repo.git"
+            self.fail("push must not run for an unrelated host")
+
+        with patch.object(agentic_workflow, "git", side_effect=fake_git):
+            with self.assertRaisesRegex(RuntimeError, "match configured GitHub host"):
+                agentic_workflow._push_publication(self.repo, "agent/test", "github.example")
+
+    def test_publication_accepts_approved_ssh_remotes_without_askpass(self):
+        for remote in (
+            "git@github.example:owner/status.git",
+            "ssh://git@github.example/owner/repo.git",
+        ):
+            with self.subTest(remote=remote):
+                pushed = []
+
+                def fake_git(_repo, *args, **kwargs):
+                    if args[:4] == ("remote", "get-url", "--push", "origin"):
+                        return remote
+                    pushed.append((args, kwargs))
+                    return ""
+
+                with patch.object(agentic_workflow, "git", side_effect=fake_git):
+                    agentic_workflow._push_publication(self.repo, "agent/test", "github.example")
+                self.assertEqual(len(pushed), 1)
+                self.assertNotIn("env", pushed[0][1])
+
+    def test_publication_rejects_ssh_credentials_and_malformed_paths(self):
+        for remote in (
+            "ssh://git:secret@github.example/owner/repo.git",
+            "https://github.example/owner//repo.git",
+            "https://github.example/owner/repo.git/",
+            "git@github.example:owner//repo.git",
+            "git@github.example:owner/repo.git/",
+        ):
+            with self.subTest(remote=remote):
+                def fake_git(_repo, *args, **_kwargs):
+                    if args[:4] == ("remote", "get-url", "--push", "origin"):
+                        return remote
+                    self.fail("push must not run for an invalid remote")
+
+                with patch.object(agentic_workflow, "git", side_effect=fake_git):
+                    with self.assertRaisesRegex(RuntimeError, "Publication"):
+                        agentic_workflow._push_publication(
+                            self.repo, "agent/test", "github.example",
+                        )
+
     def test_git_rejects_repository_filter_drivers_before_running_operations(self):
         subprocess.run(
             ["git", "config", "filter.malicious.clean", "sh -c evil"],

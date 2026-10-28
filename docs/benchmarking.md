@@ -83,6 +83,8 @@ adapters: `agent-alone` is the baseline, and `agentic` runs the full
 developer/check/reviewer workflow. A task keeps its prompt in a separate file
 and declares the checks and any known review defects:
 
+Benchmark corpus JSON is bounded to 256,000 bytes before parsing.
+
 ```json
 {
   "schema_version": 1,

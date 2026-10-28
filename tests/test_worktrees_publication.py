@@ -5,7 +5,7 @@ import sys
 from io import StringIO
 from pathlib import Path
 from subprocess import CompletedProcess
-from unittest.mock import call, patch
+from unittest.mock import ANY, call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -547,6 +547,7 @@ class PublicationTests(_GitRepositoryTestCase):
               patch('agentic.command', side_effect=fake_command),
               patch('builtins.input', return_value='publish'),
               patch('agentic._status_print') as status):
+            git_mock.return_value = 'https://github.com/owner/repo.git'
             agentic.publish(run, issue, 'owner/repo', 'main', config, folder)
         self.assertTrue(any(
             message.startswith('[PUBLISH] Completed: Draft PR:')
@@ -560,6 +561,7 @@ class PublicationTests(_GitRepositoryTestCase):
         self.assertIn(call(
             run.worktree, '-c', 'core.hooksPath=/dev/null',
             'push', '-u', 'origin', run.branch,
+            env=ANY,
         ), git_mock.call_args_list)
         pr_command = next(argv for argv in commands if argv[:3] == ['gh', 'pr', 'create'])
         self.assertIn('--draft', pr_command)
@@ -611,6 +613,8 @@ class PublicationTests(_GitRepositoryTestCase):
             return real_command(argv, cwd, **kwargs)
 
         def git_without_push(repo, *args, **kwargs):
+            if args[:4] == ('remote', 'get-url', '--push', 'origin'):
+                return 'https://github.com/owner/repo.git'
             if args[2:4] == ('push', '-u'):
                 return ''
             return real_git(repo, *args, **kwargs)
@@ -641,6 +645,8 @@ class PublicationTests(_GitRepositoryTestCase):
         self._record_passed_validation(folder)
 
         def fail_on_push(_repo, *args, **_kwargs):
+            if args[:4] == ('remote', 'get-url', '--push', 'origin'):
+                return 'https://github.com/owner/repo.git'
             if args[2:4] == ('push', '-u'):
                 raise RuntimeError('remote rejected the push')
             return ''
@@ -688,7 +694,7 @@ class PublicationTests(_GitRepositoryTestCase):
               )),
               patch.dict(agentic_workflow._WORKFLOW_IMPLEMENTATIONS,
                          {'_publication_identity_environment': lambda *_args: {}}),
-              patch('agentic.git'),
+              patch('agentic.git', return_value='https://github.com/owner/repo.git'),
               patch('agentic.command', side_effect=fake_command),
               patch('builtins.input', return_value='y')):
             agentic.publish(
@@ -776,7 +782,14 @@ class PublicationTests(_GitRepositoryTestCase):
               patch('agentic.git') as git_mock,
               patch('agentic.command', side_effect=fake_command),
               patch('agentic._status_print')):
-            git_mock.side_effect = ['', 'pushed-sha', '', '']
+            def git_for_repair(_repo, *args, **_kwargs):
+                if args[:4] == ('remote', 'get-url', '--push', 'origin'):
+                    return 'https://github.com/owner/repo.git'
+                if args == ('rev-parse', 'HEAD'):
+                    return 'pushed-sha'
+                return ''
+
+            git_mock.side_effect = git_for_repair
             pushed_head = agentic.push_existing_pr(
                 run, issue, 'owner/repo', 'main', config, folder, pull_request,
                 fetch_pr=lambda: pull_request,
@@ -785,5 +798,6 @@ class PublicationTests(_GitRepositoryTestCase):
         self.assertIn(call(
             run.worktree, '-c', 'core.hooksPath=/dev/null',
             'push', '-u', 'origin', run.branch,
+            env=ANY,
         ), git_mock.call_args_list)
         self.assertFalse(any(argv[:3] == ['gh', 'pr', 'create'] for argv in commands))

@@ -1103,6 +1103,17 @@ console.log(JSON.stringify({{newest, oldest}}));
         self.assertIn("action_reasons", csv_text)
         self.assertLessEqual(len(csv_text.encode("utf-8")), 256_000)
 
+    def test_dashboard_sort_handles_missing_and_malformed_timestamps(self):
+        runs = [
+            {"id": "valid", "last_activity": "2026-01-03T00:00:00+00:00"},
+            {"id": "malformed", "last_activity": "not-a-timestamp"},
+            {"id": "missing"},
+        ]
+        self.assertEqual(
+            [run["id"] for run in agentic_dashboard_data.sort_runs(runs)],
+            ["valid", "malformed", "missing"],
+        )
+
     def test_dashboard_csv_budget_preserves_quoted_rows(self):
         runs = [
             {

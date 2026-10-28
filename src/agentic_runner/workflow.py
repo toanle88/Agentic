@@ -20,6 +20,7 @@ import time
 import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .config import (
     DEFAULT_OPENROUTER_BASE_URL,
@@ -129,6 +130,69 @@ MAX_INVESTIGATION_FINDINGS = 40
 MAX_PUBLICATION_REPORT_BYTES = 64_000
 MAX_TEST_REPORT_CHARS = 50_000
 MAX_TEST_FAILURE_OUTPUT_CHARS = 6_000
+
+
+def _valid_publication_repository_path(path: str) -> bool:
+    """Accept only the owner/repository path used by GitHub remotes."""
+    if "\\" in path or any(character.isspace() for character in path):
+        return False
+    parts = path.split("/")
+    if len(parts) == 3 and parts[0] == "":
+        parts = parts[1:]
+    if len(parts) != 2 or any(not part or part in {".", ".."} for part in parts):
+        return False
+    return bool(parts[0] and parts[1].removesuffix(".git"))
+
+
+def _publication_remote_kind(remote: str, github_host: str) -> str:
+    """Validate a GitHub publication remote before credentials can be used."""
+    remote = remote.strip()
+    configured_host = github_host.rstrip(".").casefold()
+    if not remote:
+        raise RuntimeError("Publication remote is empty; refusing to push")
+    if remote.casefold().startswith("http://"):
+        raise RuntimeError(
+            "Publication requires an HTTPS or approved SSH remote; refusing to "
+            "send GitHub credentials over HTTP"
+        )
+
+    parsed = urlsplit(remote)
+    try:
+        parsed_host = (parsed.hostname or "").rstrip(".").casefold()
+        parsed_port = parsed.port
+    except ValueError as exc:
+        raise RuntimeError("Publication remote has an invalid URL") from exc
+    if parsed.scheme.casefold() == "https":
+        if parsed_host != configured_host:
+            raise RuntimeError(
+                f"Publication remote host must match configured GitHub host {github_host!r}"
+            )
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise RuntimeError("Publication HTTPS remote contains unsupported credentials or URL fields")
+        if not _valid_publication_repository_path(parsed.path):
+            raise RuntimeError("Publication remote must name a GitHub owner/repository")
+        return "https"
+
+    if parsed.scheme.casefold() == "ssh":
+        if parsed_host != configured_host or parsed.username != "git" or parsed.password is not None:
+            raise RuntimeError(f"Publication SSH remote must use git@{github_host}")
+        if parsed.query or parsed.fragment or not _valid_publication_repository_path(parsed.path):
+            raise RuntimeError("Publication SSH remote must name a GitHub owner/repository")
+        if parsed_port is not None and not 1 <= parsed_port <= 65535:
+            raise RuntimeError("Publication SSH remote has an invalid port")
+        return "ssh"
+
+    scp_match = re.fullmatch(r"git@([^:/\s]+):([^?#\s]+)", remote, re.IGNORECASE)
+    if scp_match:
+        host, path = scp_match.groups()
+        if host.rstrip(".").casefold() != configured_host:
+            raise RuntimeError(
+                f"Publication SSH remote host must match configured GitHub host {github_host!r}"
+            )
+        if not _valid_publication_repository_path(path):
+            raise RuntimeError("Publication SSH remote must name a GitHub owner/repository")
+        return "ssh"
+    raise RuntimeError("Publication remote must use HTTPS or an approved git@host SSH form")
 
 
 def _prioritized_diff_hunks(diff: str, limit: int) -> tuple[str, int]:
@@ -2240,7 +2304,10 @@ def _push_publication(repo: Path, branch: str, github_host: str) -> None:
     placed in an argv, log, repository config, or temporary file.
     """
     remote = git(repo, "remote", "get-url", "--push", "origin", check=False)
-    if not isinstance(remote, str) or not remote.casefold().startswith(("http://", "https://")):
+    if not isinstance(remote, str):
+        raise RuntimeError("Could not read the publication remote; refusing to push")
+    remote_kind = _publication_remote_kind(remote, github_host)
+    if remote_kind != "https":
         git(repo, "-c", "core.hooksPath=/dev/null", "push", "-u", "origin", branch)
         return
     with tempfile.TemporaryDirectory(prefix="agentic-git-askpass-") as directory:

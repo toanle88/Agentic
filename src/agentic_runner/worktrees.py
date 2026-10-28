@@ -29,6 +29,7 @@ from .git_policy import (
     git_filter_probe_argv,
 )
 from .models import DEFAULT_GITHUB_HOST, Issue, PullRequest, Run, StatePaths
+from .persistence import read_text_bounded
 from .security import redact_secrets
 from .output import style_system_text, style_text, timestamped_status
 
@@ -52,6 +53,7 @@ AUDIT_KEY = hashlib.sha256(b"agentic-repository-audit-v1").hexdigest()[:12]
 MAX_SELECTION_RUNS = 5
 RELATIVE_WORKTREE_GIT = (2, 48, 0)
 MAX_COMMAND_OUTPUT_BYTES = 8 * 1024 * 1024
+MAX_LOCAL_TASK_BYTES = 256_000
 _GIT_SAFETY_CONFIG = GIT_SAFETY_CONFIG
 
 
@@ -759,10 +761,12 @@ def get_pull_request(
 
 
 def load_local_task(path: Path) -> Issue:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise RuntimeError(f"Could not read local task file {path}: {exc}") from exc
+    text = read_text_bounded(path, MAX_LOCAL_TASK_BYTES)
+    if text is None:
+        raise RuntimeError(
+            f"Could not read local task file {path}: missing, unreadable, or exceeds "
+            f"{MAX_LOCAL_TASK_BYTES}-byte limit"
+        )
     return Issue.from_local_text(text, path.resolve())
 
 
