@@ -149,6 +149,33 @@ class WorkflowTests(_GitRepositoryTestCase):
         self.assertEqual(environment["GIT_ATTR_NOSYSTEM"], "1")
         self.assertNotIn("GIT_EXTERNAL_DIFF", environment)
 
+    def test_git_preserves_explicit_publication_identity_through_hardening(self):
+        captured = {}
+
+        def fake_command(argv, cwd, **kwargs):
+            if "config" not in argv:
+                captured["environment"] = kwargs["env"]
+            return CompletedProcess(
+                argv, 0, stdout="" if "config" in argv else "ok\n", stderr="",
+            )
+
+        with patch.object(agentic_worktrees, "command", side_effect=fake_command):
+            self.assertEqual(
+                agentic_worktrees.git(
+                    self.repo, "status",
+                    env={
+                        "GIT_AUTHOR_NAME": "Local Author",
+                        "GIT_AUTHOR_EMAIL": "local@example.test",
+                        "GIT_CONFIG_GLOBAL": "/unsafe/config",
+                    },
+                ),
+                "ok",
+            )
+
+        self.assertEqual(captured["environment"]["GIT_AUTHOR_NAME"], "Local Author")
+        self.assertEqual(captured["environment"]["GIT_AUTHOR_EMAIL"], "local@example.test")
+        self.assertEqual(captured["environment"]["GIT_CONFIG_GLOBAL"], os.devnull)
+
     def test_git_filter_probe_uses_the_requested_executable(self):
         git_executable = shutil.which("git") or "git"
         calls = []
@@ -162,6 +189,69 @@ class WorkflowTests(_GitRepositoryTestCase):
 
         self.assertGreaterEqual(len(calls), 2)
         self.assertEqual(calls[0][0], git_executable)
+
+    def test_publication_identity_prefers_repository_local_config(self):
+        with patch.object(
+            agentic_workflow, "git",
+            side_effect=["Local Author", "local@example.test"],
+        ) as git_mock, patch.object(agentic_workflow, "command") as command:
+            environment = agentic_workflow._publication_identity_environment(
+                self.repo, "github.test",
+            )
+
+        self.assertEqual(environment["GIT_AUTHOR_NAME"], "Local Author")
+        self.assertEqual(environment["GIT_AUTHOR_EMAIL"], "local@example.test")
+        self.assertEqual(environment["GIT_COMMITTER_NAME"], "Local Author")
+        self.assertEqual(environment["GIT_COMMITTER_EMAIL"], "local@example.test")
+        command.assert_not_called()
+        self.assertEqual(git_mock.call_count, 2)
+
+    def test_publication_identity_falls_back_to_authenticated_github_user(self):
+        user = {
+            "id": 12345,
+            "login": "toanle88",
+            "name": "Toan Le",
+            "email": None,
+        }
+        with patch.object(agentic_workflow, "git", side_effect=["", ""]), \
+             patch.object(
+                 agentic_workflow, "command",
+                 return_value=CompletedProcess(
+                     ["gh", "api", "user"], 0, stdout=json.dumps(user), stderr="",
+                 ),
+             ) as command:
+            environment = agentic_workflow._publication_identity_environment(
+                self.repo, "github.example",
+            )
+
+        self.assertEqual(environment["GIT_AUTHOR_NAME"], "Toan Le")
+        self.assertEqual(
+            environment["GIT_AUTHOR_EMAIL"],
+            "12345+toanle88@users.noreply.github.com",
+        )
+        self.assertEqual(command.call_args.args[0], ["gh", "api", "user"])
+        self.assertEqual(command.call_args.kwargs["env"]["GH_HOST"], "github.example")
+
+    def test_https_publication_push_uses_ephemeral_github_cli_askpass(self):
+        captured = {}
+
+        def fake_git(_repo, *args, **kwargs):
+            if args[:4] == ("remote", "get-url", "--push", "origin"):
+                return "https://github.example/owner/repo.git"
+            captured["args"] = args
+            captured["environment"] = kwargs["env"]
+            captured["script"] = Path(kwargs["env"]["GIT_ASKPASS"]).read_text()
+            return ""
+
+        with patch.object(agentic_workflow, "git", side_effect=fake_git):
+            agentic_workflow._push_publication(
+                self.repo, "agent/test", "github.example",
+            )
+
+        self.assertEqual(captured["args"][-3:], ("-u", "origin", "agent/test"))
+        self.assertEqual(captured["environment"]["AGENTIC_GITHUB_HOST"], "github.example")
+        self.assertIn("gh auth token --hostname", captured["script"])
+        self.assertNotIn("token-value", captured["script"])
 
     def test_git_rejects_repository_filter_drivers_before_running_operations(self):
         subprocess.run(
