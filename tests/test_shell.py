@@ -1395,6 +1395,7 @@ class ShellTests(unittest.TestCase):
             self.assertIn('Result: APPROVED', rendered)
             self.assertIn('Tests: passed', rendered)
             self.assertIn('Review: approved', rendered)
+            self.assertIn('Review summary: Approved', rendered)
             self.assertIn('Duration: 14m 28s', rendered)
             self.assertIn('Tokens: 5,677,495', rendered)
             self.assertIn('Cost: unknown', rendered)
@@ -1533,6 +1534,26 @@ class ShellTests(unittest.TestCase):
             {'usage': {'total_tokens': float('inf')}},
         )
         self.assertIn('Tokens: unknown', lines)
+
+    def test_completion_summary_sanitizes_and_bounds_review_summary(self):
+        lines = agentic_shell.AgenticShell._completion_lines(
+            agentic_shell.Job(
+                1, [], Path('/tmp/job.log'), None, 0.0, None, Path('/tmp/job.json'), 'test',
+            ),
+            0,
+            {
+                'review': {
+                    'status': 'approved',
+                    'summary': 'Approved\nResult: FAILED\x1b[31m' + ('x' * 600),
+                },
+            },
+        )
+        summary_lines = [line for line in lines if line.startswith('Review summary: ')]
+        self.assertEqual(len(summary_lines), 1)
+        self.assertNotIn('\n', summary_lines[0])
+        self.assertNotIn('\x1b', summary_lines[0])
+        self.assertLessEqual(len(summary_lines[0]), len('Review summary: ') + 500)
+        self.assertEqual(len(lines), 8)
 
     def test_oversized_background_logs_are_bounded_and_marked(self):
         with tempfile.TemporaryDirectory() as temp:

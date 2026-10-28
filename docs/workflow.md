@@ -617,8 +617,10 @@ remain durable. Pass `--verbose` to the regular CLI, for example
 shell to retain the detailed progress output. `/logs JOB|PID|ISSUE --verbose`
 shows the captured shell output without concise replay filtering;
 `/logs JOB|PID|ISSUE` keeps routine progress out of the human-readable view.
-For test commands, the concise view keeps the command, pass/fail or timeout
-result, and duration but omits successful test-case/output lines. Failed and
+For test commands, normal workflow execution keeps the command, pass/fail or
+timeout result, and duration visible but omits successful child-test/output
+lines. The complete child output remains in the numbered `test-command-*.txt`
+log. Failed and
 timed-out commands include a bounded diagnostic tail of at most 80 lines and
 12,000 characters, followed by the full-log pointer; use `--verbose` to replay
 the complete captured output. The same filtering applies while following a

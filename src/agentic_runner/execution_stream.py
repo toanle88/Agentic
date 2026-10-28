@@ -581,6 +581,7 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                      heartbeat: int = 15,
                      progress_parser: Any | None = None,
                      verbose: bool = False,
+                     display_output: bool = True,
                      sandbox: dict[str, Any] | None = None,
                      sandbox_read_only: bool = False,
                      sandbox_pass_env: list[str] | None = None,
@@ -594,6 +595,9 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
     Raw JSONL events are stored next to the human-readable log when a provider
     emits structured output.
     Only a bounded output tail is retained in memory for error reporting.
+    ``display_output`` controls terminal rendering independently from durable
+    logging, so noisy checks can keep their output in per-command logs without
+    flooding the workflow transcript.
     """
     log_file.parent.mkdir(parents=True, exist_ok=True)
     invocation_temp: tempfile.TemporaryDirectory[str] | None = None
@@ -710,7 +714,8 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
 
             def display(message: str, *, style_status_tokens: bool = False,
                         generated_status_spans: list[tuple[int, int]] | None = None,
-                        transient: bool = False, persist: bool = True) -> None:
+                        transient: bool = False, persist: bool = True,
+                        show_on_terminal: bool = True) -> None:
                 nonlocal human_log_truncated, last_notice, live_status
                 now = datetime.datetime.now().strftime("%H:%M:%S")
                 prefix = f"[{now}] [{label}]"
@@ -721,17 +726,18 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                     )
                 else:
                     rendered = style_text(formatted, style_status_tokens=style_status_tokens)
-                if transient and live_status_enabled:
-                    clear_live_status()
-                    rendered = style_text(
-                        _fit_live_status(formatted),
-                        style_status_tokens=style_status_tokens,
-                    )
-                    _console_print("\r" + rendered, end="", flush=True)
-                    live_status = True
-                else:
-                    clear_live_status()
-                    _console_print(rendered, flush=True)
+                if show_on_terminal:
+                    if transient and live_status_enabled:
+                        clear_live_status()
+                        rendered = style_text(
+                            _fit_live_status(formatted),
+                            style_status_tokens=style_status_tokens,
+                        )
+                        _console_print("\r" + rendered, end="", flush=True)
+                        live_status = True
+                    else:
+                        clear_live_status()
+                        _console_print(rendered, flush=True)
                 if persist:
                     entry = formatted + "\n"
                     if not human_log_truncated:
@@ -785,7 +791,7 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                         if codex_json else _short(shown, 500)
                     )
                     transient = is_transient_progress(f"[{label}] {displayed}")
-                    persist = verbose or not transient
+                    persist = verbose or not transient or not display_output
                     if not verbose and displayed.startswith("Still running ("):
                         now = time.monotonic()
                         persist = (
@@ -810,6 +816,7 @@ def streamed_command(argv: list[str], cwd: Path, *, label: str, log_file: Path,
                         ),
                         transient=transient,
                         persist=persist,
+                        show_on_terminal=display_output,
                     )
             proc.wait()
             if dropped_lines or raw_log_truncated or human_log_truncated:
