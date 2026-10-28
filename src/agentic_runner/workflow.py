@@ -429,6 +429,8 @@ def run_agent(worktree: Path, prompt: str, *, output: Path,
             router_kwargs["json_mode"] = True
         if check_commands is not None:
             router_kwargs["check_commands"] = check_commands
+        if effective_security_mode != "trusted":
+            router_kwargs["security_mode"] = effective_security_mode
         if credential_names:
             router_kwargs["credential_names"] = credential_names
         if provider_sandbox is not None:

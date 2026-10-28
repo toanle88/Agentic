@@ -297,7 +297,7 @@ def _descriptor_digest(descriptor: int, relative: str) -> str:
 def _write_projection_file(
     root: Path, relative: str, data: bytes, mode: int,
     expected: _ProjectionFile | None,
-) -> None:
+) -> _ProjectionFile:
     """Write a changed safe file only after validating its original target."""
     # Windows' byte-range locking requires a read/write descriptor even for
     # newly created files.  Use the same descriptor mode for both paths so a
@@ -305,6 +305,9 @@ def _write_projection_file(
     flags = os.O_RDWR
     descriptor = -1
     created = False
+    mutation_identity: tuple[int, int] | None = None
+    post_mode = stat.S_IMODE(mode)
+    digest = hashlib.sha256(data).hexdigest()
     try:
         try:
             descriptor, identity = open_relative_regular(
@@ -340,27 +343,55 @@ def _write_projection_file(
                     raise RuntimeError(f"Provider worktree file changed: {relative}")
                 if _descriptor_digest(descriptor, relative) != expected.digest:
                     raise RuntimeError(f"Provider worktree file changed: {relative}")
-            os.ftruncate(descriptor, 0)
-            view = memoryview(data)
-            while view:
-                written = os.write(descriptor, view)
-                if written <= 0:
-                    raise OSError("provider worktree write made no progress")
-                view = view[written:]
-            # Windows Python builds do not all expose fchmod, and Windows
-            # does not preserve POSIX executable bits in the same way.  The
-            # projection content and descriptor identity remain authoritative
-            # there; apply mode-only changes where the descriptor primitive is
-            # available.
-            fchmod = getattr(os, "fchmod", None)
-            if fchmod is not None:
-                fchmod(descriptor, stat.S_IMODE(mode))
-            os.fsync(descriptor)
+            mutation_identity = identity
+            try:
+                os.ftruncate(descriptor, 0)
+                view = memoryview(data)
+                while view:
+                    written = os.write(descriptor, view)
+                    if written <= 0:
+                        raise OSError("provider worktree write made no progress")
+                    view = view[written:]
+                # Windows Python builds do not all expose fchmod, and Windows
+                # does not preserve POSIX executable bits in the same way.  The
+                # projection content and descriptor identity remain authoritative
+                # there; apply mode-only changes where the descriptor primitive is
+                # available.
+                fchmod = getattr(os, "fchmod", None)
+                if fchmod is not None:
+                    fchmod(descriptor, stat.S_IMODE(mode))
+                post_mode = stat.S_IMODE(os.fstat(descriptor).st_mode)
+                os.fsync(descriptor)
+            except Exception as exc:
+                # Preserve enough evidence for the caller to roll back a
+                # partial write.  A later path scan is not sufficient for a
+                # newly-created file: a concurrent file with the same bytes
+                # must never be mistaken for our mutation.
+                mutation_snapshot = None
+                try:
+                    snapshot, _ = _read_projection_file(root, relative)
+                    if snapshot.identity == mutation_identity:
+                        mutation_snapshot = snapshot
+                except (FileNotFoundError, OSError, RuntimeError, ValueError):
+                    pass
+                failure = RuntimeError(
+                    f"Could not complete provider worktree write: {relative}",
+                )
+                setattr(failure, "_agentic_mutation_identity", mutation_identity)
+                setattr(failure, "_agentic_mutation_snapshot", mutation_snapshot)
+                raise failure from exc
     except FileExistsError:
         raise RuntimeError(f"Provider worktree file appeared during sync: {relative}")
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+    return _ProjectionFile(
+        identity=identity,
+        size=len(data),
+        digest=digest,
+        mode=post_mode,
+        source_mode=post_mode,
+    )
 
 
 def _validate_missing_projection_path(root: Path, relative: str) -> None:
@@ -380,6 +411,37 @@ def _validate_missing_projection_path(root: Path, relative: str) -> None:
                 raise RuntimeError(f"Provider projection contains a non-directory: {relative}")
         elif not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise RuntimeError(f"Provider projection contains a non-regular file: {relative}")
+
+
+def _recover_provider_write(
+    source: Path, relative: str, data: bytes,
+    expected: _ProjectionFile | None, *,
+    mutation_identity: tuple[int, int] | None = None,
+    mutation_snapshot: _ProjectionFile | None = None,
+) -> _ProjectionFile | None:
+    """Identify a source write that completed before its helper raised."""
+    if expected is None and mutation_identity is None:
+        return None
+    if mutation_snapshot is not None:
+        current_snapshot = mutation_snapshot
+    else:
+        try:
+            current_snapshot, _ = _read_projection_file(source, relative)
+        except FileNotFoundError:
+            return None
+    if mutation_identity is not None and current_snapshot.identity != mutation_identity:
+        return None
+    if expected is not None and current_snapshot.identity != expected.identity:
+        return None
+    if (
+        current_snapshot.size != len(data)
+        or current_snapshot.digest != hashlib.sha256(data).hexdigest()
+    ):
+        # A helper failure can happen after truncation but before all bytes
+        # arrive.  The recorded identity and snapshot prove that this is our
+        # partial mutation, so the normal rollback path can restore it.
+        return current_snapshot if mutation_snapshot is not None else None
+    return current_snapshot
 
 
 def _sync_provider_worktree(
@@ -410,14 +472,16 @@ def _sync_provider_worktree(
             current[relative] = staged
 
     changes: list[tuple[str, str, bytes | None, int]] = []
+    originals: dict[str, tuple[_ProjectionFile | None, bytes | None]] = {}
     for relative in sorted(set(baseline) | set(current)):
         expected = baseline.get(relative)
         staged = current.get(relative)
         if staged is not None and expected is not None and _same_projection_content(staged[0], expected):
             continue
         source_snapshot: _ProjectionFile | None = None
+        source_data: bytes | None = None
         try:
-            source_snapshot, _ = _read_projection_file(source, relative)
+            source_snapshot, source_data = _read_projection_file(source, relative)
         except FileNotFoundError:
             pass
         if expected is not None and not _same_source_file(source_snapshot, expected):
@@ -430,21 +494,110 @@ def _sync_provider_worktree(
             if expected is None and source_snapshot is not None:
                 raise RuntimeError(f"Provider source file appeared during invocation: {relative}")
             changes.append(("write", relative, staged[1], staged[0].mode))
+        originals[relative] = (source_snapshot, source_data)
 
-    for action, relative, data, mode in changes:
-        if action == "delete":
-            assert baseline[relative] is not None
-            source_snapshot, _ = _read_projection_file(source, relative)
-            if not _same_source_file(source_snapshot, baseline[relative]):
-                raise RuntimeError(f"Provider source file changed during invocation: {relative}")
-            unlink_relative_regular(
-                source, relative, baseline[relative].identity,
-                expected_digest=baseline[relative].digest,
-                expected_size=baseline[relative].size,
-                description="provider worktree file",
-            )
-        else:
-            _write_projection_file(source, relative, data or b"", mode, baseline.get(relative))
+    successful_mutations: list[tuple[str, _ProjectionFile | None]] = []
+    unresolved_mutations: list[str] = []
+    try:
+        for action, relative, data, mode in changes:
+            if action == "delete":
+                assert baseline[relative] is not None
+                source_snapshot, _ = _read_projection_file(source, relative)
+                if not _same_source_file(source_snapshot, baseline[relative]):
+                    raise RuntimeError(f"Provider source file changed during invocation: {relative}")
+                unlink_relative_regular(
+                    source, relative, baseline[relative].identity,
+                    expected_digest=baseline[relative].digest,
+                    expected_size=baseline[relative].size,
+                    description="provider worktree file",
+                )
+                successful_mutations.append((relative, None))
+            else:
+                write_data = data or b""
+                expected = baseline.get(relative)
+                try:
+                    post_change = _write_projection_file(
+                        source, relative, write_data, mode, expected,
+                    )
+                except Exception as write_exc:
+                    # A write helper can raise after truncating and writing the
+                    # source (for example during a later fsync or close).  If
+                    # the helper proves its mutation, record even partial
+                    # content so the outer rollback can restore the original
+                    # safely.  Without that proof, fail closed rather than
+                    # deleting a concurrent file that happens to match.
+                    post_change = _recover_provider_write(
+                        source, relative, write_data, expected,
+                        mutation_identity=getattr(
+                            write_exc, "_agentic_mutation_identity", None,
+                        ),
+                        mutation_snapshot=getattr(
+                            write_exc, "_agentic_mutation_snapshot", None,
+                        ),
+                    )
+                    if post_change is not None:
+                        successful_mutations.append((relative, post_change))
+                    else:
+                        try:
+                            current_snapshot, _ = _read_projection_file(source, relative)
+                        except FileNotFoundError:
+                            current_snapshot = None
+                        if (
+                            (expected is None and current_snapshot is not None)
+                            or (
+                                expected is not None
+                                and not _same_source_file(current_snapshot, expected)
+                            )
+                        ):
+                            unresolved_mutations.append(relative)
+                    raise
+                successful_mutations.append((relative, post_change))
+    except Exception as exc:
+        rollback_errors: list[str] = [
+            f"{relative}: mutation ownership could not be proven"
+            for relative in unresolved_mutations
+        ]
+        for relative, post_change in reversed(successful_mutations):
+            original, original_data = originals[relative]
+            try:
+                try:
+                    current_snapshot, _ = _read_projection_file(source, relative)
+                except FileNotFoundError:
+                    current_snapshot = None
+                if post_change is None:
+                    if current_snapshot is not None:
+                        raise RuntimeError(
+                            "current file changed after provider deletion; refusing rollback"
+                        )
+                    if original is not None and original_data is not None:
+                        _write_projection_file(
+                            source, relative, original_data, original.mode, None,
+                        )
+                    continue
+                if not _same_source_file(current_snapshot, post_change):
+                    raise RuntimeError(
+                        "current file changed after provider update; refusing rollback"
+                    )
+                if original is None:
+                    if current_snapshot is not None:
+                        unlink_relative_regular(
+                            source, relative, current_snapshot.identity,
+                            expected_digest=current_snapshot.digest,
+                            expected_size=current_snapshot.size,
+                            description="provider worktree rollback",
+                        )
+                elif original_data is not None:
+                    _write_projection_file(
+                        source, relative, original_data, original.mode, current_snapshot,
+                    )
+            except Exception as rollback_exc:  # pragma: no cover - compounded I/O failure
+                rollback_errors.append(f"{relative}: {rollback_exc}")
+        if rollback_errors:
+            raise RuntimeError(
+                "Provider worktree synchronization failed and rollback was incomplete: "
+                + "; ".join(rollback_errors)
+            ) from exc
+        raise RuntimeError("Provider worktree synchronization failed; changes rolled back") from exc
 
 
 def _read_provider_result(root: Path, name: str) -> str | None:

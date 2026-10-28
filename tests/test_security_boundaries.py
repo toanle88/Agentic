@@ -982,6 +982,212 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
 
             self.assertEqual((root / "script.py").stat().st_mode & 0o777, 0o755)
 
+    def test_provider_sync_rolls_back_when_a_later_change_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "worktree"
+            projection = Path(temp) / "projection"
+            root.mkdir()
+            (root / "first.py").write_text("original first\n", encoding="utf-8")
+            (root / "second.py").write_text("original second\n", encoding="utf-8")
+            baseline = _stage_worktree(root, projection, skip=lambda _: False, read_only=False)
+            (projection / "first.py").write_text("provider first\n", encoding="utf-8")
+            (projection / "second.py").write_text("provider second\n", encoding="utf-8")
+            original_write = _write_projection_file
+            calls = 0
+
+            def fail_on_second_write(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("injected sync failure")
+                return original_write(*args, **kwargs)
+
+            with patch(
+                "agentic_runner.execution_providers._write_projection_file",
+                side_effect=fail_on_second_write,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "changes rolled back"):
+                    _sync_provider_worktree(root, projection, baseline)
+
+            self.assertEqual((root / "first.py").read_text(encoding="utf-8"), "original first\n")
+            self.assertEqual((root / "second.py").read_text(encoding="utf-8"), "original second\n")
+
+    def test_provider_sync_restores_a_deleted_file_when_a_later_change_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "worktree"
+            projection = Path(temp) / "projection"
+            root.mkdir()
+            (root / "first.py").write_text("original first\n", encoding="utf-8")
+            (root / "second.py").write_text("original second\n", encoding="utf-8")
+            baseline = _stage_worktree(root, projection, skip=lambda _: False, read_only=False)
+            (projection / "first.py").unlink()
+            (projection / "second.py").write_text("provider second\n", encoding="utf-8")
+            original_write = _write_projection_file
+
+            def fail_once(*args, **kwargs):
+                if args[1] == "second.py":
+                    raise OSError("injected sync failure")
+                return original_write(*args, **kwargs)
+
+            with patch(
+                "agentic_runner.execution_providers._write_projection_file",
+                side_effect=fail_once,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "changes rolled back"):
+                    _sync_provider_worktree(root, projection, baseline)
+
+            self.assertEqual((root / "first.py").read_text(encoding="utf-8"), "original first\n")
+            self.assertEqual((root / "second.py").read_text(encoding="utf-8"), "original second\n")
+
+    def test_provider_sync_rolls_back_a_write_that_raises_after_mutating(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "worktree"
+            projection = Path(temp) / "projection"
+            root.mkdir()
+            (root / "first.py").write_text("original first\n", encoding="utf-8")
+            (root / "second.py").write_text("original second\n", encoding="utf-8")
+            baseline = _stage_worktree(root, projection, skip=lambda _: False, read_only=False)
+            (projection / "first.py").write_text("provider first\n", encoding="utf-8")
+            (projection / "second.py").write_text("provider second\n", encoding="utf-8")
+            original_write = _write_projection_file
+            calls = 0
+
+            def fail_after_second_write(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                result = original_write(*args, **kwargs)
+                if calls == 2:
+                    raise OSError("injected post-write failure")
+                return result
+
+            with patch(
+                "agentic_runner.execution_providers._write_projection_file",
+                side_effect=fail_after_second_write,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "changes rolled back"):
+                    _sync_provider_worktree(root, projection, baseline)
+
+            self.assertEqual((root / "first.py").read_text(encoding="utf-8"), "original first\n")
+            self.assertEqual((root / "second.py").read_text(encoding="utf-8"), "original second\n")
+
+    def test_provider_sync_refuses_to_remove_unowned_new_file_after_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "worktree"
+            projection = Path(temp) / "projection"
+            root.mkdir()
+            projection.mkdir()
+            (projection / "new.py").write_text("provider new\n", encoding="utf-8")
+
+            def create_concurrent_file_then_fail(*args, **kwargs):
+                (root / "new.py").write_text("provider new\n", encoding="utf-8")
+                raise OSError("injected concurrent create failure")
+
+            with patch(
+                "agentic_runner.execution_providers._write_projection_file",
+                side_effect=create_concurrent_file_then_fail,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "rollback was incomplete"):
+                    _sync_provider_worktree(root, projection, {})
+
+            self.assertEqual(
+                (root / "new.py").read_text(encoding="utf-8"),
+                "provider new\n",
+            )
+
+    def test_provider_sync_rolls_back_a_partial_new_file_write(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "worktree"
+            projection = Path(temp) / "projection"
+            root.mkdir()
+            projection.mkdir()
+            (projection / "new.py").write_text(
+                "provider content that is longer\n", encoding="utf-8",
+            )
+            original_write = os.write
+            failed = False
+
+            def partial_create_then_fail(descriptor, data):
+                nonlocal failed
+                if not failed:
+                    failed = True
+                    original_write(descriptor, data[:1])
+                    raise OSError("injected partial create failure")
+                return original_write(descriptor, data)
+
+            with patch(
+                "agentic_runner.execution_providers.os.write",
+                side_effect=partial_create_then_fail,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "changes rolled back"):
+                    _sync_provider_worktree(root, projection, {})
+
+            self.assertFalse((root / "new.py").exists())
+
+    def test_provider_sync_rolls_back_a_partial_write_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "worktree"
+            projection = Path(temp) / "projection"
+            root.mkdir()
+            (root / "source.py").write_text("original content\n", encoding="utf-8")
+            baseline = _stage_worktree(root, projection, skip=lambda _: False, read_only=False)
+            (projection / "source.py").write_text(
+                "provider content that is longer\n", encoding="utf-8",
+            )
+            original_write = os.write
+            failed = False
+
+            def partial_write_then_recover(descriptor, data):
+                nonlocal failed
+                if not failed:
+                    failed = True
+                    original_write(descriptor, data[:1])
+                    raise OSError("injected partial write failure")
+                return original_write(descriptor, data)
+
+            with patch(
+                "agentic_runner.execution_providers.os.write",
+                side_effect=partial_write_then_recover,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "changes rolled back"):
+                    _sync_provider_worktree(root, projection, baseline)
+
+            self.assertEqual(
+                (root / "source.py").read_text(encoding="utf-8"),
+                "original content\n",
+            )
+
+    def test_provider_sync_refuses_to_rollback_a_concurrent_source_edit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "worktree"
+            projection = Path(temp) / "projection"
+            root.mkdir()
+            (root / "first.py").write_text("original first\n", encoding="utf-8")
+            (root / "second.py").write_text("original second\n", encoding="utf-8")
+            baseline = _stage_worktree(root, projection, skip=lambda _: False, read_only=False)
+            (projection / "first.py").write_text("provider first\n", encoding="utf-8")
+            (projection / "second.py").write_text("provider second\n", encoding="utf-8")
+            original_write = _write_projection_file
+            calls = 0
+
+            def edit_after_first_write(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                result = original_write(*args, **kwargs)
+                if calls == 1:
+                    (root / "first.py").write_text("concurrent edit\n", encoding="utf-8")
+                else:
+                    raise OSError("injected sync failure")
+                return result
+
+            with patch(
+                "agentic_runner.execution_providers._write_projection_file",
+                side_effect=edit_after_first_write,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "rollback was incomplete"):
+                    _sync_provider_worktree(root, projection, baseline)
+
+            self.assertEqual((root / "first.py").read_text(encoding="utf-8"), "concurrent edit\n")
+
     def test_provider_write_rejects_same_inode_source_content_changes(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "worktree"
@@ -1366,7 +1572,25 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
                 list(argv), readonly=False, permission_policy=restricted,
             )
             self.assertFalse(allowed, (argv, reason))
-            self.assertIn("edit_files", reason)
+            self.assertIn("exact configured check", reason)
+        for argv in (["rm", "existing.txt"], ["chmod", "755", "file"], ["kill", "123"]):
+            allowed, reason = agentic_openrouter._openrouter_command_allowed(
+                list(argv), readonly=False,
+            )
+            self.assertFalse(allowed, (argv, reason))
+            self.assertIn("exact configured check", reason)
+        for argv in (["/bin/rm", "existing.txt"], ["tools/run-check", "--unsafe"]):
+            allowed, reason = agentic_openrouter._openrouter_command_allowed(
+                list(argv), readonly=False,
+            )
+            self.assertFalse(allowed, (argv, reason))
+            self.assertIn("exact configured check", reason)
+        configured_absolute = ["/bin/rm", "existing.txt"]
+        allowed, reason = agentic_openrouter._openrouter_command_allowed(
+            configured_absolute, readonly=False,
+            check_commands=[configured_absolute],
+        )
+        self.assertTrue(allowed, reason)
         allowed, reason = agentic_openrouter._openrouter_command_allowed(
             ["perl", "-i", "-e", "s/x/y/", "file.txt"],
             readonly=False, permission_policy=restricted,
@@ -1413,7 +1637,7 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
         )
         self.assertTrue(allowed, reason)
 
-    def test_openrouter_permission_policy_network_is_effective_without_legacy_flag(self):
+    def test_openrouter_network_command_requires_an_exact_configured_check(self):
         policy = {
             "read_files": True, "search_files": True, "edit_files": True,
             "create_files": True, "git_read": True, "run_checks": True,
@@ -1422,6 +1646,31 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
         allowed, reason = agentic_openrouter._openrouter_command_allowed(
             ["curl", "https://example.test"], readonly=False,
             permission_policy=policy,
+        )
+        self.assertFalse(allowed, reason)
+        self.assertIn("exact configured check", reason)
+        allowed, reason = agentic_openrouter._openrouter_command_allowed(
+            ["curl", "https://example.test"], readonly=False,
+            permission_policy=policy,
+            check_commands=[["curl", "https://example.test"]],
+        )
+        self.assertTrue(allowed, reason)
+
+    def test_openrouter_dangerous_commands_require_isolated_mode(self):
+        policy = {"allow_dangerous": True}
+        allowed, reason = agentic_openrouter._openrouter_command_allowed(
+            ["rm", "generated.txt"], readonly=False, permission_policy=policy,
+        )
+        self.assertFalse(allowed)
+        self.assertIn("isolated", reason)
+        allowed, reason = agentic_openrouter._openrouter_command_allowed(
+            ["rm", "generated.txt"], readonly=False, permission_policy=policy,
+            security_mode="isolated",
+        )
+        self.assertTrue(allowed, reason)
+        allowed, reason = agentic_openrouter._openrouter_command_allowed(
+            ["rm", "generated.txt"], readonly=False, permission_policy=policy,
+            check_commands=[["python", "-m", "unittest"]], security_mode="isolated",
         )
         self.assertTrue(allowed, reason)
 

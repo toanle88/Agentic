@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "status": "historical-reference",
+  "source": "docs/audits/2026-10-21-issue-73.md",
+  "command": "python scripts/dashboard_benchmark.py --logs /tmp/agentic-dashboard-corpus --generate --output /tmp/agentic-dashboard-results.json",
+  "corpus": {
+    "runs": 500,
+    "artifacts_per_run": 24,
+    "developer_artifact_bytes": 8388608,
+    "openrouter_files": 10000,
+    "git_files": 1000
+  },
+  "repetitions": 3,
+  "metrics": {
+    "dashboard_collection": {
+      "cold": {
+        "p50_seconds": 1.821,
+        "p95_seconds": 2.377
+      },
+      "warm": {
+        "p50_seconds": 0.130,
+        "p95_seconds": 0.131
+      }
+    }
+  },
+  "notes": [
+    "Reference measurements were collected on one host and are not a universal performance gate.",
+    "Repeat the documented command on the target filesystem before comparing regressions.",
+    "The benchmark also records p99, peak resident memory, OpenRouter distant-range work, and Git-operation timings in a generated result."
+  ]
+}

@@ -765,6 +765,7 @@ def _openrouter_command_allowed(
     permission_policy: dict[str, bool] | None = None,
     check_commands: list[list[str]] | None = None,
     worktree: Path | None = None,
+    security_mode: str = "trusted",
 ) -> tuple[bool, str]:
     if not isinstance(argv, list) or not argv or not all(isinstance(part, str) and part for part in argv):
         return False, "argv must be a non-empty array of strings"
@@ -861,13 +862,17 @@ def _openrouter_command_allowed(
         return False, "command execution is disabled by the permission policy"
     if check_commands is not None:
         if not configured_check:
-            return False, "command is not one of the configured checks"
-    elif not (policy.get("edit_files") and policy.get("create_files")):
-        return False, (
-            "command execution requires edit_files and create_files, "
-            "or an exact configured check"
-        )
-    return True, ""
+            # A non-empty check list limits ordinary execution, but must not
+            # accidentally disable the documented isolated dangerous escape hatch.
+            if not policy.get("allow_dangerous"):
+                return False, "command is not one of the configured checks"
+        else:
+            return True, ""
+    if policy.get("allow_dangerous"):
+        if security_mode != "isolated":
+            return False, "allow_dangerous command execution requires security mode 'isolated'"
+        return True, ""
+    return False, "command must be an exact configured check unless allow_dangerous is enabled in isolated mode"
 
 
 def _open_regular_text_stream(root: Path, relative: str):
@@ -1477,6 +1482,7 @@ def _openrouter_tool_call(worktree: Path, name: Any, arguments: Any,
                           allow_network: bool = False,
                           permission_policy: dict[str, bool] | None = None,
                           check_commands: list[list[str]] | None = None,
+                          security_mode: str = "trusted",
                           sandbox: dict[str, Any] | None = None,
                           allow_runner_source: bool = False,
                           redaction_values: list[str] | None = None,
@@ -1718,6 +1724,7 @@ def _openrouter_tool_call(worktree: Path, name: Any, arguments: Any,
                 return "ERROR: argv must be a non-empty array of strings"
             allowed, reason = _openrouter_command_allowed(
                 argv, readonly, allow_network, permission_policy, check_commands, worktree,
+                security_mode,
             )
             if not allowed:
                 return "ERROR: " + reason
