@@ -56,7 +56,10 @@ class PersistenceRecoveryTests(unittest.TestCase):
             def swap_target(name, *args, **kwargs):
                 nonlocal swapped
                 relative_target = name == "state.txt" and kwargs.get("dir_fd") is not None
-                windows_target = os.name == "nt" and Path(name) == path
+                windows_target = (
+                    os.name == "nt"
+                    and Path(name).name.casefold() == path.name.casefold()
+                )
                 if not swapped and (relative_target or windows_target):
                     path.unlink()
                     unrelated.write_text("unrelated\n", encoding="utf-8")
