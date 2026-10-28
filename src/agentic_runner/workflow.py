@@ -18,7 +18,7 @@ import stat
 import tempfile
 import time
 import datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from .config import (
@@ -1009,11 +1009,9 @@ def _common_repository_root(path: Path) -> Path | None:
 
 
 def _runner_source_change_allowed(worktree: Path, filename: str) -> bool:
-    """Allow Agentic runner and CI sources during self-hosted development."""
-    parts = [part.lower() for part in PurePosixPath(filename).parts]
+    """Allow the Agentic runner source during self-hosted development."""
     is_runner_source = filename == "agentic.py"
-    is_ci_workflow = len(parts) >= 3 and parts[:2] == [".github", "workflows"]
-    if not (is_runner_source or is_ci_workflow):
+    if not is_runner_source:
         return False
     target_root = _common_repository_root(worktree)
     runner_root = _common_repository_root(SCRIPT_DIR)

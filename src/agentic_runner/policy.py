@@ -118,24 +118,26 @@ def validate_permission_policy(
 
 
 def forbidden(filename: str) -> bool:
-    """Identify paths that must never be included in a proposed patch."""
+    """Identify paths that must never be included in a proposed patch.
+
+    CI workflows are ordinary target-repository source. Issues may need to
+    add or update them, so they are intentionally not protected here. The
+    developer projection and publication checks still protect credentials,
+    instructions, configuration, and Git metadata.
+    """
     parts, base = _protected_path(filename)
     return (
         filename.replace("\\", "/").lower() in {"agentic.py", "agent_config.json", "agents.md"}
         or _protected_basename(parts, base)
         or "secrets" in parts or ".git" in parts
         or ".codex" in parts
-        or (len(parts) >= 3 and parts[:2] == [".github", "workflows"])
     )
 
 
 def self_hosted_source(filename: str) -> bool:
     """Identify Agentic sources allowed during self-repository development."""
     parts, _ = _protected_path(filename)
-    return (
-        parts == ["agentic.py"]
-        or (len(parts) >= 3 and parts[:2] == [".github", "workflows"])
-    )
+    return parts == ["agentic.py"]
 
 
 def provider_forbidden(filename: str, *, allow_self_hosted_sources: bool = False) -> bool:
