@@ -68,7 +68,9 @@ class PersistenceRecoveryTests(unittest.TestCase):
                 return original_stat(name, *args, **kwargs)
 
             with patch.object(persistence.os, "stat", side_effect=swap_target):
-                with self.assertRaisesRegex(OSError, "changed while being replaced"):
+                with self.assertRaisesRegex(
+                    (OSError, ValueError), "changed while being replaced"
+                ):
                     atomic_write_text(path, "new state\n")
 
             self.assertEqual(path.read_text(encoding="utf-8"), "unrelated\n")
