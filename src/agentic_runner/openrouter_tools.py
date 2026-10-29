@@ -340,26 +340,31 @@ def _git_patch_option(part: str) -> bool:
     return git_log_option_exposes_history(part)
 
 
-def _repository_git_filters_are_safe(worktree: Path) -> bool:
+def _repository_git_filters_are_safe(
+    worktree: Path, *, subprocess_module: Any = subprocess,
+) -> bool:
     """Return whether repository-local Git filters are absent and inspectable."""
     try:
-        result = subprocess.run(
+        result = subprocess_module.run(
             git_filter_probe_argv(),
             cwd=worktree,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stdin=subprocess_module.DEVNULL,
+            stdout=subprocess_module.PIPE,
+            stderr=subprocess_module.DEVNULL,
             text=True,
             check=False,
             timeout=OPENROUTER_GIT_FILTER_CHECK_TIMEOUT_SECONDS,
             env=hardened_git_environment(),
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess_module.TimeoutExpired):
         return False
     return result.returncode in (0, 1) and not result.stdout.strip()
 
 
-def _git_show_path_is_directory(worktree: Path, argv: list[str], relative: str) -> bool:
+def _git_show_path_is_directory(
+    worktree: Path, argv: list[str], relative: str, *,
+    subprocess_module: Any = subprocess,
+) -> bool:
     """Reject ``git show REV:path`` when Git resolves the path to a tree."""
     if len(argv) < 3 or argv[1] != "show":
         return False
@@ -372,18 +377,18 @@ def _git_show_path_is_directory(worktree: Path, argv: list[str], relative: str) 
     # This preflight is itself a Git inspection subprocess. Apply the same
     # filter-driver rejection as the final OpenRouter Git command before
     # invoking cat-file, so repository configuration cannot cross this path.
-    if not _repository_git_filters_are_safe(worktree):
+    if not _repository_git_filters_are_safe(worktree, subprocess_module=subprocess_module):
         return True
     try:
         for spec in specs:
             if spec.split(":", 1)[1] != relative:
                 continue
-            object_type = subprocess.run(
+            object_type = subprocess_module.run(
                 hardened_git_argv(["git", "cat-file", "-t", spec]),
                 cwd=worktree,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stdin=subprocess_module.DEVNULL,
+                stdout=subprocess_module.PIPE,
+                stderr=subprocess_module.DEVNULL,
                 text=True,
                 check=False,
                 timeout=OPENROUTER_GIT_OBJECT_CHECK_TIMEOUT_SECONDS,
@@ -393,7 +398,7 @@ def _git_show_path_is_directory(worktree: Path, argv: list[str], relative: str) 
                 return True
             if object_type.stdout.strip() != "blob":
                 return True
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess_module.TimeoutExpired):
         return True
     return False
 
@@ -449,7 +454,8 @@ def _interpreter_family(executable: str) -> str | None:
 
 
 def _readonly_command_paths(
-    argv: list[str], worktree: Path | None,
+    argv: list[str], worktree: Path | None, *,
+    subprocess_module: Any = subprocess,
 ) -> tuple[bool, str]:
     """Apply resolved worktree and protected-read checks to command operands."""
     executable = Path(argv[0]).name.lower()
@@ -502,13 +508,16 @@ def _readonly_command_paths(
             return False, "rg directory scopes are not allowed during read-only review"
         if git_content_output and not target.is_file():
             return False, "Git pathspecs must resolve to a regular file during read-only review"
-        if git_content_output and _git_show_path_is_directory(worktree, argv, part):
+        if git_content_output and _git_show_path_is_directory(
+            worktree, argv, part, subprocess_module=subprocess_module,
+        ):
             return False, "Git pathspecs may not name historical directories during read-only review"
     return True, ""
 
 
 def _readonly_git_command_allowed(
-    argv: list[str], worktree: Path | None = None,
+    argv: list[str], worktree: Path | None = None, *,
+    subprocess_module: Any = subprocess,
 ) -> tuple[bool, str]:
     """Allow only inspection-oriented Git commands in a worktree.
 
@@ -566,11 +575,14 @@ def _readonly_git_command_allowed(
             "--short", "--porcelain", "--branch", "--untracked-files=no",
         }:
             return False, f"git option {part} is not allowed during read-only review"
-    return _readonly_command_paths(argv, worktree)
+    return _readonly_command_paths(
+        argv, worktree, subprocess_module=subprocess_module,
+    )
 
 
 def _readonly_inspection_command_allowed(
-    argv: list[str], worktree: Path | None = None,
+    argv: list[str], worktree: Path | None = None, *,
+    subprocess_module: Any = subprocess,
 ) -> tuple[bool, str]:
     """Allow bounded, non-mutating text inspection without path escapes."""
     executable = Path(argv[0]).name.lower()
@@ -610,17 +622,22 @@ def _readonly_inspection_command_allowed(
                 return False, f"{executable} traversal options are not allowed during read-only review"
         elif executable == "file" and option in {"-L", "--dereference", "-f", "--files-from"}:
             return False, f"{executable} traversal options are not allowed during read-only review"
-    allowed, reason = _readonly_command_paths(argv, worktree)
+    allowed, reason = _readonly_command_paths(
+        argv, worktree, subprocess_module=subprocess_module,
+    )
     if not allowed:
         return False, reason
     return True, ""
 
 
 def _developer_inspection_command_allowed(
-    argv: list[str], worktree: Path | None,
+    argv: list[str], worktree: Path | None, *,
+    subprocess_module: Any = subprocess,
 ) -> tuple[bool, str]:
     """Apply the same worktree operand boundary to developer inspection."""
-    allowed, reason = _readonly_inspection_command_allowed(argv, worktree)
+    allowed, reason = _readonly_inspection_command_allowed(
+        argv, worktree, subprocess_module=subprocess_module,
+    )
     if not allowed:
         return False, reason
     return True, ""
@@ -766,6 +783,7 @@ def _openrouter_command_allowed(
     check_commands: list[list[str]] | None = None,
     worktree: Path | None = None,
     security_mode: str = "trusted",
+    subprocess_module: Any = subprocess,
 ) -> tuple[bool, str]:
     if not isinstance(argv, list) or not argv or not all(isinstance(part, str) and part for part in argv):
         return False, "argv must be a non-empty array of strings"
@@ -849,15 +867,21 @@ def _openrouter_command_allowed(
         # ``git_read`` is intentionally an allowlist, not a denylist. A
         # denylist would leave mutating commands such as ``git add`` and
         # ``git config`` executable as soon as a new subcommand is added.
-        return _readonly_git_command_allowed(argv, worktree)
+        return _readonly_git_command_allowed(
+            argv, worktree, subprocess_module=subprocess_module,
+        )
     if readonly:
         if executable in READONLY_INSPECTION_COMMANDS and not policy.get("search_files"):
             return False, "file search is disabled by the permission policy"
-        return _readonly_inspection_command_allowed(argv, worktree)
+        return _readonly_inspection_command_allowed(
+            argv, worktree, subprocess_module=subprocess_module,
+        )
     if executable in READONLY_INSPECTION_COMMANDS:
         if not policy.get("search_files"):
             return False, "file search is disabled by the permission policy"
-        return _developer_inspection_command_allowed(argv, worktree)
+        return _developer_inspection_command_allowed(
+            argv, worktree, subprocess_module=subprocess_module,
+        )
     if not policy.get("run_checks"):
         return False, "command execution is disabled by the permission policy"
     if check_commands is not None:
@@ -1278,7 +1302,9 @@ def _search_files(
     return output or "(no matches)"
 
 
-def _stop_command_process(process: subprocess.Popen[Any]) -> None:
+def _stop_command_process(
+    process: subprocess.Popen[Any], *, subprocess_module: Any = subprocess,
+) -> None:
     """Stop a command and its descendants without leaving the output pipe open."""
     if os.name != "nt":
         try:
@@ -1287,10 +1313,10 @@ def _stop_command_process(process: subprocess.Popen[Any]) -> None:
             pass
     else:
         try:
-            subprocess.run(
+            subprocess_module.run(
                 ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, check=False,
+                stdin=subprocess_module.DEVNULL, stdout=subprocess_module.DEVNULL,
+                stderr=subprocess_module.DEVNULL, check=False,
             )
         except OSError:
             pass
@@ -1305,6 +1331,7 @@ def _bounded_command_capture(
     process_argv: list[str], worktree: Path, timeout: int | None,
     *, env: dict[str, str] | None = None,
     terminate_on_output_limit: bool = True,
+    subprocess_module: Any = subprocess,
 ) -> tuple[int, str, bool, bool]:
     """Run a command while retaining only a bounded decoded output tail.
 
@@ -1314,17 +1341,17 @@ def _bounded_command_capture(
     """
     popen_kwargs: dict[str, Any] = {
         "cwd": worktree,
-        "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.PIPE,
-        "stderr": subprocess.STDOUT,
+        "stdin": subprocess_module.DEVNULL,
+        "stdout": subprocess_module.PIPE,
+        "stderr": subprocess_module.STDOUT,
         "bufsize": 0,
         "env": env,
     }
     if os.name != "nt":
         popen_kwargs["start_new_session"] = True
     else:
-        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    process = subprocess.Popen(process_argv, **popen_kwargs)
+        popen_kwargs["creationflags"] = getattr(subprocess_module, "CREATE_NEW_PROCESS_GROUP", 0)
+    process = subprocess_module.Popen(process_argv, **popen_kwargs)
     if process.stdout is None:
         raise OSError("command output pipe was not created")
 
@@ -1386,7 +1413,7 @@ def _bounded_command_capture(
                 timed_out = True
                 terminated = True
                 drain_deadline = now + OPENROUTER_COMMAND_DRAIN_TIMEOUT_SECONDS
-                _stop_command_process(process)
+                _stop_command_process(process, subprocess_module=subprocess_module)
             if terminated and reader_done:
                 break
             if terminated and drain_deadline is not None and now >= drain_deadline:
@@ -1409,14 +1436,14 @@ def _bounded_command_capture(
             if truncated and terminate_on_output_limit and not terminated:
                 terminated = True
                 drain_deadline = time.monotonic() + OPENROUTER_COMMAND_DRAIN_TIMEOUT_SECONDS
-                _stop_command_process(process)
+                _stop_command_process(process, subprocess_module=subprocess_module)
         if not terminated:
             process.wait()
         else:
             try:
                 process.wait(timeout=OPENROUTER_COMMAND_DRAIN_TIMEOUT_SECONDS)
-            except subprocess.TimeoutExpired:
-                _stop_command_process(process)
+            except subprocess_module.TimeoutExpired:
+                _stop_command_process(process, subprocess_module=subprocess_module)
                 process.wait()
         if not timed_out:
             append_output(b"", final=True)
@@ -1426,11 +1453,11 @@ def _bounded_command_capture(
         # already stopped and waited for the process, but this also covers
         # unexpected pipe or wait failures.
         if process.poll() is None:
-            _stop_command_process(process)
+            _stop_command_process(process, subprocess_module=subprocess_module)
         try:
             process.wait(timeout=OPENROUTER_COMMAND_DRAIN_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            _stop_command_process(process)
+        except subprocess_module.TimeoutExpired:
+            _stop_command_process(process, subprocess_module=subprocess_module)
             process.wait()
         stop_reader.set()
         stream.close()
@@ -1491,7 +1518,8 @@ def _openrouter_tool_call(worktree: Path, name: Any, arguments: Any,
                           allow_runner_source: bool = False,
                           redaction_values: list[str] | None = None,
                           env: dict[str, str] | None = None,
-                          mutation_state: dict[str, int] | None = None) -> str:
+                          mutation_state: dict[str, int] | None = None,
+                          subprocess_module: Any = subprocess) -> str:
     try:
         if isinstance(arguments, dict) and OPENROUTER_MALFORMED_TOOL_CALL_ERROR_KEY in arguments:
             malformed_error = arguments[OPENROUTER_MALFORMED_TOOL_CALL_ERROR_KEY]
@@ -1728,7 +1756,7 @@ def _openrouter_tool_call(worktree: Path, name: Any, arguments: Any,
                 return "ERROR: argv must be a non-empty array of strings"
             allowed, reason = _openrouter_command_allowed(
                 argv, readonly, allow_network, permission_policy, check_commands, worktree,
-                security_mode,
+                security_mode, subprocess_module=subprocess_module,
             )
             if not allowed:
                 return "ERROR: " + reason
@@ -1745,6 +1773,7 @@ def _openrouter_tool_call(worktree: Path, name: Any, arguments: Any,
                         _bounded_command_capture(
                             filter_probe, worktree, OPENROUTER_GIT_FILTER_CHECK_TIMEOUT_SECONDS,
                             env=command_env,
+                            subprocess_module=subprocess_module,
                         )
                     )
                 except OSError:
@@ -1766,6 +1795,7 @@ def _openrouter_tool_call(worktree: Path, name: Any, arguments: Any,
             returncode, output, truncated, timed_out = _bounded_command_capture(
                 process_argv, worktree, command_timeout, env=command_env,
                 terminate_on_output_limit=check_commands is None,
+                subprocess_module=subprocess_module,
             )
             if timed_out:
                 return f"ERROR: command timed out after {command_timeout}s"
@@ -1815,12 +1845,14 @@ def _read_bounded_response(stream: Any, limit: int) -> tuple[bytes, bool]:
 def _openrouter_request(url: str, api_key: str, body: dict[str, Any],
                         timeout: int | None,
                         redaction_values: list[str] | None = None,
-                        *, allow_custom_endpoint: bool = False) -> dict[str, Any]:
+                        *, allow_custom_endpoint: bool = False,
+                        urllib_module: Any = urllib) -> dict[str, Any]:
+    transport = urllib_module
     validate_openrouter_base_url(
         url, "OpenRouter request URL", allow_custom_endpoint=allow_custom_endpoint,
     )
     redaction_values = [api_key, *(redaction_values or [])]
-    request = urllib.request.Request(
+    request = transport.request.Request(
         url,
         data=json.dumps(body).encode("utf-8"),
         headers={
@@ -1834,13 +1866,13 @@ def _openrouter_request(url: str, api_key: str, body: dict[str, Any],
         # Preserve the historical module-level transport seam for integrations
         # that inject a test/local transport. The real urllib transport uses a
         # no-redirect opener so Authorization cannot cross endpoint boundaries.
-        if urllib.request.urlopen is not _DEFAULT_URL_OPEN:
+        if transport.request.urlopen is not _DEFAULT_URL_OPEN:
             response_context = (
-                urllib.request.urlopen(request, timeout=timeout)
-                if timeout else urllib.request.urlopen(request)
+                transport.request.urlopen(request, timeout=timeout)
+                if timeout else transport.request.urlopen(request)
             )
         else:
-            opener = urllib.request.build_opener(_NoRedirectHandler())
+            opener = transport.request.build_opener(_NoRedirectHandler())
             response_context = opener.open(request, timeout=timeout) if timeout else opener.open(request)
         with response_context as response:
             response_body, truncated = _read_bounded_response(
@@ -1851,7 +1883,7 @@ def _openrouter_request(url: str, api_key: str, body: dict[str, Any],
                     f"OpenRouter response exceeded {OPENROUTER_HTTP_RESPONSE_BYTES} bytes"
                 )
             value = json.loads(response_body.decode("utf-8"))
-    except urllib.error.HTTPError as exc:
+    except transport.error.HTTPError as exc:
         try:
             error_body, truncated = _read_bounded_response(
                 exc, OPENROUTER_HTTP_RESPONSE_BYTES,
@@ -1865,7 +1897,7 @@ def _openrouter_request(url: str, api_key: str, body: dict[str, Any],
             detail += " [response body truncated]"
         raise RuntimeError(f"OpenRouter request failed ({exc.code}): {detail}") from exc
     except (
-        urllib.error.URLError,
+        transport.error.URLError,
         OSError,
         socket.timeout,
         TimeoutError,

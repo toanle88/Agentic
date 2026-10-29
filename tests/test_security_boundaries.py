@@ -920,6 +920,49 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'complete read-only worktree'):
                     _stage_readonly_worktree(root, Path(temp) / 'review-worktree')
 
+    def test_fallback_provider_traversal_fails_closed_on_stat_error(self):
+        class BrokenEntry:
+            name = 'public.py'
+            path = 'public.py'
+
+            def stat(self, follow_symlinks=False):
+                raise OSError('simulated entry stat failure')
+
+        class Entries:
+            def __enter__(self):
+                return [BrokenEntry()]
+
+            def __exit__(self, *args):
+                return False
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with patch.object(file_boundaries, '_supports_anchored_traversal', return_value=False), \
+                 patch.object(file_boundaries.os, 'scandir', return_value=Entries()):
+                with self.assertRaisesRegex(OSError, 'simulated entry stat failure'):
+                    list(file_boundaries.iter_safe_regular_files(root, fail_on_error=True))
+
+    def test_direct_native_provider_filters_unrelated_sandbox_environment(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            captured = {}
+
+            def fake_stream(argv, cwd, **kwargs):
+                captured.update(kwargs)
+                return CompletedProcess(argv, 0, stdout='done')
+
+            with patch('agentic_execution.streamed_command', side_effect=fake_stream):
+                ok, message = agentic_execution.run_cli_provider(
+                    root, 'prompt', output=root / 'provider.txt', provider='claude',
+                    sandbox={
+                        'enabled': True, 'image': 'test-image',
+                        'pass_env': ['ANTHROPIC_API_KEY', 'OTHER_PROVIDER_KEY'],
+                    },
+                )
+        self.assertTrue(ok)
+        self.assertEqual(message, 'done')
+        self.assertEqual(captured['sandbox_pass_env'], ['ANTHROPIC_API_KEY'])
+
     def test_provider_staging_skips_oversized_untracked_artifacts(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / 'worktree'

@@ -3,9 +3,8 @@
 Scoped file/command tools live in agentic_openrouter_tools; the HTTP agent loop
 lives in agentic_openrouter_loop. Historical private imports remain available.
 """
-import subprocess
-import threading
-import urllib
+import subprocess  # noqa: F401 - historical facade patch point
+import urllib  # noqa: F401 - historical facade patch point
 from . import openrouter_loop as _loop
 from . import openrouter_tools as _tools
 from .config import (  # noqa: F401
@@ -43,47 +42,22 @@ from .openrouter_tools import (  # noqa: F401
 )
 
 
-# OpenRouter compatibility hooks are installed in shared implementation
-# globals for the duration of a call. A re-entrant lock serializes concurrent
-# facade calls while allowing the loop to invoke wrapped callbacks.
-_COMPATIBILITY_LOCK = threading.RLock()
-
-
 def _openrouter_request(*args, **kwargs):
-    with _COMPATIBILITY_LOCK:
-        old_urllib = _tools.urllib
-        _tools.urllib = urllib
-        try:
-            return _tools._openrouter_request(*args, **kwargs)
-        finally:
-            _tools.urllib = old_urllib
+    kwargs.setdefault("urllib_module", urllib)
+    return _tools._openrouter_request(*args, **kwargs)
 
 
 def _openrouter_tool_call(*args, **kwargs):
-    with _COMPATIBILITY_LOCK:
-        old_subprocess = _tools.subprocess
-        _tools.subprocess = subprocess
-        try:
-            return _tools._openrouter_tool_call(*args, **kwargs)
-        finally:
-            _tools.subprocess = old_subprocess
+    kwargs.setdefault("subprocess_module", subprocess)
+    return _tools._openrouter_tool_call(*args, **kwargs)
 
 
 def run_openrouter(*args, **kwargs):
     """Run the API loop while retaining facade-level integration hooks."""
-    with _COMPATIBILITY_LOCK:
-        old_request = _loop._openrouter_request
-        old_tool_call = _loop._openrouter_tool_call
-        old_max_turns = _loop.OPENROUTER_MAX_TURNS
-        old_command_timeout = _loop.DEFAULT_OPENROUTER_COMMAND_TIMEOUT
-        _loop._openrouter_request = _openrouter_request
-        _loop._openrouter_tool_call = _openrouter_tool_call
-        _loop.OPENROUTER_MAX_TURNS = OPENROUTER_MAX_TURNS
-        _loop.DEFAULT_OPENROUTER_COMMAND_TIMEOUT = DEFAULT_OPENROUTER_COMMAND_TIMEOUT
-        try:
-            return _loop.run_openrouter(*args, **kwargs)
-        finally:
-            _loop._openrouter_request = old_request
-            _loop._openrouter_tool_call = old_tool_call
-            _loop.OPENROUTER_MAX_TURNS = old_max_turns
-            _loop.DEFAULT_OPENROUTER_COMMAND_TIMEOUT = old_command_timeout
+    return _loop.run_openrouter(
+        *args, _request=_openrouter_request,
+        _tool_call=_openrouter_tool_call,
+        _max_tool_turns=OPENROUTER_MAX_TURNS,
+        _command_timeout_default=DEFAULT_OPENROUTER_COMMAND_TIMEOUT,
+        **kwargs,
+    )

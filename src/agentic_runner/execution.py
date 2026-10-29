@@ -5,7 +5,6 @@ and command adapters live in agentic_execution_providers. Historical imports
 remain available from this module.
 """
 import re
-import threading
 
 from . import execution_providers as _providers
 from .execution_providers import (  # noqa: F401
@@ -34,11 +33,6 @@ from .execution_stream import (  # noqa: F401
 )
 
 
-# Provider adapters temporarily receive compatibility callbacks through their
-# module globals. Hold this process-local lock for the full facade call so
-# concurrent callers cannot observe a partially patched adapter. It is
-# deliberately non-reentrant; adapters must not call this facade recursively.
-_COMPATIBILITY_LOCK = threading.Lock()
 _UNEXPECTED_KEYWORD_RE = re.compile(
     r"^(?:[\w.<>]+(?:\(\))? )?got an unexpected keyword argument ['\"]([^'\"]+)['\"]$"
 )
@@ -46,52 +40,39 @@ _UNEXPECTED_KEYWORD_RE = re.compile(
 
 def run_codex(*args, **kwargs):
     """Call the adapter while honoring historical facade monkeypatches."""
-    with _COMPATIBILITY_LOCK:
-        old_streamed = _providers.streamed_command
-        old_codex = _providers.codex_command
-        _providers.streamed_command = streamed_command
-        _providers.codex_command = codex_command
-        try:
-            return _providers.run_codex(*args, **kwargs)
-        finally:
-            _providers.streamed_command = old_streamed
-            _providers.codex_command = old_codex
+    return _providers.run_codex(
+        *args, _streamed_command=streamed_command,
+        _codex_command=codex_command, **kwargs,
+    )
 
 
 def run_cli_provider(*args, **kwargs):
     """Call a CLI adapter while honoring historical facade monkeypatches."""
-    with _COMPATIBILITY_LOCK:
-        old_streamed = _providers.streamed_command
-        old_command = _providers.cli_provider_command
-        _providers.streamed_command = streamed_command
-
-        def compatible_command(*command_args, **command_kwargs):
-            while True:
-                try:
-                    return cli_provider_command(*command_args, **command_kwargs)
-                except TypeError as exc:
-                    match = _UNEXPECTED_KEYWORD_RE.fullmatch(str(exc))
-                    unsupported = next(
-                        (
-                            name for name in (
-                                "executable_path", "worktree", "sandbox_enabled",
-                                "sandbox_allow_network", "check_commands",
-                                "permission_policy", "security_mode",
-                            )
-                            if (
-                                name in command_kwargs
-                                and match is not None
-                                and match.group(1) == name
-                            )
-                        ),
-                        None,
-                    )
-                    if unsupported is None:
-                        raise
-                    command_kwargs.pop(unsupported)
-        _providers.cli_provider_command = compatible_command
-        try:
-            return _providers.run_cli_provider(*args, **kwargs)
-        finally:
-            _providers.streamed_command = old_streamed
-            _providers.cli_provider_command = old_command
+    def compatible_command(*command_args, **command_kwargs):
+        while True:
+            try:
+                return cli_provider_command(*command_args, **command_kwargs)
+            except TypeError as exc:
+                match = _UNEXPECTED_KEYWORD_RE.fullmatch(str(exc))
+                unsupported = next(
+                    (
+                        name for name in (
+                            "executable_path", "worktree", "sandbox_enabled",
+                            "sandbox_allow_network", "check_commands",
+                            "permission_policy", "security_mode",
+                        )
+                        if (
+                            name in command_kwargs
+                            and match is not None
+                            and match.group(1) == name
+                        )
+                    ),
+                    None,
+                )
+                if unsupported is None:
+                    raise
+                command_kwargs.pop(unsupported)
+    return _providers.run_cli_provider(
+        *args, _streamed_command=streamed_command,
+        _cli_provider_command=compatible_command, **kwargs,
+    )

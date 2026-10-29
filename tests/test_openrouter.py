@@ -25,7 +25,7 @@ from agentic_runner.git_policy import GIT_LOG_METADATA_FORMAT, hardened_git_envi
 
 
 class OpenRouterTests(unittest.TestCase):
-    def test_openrouter_facade_serializes_compatibility_mutation(self):
+    def test_openrouter_facade_uses_per_call_compatibility_adapters(self):
         observed = []
         state_lock = Lock()
         active = 0
@@ -54,14 +54,14 @@ class OpenRouterTests(unittest.TestCase):
                 results = list(pool.map(agentic_openrouter.run_openrouter, ("one", "two")))
 
         self.assertEqual(len(results), 2)
-        self.assertEqual(max_active, 1)
+        self.assertEqual(max_active, 2)
         self.assertEqual(
             observed,
             [
                 (
-                    agentic_openrouter._openrouter_request,
-                    agentic_openrouter._openrouter_tool_call,
-                    agentic_openrouter.OPENROUTER_MAX_TURNS,
+                    agentic_openrouter._loop._openrouter_request,
+                    agentic_openrouter._loop._openrouter_tool_call,
+                    agentic_openrouter._loop.OPENROUTER_MAX_TURNS,
                 ),
             ] * 2,
         )
@@ -78,6 +78,21 @@ class OpenRouterTests(unittest.TestCase):
         self.assertIs(agentic_openrouter._loop._openrouter_request, original_request)
         self.assertIs(agentic_openrouter._loop._openrouter_tool_call, original_tool_call)
         self.assertEqual(agentic_openrouter._loop.OPENROUTER_MAX_TURNS, original_turns)
+
+    def test_openrouter_facade_forwards_historical_transport_patch_points(self):
+        facade_urllib = object()
+        facade_subprocess = object()
+        with (
+            patch.object(agentic_openrouter._tools, "_openrouter_request", return_value={}) as request,
+            patch.object(agentic_openrouter, "urllib", facade_urllib),
+            patch.object(agentic_openrouter._tools, "_openrouter_tool_call", return_value="ok") as tool_call,
+            patch.object(agentic_openrouter, "subprocess", facade_subprocess),
+        ):
+            agentic_openrouter._openrouter_request("url", "key", {}, None)
+            agentic_openrouter._openrouter_tool_call("worktree", "name", {}, readonly=True)
+
+        self.assertIs(request.call_args.kwargs["urllib_module"], facade_urllib)
+        self.assertIs(tool_call.call_args.kwargs["subprocess_module"], facade_subprocess)
 
     def test_file_tools_stay_on_open_parent_when_directory_is_replaced(self):
         with tempfile.TemporaryDirectory() as temp:

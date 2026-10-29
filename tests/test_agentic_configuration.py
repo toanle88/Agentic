@@ -952,7 +952,10 @@ class ConfigurationTests(unittest.TestCase):
 
 
     def test_isolated_preflight_uses_tools_from_the_sandbox_image(self):
-        sandbox = {'enabled': True, 'engine': 'docker', 'image': 'test-image'}
+        sandbox = {
+            'enabled': True, 'engine': 'docker', 'image': 'test-image',
+            'dockerfile': 'Dockerfile.agentic',
+        }
         with patch('agentic.shutil.which', return_value=None):
             agentic.preflight_test_commands(Path('/tmp/repo'), [['missing-tool', '--check']], sandbox=sandbox)
             agentic.preflight_agent_settings({'provider': 'gemini'}, sandbox=sandbox)
@@ -1060,10 +1063,9 @@ class ConfigurationTests(unittest.TestCase):
                 'enabled': True, 'engine': 'docker', 'image': 'project:latest',
                 'dockerfile': 'Dockerfile.agentic', 'build_context': '.',
             }
-            completed = CompletedProcess([], 0, stdout='built\n')
             observed = {}
 
-            def run_build(argv, **kwargs):
+            def run_build(argv, repo):
                 context = Path(argv[-1])
                 observed['context'] = context
                 observed['dockerfile'] = Path(argv[argv.index('--file') + 1])
@@ -1071,10 +1073,10 @@ class ConfigurationTests(unittest.TestCase):
                     path.relative_to(context).as_posix()
                     for path in context.rglob('*') if path.is_file()
                 )
-                return completed
+                return 0, 'built', False
 
             with (patch('agentic_config.shutil.which', return_value='/usr/bin/docker'),
-                  patch('agentic_config.subprocess.run', side_effect=run_build) as run):
+                  patch('agentic_config._run_sandbox_build', side_effect=run_build) as run):
                 agentic.preflight_security('isolated', sandbox, repo=repo)
         run.assert_called_once()
         command = run.call_args.args[0]
@@ -1084,15 +1086,58 @@ class ConfigurationTests(unittest.TestCase):
         ])
         self.assertEqual(Path(command[7]), observed['dockerfile'])
         self.assertEqual(Path(command[8]), observed['context'])
-        self.assertEqual(run.call_args.kwargs, {
-            'cwd': repo, 'stdout': agentic_config.subprocess.PIPE,
-            'stderr': agentic_config.subprocess.STDOUT, 'text': True, 'encoding': 'utf-8',
-            'errors': 'replace', 'timeout': 1800, 'check': False,
-        })
+        self.assertEqual(run.call_args.args[1], repo)
         self.assertEqual(observed['files'], ['Dockerfile.agentic', 'safe.txt'])
         self.assertNotIn(str(repo.resolve()), str(observed['context']))
         self.assertFalse(observed['context'].exists())
         self.assertFalse(observed['dockerfile'].exists())
+
+    def test_sandbox_build_output_is_bounded_while_process_runs(self):
+        class FakeStream:
+            def __init__(self):
+                self.chunks = ["x" * (agentic_config.SANDBOX_BUILD_OUTPUT_CHARS * 4), ""]
+
+            def read(self, _size):
+                return self.chunks.pop(0)
+
+            def close(self):
+                pass
+
+        class FakeProcess:
+            pid = 123
+
+            def __init__(self):
+                self.stdout = FakeStream()
+                self.returncode = 7
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+            def poll(self):
+                return self.returncode
+
+        process = FakeProcess()
+        with patch.object(agentic_config.subprocess, 'Popen', return_value=process) as popen:
+            returncode, detail, truncated = agentic_config._run_sandbox_build(
+                ['docker', 'build'], Path('/tmp/repo'),
+            )
+        self.assertEqual(returncode, 7)
+        self.assertTrue(truncated)
+        self.assertLessEqual(len(detail), agentic_config.SANDBOX_BUILD_OUTPUT_CHARS)
+        self.assertTrue(popen.call_args.kwargs['start_new_session'])
+
+    def test_sandbox_build_failure_reports_output_truncation(self):
+        sandbox = {
+            'enabled': True, 'engine': 'docker', 'image': 'test-image',
+            'dockerfile': 'Dockerfile.agentic',
+        }
+        with patch('agentic_config.shutil.which', return_value='/usr/bin/docker'), \
+             patch('agentic_config.sandbox_build_context', return_value=nullcontext(['docker', 'build'])), \
+             patch('agentic_config._run_sandbox_build', return_value=(1, 'tail', True)):
+            with self.assertRaisesRegex(
+                RuntimeError, r'agentic_stream_truncated: sandbox build output limit reached',
+            ):
+                agentic.preflight_security('isolated', sandbox, repo=Path('/tmp/repo'))
 
 
     def test_sandbox_build_context_filters_links_and_special_files(self):
@@ -1128,9 +1173,8 @@ class ConfigurationTests(unittest.TestCase):
                 'dockerfile': 'Dockerfile.agentic', 'build_context': '.',
                 'build_network': False,
             }
-            completed = CompletedProcess([], 0, stdout='built\n')
             with (patch('agentic_config.shutil.which', return_value='/usr/bin/docker'),
-                  patch('agentic_config.subprocess.run', return_value=completed) as run):
+                  patch('agentic_config._run_sandbox_build', return_value=(0, 'built', False)) as run):
                 agentic.preflight_security('isolated', sandbox, repo=repo)
         self.assertIn('--network=none', run.call_args.args[0])
         self.assertTrue(agentic.validate_sandbox({

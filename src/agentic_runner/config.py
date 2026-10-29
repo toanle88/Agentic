@@ -9,9 +9,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import shutil
 import stat
 import subprocess
+import threading
+from collections import deque
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
@@ -53,6 +56,93 @@ PROVIDER_API_KEY_ENV = {
     "copilot": "GH_TOKEN",
     "openrouter": "OPENROUTER_API_KEY",
 }
+SANDBOX_BUILD_TIMEOUT = 1800
+SANDBOX_BUILD_OUTPUT_CHARS = 2000
+SANDBOX_BUILD_TRUNCATION_MARKER = (
+    "[agentic_stream_truncated: sandbox build output limit reached]"
+)
+
+
+def _sandbox_build_process_kwargs() -> dict[str, Any]:
+    """Start a sandbox build in its own process group for timeout cleanup."""
+    if os.name != "nt":
+        return {"start_new_session": True}
+    return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+
+
+def _stop_sandbox_build_process(process: subprocess.Popen[str]) -> None:
+    """Terminate a timed-out build and all of its descendants."""
+    if os.name != "nt":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            pass
+    else:
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, check=False,
+            )
+        except OSError:
+            pass
+    try:
+        if process.poll() is None:
+            process.kill()
+    except OSError:
+        pass
+
+
+def _run_sandbox_build(argv: list[str], cwd: Path) -> tuple[int, str, bool]:
+    """Run a build while retaining only a bounded output tail."""
+    output: deque[str] = deque()
+    output_chars = 0
+    truncated = False
+    output_lock = threading.Lock()
+
+    def read_output(stream: Any) -> None:
+        nonlocal output_chars, truncated
+        while True:
+            chunk = stream.read(4096)
+            if not chunk:
+                return
+            with output_lock:
+                output.append(chunk)
+                output_chars += len(chunk)
+                while output_chars > SANDBOX_BUILD_OUTPUT_CHARS:
+                    removed = output.popleft()
+                    excess = output_chars - SANDBOX_BUILD_OUTPUT_CHARS
+                    if len(removed) <= excess:
+                        output_chars -= len(removed)
+                    else:
+                        output.appendleft(removed[excess:])
+                        output_chars -= excess
+                    truncated = True
+
+    process = subprocess.Popen(
+        argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace", bufsize=1,
+        **_sandbox_build_process_kwargs(),
+    )
+    assert process.stdout is not None
+    reader = threading.Thread(target=read_output, args=(process.stdout,), daemon=True)
+    reader.start()
+    try:
+        try:
+            returncode = process.wait(timeout=SANDBOX_BUILD_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            _stop_sandbox_build_process(process)
+            process.wait(timeout=5)
+            raise
+    finally:
+        reader.join(timeout=5)
+        try:
+            process.stdout.close()
+        except OSError:
+            pass
+    with output_lock:
+        detail = "".join(output).strip()
+    return returncode, detail, truncated
 # Native provider CLIs receive only variables needed to locate executables,
 # user configuration, temporary files, and terminal formatting.  In
 # particular, do not inherit the host environment wholesale: variables such
@@ -677,18 +767,20 @@ def preflight_security(
         else:
             build_context = None
         if build_context is not None:
+            if repo is None:
+                raise RuntimeError(
+                    "A repository path is required to build sandbox.dockerfile"
+                )
             try:
                 with build_context as build_command:
-                    result = subprocess.run(
-                        build_command, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                        text=True, encoding="utf-8", errors="replace", timeout=1800, check=False,
-                    )
+                    returncode, detail, truncated = _run_sandbox_build(build_command, repo)
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise RuntimeError(f"Sandbox image build could not start or timed out: {exc}") from exc
-            if result.returncode:
-                detail = result.stdout.strip()[-2000:]
+            if returncode:
+                if truncated:
+                    detail = f"{SANDBOX_BUILD_TRUNCATION_MARKER}\n{detail}".strip()
                 raise RuntimeError(
-                    f"Sandbox image build failed with exit code {result.returncode}: {detail}"
+                    f"Sandbox image build failed with exit code {returncode}: {detail}"
                 )
 
 
