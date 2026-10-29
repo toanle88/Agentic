@@ -2,7 +2,7 @@
 
 `AGENTS.md` is the target repository's shared instruction file for coding agents. It gives the developer context that is difficult to infer reliably from source code alone: project conventions, required checks, architectural boundaries, and safety rules.
 
-Agentic provides a copy-ready starting point in [`AGENTS.example.md`](../AGENTS.example.md).
+Agentic provides a copy-ready starting point in [`AGENTS.example.md`](https://github.com/toanle88/Agentic/blob/main/AGENTS.example.md).
 
 ## Create the file
 

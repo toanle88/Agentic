@@ -23,8 +23,10 @@ class CIWorkflowTests(unittest.TestCase):
     def setUpClass(cls):
         cls.ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
         cls.codeql = (WORKFLOWS / "codeql.yml").read_text(encoding="utf-8")
+        cls.docs_workflow = (WORKFLOWS / "docs.yml").read_text(encoding="utf-8")
         cls.release = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
         cls.pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        cls.mkdocs = (ROOT / "mkdocs.yml").read_text(encoding="utf-8")
 
     def test_every_ci_job_has_a_finite_timeout(self):
         jobs = _job_blocks(self.ci)
@@ -38,6 +40,57 @@ class CIWorkflowTests(unittest.TestCase):
         for workflow in (self.codeql, self.release):
             for job, block in _job_blocks(workflow).items():
                 self.assertRegex(block, r"(?m)^    timeout-minutes: [1-9][0-9]*$", msg=job)
+
+    def test_documentation_workflow_builds_strictly_and_deploys_pinned_pages(self):
+        jobs = _job_blocks(self.docs_workflow)
+        self.assertEqual(set(jobs), {"build", "deploy"})
+        for job, block in jobs.items():
+            self.assertRegex(block, r"(?m)^    timeout-minutes: [1-9][0-9]*$", msg=job)
+        self.assertIn("branches:\n      - main", self.docs_workflow)
+        self.assertIn("python -m mkdocs build --strict --site-dir site", self.docs_workflow)
+        self.assertIn('python -m pip install --upgrade ".[docs]"', self.docs_workflow)
+        for action in (
+            "actions/checkout@",
+            "actions/setup-python@",
+            "actions/configure-pages@",
+            "actions/upload-pages-artifact@",
+            "actions/deploy-pages@",
+        ):
+            self.assertRegex(self.docs_workflow, rf"{re.escape(action)}[0-9a-f]{{40}}")
+        self.assertIn(
+            "actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e",
+            self.docs_workflow,
+        )
+        self.assertIn("contents: read", self.docs_workflow)
+        self.assertIn("pages: write", self.docs_workflow)
+        self.assertIn("id-token: write", self.docs_workflow)
+
+    def test_mkdocs_navigation_covers_the_public_documentation_structure(self):
+        for path in (
+            "index.md",
+            "getting-started.md",
+            "quickstart.md",
+            "cli-reference.md",
+            "configuration.md",
+            "provider-authorization.md",
+            "sandbox.md",
+            "workflow.md",
+            "architecture.md",
+            "troubleshooting.md",
+            "demo.md",
+            "development.md",
+            "development-standards.md",
+            "agent-instructions.md",
+            "decisions/README.md",
+        ):
+            self.assertIn(f": {path}", self.mkdocs)
+        self.assertIn("name: material", self.mkdocs)
+        self.assertIn("site_url: https://toanle88.github.io/Agentic/", self.mkdocs)
+
+    def test_documentation_dependency_stays_out_of_runtime_dependencies(self):
+        self.assertIn("dependencies = []", self.pyproject)
+        self.assertIn("docs = [", self.pyproject)
+        self.assertIn('"mkdocs-material==9.6.22"', self.pyproject)
 
     def test_ci_has_weekly_schedule_and_coverage_gate_artifact_and_sdist_smoke(self):
         self.assertIn("schedule:\n    - cron: \"17 3 * * 1\"", self.ci)
