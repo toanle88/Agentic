@@ -13,7 +13,7 @@ import shutil
 import stat
 import subprocess
 from collections.abc import Mapping
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -147,11 +147,14 @@ def _validate_dependency_files(value: Any) -> list[str]:
     paths: list[str] = []
     for item in value:
         candidate = Path(item)
+        posix_candidate = PurePosixPath(item)
         windows_candidate = PureWindowsPath(item)
         if (
             candidate.is_absolute()
+            or posix_candidate.is_absolute()
             or windows_candidate.is_absolute()
             or ".." in candidate.parts
+            or ".." in posix_candidate.parts
             or ".." in windows_candidate.parts
         ):
             raise ValueError("dependency_files must contain repository-relative paths")
