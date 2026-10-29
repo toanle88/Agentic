@@ -1,0 +1,60 @@
+site_name: Agentic
+site_description: A resumable, issue-driven coding workflow for GitHub repositories.
+site_url: https://toanle88.github.io/Agentic/
+repo_url: https://github.com/toanle88/Agentic
+repo_name: toanle88/Agentic
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - search.highlight
+    - content.code.copy
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - pymdownx.details
+  - pymdownx.superfences
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Installation and first run: getting-started.md
+      - Five-minute quickstart: quickstart.md
+  - Reference:
+      - CLI and interactive shell: cli-reference.md
+      - Configuration: configuration.md
+      - Provider authorization: provider-authorization.md
+      - Sandbox configuration: sandbox.md
+  - Workflow:
+      - Lifecycle and worktrees: workflow.md
+      - Architecture and boundaries: architecture.md
+  - Operations:
+      - Troubleshooting: troubleshooting.md
+      - Offline benchmarking: benchmarking.md
+      - End-to-end demonstration: demo.md
+  - Contributing:
+      - Development: development.md
+      - Development standards: development-standards.md
+      - Agent instructions: agent-instructions.md
+      - Architecture decisions: decisions/README.md

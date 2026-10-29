@@ -18,6 +18,9 @@ dev = [
     "pyright==1.1.414",
     "ruff==0.17.2",
 ]
+docs = [
+    "mkdocs-material==9.6.22",
+]
 
 [project.scripts]
 agentic = "agentic_runner.cli:main"

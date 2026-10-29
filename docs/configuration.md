@@ -1,8 +1,8 @@
 # Configuration
 
-Agentic reads the personal, target-specific `agent_config.json` from the target repository unless `--config` points to another file. Configuration files are bounded to 256,000 bytes before JSON parsing; larger files fail closed. The repository contains [`agent_config.example.json`](../agent_config.example.json) as a structural example; it is not a universal configuration.
+Agentic reads the personal, target-specific `agent_config.json` from the target repository unless `--config` points to another file. Configuration files are bounded to 256,000 bytes before JSON parsing; larger files fail closed. The repository contains [`agent_config.example.json`](https://github.com/toanle88/Agentic/blob/main/agent_config.example.json) as a structural example; it is not a universal configuration.
 
-For editor validation, use the checked-in [`agent_config.schema.json`](../agent_config.schema.json) as the JSON Schema. The schema is a convenience for editors; Agentic remains the source of truth and validates configuration before a run.
+For editor validation, use the checked-in [`agent_config.schema.json`](https://github.com/toanle88/Agentic/blob/main/agent_config.schema.json) as the JSON Schema. The schema is a convenience for editors; Agentic remains the source of truth and validates configuration before a run.
 
 The easiest setup is `agentic init`. It creates an ignored config with a detected starter check by adding `agent_config.json` to Git's local `.git/info/exclude`; the tracked `.gitignore` is not changed. Local excludes are specific to one clone, so run `agentic init` separately in each clone. Choose a provider during initialization when needed:
 
@@ -15,7 +15,7 @@ agentic init --provider openrouter
 ```
 
 The same complete templates are available under
-[`examples/provider-configs/`](../examples/provider-configs/). Treat the
+[provider configuration templates](https://github.com/toanle88/Agentic/tree/main/examples/provider-configs). Treat the
 detected `test_commands` as a starting point and replace them with the target
 project's real checks before running an issue.
 
@@ -453,7 +453,7 @@ isolated checks and provider processes start:
 `dockerfile` and `build_context` must be relative paths inside the target
 repository. The build is opt-in: omitted Dockerfile settings do not change
 existing image-only behavior, and trusted mode never builds or runs a
-container. See the [language-specific starter templates](../examples/sandbox/README.md)
+container. See the [language-specific starter templates](https://github.com/toanle88/Agentic/tree/main/examples/sandbox)
 for pinned Python, Node.js, Go, Rust, Java, and .NET examples. Templates
 include comments for adding project dependencies, native packages, test tools,
 and the selected provider CLI.

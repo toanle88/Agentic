@@ -107,7 +107,7 @@ agentic init
 agentic init --agents  # optional starter AGENTS.md
 ```
 
-Review `agent_config.json` and replace the detected command with the target project's real fast checks. See the [configuration guide](docs/configuration.md).
+Review `agent_config.json` and replace the detected command with the target project's real fast checks. See the [configuration guide](https://toanle88.github.io/Agentic/configuration/).
 
 Initialization defaults to trusted host execution so it works with the
 provider authentication already installed on the host. To use isolation,
@@ -119,10 +119,10 @@ agentic init --security-mode isolated --sandbox-image your-project-agentic-runne
 agentic init --secure --sandbox-image your-project-agentic-runner:latest
 ```
 
-See the [sandbox image guide](examples/sandbox/README.md) for the required
+See the [sandbox image guide](https://toanle88.github.io/Agentic/sandbox/) for the required
 provider and project tooling, including pinned language-specific Dockerfiles.
 
-Provider-ready templates are in [`examples/provider-configs/`](examples/provider-configs/). Copy one to the target repository, or let initialization create it:
+Provider-ready templates are documented in the [provider authorization guide](https://toanle88.github.io/Agentic/provider-authorization/). Copy one to the target repository, or let initialization create it:
 
 ```bash
 agentic init --provider codex
@@ -386,22 +386,10 @@ termination for every running Agentic job.
 
 ## Documentation
 
-| Guide | Contents |
-| --- | --- |
-| [Getting started](docs/getting-started.md) | Installation, authentication, first run, and target repository setup. |
-| [Five-minute quickstart](docs/quickstart.md) | A disposable local-task walkthrough. |
-| [Offline benchmarking](docs/benchmarking.md) | Deterministic argv-only benchmark cases and result format. |
-| [Provider authorization](docs/provider-authorization.md) | Provider-neutral capability matrix and command boundaries. |
-| [Configuration](docs/configuration.md) | `agent_config.json`, test commands, model settings, retries, and timeouts. |
-| [Agent instructions](docs/agent-instructions.md) | How to create and maintain a target repository's `AGENTS.md`. |
-| [Development standards](docs/development-standards.md) | Testing, naming, security, compatibility, and review conventions for Agentic changes. |
-| [Workflow](docs/workflow.md) | Worktrees, resume behavior, reviews, publication, logs, and dashboard usage. |
-| [Troubleshooting](docs/troubleshooting.md) | Missing tools, failed checks, repeated rejections, and WSL/Git issues. |
-| [Architecture](docs/architecture.md) | Components, lifecycle, filesystem layout, and safety boundaries. |
-| [Architecture decisions](docs/decisions/) | Durable architecture decision records. |
-| [Security policy](SECURITY.md) | Threat model, credentials, logs, and sandbox limitations. |
-| [Development](docs/development.md) | Local development, tests, CI, releases, and contribution workflow. |
-| [`agent_config.schema.json`](agent_config.schema.json) | JSON Schema for editor-assisted configuration validation. |
+Read the [Agentic documentation site](https://toanle88.github.io/Agentic/) for
+the complete getting-started guide, CLI reference, configuration reference,
+security boundaries, workflow lifecycle, sandbox guidance, troubleshooting,
+recipes, and contributor documentation. The site's source remains in `docs/`.
 
 ## Development and releases
 

@@ -91,7 +91,7 @@ agentic init
 
 The command detects a conservative starter check and adds `agent_config.json` to Git's local `.git/info/exclude`, without changing the target repository's `.gitignore`. Because local excludes are not shared, run `agentic init` separately in each clone. The command never overwrites an existing config by default. Select a provider with `agentic init --provider gemini` (supported values are `codex`, `gemini`, `claude`, `copilot`, and `openrouter`). Review the generated file and replace the starter command with the target project's real checks. Use `agentic init --agents` if the repository also needs a starter `AGENTS.md`; existing files are preserved. Start with the [configuration guide](configuration.md).
 
-For shared repository guidance, copy [`AGENTS.example.md`](../AGENTS.example.md) to the target repository as `AGENTS.md` and customize it. See the [agent instructions guide](agent-instructions.md).
+For shared repository guidance, copy [`AGENTS.example.md`](https://github.com/toanle88/Agentic/blob/main/AGENTS.example.md) to the target repository as `AGENTS.md` and customize it. See the [agent instructions guide](agent-instructions.md).
 
 ## Check the environment
 

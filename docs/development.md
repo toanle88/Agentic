@@ -108,7 +108,7 @@ WSL Git and Windows Git, use the shared-state and Git 2.48+ guidance in
 [Getting started](getting-started.md#check-the-environment) and
 [Troubleshooting](troubleshooting.md#wslwindows-git-reports-not-a-git-repository).
 
-See [CONTRIBUTING.md](../CONTRIBUTING.md) for the repository contribution policy.
+See [CONTRIBUTING.md](https://github.com/toanle88/Agentic/blob/main/CONTRIBUTING.md) for the repository contribution policy.
 
 ## Releases
 
