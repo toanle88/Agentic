@@ -63,6 +63,10 @@ class _ProjectionFile:
     source_mode: int
 
 
+class _SkipProviderFile(RuntimeError):
+    """Signal that an untracked, oversized artifact should not be projected."""
+
+
 def _bound_provider_message(value: str) -> str:
     """Keep durable provider messages within the documented character bound."""
     if len(value) <= MAX_PROVIDER_MESSAGE_CHARS:
@@ -136,13 +140,13 @@ def _read_projection_file(root: Path, relative: str) -> tuple[_ProjectionFile, b
 
 def _copy_projection_file(
     source_root: Path, destination_root: Path, relative: str, *, read_only: bool,
+    skip_if_oversized: bool = False,
 ) -> _ProjectionFile:
     """Copy a source file into a disposable projection and return its baseline."""
     descriptor, expected_identity = open_relative_regular(
         source_root, relative, os.O_RDONLY, description="provider worktree file",
     )
     destination = destination_root / relative
-    destination.parent.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256()
     copied = 0
     try:
@@ -153,7 +157,10 @@ def _copy_projection_file(
                 description="provider worktree file",
             )
             if metadata.st_size > MAX_PROVIDER_RESULT_BYTES:
+                if skip_if_oversized:
+                    raise _SkipProviderFile(relative)
                 raise RuntimeError(f"Provider input is too large: {source_root / relative}")
+            destination.parent.mkdir(parents=True, exist_ok=True)
             with destination.open("wb") as destination_stream:
                 while True:
                     chunk = source_stream.read(64 * 1024)
@@ -233,6 +240,41 @@ def _ignored_worktree_paths(source: Path) -> frozenset[str]:
     )
 
 
+def _tracked_worktree_paths(source: Path) -> frozenset[str] | None:
+    """Return tracked paths, or ``None`` when ``source`` is not a Git worktree.
+
+    Staging preserves untracked source files because a provider may create
+    them.  It is safe to omit an untracked artifact that exceeds the provider
+    file bound: such artifacts are commonly dependency binaries (for example
+    ``.terraform`` providers) and cannot be projected safely anyway.  Tracked
+    oversized files continue to fail closed.
+    """
+    git_metadata = source / ".git"
+    if git_metadata.is_file():
+        try:
+            with git_metadata.open("r", encoding="utf-8", errors="replace") as stream:
+                if stream.read(len("gitdir:")) != "gitdir:":
+                    return None
+        except OSError:
+            return None
+    elif not (git_metadata.is_dir() and (git_metadata / "HEAD").is_file()):
+        return None
+
+    from .worktrees import command as git_command
+
+    result = git_command(
+        hardened_git_argv(["git", "ls-files", "--cached", "-z"]),
+        source,
+        timeout=30,
+        check=False,
+        env=hardened_git_environment(),
+        max_output_bytes=MAX_PROVIDER_IGNORE_OUTPUT_BYTES,
+    )
+    if result.returncode:
+        raise RuntimeError("Could not inspect tracked paths before provider staging")
+    return frozenset(path for path in result.stdout.split("\x00") if path)
+
+
 def _stage_worktree(
     source: Path, destination: Path, *, skip: Callable[[str], bool], read_only: bool,
 ) -> dict[str, _ProjectionFile]:
@@ -241,8 +283,10 @@ def _stage_worktree(
     destination_preexisted = destination.exists()
     destination.mkdir(parents=True, exist_ok=True)
     baseline: dict[str, _ProjectionFile] = {}
+    current_relative: str | None = None
     try:
         ignored_paths = _ignored_worktree_paths(source)
+        tracked_paths = _tracked_worktree_paths(source)
 
         def should_skip(relative: str) -> bool:
             normalized = relative.rstrip("/")
@@ -260,11 +304,21 @@ def _stage_worktree(
         for kind, relative, _ in entries:
             if kind != "file":
                 continue
+            current_relative = relative
             if len(baseline) >= MAX_PROVIDER_STAGE_FILES:
                 raise RuntimeError("Provider staging exceeded its file-count limit")
-            metadata = _copy_projection_file(
-                source, destination, relative, read_only=read_only,
-            )
+            try:
+                metadata = _copy_projection_file(
+                    source,
+                    destination,
+                    relative,
+                    read_only=read_only,
+                    skip_if_oversized=(
+                        tracked_paths is not None and relative not in tracked_paths
+                    ),
+                )
+            except _SkipProviderFile:
+                continue
             staged_bytes += metadata.size
             if staged_bytes > MAX_PROVIDER_STAGE_BYTES:
                 raise RuntimeError("Provider staging exceeded its byte limit")
@@ -272,7 +326,10 @@ def _stage_worktree(
     except (OSError, RuntimeError, ValueError) as exc:
         if not destination_preexisted:
             _remove_staging_tree(destination)
-        raise RuntimeError("Could not stage the complete provider worktree") from exc
+        detail = f" at {current_relative}" if current_relative else ""
+        raise RuntimeError(
+            f"Could not stage the complete provider worktree{detail}: {exc}"
+        ) from exc
     return baseline
 
 
@@ -295,7 +352,7 @@ def _stage_readonly_worktree(
             read_only=True,
         )
     except RuntimeError as exc:
-        raise RuntimeError("Could not stage the complete read-only worktree") from exc
+        raise RuntimeError(f"Could not stage the complete read-only worktree: {exc}") from exc
     return destination
 
 

@@ -920,6 +920,50 @@ class ReadOnlyBoundaryTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'complete read-only worktree'):
                     _stage_readonly_worktree(root, Path(temp) / 'review-worktree')
 
+    def test_provider_staging_skips_oversized_untracked_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'worktree'
+            root.mkdir()
+            subprocess.run(
+                ['git', 'init', '--initial-branch=main', str(root)],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            (root / 'src.py').write_text('1\n', encoding='utf-8')
+            generated = root / 'infra' / '.terraform' / 'provider.bin'
+            generated.parent.mkdir(parents=True)
+            generated.write_bytes(b'x' * 8)
+            destination = Path(temp) / 'review-worktree'
+            with patch(
+                'agentic_runner.execution_providers.MAX_PROVIDER_RESULT_BYTES', 4,
+            ):
+                baseline = _stage_worktree(
+                    root, destination, skip=lambda _: False, read_only=True,
+                )
+            self.assertIn('src.py', baseline)
+            self.assertFalse((destination / 'infra' / '.terraform').exists())
+
+    def test_provider_staging_rejects_oversized_tracked_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'worktree'
+            root.mkdir()
+            subprocess.run(
+                ['git', 'init', '--initial-branch=main', str(root)],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            tracked = root / 'tracked.bin'
+            tracked.write_bytes(b'x' * 8)
+            subprocess.run(
+                ['git', '-C', str(root), 'add', 'tracked.bin'],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            with patch(
+                'agentic_runner.execution_providers.MAX_PROVIDER_RESULT_BYTES', 4,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, r'complete read-only worktree.*tracked\.bin',
+                ):
+                    _stage_readonly_worktree(root, Path(temp) / 'review-worktree')
+
     def test_provider_staging_rejects_oversized_single_file_before_copy(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "worktree"

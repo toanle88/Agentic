@@ -745,6 +745,22 @@ class PureTests(unittest.TestCase):
             'nested fixture text: required command unavailable\n'
         ))
 
+    def test_dependency_setup_project_failures_are_retryable(self):
+        report = (
+            'Validation check 1 — unavailable (dependency setup command failed)\n'
+            'Dependency preparation was not completed.\n'
+            '[ERR_PNPM_MISSING_TARBALL_INTEGRITY] lockfile entries failed verification'
+        )
+        self.assertTrue(agentic.retryable_test_failure(report))
+
+    def test_dependency_setup_environment_failures_remain_blocked(self):
+        report = (
+            'Validation check 1 — unavailable (dependency setup command failed)\n'
+            'Dependency preparation was not completed.\n'
+            'unable to open database file'
+        )
+        self.assertFalse(agentic.retryable_test_failure(report))
+
 
     def test_test_failure_fingerprint_ignores_runtime_metadata(self):
         first = (
