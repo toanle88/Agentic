@@ -53,6 +53,7 @@ from .config import (  # noqa: F401
     sandbox_env_for_providers,
     test_commands_for_profile,
 )
+from .repository_metadata import read_repository_metadata
 from .git_policy import hardened_git_argv, hardened_git_environment
 from .context import (  # noqa: F401
     FEEDBACK_CONTEXT_CHARS,
@@ -1153,7 +1154,8 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
     if root != repo:
         raise RuntimeError(f"Run init from the repository root or pass --repo {root}")
     config_path = repo / AGENT_CONFIG_FILENAME
-    commands, detection = detect_test_commands(repo)
+    repository_metadata = read_repository_metadata(repo)
+    commands, detection = detect_test_commands(repo, metadata=repository_metadata)
     detected_language, _ = detect_project_language(repo)
     sandbox_language = sandbox_language or detected_language
     if sandbox_language is not None and sandbox_language not in SUPPORTED_LANGUAGES:
@@ -1240,6 +1242,7 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
                 timeout=discovery_timeout,
                 sandbox=sandbox,
                 credential_names=discovery_credential_names,
+                repository_metadata=repository_metadata,
             )
         _print_discovery_results(discovery_result)
         if discovery_result.agent_status:

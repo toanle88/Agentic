@@ -31,6 +31,7 @@ from .ci_repair import validate_repair_limits
 from .file_boundaries import atomic_replace_relative_regular, open_relative_regular
 from .git_policy import hardened_git_argv, hardened_git_environment
 from .persistence import read_text_bounded
+from .repository_metadata import RepositoryMetadata, read_repository_metadata
 
 
 SUPPORTED_PROVIDERS = ("codex", "gemini", "claude", "copilot", "openrouter")
@@ -257,7 +258,7 @@ def sandbox_env_for_provider(provider: str, sandbox: dict[str, Any] | None,
         return [name for name in configured if name == api_key_env]
     expected = set(PROVIDER_SANDBOX_ENV.get(provider, ()))
     matched = [name for name in configured if name in expected]
-    return matched or configured
+    return matched
 
 
 def _agent_settings_from_config(data: dict[str, Any], section: str, *,
@@ -723,31 +724,26 @@ def test_commands_for_profile(config: dict[str, Any], profile: str) -> list[list
     return config["test_commands"] + slow
 
 
-def detect_test_commands(repo: Path) -> tuple[list[list[str]], str]:
+def detect_test_commands(
+    repo: Path, *, metadata: RepositoryMetadata | None = None,
+) -> tuple[list[list[str]], str]:
     """Choose a conservative starter check for ``agentic init``."""
+    metadata = metadata or read_repository_metadata(repo)
     if (repo / "go.mod").is_file():
         return [["go", "test", "./..."]], "Detected Go module"
     if (repo / "Cargo.toml").is_file():
         return [["cargo", "test"]], "Detected Rust crate"
-    package_json = repo / "package.json"
-    if package_json.is_file():
-        try:
-            package = json.loads(package_json.read_text(encoding="utf-8"))
-            has_test = isinstance(package, dict) and isinstance(package.get("scripts"), dict) and "test" in package["scripts"]
-        except (OSError, json.JSONDecodeError):
-            has_test = False
-        if has_test:
-            if (repo / "pnpm-lock.yaml").is_file():
-                return [["pnpm", "test"]], "Detected package.json test script and pnpm lockfile"
-            if (repo / "yarn.lock").is_file():
-                return [["yarn", "test"]], "Detected package.json test script and yarn lockfile"
-            return [["npm", "test"]], "Detected package.json test script"
-    makefile = next((repo / name for name in ("Makefile", "makefile") if (repo / name).is_file()), None)
-    if makefile:
-        content = makefile.read_text(encoding="utf-8", errors="replace")
-        for target in ("check", "test"):
-            if re.search(rf"(?m)^{re.escape(target)}\s*:", content):
-                return [["make", target]], f"Detected Makefile {target} target"
+    package = metadata.package_json
+    has_test = isinstance(package.get("scripts"), dict) and "test" in package["scripts"]
+    if has_test:
+        if (repo / "pnpm-lock.yaml").is_file():
+            return [["pnpm", "test"]], "Detected package.json test script and pnpm lockfile"
+        if (repo / "yarn.lock").is_file():
+            return [["yarn", "test"]], "Detected package.json test script and yarn lockfile"
+        return [["npm", "test"]], "Detected package.json test script"
+    for target in ("check", "test"):
+        if re.search(rf"(?m)^{re.escape(target)}\s*:", metadata.makefile_text):
+            return [["make", target]], f"Detected Makefile {target} target"
     if (repo / "pyproject.toml").is_file() or (repo / "setup.py").is_file():
         if (repo / "tests").is_dir():
             return [["python", "-m", "unittest", "discover", "-s", "tests", "-q"]], "Detected Python tests directory"

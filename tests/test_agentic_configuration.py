@@ -16,6 +16,7 @@ from agentic_runner import cli as agentic
 from agentic_runner.policy import sensitive_read
 from agentic_runner import config as agentic_config
 from agentic_runner import diagnostics as agentic_diagnostics
+from agentic_runner.repository_metadata import MAX_REPOSITORY_METADATA_BYTES
 
 from test_agentic import sh
 
@@ -993,6 +994,16 @@ class ConfigurationTests(unittest.TestCase):
         )
         self.assertEqual(agentic.sandbox_env_for_provider('openrouter', sandbox), [])
 
+    def test_native_cli_sandbox_filter_ignores_unrelated_pass_env(self):
+        sandbox = {
+            'enabled': True, 'engine': 'docker', 'image': 'test-image',
+            'pass_env': ['OTHER_PROVIDER_KEY'],
+        }
+        self.assertEqual(agentic.sandbox_env_for_provider('claude', sandbox), [])
+        with patch.dict(agentic.os.environ, {}, clear=True), \
+             patch('agentic.shutil.which', return_value='/usr/bin/claude'):
+            agentic.preflight_agent_settings({'provider': 'claude'}, sandbox=sandbox)
+
 
     def test_sandbox_image_and_environment_validation_is_strict(self):
         with self.assertRaisesRegex(ValueError, 'sandbox.image'):
@@ -1874,6 +1885,29 @@ class ConfigurationTests(unittest.TestCase):
             fallback.mkdir()
             self.assertEqual(
                 agentic.detect_test_commands(fallback)[0],
+                [['git', 'diff', '--no-ext-diff', '--no-textconv', '--check']],
+            )
+
+    def test_detect_test_commands_skips_oversized_repository_metadata(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package_repo = Path(temp) / 'package'
+            package_repo.mkdir()
+            (package_repo / 'package.json').write_text(
+                '{"scripts":{"test":"echo test"}}' +
+                ' ' * MAX_REPOSITORY_METADATA_BYTES,
+            )
+            self.assertEqual(
+                agentic.detect_test_commands(package_repo)[0],
+                [['git', 'diff', '--no-ext-diff', '--no-textconv', '--check']],
+            )
+
+            make_repo = Path(temp) / 'make'
+            make_repo.mkdir()
+            (make_repo / 'Makefile').write_text(
+                'check:\n\techo check\n' + ' ' * MAX_REPOSITORY_METADATA_BYTES,
+            )
+            self.assertEqual(
+                agentic.detect_test_commands(make_repo)[0],
                 [['git', 'diff', '--no-ext-diff', '--no-textconv', '--check']],
             )
 

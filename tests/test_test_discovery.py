@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import tests  # noqa: F401  # Import bootstraps legacy test-module aliases.
 from agentic_runner import cli as agentic
+from agentic_runner.repository_metadata import MAX_REPOSITORY_METADATA_BYTES
 from agentic_runner.test_discovery import (
     MAX_OUTPUT_TAIL_BYTES,
     MAX_DISCOVERY_TIMEOUT_SECONDS,
@@ -66,6 +67,27 @@ class TestDiscovery(unittest.TestCase):
         self.assertIn(["npm", "run", "build"], commands)
         self.assertNotIn("node ./tests.js && rm -rf output", commands)
         self.assertTrue(all(isinstance(part, str) for argv in commands for part in argv))
+
+    def test_metadata_discovery_skips_oversized_package_and_makefile(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package_repo = Path(temp) / 'package'
+            package_repo.mkdir()
+            (package_repo / 'package.json').write_text(
+                json.dumps({'scripts': {'test': 'true'}}) +
+                ' ' * MAX_REPOSITORY_METADATA_BYTES,
+            )
+            package_commands = [
+                item['argv'] for item in discover_test_candidates(package_repo)
+            ]
+            self.assertNotIn(['npm', 'run', 'test'], package_commands)
+
+            make_repo = Path(temp) / 'make'
+            make_repo.mkdir()
+            (make_repo / 'Makefile').write_text(
+                'check:\n\t@true\n' + ' ' * MAX_REPOSITORY_METADATA_BYTES,
+            )
+            make_commands = [item['argv'] for item in discover_test_candidates(make_repo)]
+            self.assertNotIn(['make', 'check'], make_commands)
 
     def test_wrapper_discovery_and_validation_reject_symlinked_wrappers(self):
         with tempfile.TemporaryDirectory() as temp:
