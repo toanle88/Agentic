@@ -1124,7 +1124,15 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(returncode, 7)
         self.assertTrue(truncated)
         self.assertLessEqual(len(detail), agentic_config.SANDBOX_BUILD_OUTPUT_CHARS)
-        self.assertTrue(popen.call_args.kwargs['start_new_session'])
+        popen_kwargs = popen.call_args.kwargs
+        if os.name == 'nt':
+            self.assertEqual(
+                popen_kwargs['creationflags'],
+                getattr(agentic_config.subprocess, 'CREATE_NEW_PROCESS_GROUP', 0),
+            )
+            self.assertNotIn('start_new_session', popen_kwargs)
+        else:
+            self.assertTrue(popen_kwargs['start_new_session'])
 
     def test_sandbox_build_failure_reports_output_truncation(self):
         sandbox = {
