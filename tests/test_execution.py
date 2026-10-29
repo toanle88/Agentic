@@ -1044,6 +1044,28 @@ class StreamingTests(unittest.TestCase):
         self.assertIn('Validation check 2 — failed', report)
         self.assertIn('Validation check 3 — passed', report)
 
+    def test_test_runner_prioritizes_failed_check_diagnostics(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            sh('git', 'init', cwd=root)
+            commands = [
+                [sys.executable, '-c', 'print("before")'],
+                [
+                    sys.executable, '-c',
+                    'print("x" * 9000); print("TypeError: actionable failure")'
+                    '; raise SystemExit(1)',
+                ],
+                [sys.executable, '-c', 'print("after")'],
+            ]
+            passed, report = agentic.run_tests(root, commands, folder=root)
+
+        self.assertFalse(passed)
+        self.assertIn('Agentic focused test failure diagnostics:', report)
+        self.assertIn('TypeError: actionable failure', report)
+        focused = agentic.focused_test_failure_context(report)
+        self.assertIn('TypeError: actionable failure', focused)
+        self.assertIn('Validation check 2 failed', focused)
+
     def test_test_runner_diagnoses_ignored_artifact_cascade(self):
         with tempfile.TemporaryDirectory() as dirname:
             root = Path(dirname)

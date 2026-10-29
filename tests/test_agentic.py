@@ -765,12 +765,12 @@ class PureTests(unittest.TestCase):
 
     def test_test_failure_fingerprint_ignores_runtime_metadata(self):
         first = (
-            "[13:50:19] Ran 835 tests in 53.395s\n"
+            "[2026-10-29 13:50:19] Ran 835 tests in 53.395s\n"
             "AssertionError: expected 2, got 3\n"
             "Started (PID 1234)\n"
         )
         second = (
-            "[13:51:07] Ran 835 tests in 44.609s\n"
+            "[2026-10-29 13:51:07] Ran 835 tests in 44.609s\n"
             "AssertionError: expected 2, got 3\n"
             "Started (PID 5678)\n"
         )

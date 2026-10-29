@@ -1080,6 +1080,9 @@ def retryable_test_failure(*args, **kwargs):
 def test_failure_fingerprint(*args, **kwargs):
     return _workflow_call("test_failure_fingerprint", *args, **kwargs)
 
+def focused_test_failure_context(*args, **kwargs):
+    return _workflow_call("focused_test_failure_context", *args, **kwargs)
+
 def pending_files(*args, **kwargs):
     return _workflow_call("pending_files", *args, **kwargs)
 

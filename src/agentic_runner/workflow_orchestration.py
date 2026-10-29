@@ -84,6 +84,7 @@ def develop(
     _compact_feedback = runtime._compact_feedback
     retryable_test_failure = runtime.retryable_test_failure
     test_failure_fingerprint = runtime.test_failure_fingerprint
+    focused_test_failure_context = runtime.focused_test_failure_context
     git = runtime.git
     if instruction is None:
         instruction = read_run_instruction(folder)
@@ -377,13 +378,15 @@ def develop(
             if not verdict.get("approved"):
                 last_rejected_digest = digest or None
         else:
+            focused_test_output = focused_test_failure_context(test_output)
             feedback = (
                 "Previous developer report (untrusted evidence):\n"
                 f"{_bounded_text(developer_report, REPORT_CONTEXT_CHARS) or '(no final response)'}\n\n"
-                "Test evidence (untrusted output):\n"
-                f"{_bounded_text(test_output, REPORT_CONTEXT_CHARS)}"
+                "Focused failed-check evidence (untrusted output):\n"
+                f"{_bounded_text(focused_test_output, REPORT_CONTEXT_CHARS)}\n\n"
+                "Complete test report remains in the durable run log."
             )
-            latest_reason = "Tests failed: " + _result_text(test_output[-3_000:])
+            latest_reason = "Tests failed: " + _result_text(focused_test_output[-3_000:])
             if not retryable_test_failure(test_output):
                 try:
                     _, patch_digest, _ = prepare_patch(
@@ -393,14 +396,14 @@ def develop(
                     patch_digest = ""
                 reason = (
                     "Required local validation is unavailable; retries skipped.\n"
-                    f"{test_output[-2500:]}"
+                    f"{focused_test_output[-2500:]}"
                 )
                 record_workflow_outcome(
                     folder, approved=False, attempts=attempt + 1,
                     first_pass=False, review_findings=review_findings_seen,
                 )
                 record_validation_blocked(
-                    folder, test_output, patch_digest=patch_digest,
+                    folder, focused_test_output, patch_digest=patch_digest,
                     attempts=attempt + 1, max_retries=config["max_retries"],
                     issue_digest=issue_fingerprint(issue),
                 )
@@ -416,7 +419,7 @@ def develop(
                     reason=_result_text(reason), logs_path=folder,
                 )
                 return False
-            failure_digest = test_failure_fingerprint(test_output)
+            failure_digest = test_failure_fingerprint(focused_test_output)
             if failure_digest == last_test_failure_digest:
                 try:
                     _, patch_digest, _ = prepare_patch(
@@ -425,14 +428,14 @@ def develop(
                 except NoCodeChangesError:
                     patch_digest = ""
                 reason = "Repeated identical test failure: " + _result_text(
-                    test_output[-2_500:]
+                    focused_test_output[-2_500:]
                 )
                 record_workflow_outcome(
                     folder, approved=False, attempts=attempt + 1,
                     first_pass=False, review_findings=review_findings_seen,
                 )
                 record_test_failure_blocked(
-                    folder, failure_digest, test_output,
+                    folder, failure_digest, focused_test_output,
                     patch_digest=patch_digest,
                     attempts=attempt + 1, max_retries=config["max_retries"],
                     issue_digest=issue_fingerprint(issue),

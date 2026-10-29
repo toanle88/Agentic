@@ -1032,6 +1032,40 @@ class WorkflowTests(_GitRepositoryTestCase):
         self.assertEqual(result['status'], 'APPROVED')
 
 
+    def test_develop_passes_prioritized_test_failure_to_the_next_attempt(self):
+        run = agentic.create_worktree(self.repo, 'main', 43)
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(43, 'Retry test failure evidence', 'Implement it')
+        config = {
+            'max_retries': 1,
+            'max_files': None,
+            'developer_agent': {'provider': 'codex'},
+        }
+        report = (
+            'Validation check 1 — passed\n'
+            'Validation check 2 — failed\n'
+            'Validation check 3 — passed\n\n'
+            'Agentic focused test failure diagnostics:\n'
+            'Validation check 2 failed (node):\n'
+            'TypeError: actionable failure\n'
+        )
+        with (
+            patch('agentic.run_agent', side_effect=[(True, 'first'), (True, 'second')]) as run_agent,
+            patch('agentic.verify_and_review', side_effect=[
+                (False, report, {}, '', ''),
+                (True, 'tests passed', {
+                    'approved': True, 'summary': 'Good', 'findings': [],
+                }, 'digest', 'base-sha'),
+            ]),
+        ):
+            self.assertTrue(agentic.develop(run, issue, 'main', config, folder))
+
+        self.assertEqual(run_agent.call_count, 2)
+        second_prompt = run_agent.call_args_list[1].args[1]
+        self.assertIn('Focused failed-check evidence', second_prompt)
+        self.assertIn('TypeError: actionable failure', second_prompt)
+
+
     def test_develop_accepts_compact_review_actions_without_retrying(self):
         run = agentic.create_worktree(self.repo, 'main', 34)
         folder = agentic.logs_path(self.repo, run)
