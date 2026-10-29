@@ -621,6 +621,27 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(snapshot["investigation"]["state"], "recorded")
             self.assertIn("already present", snapshot["investigation"]["summary"])
 
+    def test_dashboard_indexes_investigation_outside_display_artifact_limit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            run = root / "agent-issue-110-deadbeef"
+            run.mkdir(parents=True)
+            (run / "investigation-001.json").write_text(json.dumps({
+                "summary": "Investigation retained despite later logs.",
+                "findings": ["Keep structured evidence discoverable."],
+            }))
+            for index in range(1, 31):
+                (run / f"developer-{index:03d}.txt").write_text(
+                    f"Developer attempt {index}\n",
+                )
+
+            snapshot = agentic_dashboard_data.collect_runs(root)[0]
+
+        self.assertLessEqual(snapshot["file_count"], agentic_dashboard_data.MAX_FILES_PER_RUN)
+        self.assertNotIn("investigation-001.json", {item["name"] for item in snapshot["files"]})
+        self.assertEqual(snapshot["investigation"]["state"], "recorded")
+        self.assertIn("retained", snapshot["investigation"]["summary"])
+
     def test_legacy_run_list_uses_review_summary_without_investigation(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / ".demo-agent-runs"
@@ -1215,6 +1236,46 @@ console.log(JSON.stringify({{newest, oldest}}));
             html = agentic_dashboard.render_dashboard([snapshot], "demo", root.name)
             self.assertIn("Redesign dashboard navigation", html)
             self.assertIn("<td>OPEN</td>", html)
+
+    def test_dashboard_exposes_bounded_issue_body_in_run_detail(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            run = root / "agent-issue-73-deadbeef"
+            run.mkdir(parents=True)
+            (run / "run.json").write_text(json.dumps({
+                "issue_metadata": {
+                    "number": 73,
+                    "title": "Dashboard issue details",
+                    "state": "OPEN",
+                    "source": "github",
+                },
+            }))
+            (run / "issue-snapshot.json").write_text(json.dumps({
+                "number": 73,
+                "title": "Dashboard issue details",
+                "body": "Acceptance criteria\n\n- Show the issue body safely.",
+                "state": "OPEN",
+                "source": "github",
+            }))
+            snapshot = agentic_dashboard_data.collect_runs(root)[0]
+            html = agentic_dashboard.render_dashboard([snapshot], "demo", root.name)
+            payload = html.split(
+                '<script type="application/json" id="dashboard-data">', 1,
+            )[1].split("</script>", 1)[0]
+            data = json.loads(base64.b64decode(payload).decode("utf-8"))
+
+        self.assertEqual(
+            data["runs"][0]["issue_body"],
+            "Acceptance criteria\n\n- Show the issue body safely.",
+        )
+        self.assertIn("Issue details", html)
+
+    def test_dashboard_summary_gates_audit_fallback_by_run_kind(self):
+        html = agentic_dashboard.render_dashboard([], "demo", ".demo-agent-runs")
+        self.assertIn(
+            'const auditSummary=run.audit?run.audit_report?.summary:"";',
+            html,
+        )
 
     def test_dashboard_snapshot_normalizes_finding_severity_and_model_metadata(self):
         with tempfile.TemporaryDirectory() as temp:
