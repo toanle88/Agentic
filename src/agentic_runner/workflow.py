@@ -959,17 +959,39 @@ def retryable_test_failure(report: str) -> bool:
     # the outer runner.  Inspect the outer statuses first so nested output
     # cannot turn a real test/lint failure into a non-retryable infrastructure
     # failure.
+    normalized_report = strip_ansi(report)
+    lower = normalized_report.lower()
+    dependency_setup_failed = "dependency setup command failed" in lower
+    dependency_environment_markers = (
+        "unable to open database file",
+        "connection refused",
+        "connection reset",
+        "could not resolve host",
+        "eai_again",
+        "enetwork",
+        "etimedout",
+        "fetch failed",
+        "network is unreachable",
+        "permission denied",
+        "request timed out",
+    )
     outer_statuses: list[str] = []
-    for raw_line in strip_ansi(report).splitlines():
+    for raw_line in normalized_report.splitlines():
         line = raw_line.strip()
         if line.startswith("$ <configured test command:"):
             break
         if line.startswith("Validation check "):
             outer_statuses.append(line.lower())
     if outer_statuses:
+        # Dependency preparation is a validation step, but a non-zero setup
+        # command can be caused by a project change (for example a malformed
+        # lockfile) that the developer can repair.  Keep retrying those
+        # failures unless the diagnostic identifies an external environment
+        # problem.  Other unavailable checks remain terminal as before.
+        if dependency_setup_failed:
+            return not any(marker in lower for marker in dependency_environment_markers)
         return not any("unavailable" in line for line in outer_statuses)
 
-    lower = report.lower()
     environment_markers = (
         "no module named",
         "command not found",
