@@ -52,6 +52,94 @@ WINDOWS_TREE_PARENT = (
 )
 
 
+class _TerminalScreen:
+    """Small ANSI screen model for the shell's POSIX PTY regression tests."""
+
+    def __init__(self, columns=120, rows=20):
+        self.columns = columns
+        self.rows = rows
+        self.cells = [[' '] * columns for _ in range(rows)]
+        self.row = 0
+        self.column = 0
+        self.scroll_top = 0
+        self.scroll_bottom = rows - 1
+
+    def _newline(self):
+        if self.row == self.scroll_bottom:
+            self.cells[self.scroll_top:self.scroll_bottom + 1] = (
+                self.cells[self.scroll_top + 1:self.scroll_bottom + 1]
+                + [[' '] * self.columns]
+            )
+        else:
+            self.row = min(self.rows - 1, self.row + 1)
+
+    def _clear_line(self):
+        self.cells[self.row] = [' '] * self.columns
+
+    def _csi(self, params, final):
+        private = params.startswith('?')
+        values = params[1:] if private else params
+        numbers = [int(value) if value else 0 for value in values.split(';')] if values else []
+        if final in 'Hf':
+            self.row = max(0, min(self.rows - 1, (numbers[0] if numbers else 1) - 1))
+            self.column = max(0, min(self.columns - 1, (numbers[1] if len(numbers) > 1 else 1) - 1))
+        elif final == 'A':
+            self.row = max(0, self.row - (numbers[0] if numbers and numbers[0] else 1))
+        elif final == 'B':
+            self.row = min(self.rows - 1, self.row + (numbers[0] if numbers and numbers[0] else 1))
+        elif final == 'G':
+            self.column = max(0, min(self.columns - 1, (numbers[0] if numbers and numbers[0] else 1) - 1))
+        elif final == 'J' and (not numbers or numbers[0] in (0, 2)):
+            self.cells = [[' '] * self.columns for _ in range(self.rows)]
+        elif final == 'K' and (not numbers or numbers[0] in (0, 2)):
+            self._clear_line()
+        elif final == 'r':
+            top = numbers[0] if numbers and numbers[0] else 1
+            bottom = numbers[1] if len(numbers) > 1 and numbers[1] else self.rows
+            self.scroll_top = max(0, min(self.rows - 1, top - 1))
+            self.scroll_bottom = max(self.scroll_top, min(self.rows - 1, bottom - 1))
+        # SGR, mode changes, erase variants, and unsupported movement codes do
+        # not affect the textual screen assertions in this test.
+
+    def feed(self, text):
+        index = 0
+        while index < len(text):
+            character = text[index]
+            if character == '\x1b':
+                if index + 1 < len(text) and text[index + 1] == '[':
+                    end = index + 2
+                    while end < len(text) and not ('@' <= text[end] <= '~'):
+                        end += 1
+                    if end < len(text):
+                        self._csi(text[index + 2:end], text[end])
+                        index = end + 1
+                        continue
+                if index + 1 < len(text) and text[index + 1] == ']':
+                    end = text.find('\x07', index + 2)
+                    index = len(text) if end < 0 else end + 1
+                    continue
+                index += 2
+                continue
+            if character == '\r':
+                self.column = 0
+            elif character == '\n':
+                self._newline()
+            elif character == '\b':
+                self.column = max(0, self.column - 1)
+            elif character == '\t':
+                self.column = min(self.columns - 1, ((self.column // 8) + 1) * 8)
+            elif ord(character) >= 0x20:
+                if self.column >= self.columns:
+                    self.column = 0
+                    self._newline()
+                self.cells[self.row][self.column] = character
+                self.column += 1
+            index += 1
+
+    def text(self):
+        return '\n'.join(''.join(row).rstrip() for row in self.cells).rstrip()
+
+
 class ShellTests(unittest.TestCase):
     def test_shell_redaction_values_include_short_configured_credentials(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -271,6 +359,109 @@ class ShellTests(unittest.TestCase):
                 process.stdout.close()
             terminal_input.close()
             os.close(master)
+
+    @unittest.skipUnless(os.name != 'nt', 'POSIX terminal behavior only')
+    def test_real_pty_foreground_repair_replaces_startup_screen(self):
+        import fcntl
+        import pty
+        import select
+        import struct
+        import termios
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            runner = root / 'fake_runner.py'
+            runner.write_text(
+                'import time\n'
+                'print("diagnostic-line-1", flush=True)\n'
+                'time.sleep(0.2)\n'
+                'for index in range(12):\n'
+                '    print("[TESTS] Running: " + ("long-output-" + str(index) + " ") + ("x" * 150), flush=True)\n'
+                'print("diagnostic-line-2", flush=True)\n'
+                'time.sleep(0.7)\n',
+                encoding='utf-8',
+            )
+            wrapper = Path(__file__).resolve().parents[1] / 'agentic.py'
+            master, slave = pty.openpty()
+            fcntl.ioctl(
+                master,
+                termios.TIOCSWINSZ,
+                struct.pack('HHHH', 51, 209, 0, 0),
+            )
+            process = subprocess.Popen(
+                [
+                    sys.executable, '-u', str(wrapper), 'shell',
+                    '--repo', str(root), '--runner', str(runner),
+                    '--session-dir', str(root / 'logs'),
+                    '--state-dir', str(root / 'state'),
+                ],
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                close_fds=True,
+            )
+            os.close(slave)
+            captured = ''
+
+            def read_until(needle, timeout=8):
+                nonlocal captured
+                deadline = time.monotonic() + timeout
+                while needle not in captured and time.monotonic() < deadline:
+                    readable, _, _ = select.select([master], [], [], 0.1)
+                    if not readable:
+                        continue
+                    try:
+                        chunk = os.read(master, 8192)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    captured += chunk.decode('utf-8', errors='replace')
+                self.assertIn(needle, captured)
+
+            try:
+                read_until('› ')
+                os.write(master, b'/repair-pr 48\n')
+                read_until('diagnostic-line-1')
+                during_screen = _TerminalScreen(columns=209, rows=51)
+                during_screen.feed(captured)
+                during = during_screen.text()
+                self.assertIn('[CI-REPAIR] Running', during)
+                self.assertIn('diagnostic-line-1', during)
+                self.assertNotIn('Setup and cleanup', during)
+                self.assertNotIn('/init [OPTIONS]', during)
+
+                read_until('diagnostic-line-2')
+                time.sleep(1.0)
+                read_until('› ', timeout=3)
+                os.write(master, b'/quit\n')
+                deadline = time.monotonic() + 5
+                while process.poll() is None and time.monotonic() < deadline:
+                    readable, _, _ = select.select([master], [], [], 0.1)
+                    if readable:
+                        try:
+                            chunk = os.read(master, 8192)
+                        except OSError:
+                            break
+                        if chunk:
+                            captured += chunk.decode('utf-8', errors='replace')
+                process.wait(timeout=5)
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=5)
+                os.close(master)
+
+            final_screen = _TerminalScreen(columns=209, rows=51)
+            final_screen.feed(captured)
+            final = final_screen.text()
+            command_rows = [
+                line for line in final.splitlines()
+                if '/repair-pr 48' in line
+            ]
+            self.assertLessEqual(len(command_rows), 1, final)
+            self.assertIn('diagnostic-line-2', captured)
+            self.assertNotIn('Setup and cleanup', final)
 
     @unittest.skipUnless(os.name != 'nt', 'POSIX process-group behavior only')
     def test_foreground_cancel_signals_descendants_in_child_process_group(self):
@@ -607,6 +798,85 @@ class ShellTests(unittest.TestCase):
         self.assertIn('/help', ''.join(state.history))
 
 
+    def test_shell_keeps_output_viewport_when_only_stdout_is_a_tty(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        with tempfile.TemporaryDirectory() as temp:
+            state = agentic_shell_input._InteractiveOutputState()
+            shell = agentic_shell.AgenticShell(
+                Path(temp), Path(sys.executable), session_dir=Path(temp) / 'logs'
+            )
+            output = TTYBuffer()
+            seen = []
+
+            def observe_viewport(_prompt, _status_line):
+                seen.append(shell._interactive_output_state)
+                return '/quit'
+
+            with patch('agentic_shell._is_interactive_terminal', return_value=False), \
+                 patch('agentic_shell._InteractiveOutputState', return_value=state), \
+                 patch.object(shell, '_input', side_effect=observe_viewport), \
+                 patch('agentic_shell.sys.stdout', output):
+                self.assertEqual(shell.run(), 0)
+
+        self.assertEqual(seen, [state])
+        self.assertIn('A G E N T I C', ''.join(state.history))
+
+
+    def test_foreground_uses_viewport_when_stdin_is_not_detected_as_tty(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        class Process:
+            pid = 123
+            stdout = StringIO('[CI-REPAIR] streamed output\n')
+
+            def poll(self):
+                return None
+
+            def wait(self):
+                return 0
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shell = agentic_shell.AgenticShell(
+                root, Path(sys.executable), session_dir=root / 'logs'
+            )
+            state = agentic_shell_input._InteractiveOutputState()
+            state.history.append('startup banner\n')
+            state.mark_startup_complete()
+            shell._interactive_output_state = state
+            previous = agentic_shell_input._activate_interactive_output(state)
+            output = TTYBuffer()
+            try:
+                with patch('agentic_shell._is_interactive_terminal', return_value=False), \
+                     patch('agentic_shell.subprocess.Popen', return_value=Process()), \
+                     patch('agentic_shell.shutil.get_terminal_size',
+                           return_value=os.terminal_size((80, 8))), \
+                     patch('agentic_shell_input.shutil.get_terminal_size',
+                           return_value=os.terminal_size((80, 8))), \
+                     patch('agentic_shell.sys.stdout', output), \
+                     patch('agentic_shell_input.sys.stdout', output):
+                    shell._run_foreground(
+                        ['fake-agentic', '--repair-ci'],
+                        start_message='[CI-REPAIR] starting',
+                    )
+            finally:
+                agentic_shell_input._restore_interactive_output(previous)
+
+        self.assertIn(
+            '[CI-REPAIR] streamed output',
+            agentic_shell_input.strip_ansi(''.join(state.history)),
+        )
+        self.assertNotIn('fake-agentic', output.getvalue())
+        rendered = output.getvalue()
+        viewport = rendered.index('\033[1;7r')
+        self.assertGreater(rendered.index('starting'), viewport)
+
+
     def test_welcome_banner_does_not_emit_color_when_output_is_not_a_terminal(self):
         from contextlib import redirect_stdout
         from io import StringIO
@@ -615,6 +885,79 @@ class ShellTests(unittest.TestCase):
         with redirect_stdout(output):
             agentic_shell._welcome_banner(Path('/tmp/example'))
         self.assertNotIn('\033[', output.getvalue())
+
+
+    def test_welcome_banner_resets_a_stale_terminal_scroll_region(self):
+        class TTYBuffer(StringIO):
+            def isatty(self):
+                return True
+
+        output = TTYBuffer()
+        with patch('agentic_shell_input.sys.stdout', output):
+            agentic_shell._welcome_banner(Path('/tmp/example'))
+
+        self.assertTrue(output.getvalue().startswith('\033[r'))
+
+
+    def test_welcome_banner_is_emitted_atomically_before_streamed_output(self):
+        writes = []
+        with patch('agentic_shell_input.shutil.get_terminal_size',
+                   return_value=os.terminal_size((80, 24))), \
+             patch.object(agentic_shell_input, '_write_shell_output',
+                          side_effect=lambda text, **_kwargs: writes.append(text)):
+            agentic_shell._welcome_banner(Path('/tmp/example'))
+
+        self.assertEqual(len(writes), 1)
+        rendered = writes[0]
+        self.assertLess(rendered.index('Repository'), rendered.index('State'))
+        self.assertLess(rendered.index('State'), rendered.index('Commands'))
+        self.assertTrue(rendered.endswith('\n\n'))
+
+
+    def test_foreground_stream_does_not_spend_viewport_on_startup_screen(self):
+        state = agentic_shell_input._InteractiveOutputState()
+        output = StringIO()
+        previous = agentic_shell_input._activate_interactive_output(state)
+        try:
+            with patch('agentic_shell_input.shutil.get_terminal_size',
+                       return_value=os.terminal_size((80, 8))), \
+                 patch('sys.stdout', output):
+                agentic_shell_input._welcome_banner(Path('/tmp/example'))
+                agentic_shell_input._print_help()
+                state.mark_startup_complete()
+                foreground = agentic_shell_input._ForegroundOutputState(state)
+                foreground.write('[CI-REPAIR] streamed diagnostic\n')
+        finally:
+            agentic_shell_input._restore_interactive_output(previous)
+
+        visible_frame = output.getvalue().rsplit('\033[1;7r', 1)[-1]
+        visible_frame = agentic_shell_input.strip_ansi(visible_frame)
+        self.assertNotIn('A G E N T I C', visible_frame)
+        self.assertIn('[CI-REPAIR] streamed diagnostic', visible_frame)
+        self.assertIn('A G E N T I C', ''.join(state.history))
+        self.assertIn('\033[r\033[2J\033[H', output.getvalue())
+
+
+    def test_foreground_viewport_does_not_redraw_submitted_shell_command(self):
+        state = agentic_shell_input._InteractiveOutputState()
+        state.mark_startup_complete()
+        state.append('› /repair-pr 48\n', ensure_newline=False, columns=80)
+        output = StringIO()
+        previous = agentic_shell_input._activate_interactive_output(state)
+        try:
+            with patch('agentic_shell_input.shutil.get_terminal_size',
+                       return_value=os.terminal_size((80, 8))), \
+                 patch('sys.stdout', output):
+                foreground, _ = agentic_shell_input._begin_foreground_output(state)
+                self.assertIsNotNone(foreground)
+                foreground.write('[CI-REPAIR] child output\n')
+        finally:
+            agentic_shell_input._restore_interactive_output(previous)
+
+        visible_frame = output.getvalue().rsplit('\033[1;7r', 1)[-1]
+        visible_frame = agentic_shell_input.strip_ansi(visible_frame)
+        self.assertNotIn('› /repair-pr 48', visible_frame)
+        self.assertIn('[CI-REPAIR] child output', visible_frame)
 
 
     def test_help_does_not_emit_color_when_output_is_not_a_terminal(self):

@@ -806,6 +806,8 @@ def repair_ci(
             raise RuntimeError("CI repair task timeout reached; preserved the PR worktree and logs")
         feedback = evidence.prompt_context()
         with worktree_lock(repo, run, state_dir):
+            repair_head_before = git(run.worktree, "rev-parse", "HEAD", check=False)
+            repair_fingerprint_before = worktree_change_fingerprint(run.worktree)
             completed = develop(
                 run, issue, pull_request.base, config, folder,
                 initial_feedback=feedback,
@@ -815,6 +817,30 @@ def repair_ci(
                 repair_scope=feedback,
                 review_base_sha=pull_request.head_sha,
             )
+            repair_head_after = git(run.worktree, "rev-parse", "HEAD", check=False)
+            repair_fingerprint_after = worktree_change_fingerprint(run.worktree)
+        if (
+            completed
+            and repair_head_before == repair_head_after
+            and repair_fingerprint_before == repair_fingerprint_after
+        ):
+            reason = (
+                f"CI repair attempt {attempt} produced no new changes; refusing to "
+                "republish the unchanged PR patch"
+            )
+            record_event({
+                "event": "repair_blocked", "attempt": attempt,
+                "reason": reason,
+            })
+            clear_result(folder)
+            review_approval_path(folder).unlink(missing_ok=True)
+            record_result(
+                folder, "NO_CHANGES", attempts=attempt,
+                max_retries=max_attempts, reason=reason,
+                worktree=run.worktree, next_action=_resume_action(issue, folder),
+            )
+            _status_print(f"[CI-REPAIR] {reason}")
+            raise RuntimeError(reason)
         attempt_event = {
             "event": "repair_attempt", "attempt": attempt, "completed": completed,
             "classification": evidence.classification,
@@ -1079,6 +1105,9 @@ def retryable_test_failure(*args, **kwargs):
 
 def test_failure_fingerprint(*args, **kwargs):
     return _workflow_call("test_failure_fingerprint", *args, **kwargs)
+
+def focused_test_failure_context(*args, **kwargs):
+    return _workflow_call("focused_test_failure_context", *args, **kwargs)
 
 def pending_files(*args, **kwargs):
     return _workflow_call("pending_files", *args, **kwargs)
@@ -2441,6 +2470,14 @@ def _main(argv: list[str] | None = None) -> int:
                 runner = Path(sys.executable)
             return run_shell(Path(args.repo), runner, config, state_dir=state_dir)
         return execute(args)
+    except KeyboardInterrupt as exc:
+        # Provider cancellation is deliberately propagated out of the
+        # streaming layer so it can stop the child process and flush logs.
+        # Handle it here at the CLI boundary instead of exposing a Python
+        # traceback to users who pressed Ctrl-C during a review or run.
+        record_diagnostic("cancelled", exc=exc, argv=raw_args, entrypoint="cli")
+        _status_print("[CANCEL] Cancelled by Ctrl-C", file=sys.stderr)
+        return 0
     except UserCancelled as exc:
         record_diagnostic("cancelled", exc=exc, argv=raw_args, entrypoint="cli")
         _status_print(f"[CANCEL] {exc}", file=sys.stderr)

@@ -130,6 +130,8 @@ MAX_INVESTIGATION_FINDINGS = 40
 MAX_PUBLICATION_REPORT_BYTES = 64_000
 MAX_TEST_REPORT_CHARS = 50_000
 MAX_TEST_FAILURE_OUTPUT_CHARS = 6_000
+MAX_FOCUSED_FAILURE_CONTEXT_CHARS = 12_000
+FOCUSED_FAILURE_MARKER = "Agentic focused test failure diagnostics:"
 MAX_VALIDATION_SNAPSHOT_ENTRIES = 4_096
 MAX_VALIDATION_DIAGNOSIS_PATHS = 32
 MAX_VALIDATION_DIAGNOSIS_CHARS = 4_000
@@ -1013,6 +1015,7 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
     command_statuses: list[str] = []
     reported_commands: set[int] = set()
     artifact_producers: dict[str, tuple[int, str, str]] = {}
+    failure_diagnostics: list[str] = []
     all_passed = True
     report_chars = 0
 
@@ -1033,6 +1036,14 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
             evidence = evidence[-available:] if available else ""
         parts = [item for item in (statuses, evidence, suffix.strip()) if item]
         return "\n\n".join(parts)
+
+    def report_with_failure_context(suffix: str = "") -> str:
+        """Keep failed-check evidence available after later checks finish."""
+        sections = [suffix.strip()] if suffix.strip() else []
+        if failure_diagnostics:
+            focused = "\n\n".join(failure_diagnostics)
+            sections.append(f"{FOCUSED_FAILURE_MARKER}\n{focused}")
+        return report_text("\n\n".join(sections))
 
     def mark_unavailable(index: int, reason: str) -> None:
         """Record a terminal status for a check that could not be reached."""
@@ -1129,12 +1140,16 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
         )
         if result.returncode:
             diagnostic = str(result.stdout or "").strip()
+            if len(diagnostic) > MAX_TEST_FAILURE_OUTPUT_CHARS:
+                diagnostic = (
+                    "[… earlier test output omitted …]\n"
+                    + diagnostic[-MAX_TEST_FAILURE_OUTPUT_CHARS:]
+                )
+            failure_diagnostics.append(
+                f"Validation check {index} failed ({command_name}):\n"
+                f"{diagnostic or '(no diagnostic output)'}"
+            )
             if diagnostic:
-                if len(diagnostic) > MAX_TEST_FAILURE_OUTPUT_CHARS:
-                    diagnostic = (
-                        "[… earlier test output omitted …]\n"
-                        + diagnostic[-MAX_TEST_FAILURE_OUTPUT_CHARS:]
-                    )
                 _status_print(
                     "[TESTS] Failure diagnostics (bounded):\n" + diagnostic,
                     style_status_tokens=False,
@@ -1169,7 +1184,9 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
         # command loop has otherwise finished.
         for remaining in range(1, len(test_commands) + 1):
             mark_unavailable(remaining, "task deadline reached")
-        report = report_text("Task deadline reached before git diff --check")
+        report = report_with_failure_context(
+            "Task deadline reached before git diff --check"
+        )
         _status_print("[TESTS] Overall task deadline reached", flush=True)
         if folder is not None:
             record_test_result(folder, passed=False, diff_check="not_run")
@@ -1190,12 +1207,14 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
     except RuntimeError as exc:
         if folder is not None:
             record_test_result(folder, passed=False, diff_check="failed")
-        return False, report_text(f"git diff --check failed: {exc}")
+        return False, report_with_failure_context(f"git diff --check failed: {exc}")
     if whitespace_report:
         _status_print("[TESTS] git diff --check FAILED", flush=True)
         if folder is not None:
             record_test_result(folder, passed=False, diff_check="failed")
-        return False, report_text(f"git diff --check failed\n{whitespace_report}")
+        return False, report_with_failure_context(
+            f"git diff --check failed\n{whitespace_report}"
+        )
     if dependency_fingerprint is not None:
         try:
             _record_dependency_fingerprint(
@@ -1204,7 +1223,9 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
                 _dependency_fingerprint(worktree, dependency_files or []),
             )
         except (OSError, RuntimeError, TypeError) as exc:
-            report = report_text(f"Dependency state could not be recorded: {exc}")
+            report = report_with_failure_context(
+                f"Dependency state could not be recorded: {exc}"
+            )
             if folder is not None:
                 record_test_result(folder, passed=False, diff_check="passed")
             return False, report.strip()
@@ -1213,10 +1234,28 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
         _status_print("[TESTS] All configured checks passed", flush=True)
     else:
         _status_print("[TESTS] Local validation failed", flush=True)
-    report = report_text()
+    report = report_with_failure_context()
     if folder is not None:
         record_test_result(folder, passed=all_passed, diff_check="passed")
     return all_passed, report
+
+
+def focused_test_failure_context(report: str) -> str:
+    """Return prioritized failed-check evidence from a validation report.
+
+    The full report intentionally contains every configured check and can be
+    large. ``run_tests`` appends this focused section after the complete
+    summary so retry prompts do not lose the actionable failure when later
+    checks produce more output. Reports created by older runs fall back to
+    their original content.
+    """
+    marker = f"\n\n{FOCUSED_FAILURE_MARKER}\n"
+    if marker not in report:
+        return report
+    focused = report.rsplit(marker, 1)[1].strip()
+    if not focused:
+        return report
+    return _bounded_text(focused, MAX_FOCUSED_FAILURE_CONTEXT_CHARS)
 
 
 def preflight_test_commands(repo: Path, test_commands: list[list[str]],
@@ -1334,7 +1373,11 @@ def test_failure_fingerprint(report: str) -> str:
     """Return a stable digest for comparing consecutive test failures."""
     normalized_lines: list[str] = []
     for raw_line in strip_ansi(report).splitlines():
-        line = re.sub(r"^\s*\[\d{2}:\d{2}:\d{2}\]\s*", "", raw_line)
+        line = re.sub(
+            r"^\s*\[(?:\d{4}-\d{2}-\d{2} )?\d{2}:\d{2}:\d{2}\]\s*",
+            "",
+            raw_line,
+        )
         line = re.sub(r"\bPID\s+\d+\b", "PID <pid>", line, flags=re.IGNORECASE)
         line = re.sub(
             r"\b(Ran\s+\d+\s+tests?\s+in\s+)\d+(?:\.\d+)?s\b",
@@ -1344,6 +1387,7 @@ def test_failure_fingerprint(report: str) -> str:
             r"\b(Finished\s+in\s+)\d+(?:\.\d+)?s\b",
             r"\1<duration>", line, flags=re.IGNORECASE,
         )
+        line = re.sub(r"\b\d+(?:\.\d+)?(?:s|ms)\b", "<duration>", line)
         normalized_lines.append(line.rstrip())
     normalized = "\n".join(normalized_lines).strip()
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
@@ -2406,7 +2450,9 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
     atomic_write_text(next_log(folder, "tests"), report)
     if not passed:
         _status_print("[TESTS] Failed")
-        bounded_report = strip_ansi(report[-2500:])
+        bounded_report = strip_ansi(
+            focused_test_failure_context(report)[-2500:]
+        )
         _status_print(
             "\n".join(f"[TESTS] {line}" for line in bounded_report.splitlines())
             or "[TESTS] (no diagnostic output)",
@@ -2414,8 +2460,30 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
         )
         return False, report, {}, "", ""
     base_sha, digest, summary = prepare_patch(run.worktree, base, config["max_files"])
+    display_label = "Proposed changes"
+    display_summary = summary
+    if repair_mode and review_base_sha:
+        # A CI repair runs on an existing PR.  The publication patch is still
+        # compared with the target branch above, but the reviewer and user
+        # need to see only the delta introduced by this repair attempt.
+        repair_summary = git(
+            run.worktree, "-c", "diff.external=", "diff",
+            "--no-ext-diff", "--no-textconv", "--cached", "--stat",
+            review_base_sha,
+        )
+        if not repair_summary.strip():
+            _status_print(
+                "[PATCH] No new repair changes; the existing PR patch is unchanged.",
+                style_status_tokens=False,
+                style_patch_stat=True,
+            )
+            raise NoCodeChangesError(
+                "No new CI-repair changes compared to the current PR head"
+            )
+        display_label = "New repair changes relative to current PR head"
+        display_summary = repair_summary
     _status_print(
-        "[PATCH] Proposed changes:\n" + summary,
+        f"[PATCH] {display_label}:\n" + display_summary,
         style_status_tokens=False,
         style_patch_stat=True,
     )
@@ -3176,6 +3244,7 @@ def _orchestration_runtime() -> WorkflowRuntime:
         "_compact_feedback": _compact_feedback,
         "retryable_test_failure": retryable_test_failure,
         "test_failure_fingerprint": test_failure_fingerprint,
+        "focused_test_failure_context": focused_test_failure_context,
         "git": git,
     })
 

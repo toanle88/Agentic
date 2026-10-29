@@ -98,6 +98,75 @@ class InteractiveInputTests(unittest.TestCase):
         self.assertEqual(state.mode, agentic_shell_input.TerminalMode.OUTPUT)
         self.assertFalse(state.normal_prompt_visible)
 
+    def test_interactive_input_does_not_replay_startup_history(self):
+        state = agentic_shell_input._InteractiveOutputState()
+        state.history.append('startup help\n')
+        state.mark_startup_complete()
+        reader = _create_mock_reader([('ENTER', '\n')])
+        output = StringIO()
+
+        with patch('sys.stdout', output), \
+             patch('agentic_shell.shutil.get_terminal_size',
+                   return_value=os.terminal_size((80, 8))):
+            agentic_shell._interactive_input(
+                '› ', agentic_shell._completion_items,
+                key_reader_factory=reader, output_state=state,
+            )
+
+        self.assertNotIn('startup help', output.getvalue())
+
+    def test_submitted_command_stays_once_across_foreground_transition(self):
+        state = agentic_shell_input._InteractiveOutputState()
+        state.mark_startup_complete()
+        state.append('› /repair-pr 48\n', ensure_newline=False, columns=80)
+        output = StringIO()
+        previous = agentic_shell_input._activate_interactive_output(state)
+        try:
+            with patch('agentic_shell_input.shutil.get_terminal_size',
+                       return_value=os.terminal_size((80, 8))), \
+                 patch('sys.stdout', output):
+                foreground, _ = agentic_shell_input._begin_foreground_output(
+                    state, agentic_shell_input.TerminalMode.CONFIRMATION,
+                )
+                self.assertIsNotNone(foreground)
+                foreground.write('[CI-REPAIR] child output\n')
+
+                visible_during_foreground = strip_ansi(
+                    output.getvalue().rsplit('\033[1;7r', 1)[-1]
+                )
+                self.assertNotIn('› /repair-pr 48', visible_during_foreground)
+                self.assertIn('[CI-REPAIR] child output', visible_during_foreground)
+
+                foreground.finish()
+        finally:
+            agentic_shell_input._restore_interactive_output(previous)
+
+        self.assertEqual(state.history.count('› /repair-pr 48\n'), 1)
+        self.assertIn('[CI-REPAIR] child output\n', state.history)
+        self.assertIsNone(state.foreground_history_start)
+
+    def test_interactive_input_does_not_replay_output_written_between_prompts(self):
+        state = agentic_shell_input._InteractiveOutputState()
+        state.mark_startup_complete()
+        output = StringIO()
+        previous = agentic_shell_input._activate_interactive_output(state)
+        try:
+            with patch('agentic_shell_input.shutil.get_terminal_size',
+                       return_value=os.terminal_size((80, 8))), \
+                 patch('sys.stdout', output):
+                state.write_without_editor('help output\n')
+                already_rendered = output.getvalue()
+                reader = _create_mock_reader([('ENTER', '\n')])
+                agentic_shell._interactive_input(
+                    '› ', agentic_shell._completion_items,
+                    key_reader_factory=reader, output_state=state,
+                )
+        finally:
+            agentic_shell_input._restore_interactive_output(previous)
+
+        self.assertEqual(output.getvalue().count('help output'), 1)
+        self.assertEqual(already_rendered.count('help output'), 1)
+
     def test_submitted_input_becomes_plain_transcript_before_streamed_output(self):
         state = agentic_shell_input._InteractiveOutputState()
         output = TTYBuffer()

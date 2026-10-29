@@ -365,6 +365,10 @@ review findings from the existing run and the broad original PR description do
 not become developer requirements. A fresh read-only review still checks the
 resulting patch against that targeted CI-repair scope, starting at the current
 PR head so the original PR changes are not reported as new repair changes.
+The status output labels this delta as `New repair changes relative to current
+PR head`. If the developer leaves the PR unchanged, the attempt records
+`NO_CHANGES` and stops without republishing the existing PR patch or starting
+another repair cycle.
 With `automation.auto_publish` false (the default), Agentic asks before
 committing and pushing; true permits the guarded same-branch push. The
 `ci_repair.max_attempts` and polling settings bound repeated repair cycles and
@@ -437,7 +441,10 @@ Failures caused by unavailable infrastructure, missing dependencies, or invalid
 Git paths are not retried as code repairs. They stop the developer loop with
 the original diagnostic, record a durable `BLOCKED` result, and preserve the
 environment or worktree for correction; the reviewer is not invoked because
-validation did not pass.
+validation did not pass. Developer-provider invocation failures are also
+recorded as `BLOCKED` without restarting the developer with the same provider
+error as feedback. Fix the provider configuration, authentication, executable,
+or service environment and resume the preserved run.
 If the same retryable test failure is reported on consecutive validation
 attempts, the run is marked `BLOCKED` immediately with its failure digest and
 diagnostic, instead of consuming the remaining retries. Test diagnostics are
@@ -485,7 +492,10 @@ reviewer records it in `skipped` with a reason; skipped validation is visible in
 the review log and dashboard and is not itself an approval or rejection. A
 rejection does not discard the worktree. The developer receives the findings
 and skipped-validation context on the next retry, up to the configured retry
-limit, and is instructed to reconcile each item explicitly.
+limit, and is instructed to reconcile each item explicitly. A recurring finding
+alone does not stop the loop when the proposed patch changed; it is passed back
+to the developer until the retry limit is reached. An unchanged rejected patch
+is blocked immediately.
 
 The approval threshold is limited to blockers: concrete implementation defects,
 unmet explicit requirements, regressions, security problems, or required

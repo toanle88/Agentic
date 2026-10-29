@@ -718,9 +718,17 @@ class AgenticShell:
             return [sys.executable, "-u", "-m", "agentic_runner.cli"]
         return [str(self.runner)]
 
-    def _run_foreground(self, argv: list[str]) -> None:
+    def _run_foreground(
+        self, argv: list[str], *, start_message: str | None = None,
+    ) -> None:
         """Stream command output while leaving terminal input available."""
-        if not _is_interactive_terminal():
+        # stdout may be a TTY even when stdin is wrapped or redirected.  If
+        # the shell already owns an output viewport, keep using it; falling
+        # back to subprocess.run here writes child output directly over the
+        # startup banner when a command such as /repair-pr is submitted.
+        if not _is_interactive_terminal() and self._interactive_output_state is None:
+            if start_message:
+                _shell_print(start_message)
             result = subprocess.run(argv, cwd=self.repo, check=False)
             if result.returncode:
                 raise RuntimeError(f"command failed with exit {result.returncode}")
@@ -731,6 +739,8 @@ class AgenticShell:
         foreground, previous_output = _begin_foreground_output(
             self._interactive_output_state, mode
         )
+        if start_message:
+            _shell_print(start_message)
         resize_handler_previous = None
         resize_handler_installed = False
         input_forwarder: _ForegroundInputForwarder | None = None
@@ -1127,12 +1137,17 @@ class AgenticShell:
             argv.extend(["--task-file", str(task_file)])
         security_override = self._execution_security_override()
         if _has_job_flag(flags, "--publish"):
-            _shell_print("[PUBLISH] Running in the foreground so publication confirmation can be entered")
             previous = os.environ.get("AGENTIC_SECURITY_MODE_OVERRIDE")
             if security_override:
                 os.environ["AGENTIC_SECURITY_MODE_OVERRIDE"] = security_override
             try:
-                self._run_foreground(argv)
+                self._run_foreground(
+                    argv,
+                    start_message=(
+                        "[PUBLISH] Running in the foreground so publication "
+                        "confirmation can be entered"
+                    ),
+                )
             finally:
                 if previous is None:
                     os.environ.pop("AGENTIC_SECURITY_MODE_OVERRIDE", None)
@@ -1150,13 +1165,18 @@ class AgenticShell:
         argv = self._runner_args(None, ["--pr", pr_number, "--repair-ci"])
         if clean:
             argv.append("--clean")
-        _shell_print("[CI-REPAIR] Running in the foreground so confirmation can be entered")
         security_override = self._execution_security_override()
         previous = os.environ.get("AGENTIC_SECURITY_MODE_OVERRIDE")
         if security_override:
             os.environ["AGENTIC_SECURITY_MODE_OVERRIDE"] = security_override
         try:
-            self._run_foreground(argv)
+            self._run_foreground(
+                argv,
+                start_message=(
+                    "[CI-REPAIR] Running in the foreground so confirmation "
+                    "can be entered"
+                ),
+            )
         finally:
             if security_override:
                 if previous is None:
@@ -1171,12 +1191,17 @@ class AgenticShell:
         self.active_task = "repository audit"
         security_override = self._execution_security_override()
         if _has_job_flag(flags, "--publish"):
-            _shell_print("[PUBLISH] Running in the foreground so publication confirmation can be entered")
             previous = os.environ.get("AGENTIC_SECURITY_MODE_OVERRIDE")
             if security_override:
                 os.environ["AGENTIC_SECURITY_MODE_OVERRIDE"] = security_override
             try:
-                self._run_foreground(argv)
+                self._run_foreground(
+                    argv,
+                    start_message=(
+                        "[PUBLISH] Running in the foreground so publication "
+                        "confirmation can be entered"
+                    ),
+                )
             finally:
                 if previous is None:
                     os.environ.pop("AGENTIC_SECURITY_MODE_OVERRIDE", None)
@@ -1540,9 +1565,19 @@ class AgenticShell:
     def run(self) -> int:
         active_jobs = sum(job.running for job in self.jobs.values())
         previous_jobs = sum(job.session_id != self.session_id for job in self.jobs.values())
+        # Keep the output viewport whenever stdout is a TTY, even if stdin
+        # was not detected as one (for example through a WSL/terminal
+        # wrapper).  Otherwise foreground repair output bypasses the redraw
+        # layer and is written directly over the startup banner.
         output_state = (
             _InteractiveOutputState()
-            if _is_interactive_terminal()
+            if (
+                not os.environ.get("AGENTIC_PLAIN")
+                and (
+                    _is_interactive_terminal()
+                    or getattr(sys.stdout, "isatty", lambda: False)()
+                )
+            )
             else None
         )
         self._interactive_output_state = output_state
@@ -1563,6 +1598,8 @@ class AgenticShell:
                 previous_jobs=previous_jobs,
             )
             _print_help()
+            if output_state is not None:
+                output_state.mark_startup_complete()
             completion_state = self._configure_completion()
             while True:
                 self.refresh()
