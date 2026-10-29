@@ -61,7 +61,7 @@ class StreamingTests(unittest.TestCase):
         )
         self.assertTrue(stream._active)
 
-    def test_provider_facade_serializes_compatibility_mutation_and_restores_on_failure(self):
+    def test_provider_facade_uses_per_call_compatibility_adapters(self):
         sentinel_streamed = object()
         sentinel_codex = object()
         observed = []
@@ -96,8 +96,9 @@ class StreamingTests(unittest.TestCase):
                 results = list(pool.map(agentic_execution.run_codex, ("one", "two")))
 
         self.assertEqual(len(results), 2)
-        self.assertEqual(max_active, 1)
-        self.assertEqual(observed, [(sentinel_streamed, sentinel_codex)] * 2)
+        self.assertEqual(max_active, 2)
+        self.assertEqual(observed, [(agentic_execution._providers.streamed_command,
+                                     agentic_execution._providers.codex_command)] * 2)
         self.assertIs(
             agentic_execution._providers.streamed_command,
             agentic_execution.streamed_command,

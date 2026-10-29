@@ -27,7 +27,9 @@ from .file_boundaries import (
     unlink_relative_regular,
 )
 from .guidance import guidance_phase, guidance_prompt
-from .config import PROVIDER_API_KEY_ENV, provider_process_environment
+from .config import (
+    PROVIDER_API_KEY_ENV, provider_process_environment, sandbox_env_for_provider,
+)
 from .git_policy import hardened_git_argv, hardened_git_environment
 from .persistence import atomic_write_text
 from .persistence import read_text_tail
@@ -779,13 +781,17 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
               verbose: bool = False,
               sandbox: dict[str, Any] | None = None,
               allow_self_hosted_sources: bool = False,
-              log_label: str | None = None) -> tuple[bool, str]:
+              log_label: str | None = None,
+              _streamed_command: Callable[..., Any] | None = None,
+              _codex_command: Callable[..., Any] | None = None) -> tuple[bool, str]:
     # Each invocation creates a fresh session. The repository is the memory.
     prompt = guidance_prompt(
         worktree, prompt, readonly=readonly, audit_folder=output.parent,
         phase=guidance_phase(output, readonly=readonly),
     )
     output.parent.mkdir(parents=True, exist_ok=True)
+    _streamed_command = _streamed_command or streamed_command
+    _codex_command = _codex_command or codex_command
     credential_name = api_key_env or PROVIDER_API_KEY_ENV.get("codex")
     credential_value = os.environ.get(credential_name) if credential_name else None
     redaction_values = [credential_value] if credential_value else []
@@ -815,7 +821,7 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
         command_kwargs: dict[str, Any] = {}
         if permission_policy is not None:
             command_kwargs["permission_policy"] = permission_policy
-        args = codex_command(
+        args = _codex_command(
             prompt, readonly=readonly, schema=staged_schema, output=temporary_output,
             model=model, reasoning_effort=reasoning_effort,
             worktree_is_projection=developer_baseline is not None,
@@ -823,11 +829,15 @@ def run_codex(worktree: Path, prompt: str, *, output: Path, readonly: bool = Fal
         )
         label = log_label or ("REVIEW" if readonly else "DEVELOPER")
         invocation_started = time.monotonic()
-        result = streamed_command(
+        pass_env = sandbox_env_for_provider("codex", sandbox, credential_name)
+        canonical = PROVIDER_API_KEY_ENV.get("codex")
+        if credential_name and credential_name != canonical and credential_name in pass_env and canonical:
+            pass_env.append(canonical)
+        result = _streamed_command(
             args, provider_worktree, label=label, log_file=output.with_suffix(".log"),
             timeout=timeout, codex_json=True, verbose=verbose, sandbox=sandbox,
             sandbox_read_only=readonly,
-            sandbox_pass_env=(sandbox or {}).get("pass_env", []),
+            sandbox_pass_env=pass_env,
             metrics_folder=output.parent,
             output_root=invocation_output,
             env=provider_process_environment("codex", api_key_env),
@@ -968,12 +978,16 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
                      verbose: bool = False,
                      sandbox: dict[str, Any] | None = None,
                      allow_self_hosted_sources: bool = False,
-                     log_label: str | None = None) -> tuple[bool, str]:
+                     log_label: str | None = None,
+                     _streamed_command: Callable[..., Any] | None = None,
+                     _cli_provider_command: Callable[..., Any] | None = None) -> tuple[bool, str]:
     """Run a locally installed coding CLI in its non-interactive mode."""
     prompt = guidance_prompt(
         worktree, prompt, readonly=readonly, audit_folder=output.parent,
         phase=guidance_phase(output, readonly=readonly),
     )
+    _streamed_command = _streamed_command or streamed_command
+    _cli_provider_command = _cli_provider_command or cli_provider_command
     command_kwargs: dict[str, Any] = {}
     if provider == "copilot":
         resolved = resolve_provider_executable(
@@ -997,10 +1011,13 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
     )
     label = log_label or ("REVIEW" if readonly else "DEVELOPER")
     invocation_started = time.monotonic()
-    sandbox_pass_env = list((sandbox or {}).get("pass_env", []))
+    credential_name = api_key_env or PROVIDER_API_KEY_ENV.get(provider)
+    sandbox_pass_env = sandbox_env_for_provider(provider, sandbox, credential_name)
+    canonical = PROVIDER_API_KEY_ENV.get(provider)
+    if credential_name and credential_name != canonical and credential_name in sandbox_pass_env and canonical:
+        sandbox_pass_env.append(canonical)
     if provider == "copilot" and host and "COPILOT_GH_HOST" not in sandbox_pass_env:
         sandbox_pass_env.append("COPILOT_GH_HOST")
-    credential_name = api_key_env or PROVIDER_API_KEY_ENV.get(provider)
     credential_value = os.environ.get(credential_name) if credential_name else None
     redaction_values = [credential_value] if credential_value else []
     process_env = provider_process_environment(provider, api_key_env)
@@ -1025,13 +1042,13 @@ def run_cli_provider(worktree: Path, prompt: str, *, output: Path,
                 ),
                 read_only=False,
             )
-        args, structured = cli_provider_command(
+        args, structured = _cli_provider_command(
             provider, prompt, readonly=readonly, model=model,
             worktree=provider_worktree, **command_kwargs,
         )
         output_root = invocation_root / "output"
         output_root.mkdir()
-        result = streamed_command(
+        result = _streamed_command(
             args, provider_worktree, label=label, log_file=output.with_suffix(".log"),
             timeout=timeout, codex_json=structured, verbose=verbose,
             progress_parser=(lambda line: _provider_progress(line, provider)) if structured else None,

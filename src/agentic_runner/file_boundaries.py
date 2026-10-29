@@ -639,6 +639,8 @@ def _iter_safe_regular_files_without_dir_fd(
                 try:
                     metadata = entry.stat(follow_symlinks=False)
                 except OSError:
+                    if fail_on_error:
+                        raise
                     continue
                 children.append((child, child_relative, metadata))
         children.sort(key=lambda item: item[1])

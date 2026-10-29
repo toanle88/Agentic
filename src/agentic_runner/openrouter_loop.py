@@ -193,7 +193,11 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                    json_mode: bool = False,
                    verbose: bool = False,
                    log_label: str | None = None,
-                   sandbox: dict[str, Any] | None = None) -> tuple[bool, str]:
+                   sandbox: dict[str, Any] | None = None,
+                   _request: Any = _openrouter_request,
+                   _tool_call: Any = _openrouter_tool_call,
+                   _max_tool_turns: int = OPENROUTER_MAX_TURNS,
+                   _command_timeout_default: int = DEFAULT_OPENROUTER_COMMAND_TIMEOUT) -> tuple[bool, str]:
     """Run an OpenAI-compatible OpenRouter agent with scoped local tools."""
     if not model:
         raise RuntimeError("OpenRouter requires a model, for example openai/gpt-6-luna")
@@ -207,8 +211,8 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
         role_policy.update(permission_policy)
     permission_policy = role_policy
     allow_network = bool(permission_policy.get("network"))
-    max_tool_turns = max_tool_turns or OPENROUTER_MAX_TURNS
-    command_timeout = command_timeout or DEFAULT_OPENROUTER_COMMAND_TIMEOUT
+    max_tool_turns = max_tool_turns or _max_tool_turns
+    command_timeout = command_timeout or _command_timeout_default
     api_key = os.environ.get(api_key_env)
     if not api_key:
         raise RuntimeError(f"OpenRouter API key is missing; set ${api_key_env}")
@@ -396,14 +400,14 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
             remaining = None if deadline is None else max(1, int(deadline - time.monotonic()))
             request_url = base_url.rstrip("/") + "/chat/completions"
             if allow_custom_endpoint:
-                response = _openrouter_request(
+                response = _request(
                     request_url, api_key, body, remaining,
                     allow_custom_endpoint=True,
                 )
             else:
                 # Keep the historical call shape for integrations that patch
                 # the request seam without the newer opt-in keyword.
-                response = _openrouter_request(request_url, api_key, body, remaining)
+                response = _request(request_url, api_key, body, remaining)
             usage_records.append(normalize_usage(response, provider="openrouter"))
             record_raw({"event": "response", "turn": turn + 1, "response": response})
             choices = response.get("choices")
@@ -522,7 +526,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                             "do not replace the whole file."
                         )
                     elif shape_error:
-                        result = _openrouter_tool_call(
+                        result = _tool_call(
                             worktree, name, arguments, readonly=readonly,
                             command_timeout=tool_timeout, allow_network=allow_network,
                             permission_policy=permission_policy,
@@ -533,7 +537,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                             env=restricted_environment, mutation_state=mutation_state,
                         )
                     else:
-                        result = phase_error or _openrouter_tool_call(
+                        result = phase_error or _tool_call(
                             worktree, name, arguments, readonly=readonly,
                             command_timeout=tool_timeout, allow_network=allow_network,
                             permission_policy=permission_policy,
