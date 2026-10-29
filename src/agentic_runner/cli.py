@@ -557,6 +557,31 @@ def _record_failed_ci_repair(
     )
 
 
+def _record_unknown_ci_status(
+    run: Run, issue: Issue, folder: Path, *, attempt: int,
+    max_attempts: int, reason: str,
+) -> None:
+    """Persist an unverifiable GitHub status without claiming retries are exhausted."""
+    clear_blocked(folder)
+    clear_result(folder)
+    review_approval_path(folder).unlink(missing_ok=True)
+    try:
+        record_workflow_outcome(
+            folder, approved=False, attempts=attempt, first_pass=False,
+        )
+    except (OSError, ValueError, TypeError):
+        pass
+    record_result(
+        folder, "CI_STATUS_UNKNOWN", attempts=attempt, max_retries=max_attempts,
+        reason=reason, worktree=run.worktree,
+        next_action=_resume_action(issue, folder),
+    )
+    _status_print(
+        f"[RESULT] CI_STATUS_UNKNOWN: {_short(reason, 800)}",
+        system_prefix="RESULT",
+    )
+
+
 def fetch_issues(
     repo: Path, github_repo: str, github_host: str = DEFAULT_GITHUB_HOST,
 ) -> list[Issue]:
@@ -842,6 +867,19 @@ def repair_ci(
         if outcome == "passed":
             _status_print(f"[CI-REPAIR] PR #{pr_number} CI passed after attempt {attempt}")
             return 0
+        if outcome == "status_unknown":
+            reason = (
+                f"GitHub CI status could not be verified after repair attempt {attempt}; "
+                f"no reliable check result was available for PR #{pr_number}. "
+                "Retry CI repair after GitHub status access is restored; "
+                f"logs: {folder}"
+            )
+            record_event({"event": "ci_status_unknown", "attempt": attempt, "reason": reason})
+            _record_unknown_ci_status(
+                run, issue, folder, attempt=attempt,
+                max_attempts=max_attempts, reason=reason,
+            )
+            raise RuntimeError(reason)
         # A failed remote check invalidates the local approval while another
         # bounded repair attempt is pending; it must never look publishable.
         clear_result(folder)
@@ -2279,7 +2317,7 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
             status = candidate.get("status")
             next_action = candidate.get("next_action")
             if (
-                status in {"RETRY_EXHAUSTED", "BLOCKED", "NO_CHANGES"}
+                status in {"RETRY_EXHAUSTED", "CI_STATUS_UNKNOWN", "BLOCKED", "NO_CHANGES"}
                 and isinstance(next_action, str)
             ):
                 terminal_result = f"{status}: {next_action}"
