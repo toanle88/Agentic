@@ -1201,6 +1201,21 @@ class PureTests(unittest.TestCase):
         passed_sandbox = cli.call_args.kwargs['sandbox']
         self.assertEqual(passed_sandbox['pass_env'], ['ROLE_KEY', 'ANTHROPIC_API_KEY'])
 
+    def test_run_agent_does_not_pass_unrelated_native_sandbox_environment(self):
+        root = Path('/tmp/agentic-provider-sandbox-unrelated-auth-test')
+        sandbox = {
+            'enabled': True, 'image': 'agent-image',
+            'pass_env': ['OTHER_PROVIDER_KEY'],
+        }
+        with patch.dict(agentic.os.environ, {'OTHER_PROVIDER_KEY': 'unrelated'}, clear=True), \
+             patch('agentic.run_cli_provider', return_value=(True, 'cli')) as cli:
+            result = agentic.run_agent(
+                root, 'prompt', output=root / 'message.txt',
+                settings={'provider': 'claude'}, sandbox=sandbox,
+            )
+        self.assertEqual(result, (True, 'cli'))
+        self.assertEqual(cli.call_args.kwargs['sandbox']['pass_env'], [])
+
     def test_run_agent_forwards_verbose_only_when_requested(self):
         root = Path('/tmp/agentic-provider-verbose-test')
         with patch('agentic.run_cli_provider', return_value=(True, 'cli')) as cli:

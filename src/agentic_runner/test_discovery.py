@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import SAFE_GIT_DIFF_CHECK
+from .repository_metadata import RepositoryMetadata, read_repository_metadata
 from .sandbox import sandbox_command
 from .security import restricted_test_environment
 
@@ -206,29 +207,15 @@ def _safe_local_wrapper(repo: Path, filename: str) -> bool:
     return True
 
 
-def _repository_metadata(repo: Path) -> _RepositoryMetadata:
-    package: dict[str, Any] = {}
-    package_path = repo / "package.json"
-    if package_path.is_file():
-        try:
-            value = json.loads(package_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            value = {}
-        if isinstance(value, dict):
-            package = value
-    makefile = next(
-        (repo / name for name in ("Makefile", "makefile", "GNUmakefile") if (repo / name).is_file()),
-        None,
-    )
-    content = ""
-    if makefile is not None:
-        try:
-            content = makefile.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            pass
+def _repository_metadata(
+    repo: Path, source: RepositoryMetadata | None = None,
+) -> _RepositoryMetadata:
+    source = source or read_repository_metadata(repo)
+    package = source.package_json
     targets = tuple(sorted({
-        match.group(1)
-        for match in re.finditer(r"(?m)^([A-Za-z][A-Za-z0-9_.-]*)\s*:", content)
+        match.group(1) for match in re.finditer(
+            r"(?m)^([A-Za-z][A-Za-z0-9_.-]*)\s*:", source.makefile_text,
+        )
     }))
     scripts = package.get("scripts")
     return _RepositoryMetadata(
@@ -727,9 +714,10 @@ def discover_and_validate(
     timeout: int = DISCOVERY_TIMEOUT_SECONDS,
     sandbox: dict[str, Any] | None = None,
     credential_names: list[str] | None = None,
+    repository_metadata: RepositoryMetadata | None = None,
 ) -> DiscoveryResult:
     """Discover deterministic checks, optionally ask a read-only agent, then validate."""
-    metadata = _repository_metadata(repo)
+    metadata = _repository_metadata(repo, repository_metadata)
     deterministic = discover_test_candidates(repo, metadata=metadata)
     metadata_inventory = _metadata_command_inventory(repo, deterministic, metadata)
     assisted, agent_status = _agent_candidates(

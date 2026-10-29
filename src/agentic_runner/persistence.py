@@ -556,6 +556,11 @@ def read_text_bounded(path: Path, max_bytes: int, *, encoding: str = "utf-8") ->
             path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0), description="text artifact",
         )
         try:
+            # Some native platforms can return a short read for a regular
+            # file.  Check the descriptor's byte size first so an oversized
+            # artifact cannot be mistaken for a bounded one.
+            if os.fstat(descriptor).st_size > max_bytes:
+                return None
             payload = os.read(descriptor, max_bytes + 1)
         finally:
             os.close(descriptor)

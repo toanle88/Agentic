@@ -33,6 +33,11 @@ duration: a check taking at least 30 seconds is slow, as is a check whose
 metadata identifies integration, end-to-end, build, release, or benchmark
 work.
 
+Common discovery metadata is read with a 256,000-byte complete-file limit per
+file. Oversized or unreadable `package.json` and Makefile files are skipped,
+so they cannot create discovery candidates; files within the limit retain the
+normal behavior.
+
 Discovery never creates an installer command, runs a shell, or parses package
 scripts into shell commands. When multiple checks make interpretation useful,
 the selected provider may suggest additional argv candidates from the bounded,

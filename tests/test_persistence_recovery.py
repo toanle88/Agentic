@@ -12,7 +12,8 @@ from agentic_runner import dashboard_data as agentic_dashboard_data
 from agentic_runner import workflow as agentic_workflow
 from agentic_runner import workflow_state as agentic_workflow_state
 from agentic_runner.models import Issue
-from agentic_runner.persistence import atomic_write_json, atomic_write_text
+import agentic_runner.persistence as persistence
+from agentic_runner.persistence import atomic_write_json, atomic_write_text, read_text_bounded
 from agentic_runner.review import record_review_findings
 from agentic_runner.telemetry import read_issue_snapshot, read_run_usage, record_usage
 
@@ -185,6 +186,15 @@ class PersistenceRecoveryTests(unittest.TestCase):
                 json.dumps({'title': 'title', 'body': oversized}), encoding='utf-8'
             )
             self.assertIsNone(read_issue_snapshot(root))
+
+    def test_bounded_text_rejects_oversized_file_before_a_short_native_read(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "metadata.txt"
+            path.write_bytes(b"x" * 4)
+            with patch.object(
+                persistence.os, "read", side_effect=AssertionError("read should be skipped"),
+            ):
+                self.assertIsNone(read_text_bounded(path, 3))
 
     def test_review_approval_is_redacted_before_validation(self):
         value = "approval-synthetic-secret-123456"
