@@ -130,6 +130,9 @@ MAX_INVESTIGATION_FINDINGS = 40
 MAX_PUBLICATION_REPORT_BYTES = 64_000
 MAX_TEST_REPORT_CHARS = 50_000
 MAX_TEST_FAILURE_OUTPUT_CHARS = 6_000
+MAX_VALIDATION_SNAPSHOT_ENTRIES = 4_096
+MAX_VALIDATION_DIAGNOSIS_PATHS = 32
+MAX_VALIDATION_DIAGNOSIS_CHARS = 4_000
 MAX_DEPENDENCY_FILE_BYTES = 8 * 1024 * 1024
 DEPENDENCY_STATE_VERSION = 1
 
@@ -741,6 +744,103 @@ def _whitespace_check(worktree: Path, timeout: int) -> str:
     return ""
 
 
+def _validation_filesystem_snapshot(worktree: Path) -> dict[str, str]:
+    """Return a bounded map of safe regular files and directories in a worktree."""
+    root = worktree.resolve()
+    snapshot: dict[str, str] = {}
+    pending = [root]
+    inspected = 0
+    while pending and inspected < MAX_VALIDATION_SNAPSHOT_ENTRIES:
+        current = pending.pop()
+        try:
+            entries = os.scandir(current)
+        except OSError:
+            continue
+        try:
+            for entry in entries:
+                if inspected >= MAX_VALIDATION_SNAPSHOT_ENTRIES:
+                    break
+                inspected += 1
+                try:
+                    relative = Path(entry.path).relative_to(root).as_posix()
+                    if forbidden(relative):
+                        continue
+                    info = entry.stat(follow_symlinks=False)
+                except (OSError, ValueError):
+                    continue
+                if stat.S_ISDIR(info.st_mode):
+                    snapshot[relative] = "directory"
+                    pending.append(Path(entry.path))
+                elif stat.S_ISREG(info.st_mode):
+                    snapshot[relative] = "file"
+        finally:
+            entries.close()
+    return snapshot
+
+
+def _ignored_generated_artifact_diagnosis(
+    worktree: Path,
+    before: dict[str, str],
+    producers: dict[str, tuple[int, str, str]],
+    consumer_index: int,
+    consumer_command: str,
+    timeout: int,
+) -> str:
+    """Describe bounded ignored artifacts left by an earlier validation check."""
+    candidates = [
+        (path, kind, producer_index, producer_command)
+        for path, (producer_index, kind, producer_command) in producers.items()
+        if producer_index < consumer_index and path in before
+    ]
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda item: (item[1] != "file", -item[0].count("/"), item[0]))
+    candidates = candidates[:MAX_VALIDATION_DIAGNOSIS_PATHS]
+    git_executable = _GIT_EXECUTABLE or shutil.which("git") or "git"
+    try:
+        ignored = command(
+            [
+                git_executable, "check-ignore", "--no-index", "--verbose", "--",
+                *(path for path, *_ in candidates),
+            ],
+            worktree,
+            timeout=max(1, timeout),
+            check=False,
+            max_output_bytes=MAX_VALIDATION_DIAGNOSIS_CHARS * 2,
+        )
+    except (OSError, RuntimeError, ValueError):
+        return ""
+    if not ignored.stdout:
+        return ""
+    ignored_paths: dict[str, str] = {}
+    candidate_paths = {item[0] for item in candidates}
+    for line in ignored.stdout.splitlines():
+        source_pattern, separator, path = line.partition("\t")
+        if separator and path in candidate_paths:
+            ignored_paths[path] = f"ignore rule {source_pattern!r}"
+    if not ignored_paths:
+        return ""
+    details = []
+    producer_lookup = {
+        path: (producer, kind, producer_command)
+        for path, kind, producer, producer_command in candidates
+    }
+    for path in sorted(ignored_paths, key=lambda item: (item.count("/"), item)):
+        producer, kind, producer_command = producer_lookup[path]
+        details.append(
+            f"{path} ({kind}; {ignored_paths[path]}; produced by validation "
+            f"check {producer} {producer_command}; consumed by validation "
+            f"check {consumer_index} {consumer_command})"
+        )
+    diagnosis = (
+        "Validation cascade diagnosis: a Git-ignored/generated artifact from an "
+        "earlier check is still present and may be traversed or consumed by the "
+        "failing check. Likely configuration area: the validation commands and "
+        "the repository ignore rule.\n- " + "\n- ".join(details)
+    )
+    return redact_secrets(diagnosis)[:MAX_VALIDATION_DIAGNOSIS_CHARS]
+
+
 _EOF_REPAIR_READ_SIZE = 64 * 1024
 
 
@@ -912,6 +1012,7 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
     results: list[str] = []
     command_statuses: list[str] = []
     reported_commands: set[int] = set()
+    artifact_producers: dict[str, tuple[int, str, str]] = {}
     all_passed = True
     report_chars = 0
 
@@ -983,6 +1084,8 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
                 record_test_result(folder, passed=False, diff_check="not_run")
             return False, report.strip()
         display_command = safe_command_label(argv)
+        command_name = Path(argv[0]).name if argv else "<empty command>"
+        provenance_command = f"{display_command} ({command_name})"
         unavailable = preflight_test_commands(
             worktree, [argv], sandbox=sandbox, fail_fast=False,
             credential_names=credential_names, env=test_environment,
@@ -997,6 +1100,7 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
             continue
         _status_print(f"[TESTS] Running: {display_command}", flush=True)
         log = next_log(folder, "test-command") if folder else (Path(tempfile.gettempdir()) / f"agentic-tests-{os.getpid()}.log")
+        before_snapshot = _validation_filesystem_snapshot(worktree)
         try:
             result = streamed_command(argv, worktree, label="TESTS", log_file=log,
                                       timeout=_remaining_timeout(deadline, timeout),
@@ -1039,6 +1143,26 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
             _status_print(f"[TESTS] FAILED (exit {result.returncode})", flush=True)
         else:
             _status_print("[TESTS] PASSED", flush=True)
+        after_snapshot = _validation_filesystem_snapshot(worktree)
+        for path, kind in after_snapshot.items():
+            if path not in before_snapshot:
+                artifact_producers[path] = (index, kind, provenance_command)
+        if result.returncode:
+            diagnosis = _ignored_generated_artifact_diagnosis(
+                worktree,
+                before_snapshot,
+                artifact_producers,
+                index,
+                provenance_command,
+                _remaining_timeout(deadline, timeout) or 1,
+            )
+            if diagnosis:
+                append_report(diagnosis)
+                _status_print(
+                    "[TESTS] " + diagnosis,
+                    style_status_tokens=False,
+                    flush=True,
+                )
     if deadline is not None and time.monotonic() >= deadline:
         # A command may consume the remaining task budget.  Keep the final
         # report complete even when the deadline is observed only after the

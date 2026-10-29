@@ -1044,6 +1044,37 @@ class StreamingTests(unittest.TestCase):
         self.assertIn('Validation check 2 — failed', report)
         self.assertIn('Validation check 3 — passed', report)
 
+    def test_test_runner_diagnoses_ignored_artifact_cascade(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            root = Path(dirname)
+            sh('git', 'init', cwd=root)
+            (root / '.gitignore').write_text('generated/\n', encoding='utf-8')
+            commands = [
+                [
+                    sys.executable, '-c',
+                    "from pathlib import Path; "
+                    "Path('generated').mkdir(); "
+                    "Path('generated/trace.asset').write_text('trace')",
+                ],
+                [
+                    sys.executable, '-c',
+                    "from pathlib import Path; "
+                    "path = Path('generated/trace.asset'); "
+                    "print(f'traversed {path}'); raise SystemExit(7)",
+                ],
+            ]
+            passed, report = agentic.run_tests(root, commands, folder=root)
+
+        self.assertFalse(passed)
+        self.assertIn('Validation cascade diagnosis', report)
+        self.assertIn('generated/trace.asset', report)
+        self.assertIn('Git-ignored/generated', report)
+        command_label = (
+            f'<configured test command: 3 argv values> ({Path(sys.executable).name})'
+        )
+        self.assertIn(f'produced by validation check 1 {command_label}', report)
+        self.assertIn(f'consumed by validation check 2 {command_label}', report)
+
     def test_test_runner_marks_unavailable_commands_without_skipping_other_checks(self):
         with tempfile.TemporaryDirectory() as dirname:
             root = Path(dirname)
