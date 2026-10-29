@@ -148,6 +148,10 @@ READONLY_RG_TRAVERSAL_OPTIONS = {
 READONLY_RECURSIVE_OPTIONS = {
     "-r", "-R", "--recursive", "--dereference-recursive",
 }
+READONLY_LS_DEREFERENCE_OPTIONS = {
+    "--dereference-command-line",
+    "--dereference-command-line-symlink-to-dir",
+}
 RG_OPTIONS_WITH_VALUES = {
     "-A", "-B", "-C", "-e", "-f", "-j", "-m", "-M", "-t", "-T",
     "--after-context", "--before-context", "--colors", "--context",
@@ -616,7 +620,7 @@ def _readonly_inspection_command_allowed(
                 return False, f"{executable} recursive options are not allowed during read-only review"
         elif executable == "ls":
             short_flags = option[1:] if option.startswith("-") and not option.startswith("--") else ""
-            if option == "--recursive" or "R" in short_flags or any(
+            if option == "--recursive" or option in READONLY_LS_DEREFERENCE_OPTIONS or "R" in short_flags or any(
                 flag in short_flags for flag in ("H", "L")
             ):
                 return False, f"{executable} traversal options are not allowed during read-only review"

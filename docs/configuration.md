@@ -165,10 +165,10 @@ them. A failure preserves the completed run, worktree, and logs for manual
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
 | `task_source` | `github` or `local` | `github` | Selects where work requirements come from. GitHub mode uses issue numbers; local mode accepts `--task`, `--task-file`, or pasted tasks from `/run`. |
-| `test_commands` | array of argv arrays | required | Checks run inside the worktree. Each command must be an array such as `["go", "test", "./..."]`; shell strings are not accepted. |
-| `slow_test_commands` | array of argv arrays | `[]` | Additional checks run after `test_commands` when `--profile slow` is selected. Profiles select checks, not the provider model or reasoning setting. |
+| `test_commands` | array of argv arrays | required | Checks run inside the worktree. Each command must be an array such as `["go", "test", "./..."]`; shell strings are not accepted. Each command collection is limited to 64 commands and 64,000 UTF-8 bytes across all argv parts. |
+| `slow_test_commands` | array of argv arrays | `[]` | Additional checks run after `test_commands` when `--profile slow` is selected. Profiles select checks, not the provider model or reasoning setting. The collection is limited to 64 commands and 64,000 UTF-8 bytes across all argv parts. |
 | `dependency_files` | array of repository-relative paths | `[]` | Dependency manifests or lockfiles whose content controls the local dependency environment. Include every relevant manifest in a monorepo. |
-| `dependency_setup_commands` | array of argv arrays | `[]` | Explicit preparation commands run when `dependency_files` change, such as `["pnpm", "install", "--frozen-lockfile"]` or `["uv", "sync", "--frozen"]`. Requires `dependency_files`; shell strings are not accepted. |
+| `dependency_setup_commands` | array of argv arrays | `[]` | Explicit preparation commands run when `dependency_files` change, such as `["pnpm", "install", "--frozen-lockfile"]` or `["uv", "sync", "--frozen"]`. Requires `dependency_files`; shell strings are not accepted. The collection is limited to 64 commands and 64,000 UTF-8 bytes across all argv parts. |
 | `max_retries` | integer `0..5` | `3` | Extra developer attempts after the first attempt. `5` permits up to six total attempts. |
 | `ci_repair.max_attempts` | integer `1..5` | `2` | Maximum pushed repair cycles for `--pr N --repair-ci`, separate from `max_retries`. |
 | `ci_repair.poll_interval_seconds` | integer `1..86400` | `15` | Delay between bounded post-push CI status polls. |

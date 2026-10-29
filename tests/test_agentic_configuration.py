@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import nullcontext
 from pathlib import Path
@@ -28,6 +29,48 @@ class ConfigurationTests(unittest.TestCase):
             path.write_text("{" + " " * agentic_config.MAX_CONFIG_BYTES + "}", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "256000-byte limit"):
                 agentic.load_config(path)
+
+    def test_configured_command_collections_have_count_and_utf8_byte_limits(self):
+        limit = agentic_config.MAX_CONFIGURED_COMMAND_ARG_BYTES
+        max_count = agentic_config.MAX_CONFIGURED_COMMANDS
+        for field in (
+            'test_commands', 'slow_test_commands', 'dependency_setup_commands',
+        ):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temp:
+                path = Path(temp) / 'agent_config.json'
+                base = {'test_commands': [['true']]}
+                if field == 'test_commands':
+                    at_count = [['x']] * max_count
+                else:
+                    at_count = [['x']] * max_count
+                    base[field] = at_count
+                    if field == 'dependency_setup_commands':
+                        base['dependency_files'] = ['package.json']
+                if field == 'test_commands':
+                    base[field] = at_count
+                path.write_text(json.dumps(base), encoding='utf-8')
+                self.assertEqual(len(agentic.load_config(path)[field]), max_count)
+
+                over_count = dict(base)
+                over_count[field] = at_count + [['x']]
+                path.write_text(json.dumps(over_count), encoding='utf-8')
+                with self.assertRaisesRegex(ValueError, 'at most'):
+                    agentic.load_config(path)
+
+                exact = dict(base)
+                exact[field] = [['é' * (limit // 2)]]
+                path.write_text(json.dumps(exact), encoding='utf-8')
+                self.assertEqual(
+                    sum(len(part.encode('utf-8')) for command in exact[field] for part in command),
+                    limit,
+                )
+                agentic.load_config(path)
+
+                over_bytes = dict(base)
+                over_bytes[field] = [['é' * (limit // 2) + 'x']]
+                path.write_text(json.dumps(over_bytes), encoding='utf-8')
+                with self.assertRaisesRegex(ValueError, 'UTF-8 limit'):
+                    agentic.load_config(path)
 
     def setUp(self):
         # These tests exercise doctor command execution; model the new
@@ -1839,8 +1882,10 @@ class ConfigurationTests(unittest.TestCase):
             'image': 'test-image',
             'pass_env': ['OPENAI_API_KEY'],
         }
+        process = CompletedProcess([], 0)
+        process.communicate = lambda timeout=None: None
         with (patch('agentic_diagnostics.sandbox_command', return_value=['tool']) as sandbox_command,
-              patch('agentic_diagnostics.subprocess.run', return_value=CompletedProcess([], 0))):
+              patch('agentic_diagnostics.subprocess.Popen', return_value=process) as popen):
             result = agentic_diagnostics._run_configured_command(
                 ['tool'], Path('/tmp/worktree'), timeout=1, sandbox=sandbox,
             )
@@ -1849,6 +1894,31 @@ class ConfigurationTests(unittest.TestCase):
             ['tool'], Path('/tmp/worktree'), sandbox, pass_env=[],
             preserve_git_metadata=False,
         )
+        popen.assert_called_once()
+
+    @unittest.skipIf(os.name == 'nt', 'process-group assertion is POSIX-specific')
+    def test_doctor_timeout_stops_the_configured_command_process_group(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            child_pid = root / 'child.pid'
+            script = (
+                'import pathlib, subprocess, sys, time; '
+                'child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"]); '
+                f'pathlib.Path({str(child_pid)!r}).write_text(str(child.pid)); child.wait()'
+            )
+            result = agentic_diagnostics._run_configured_command(
+                [sys.executable, '-c', script], root, timeout=1, sandbox=None,
+            )
+            self.assertEqual(result['status'], 'timeout')
+            child = int(child_pid.read_text(encoding='utf-8'))
+            for _ in range(100):
+                try:
+                    os.kill(child, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.01)
+            else:
+                self.fail('doctor timeout left a child process running')
 
 
     def test_doctor_reports_network_policy_for_read_only_reviewers(self):

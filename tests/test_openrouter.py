@@ -25,6 +25,18 @@ from agentic_runner.git_policy import GIT_LOG_METADATA_FORMAT, hardened_git_envi
 
 
 class OpenRouterTests(unittest.TestCase):
+    def test_readonly_ls_rejects_long_dereference_aliases(self):
+        for option in (
+            '--dereference-command-line',
+            '--dereference-command-line-symlink-to-dir',
+        ):
+            with self.subTest(option=option):
+                allowed, reason = agentic_openrouter_tools._readonly_inspection_command_allowed(
+                    ['ls', option, '.'], None,
+                )
+                self.assertFalse(allowed)
+                self.assertIn('traversal options', reason)
+
     def test_openrouter_facade_uses_per_call_compatibility_adapters(self):
         observed = []
         state_lock = Lock()
