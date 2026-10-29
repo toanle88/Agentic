@@ -137,6 +137,8 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(agentic.init_repository(repo, create_agents=True), 0)
             config = agentic.load_config(repo / 'agent_config.json')
             self.assertEqual(config['test_commands'], [['go', 'test', './...']])
+            self.assertEqual(config['dependency_files'], [])
+            self.assertEqual(config['dependency_setup_commands'], [])
             self.assertEqual(config['security_mode'], 'trusted')
             self.assertFalse(config['sandbox']['enabled'])
 
@@ -168,6 +170,37 @@ class ConfigurationTests(unittest.TestCase):
             }))
             with self.assertRaisesRegex(ValueError, 'workflow_mode'):
                 agentic.load_config(path)
+
+    def test_dependency_preparation_settings_are_validated_and_normalized(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'agent_config.json'
+            path.write_text(json.dumps({
+                'test_commands': [['true']],
+                'dependency_files': ['package.json', 'sub/lockfile'],
+                'dependency_setup_commands': [['pnpm', 'install', '--frozen-lockfile']],
+            }))
+            config = agentic.load_config(path)
+            self.assertEqual(
+                config['dependency_files'], ['package.json', 'sub/lockfile']
+            )
+            self.assertEqual(
+                config['dependency_setup_commands'],
+                [['pnpm', 'install', '--frozen-lockfile']],
+            )
+
+            for field, value, message in (
+                ('dependency_files', ['../package.json'], 'relative paths'),
+                ('dependency_files', ['/tmp/package.json'], 'relative paths'),
+                ('dependency_setup_commands', [['pnpm', 'install']], 'requires'),
+            ):
+                invalid = {'test_commands': [['true']], field: value}
+                if field == 'dependency_setup_commands':
+                    invalid['dependency_files'] = []
+                path.write_text(json.dumps(invalid))
+                with self.subTest(field=field, value=value), self.assertRaisesRegex(
+                    ValueError, message,
+                ):
+                    agentic.load_config(path)
 
     def test_auto_publish_defaults_to_false_and_requires_a_boolean(self):
         with tempfile.TemporaryDirectory() as temp:

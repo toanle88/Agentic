@@ -110,6 +110,10 @@ Runtime state is controlled separately from project configuration. Use `--state-
     ["pnpm", "run", "build:web"],
     ["pnpm", "run", "contract:check"]
   ],
+  "dependency_files": ["package.json", "pnpm-lock.yaml"],
+  "dependency_setup_commands": [
+    ["pnpm", "install", "--frozen-lockfile"]
+  ],
   "slow_test_commands": [
     ["make", "persistence-check"],
     ["pnpm", "run", "test:a11y"]
@@ -158,6 +162,8 @@ them. A failure preserves the completed run, worktree, and logs for manual
 | `task_source` | `github` or `local` | `github` | Selects where work requirements come from. GitHub mode uses issue numbers; local mode accepts `--task`, `--task-file`, or pasted tasks from `/run`. |
 | `test_commands` | array of argv arrays | required | Checks run inside the worktree. Each command must be an array such as `["go", "test", "./..."]`; shell strings are not accepted. |
 | `slow_test_commands` | array of argv arrays | `[]` | Additional checks run after `test_commands` when `--profile slow` is selected. Profiles select checks, not the provider model or reasoning setting. |
+| `dependency_files` | array of repository-relative paths | `[]` | Dependency manifests or lockfiles whose content controls the local dependency environment. Include every relevant manifest in a monorepo. |
+| `dependency_setup_commands` | array of argv arrays | `[]` | Explicit preparation commands run when `dependency_files` change, such as `["pnpm", "install", "--frozen-lockfile"]` or `["uv", "sync", "--frozen"]`. Requires `dependency_files`; shell strings are not accepted. |
 | `max_retries` | integer `0..5` | `3` | Extra developer attempts after the first attempt. `5` permits up to six total attempts. |
 | `ci_repair.max_attempts` | integer `1..5` | `2` | Maximum pushed repair cycles for `--pr N --repair-ci`, separate from `max_retries`. |
 | `ci_repair.poll_interval_seconds` | integer `1..86400` | `15` | Delay between bounded post-push CI status polls. |
@@ -179,6 +185,14 @@ them. A failure preserves the completed run, worktree, and logs for manual
 | `developer` | object | Codex defaults | Provider settings for the coding agent. |
 | `reviewer` | object | Codex defaults | Provider settings for the independent reviewer. |
 | `investigator` | object | Reviewer settings | Provider settings for read-only issue investigation and repository audits. If omitted, investigator settings inherit from the effective reviewer settings. |
+
+When a retry changes a configured dependency file, Agentic compares its
+fingerprint with the last recorded preparation. If setup commands are
+configured, they run before validation; otherwise validation is marked
+unavailable instead of using a stale environment. Agentic does not guess or
+delete language-specific directories such as `node_modules`, `.venv`, `target`,
+or `vendor`. Setup failures are recorded as environment blockers and are not
+sent through code-repair retries.
 
 Each provider object supports these fields:
 

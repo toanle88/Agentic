@@ -13,7 +13,7 @@ import shutil
 import stat
 import subprocess
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -125,6 +125,44 @@ def _validate_host(value: Any, field: str, *, allow_none: bool = True) -> str | 
 def _effective_timeout(value: int | None, default: int) -> int:
     """Turn legacy ``null`` timeout settings into safe runtime defaults."""
     return default if value is None else value
+
+
+def _validate_argv_commands(value: Any, field: str) -> list[list[str]]:
+    """Validate an optional list of literal argv commands."""
+    if not isinstance(value, list) or not all(
+        isinstance(command, list) and command
+        and all(isinstance(part, str) and part for part in command)
+        for command in value
+    ):
+        raise ValueError(f"{field} must be a list of nonempty argv arrays")
+    return value
+
+
+def _validate_dependency_files(value: Any) -> list[str]:
+    """Validate repository-relative dependency input paths."""
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) and item.strip() for item in value
+    ):
+        raise ValueError("dependency_files must be a list of nonempty relative paths")
+    paths: list[str] = []
+    for item in value:
+        candidate = Path(item)
+        posix_candidate = PurePosixPath(item)
+        windows_candidate = PureWindowsPath(item)
+        if (
+            candidate.is_absolute()
+            or posix_candidate.is_absolute()
+            or windows_candidate.is_absolute()
+            or ".." in candidate.parts
+            or ".." in posix_candidate.parts
+            or ".." in windows_candidate.parts
+        ):
+            raise ValueError("dependency_files must contain repository-relative paths")
+        normalized = candidate.as_posix()
+        if normalized in {"", "."} or normalized in paths:
+            raise ValueError("dependency_files must contain unique file paths")
+        paths.append(normalized)
+    return paths
 
 
 def validate_openrouter_base_url(
@@ -448,6 +486,14 @@ def load_config(path: Path) -> dict[str, Any]:
         for c in slow_commands
     ):
         raise ValueError("slow_test_commands must be a list of argv arrays")
+    dependency_files = _validate_dependency_files(data.get("dependency_files", []))
+    dependency_setup_commands = _validate_argv_commands(
+        data.get("dependency_setup_commands", []), "dependency_setup_commands",
+    )
+    if dependency_setup_commands and not dependency_files:
+        raise ValueError(
+            "dependency_setup_commands requires at least one dependency_files entry"
+        )
     retries = data.get("max_retries", 3)
     max_files = data.get("max_files")
     codex_timeout = data.get("codex_timeout_seconds")
@@ -508,6 +554,8 @@ def load_config(path: Path) -> dict[str, Any]:
         "automation": {"auto_publish": auto_publish},
         "test_commands": commands,
         "slow_test_commands": slow_commands,
+        "dependency_files": dependency_files,
+        "dependency_setup_commands": dependency_setup_commands,
         "max_retries": retries,
         "max_files": max_files,
         "codex_timeout_seconds": codex_timeout,

@@ -130,6 +130,151 @@ MAX_INVESTIGATION_FINDINGS = 40
 MAX_PUBLICATION_REPORT_BYTES = 64_000
 MAX_TEST_REPORT_CHARS = 50_000
 MAX_TEST_FAILURE_OUTPUT_CHARS = 6_000
+MAX_DEPENDENCY_FILE_BYTES = 8 * 1024 * 1024
+DEPENDENCY_STATE_VERSION = 1
+
+
+def _dependency_fingerprint(worktree: Path, dependency_files: list[str]) -> str | None:
+    """Hash configured dependency inputs without reading outside the worktree."""
+    if not dependency_files:
+        return None
+    root = worktree.resolve()
+    digest = hashlib.sha256()
+    for relative in sorted(dependency_files):
+        path = worktree / relative
+        try:
+            resolved = path.resolve(strict=False)
+            resolved.relative_to(root)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Dependency input is outside the worktree: {relative}"
+            ) from exc
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        try:
+            if not path.is_file():
+                digest.update(b"missing-or-not-a-file\0")
+                continue
+            size = path.stat().st_size
+            if size > MAX_DEPENDENCY_FILE_BYTES:
+                raise RuntimeError(
+                    f"Dependency input is too large to fingerprint: {relative}"
+                )
+            with path.open("rb") as source:
+                while chunk := source.read(1024 * 1024):
+                    digest.update(chunk)
+        except FileNotFoundError:
+            digest.update(b"missing\0")
+    return digest.hexdigest()
+
+
+def _load_dependency_fingerprint(
+    folder: Path | None, dependency_files: list[str],
+) -> str | None:
+    if folder is None:
+        return None
+    raw = read_text_bounded(folder / "dependency-state.json", 32_000)
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    fingerprint = value.get("fingerprint") if isinstance(value, dict) else None
+    version = value.get("version") if isinstance(value, dict) else None
+    files = value.get("files") if isinstance(value, dict) else None
+    if (
+        version != DEPENDENCY_STATE_VERSION
+        or not isinstance(fingerprint, str)
+        or not isinstance(files, list)
+        or files != list(dependency_files)
+    ):
+        return None
+    return fingerprint
+
+
+def _record_dependency_fingerprint(
+    folder: Path | None, dependency_files: list[str], fingerprint: str | None,
+) -> None:
+    if folder is None or fingerprint is None:
+        return
+    atomic_write_json(folder / "dependency-state.json", {
+        "version": DEPENDENCY_STATE_VERSION,
+        "files": list(dependency_files),
+        "fingerprint": fingerprint,
+    })
+
+
+def _prepare_dependency_state(
+    worktree: Path,
+    folder: Path | None,
+    dependency_files: list[str],
+    setup_commands: list[list[str]],
+    *,
+    test_environment: dict[str, str],
+    redaction_values: list[str],
+    sandbox: dict[str, Any] | None,
+    deadline: float | None,
+    timeout: int | None,
+    verbose: bool,
+) -> tuple[str | None, str | None, str]:
+    """Prepare explicitly configured dependencies when their inputs change."""
+    try:
+        fingerprint = _dependency_fingerprint(worktree, dependency_files)
+    except (OSError, RuntimeError, TypeError) as exc:
+        return None, "dependency inputs could not be read", str(exc)
+    if fingerprint is None:
+        return None, None, ""
+    previous = _load_dependency_fingerprint(folder, dependency_files)
+    if previous == fingerprint:
+        return fingerprint, None, ""
+    if not setup_commands:
+        if previous is None:
+            return fingerprint, None, ""
+        return (
+            None,
+            "dependency inputs changed and no setup command is configured",
+            "Configure dependency_setup_commands for the listed dependency_files.",
+        )
+
+    for argv in setup_commands:
+        if deadline is not None and time.monotonic() >= deadline:
+            return None, "dependency setup deadline reached", ""
+        display = f"<configured dependency setup command: {len(argv)} argv values>"
+        unavailable = preflight_test_commands(
+            worktree, [argv], sandbox=sandbox, fail_fast=False, env=test_environment,
+        )
+        if unavailable:
+            return None, "dependency setup command unavailable", unavailable[0]
+        _status_print(f"[TESTS] Preparing dependencies: {display}", flush=True)
+        log = (
+            next_log(folder, "dependency-setup")
+            if folder is not None
+            else Path(tempfile.gettempdir()) / f"agentic-dependency-setup-{os.getpid()}.log"
+        )
+        try:
+            result = streamed_command(
+                argv, worktree, label="DEPENDENCIES", log_file=log,
+                timeout=_remaining_timeout(deadline, timeout), heartbeat=15,
+                sandbox=sandbox, sandbox_pass_env=[], metrics_folder=folder,
+                verbose=verbose, display_output=verbose, env=test_environment,
+                redaction_values=redaction_values,
+                preserve_git_metadata=command_uses_git_metadata(argv),
+            )
+        except RuntimeError as exc:
+            return None, "dependency setup command could not start", str(exc)
+        if result.returncode:
+            diagnostic = str(result.stdout or "").strip()
+            if len(diagnostic) > MAX_TEST_FAILURE_OUTPUT_CHARS:
+                diagnostic = diagnostic[-MAX_TEST_FAILURE_OUTPUT_CHARS:]
+            return None, "dependency setup command failed", diagnostic
+
+    try:
+        fingerprint = _dependency_fingerprint(worktree, dependency_files)
+        _record_dependency_fingerprint(folder, dependency_files, fingerprint)
+    except (OSError, RuntimeError, TypeError) as exc:
+        return None, "dependency state could not be recorded", str(exc)
+    return fingerprint, None, ""
 
 
 def _valid_publication_repository_path(path: str) -> bool:
@@ -753,7 +898,10 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
               sandbox: dict[str, Any] | None = None,
               deadline: float | None = None,
               verbose: bool = False,
-              credential_names: list[str] | None = None) -> tuple[bool, str]:
+              credential_names: list[str] | None = None,
+              dependency_files: list[str] | None = None,
+              dependency_setup_commands: list[list[str]] | None = None,
+              ) -> tuple[bool, str]:
     def safe_command_label(argv: list[str]) -> str:
         """Describe configured checks without persisting literal arguments."""
         return f"<configured test command: {len(argv)} argv values>"
@@ -795,6 +943,35 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
         command_statuses.append(
             f"Validation check {index} — unavailable ({reason})"
         )
+
+    dependency_fingerprint, dependency_reason, dependency_evidence = (
+        _prepare_dependency_state(
+            worktree,
+            folder,
+            dependency_files or [],
+            dependency_setup_commands or [],
+            test_environment=test_environment,
+            redaction_values=redaction_values,
+            sandbox=sandbox,
+            deadline=deadline,
+            timeout=timeout,
+            verbose=verbose,
+        )
+    )
+    if dependency_reason:
+        for index in range(1, len(test_commands) + 1):
+            mark_unavailable(index, dependency_reason)
+        evidence = "\n".join(
+            item for item in (
+                "Dependency preparation was not completed.",
+                dependency_evidence,
+            ) if item
+        )
+        append_report(evidence)
+        _status_print(f"[TESTS] UNAVAILABLE ({dependency_reason})", flush=True)
+        if folder is not None:
+            record_test_result(folder, passed=False, diff_check="not_run")
+        return False, report_text().strip()
 
     for index, argv in enumerate(test_commands, start=1):
         if deadline is not None and time.monotonic() >= deadline:
@@ -895,6 +1072,18 @@ def run_tests(worktree: Path, test_commands: list[list[str]],
         if folder is not None:
             record_test_result(folder, passed=False, diff_check="failed")
         return False, report_text(f"git diff --check failed\n{whitespace_report}")
+    if dependency_fingerprint is not None:
+        try:
+            _record_dependency_fingerprint(
+                folder,
+                dependency_files or [],
+                _dependency_fingerprint(worktree, dependency_files or []),
+            )
+        except (OSError, RuntimeError, TypeError) as exc:
+            report = report_text(f"Dependency state could not be recorded: {exc}")
+            if folder is not None:
+                record_test_result(folder, passed=False, diff_check="passed")
+            return False, report.strip()
     append_report("git diff --check — passed")
     if all_passed:
         _status_print("[TESTS] All configured checks passed", flush=True)
@@ -980,6 +1169,17 @@ def retryable_test_failure(report: str) -> bool:
         "cannot bind",
         "no such file or directory",
         "not a valid path",
+        "unable to open database file",
+        "cannot use 'in' operator to search for 'directory' in undefined",
+        "headlessinstall",
+        "rundepsstatuscheck",
+        "err_pnpm_",
+        "npm err! code e",
+        "no required module provides package",
+        "missing go.sum entry",
+        "failed to resolve dependencies",
+        "could not resolve dependencies",
+        "could not find artifact",
     )
     return not any(marker in lower for marker in environment_markers)
 
@@ -2054,6 +2254,8 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
         deadline=deadline,
         verbose=verbose,
         credential_names=credential_names,
+        dependency_files=config.get("dependency_files", []),
+        dependency_setup_commands=config.get("dependency_setup_commands", []),
     )
     atomic_write_text(next_log(folder, "tests"), report)
     if not passed:

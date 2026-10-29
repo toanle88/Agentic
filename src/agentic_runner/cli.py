@@ -624,6 +624,8 @@ def _require_manual_completion_validation(
         deadline=deadline,
         verbose=verbose,
         credential_names=credential_environment_names(config),
+        dependency_files=config.get("dependency_files", []),
+        dependency_setup_commands=config.get("dependency_setup_commands", []),
     )
     if passed:
         return report
@@ -1264,6 +1266,8 @@ def init_repository(repo: Path, *, force: bool = False, create_agents: bool = Fa
         "automation": {"auto_publish": False},
         "test_commands": commands,
         "slow_test_commands": slow_commands,
+        "dependency_files": [],
+        "dependency_setup_commands": [],
         "max_retries": 3,
         "ci_repair": {
             "max_attempts": 2,
@@ -2232,6 +2236,8 @@ def execute_locked(args: argparse.Namespace, repo: Path) -> int:
                 deadline=task_deadline,
                 verbose=args.verbose,
                 credential_names=credential_environment_names(config),
+                dependency_files=config.get("dependency_files", []),
+                dependency_setup_commands=config.get("dependency_setup_commands", []),
             )
         if not passed:
             raise RuntimeError(f"Base tests are failing; retained worktree.\n{report[-2500:]}")
