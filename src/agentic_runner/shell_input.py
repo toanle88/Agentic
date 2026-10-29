@@ -56,11 +56,40 @@ class _InteractiveOutputState:
 
     def __init__(self) -> None:
         self.history: list[str] = []
+        self.startup_history_end = 0
+        self.rendered_history_end = 0
+        self.foreground_history_start: int | None = None
         self.cursor_column = 1
         self.cursor_wrap_pending = False
         self._cursor_columns: int | None = None
         self.live_status = False
         self.mode = TerminalMode.OUTPUT
+
+    def mark_startup_complete(self) -> None:
+        """Keep startup text out of the live foreground-output viewport."""
+        self.startup_history_end = len(self.history)
+        self.rendered_history_end = len(self.history)
+
+    def mark_history_rendered(self) -> None:
+        """Record the retained-history prefix already painted on screen."""
+        self.rendered_history_end = len(self.history)
+
+    def foreground_history(self) -> list[str]:
+        """Return output that belongs to the active foreground operation."""
+        start = (
+            self.foreground_history_start
+            if self.foreground_history_start is not None
+            else self.startup_history_end
+        )
+        return self.history[start:]
+
+    def mark_foreground_start(self) -> None:
+        """Exclude the submitted shell command from child-output redraws."""
+        self.foreground_history_start = len(self.history)
+
+    def clear_foreground_start(self) -> None:
+        """Return to the complete retained history after foreground output."""
+        self.foreground_history_start = None
 
     @property
     def normal_prompt_visible(self) -> bool:
@@ -133,6 +162,7 @@ class _InteractiveOutputState:
             output_text = self.append(text, ensure_newline, columns)
             sys.stdout.write(output_text)
             sys.stdout.flush()
+            self.mark_history_rendered()
 
     def write_transient(self, text: str) -> None:
         """Draw one replaceable status row without adding it to scrollback."""
@@ -167,6 +197,7 @@ class _ForegroundOutputState:
         self.finished = False
         self.live_status: str | None = None
         self.output_scroll_lines = 0
+        self._screen_initialized = False
 
     @staticmethod
     def _sanitize_prompt(prompt: str) -> str:
@@ -217,6 +248,12 @@ class _ForegroundOutputState:
             size = shutil.get_terminal_size(fallback=(80, 24))
             columns = max(1, size.columns)
             rows = max(1, size.lines)
+            if not self._screen_initialized:
+                # Foreground takeover replaces the startup screen. Clear the
+                # visible display once before reserving the output viewport;
+                # retained history remains available for replay and scrolling.
+                sys.stdout.write("\033[r\033[2J\033[H")
+                self._screen_initialized = True
             prompt_text = self._prompt_text()
             prompt_lines = self._prompt_lines(
                 prompt_text,
@@ -227,7 +264,7 @@ class _ForegroundOutputState:
             prompt_rows = min(rows, max(1, len(prompt_lines)))
             output_rows = max(0, rows - prompt_rows)
 
-            output_text = "".join(self.output_state.history)
+            output_text = "".join(self.output_state.foreground_history())
             if self.live_status:
                 if output_text and not output_text.endswith(("\n", "\r")):
                     output_text += "\n"
@@ -358,7 +395,7 @@ class _ForegroundOutputState:
             )
             output_rows = max(0, rows - prompt_rows)
             output_lines = _output_history_lines(
-                "".join(self.output_state.history), columns
+                "".join(self.output_state.foreground_history()), columns
             )
             max_scroll = max(0, len(output_lines) - output_rows)
             page = max(1, output_rows - 1)
@@ -385,6 +422,12 @@ class _ForegroundOutputState:
             self.input_cursor = 0
             self.live_status = None
             self.output_scroll_lines = 0
+            self.output_state.clear_foreground_start()
+            # Foreground rendering clears the visible screen.  The next
+            # normal prompt must redraw the post-startup transcript once.
+            self.output_state.rendered_history_end = (
+                self.output_state.startup_history_end
+            )
             self.mode = TerminalMode.OUTPUT
             self.output_state.set_mode(TerminalMode.OUTPUT)
             sys.stdout.write("\033[r")
@@ -406,6 +449,7 @@ def _begin_foreground_output(
         if output_state is None:
             return None, None
         previous = _ACTIVE_INTERACTIVE_OUTPUT
+        output_state.mark_foreground_start()
         foreground = _ForegroundOutputState(output_state, mode)
         output_state.set_mode(mode)
         _ACTIVE_INTERACTIVE_OUTPUT = foreground.write
@@ -422,6 +466,20 @@ def _activate_interactive_output(
         previous = _ACTIVE_INTERACTIVE_OUTPUT
         _ACTIVE_INTERACTIVE_OUTPUT = state.write_without_editor
         return previous
+
+
+def _reset_terminal_scroll_region() -> None:
+    """Restore the full terminal viewport after an interrupted renderer."""
+    if os.environ.get("AGENTIC_PLAIN"):
+        return
+    if not getattr(sys.stdout, "isatty", lambda: False)():
+        return
+    with _OUTPUT_LOCK:
+        # A killed or interrupted foreground run may leave its DECSTBM
+        # scrolling region active.  Reset it before writing the next startup
+        # screen, otherwise the banner can be clipped at the stale margin.
+        sys.stdout.write("\033[r")
+        sys.stdout.flush()
 
 
 def _restore_interactive_output(
@@ -1175,13 +1233,26 @@ def _interactive_input(
     candidates: list[tuple[str, str]] = []
     output_state = output_state or _InteractiveOutputState()
     output_state.set_mode(terminal_mode)
-    output_history = output_state.history
     output_scroll_lines = 0
     input_completed = False
+    # Output written between prompt iterations is already visible on the
+    # terminal.  Only redraw output that arrives while this editor owns the
+    # viewport; otherwise the next prompt duplicates direct shell output such
+    # as /help and foreground completion messages.
+    live_history_start = output_state.rendered_history_end
 
     hist_entries = list(history) if history else []
     hist_index = len(hist_entries)
     saved_input = ""
+
+    def _interactive_history() -> list[str]:
+        """Return the current viewport history without replaying old output."""
+        start = (
+            output_state.startup_history_end
+            if output_scroll_lines
+            else live_history_start
+        )
+        return output_state.history[start:]
 
     def _clear_previous_editor(buf: list[str]) -> None:
         """Clear the old bottom-anchored region from its current cursor."""
@@ -1239,6 +1310,7 @@ def _interactive_input(
             # editable rows. On short terminals, preserve the prompt, one
             # output row when history exists, and a small completion viewport
             # before spending rows on padding.
+            output_history = _interactive_history()
             output_history_text = "".join(output_history)
             output_lines = _output_history_lines(output_history_text, columns)
             output_reserve = min(1, len(output_lines)) if output_history_text else 0
@@ -1413,6 +1485,8 @@ def _interactive_input(
             buf.append(f"\033[{max(1, cursor_col)}G")
             sys.stdout.write("".join(buf))
             sys.stdout.flush()
+            if output_rows or not output_history:
+                output_state.mark_history_rendered()
             prev_dropdown_lines = len(dropdown_strings)
             prev_editor_lines = editor_lines
             prev_cursor_row = cursor_from_top
@@ -1456,6 +1530,7 @@ def _interactive_input(
 
             sys.stdout.write("\033[r")
             sys.stdout.flush()
+            output_state.mark_history_rendered()
             render()
 
     def scroll_output(delta: int) -> None:
@@ -1468,7 +1543,13 @@ def _interactive_input(
             output_rows = max(0, rows - prev_editor_lines)
             if not output_rows:
                 return
-            output_lines = _output_history_lines("".join(output_history), columns)
+            # Scrolling is an explicit request to inspect the complete
+            # retained post-startup transcript, including output that was
+            # already painted before this prompt iteration began.
+            output_lines = _output_history_lines(
+                "".join(output_state.history[output_state.startup_history_end:]),
+                columns,
+            )
             max_scroll = max(0, len(output_lines) - output_rows)
             page = max(1, output_rows - 1)
             output_scroll_lines = max(
@@ -1523,6 +1604,7 @@ def _interactive_input(
                     sys.stdout.write(f"\033[{prev_editor_lines - 1 - prev_cursor_row}B")
                 sys.stdout.write("\r\n")
             sys.stdout.flush()
+            output_state.mark_history_rendered()
 
     reader_factory = key_reader_factory or _KeyReader
     resize_handler_previous = None
@@ -2133,8 +2215,12 @@ def _help_line(line: str) -> str:
 def _print_help() -> None:
     """Print width-aware command help with terminal-only presentation."""
     columns = max(1, shutil.get_terminal_size(fallback=(80, 24)).columns)
-    for line in _render_help_lines(columns):
-        _write_shell_output(_help_line(line) + "\n")
+    # Emit the startup screen as one output operation.  A foreground stream
+    # may otherwise interleave between help rows and make the initial screen
+    # look truncated or overwrite the banner.
+    _write_shell_output(
+        "".join(_help_line(line) + "\n" for line in _render_help_lines(columns))
+    )
 
 
 def _fit_terminal_text(text: str, width: int) -> str:
@@ -2164,9 +2250,15 @@ def _welcome_banner(repo: Path, state_dir: Path | None = None,
                     config: Path | None = None, active_jobs: int = 0,
                     previous_jobs: int = 0) -> None:
     """Print the interactive shell welcome screen."""
+    _reset_terminal_scroll_region()
+    lines: list[str] = []
+
     def write_line(text: str = "") -> None:
-        """Send banner lines through the retained interactive output path."""
-        _write_shell_output(text + "\n")
+        """Collect banner lines before one atomic terminal write."""
+        lines.append(text)
+
+    def flush_banner() -> None:
+        _write_shell_output("".join(line + "\n" for line in lines))
 
     columns = shutil.get_terminal_size(fallback=(80, 24)).columns
     # A framed banner is useful on normal terminals, but should not wrap on
@@ -2181,6 +2273,7 @@ def _welcome_banner(repo: Path, state_dir: Path | None = None,
         if previous_jobs:
             write_line(_shell_paint(f"{previous_jobs} previous job(s); use /ps --all to inspect.", "33"))
         write_line(_shell_paint("Use /help for commands. Jobs continue after /quit.", "90"))
+        flush_banner()
         return
 
     width = min(columns, 88)
@@ -2222,6 +2315,7 @@ def _welcome_banner(repo: Path, state_dir: Path | None = None,
     if previous_jobs:
         write_line(_shell_paint("Tip: use /ps --all to inspect jobs from previous sessions.", "33"))
     write_line()
+    flush_banner()
 
 
 # Explicitly export private compatibility helpers to the facade.

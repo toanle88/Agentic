@@ -230,7 +230,26 @@ def develop(
                     reason=reason, logs_path=folder,
                 )
                 return True
-            continue
+            reason = (
+                "Developer provider invocation failed; retries skipped.\n"
+                + _result_text(message[-3000:])
+            )
+            record_workflow_outcome(
+                folder, approved=False, attempts=attempt + 1,
+                first_pass=False, review_findings=review_findings_seen,
+            )
+            next_action = _resume_action(issue, folder)
+            record_result(
+                folder, "BLOCKED", attempts=attempt + 1,
+                max_retries=config["max_retries"], reason=reason,
+                worktree=run.worktree, next_action=next_action,
+            )
+            print_run_summary(
+                run, "BLOCKED", next_action,
+                attempts=attempt + 1, max_retries=config["max_retries"],
+                reason=reason, logs_path=folder,
+            )
+            return True
         developer_report = message.strip()
         if developer_report:
             _status_print(
@@ -300,7 +319,9 @@ def develop(
                 reason=_result_text(f"{resume_reason} {developer_summary}".strip()),
                 logs_path=folder,
             )
-            return True
+            # A no-op is a terminal outcome for ordinary development, but a
+            # CI repair must not treat the unchanged PR as a successful fix.
+            return False if repair_mode else True
         except RuntimeError:
             # Policy violations, malformed diff, or mid-review mutation are not model-retryable.
             raise
@@ -336,10 +357,9 @@ def develop(
         if verdict:
             review_findings_seen += len(verdict.get("findings", []))
             unchanged_patch = bool(digest) and digest == last_rejected_digest
-            repeated_finding = bool(verdict.get("_repeated_findings"))
             findings = finding_texts(verdict.get("findings", []))
             if (not verdict.get("approved") and digest and findings
-                    and (unchanged_patch or repeated_finding)):
+                    and unchanged_patch):
                 reason = _review_reason(verdict)
                 record_blocked(
                     folder, digest, findings, attempts=attempt + 1,

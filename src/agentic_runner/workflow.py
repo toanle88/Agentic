@@ -2460,8 +2460,30 @@ def verify_and_review(run: Run, issue: Issue, base: str, config: dict[str, Any],
         )
         return False, report, {}, "", ""
     base_sha, digest, summary = prepare_patch(run.worktree, base, config["max_files"])
+    display_label = "Proposed changes"
+    display_summary = summary
+    if repair_mode and review_base_sha:
+        # A CI repair runs on an existing PR.  The publication patch is still
+        # compared with the target branch above, but the reviewer and user
+        # need to see only the delta introduced by this repair attempt.
+        repair_summary = git(
+            run.worktree, "-c", "diff.external=", "diff",
+            "--no-ext-diff", "--no-textconv", "--cached", "--stat",
+            review_base_sha,
+        )
+        if not repair_summary.strip():
+            _status_print(
+                "[PATCH] No new repair changes; the existing PR patch is unchanged.",
+                style_status_tokens=False,
+                style_patch_stat=True,
+            )
+            raise NoCodeChangesError(
+                "No new CI-repair changes compared to the current PR head"
+            )
+        display_label = "New repair changes relative to current PR head"
+        display_summary = repair_summary
     _status_print(
-        "[PATCH] Proposed changes:\n" + summary,
+        f"[PATCH] {display_label}:\n" + display_summary,
         style_status_tokens=False,
         style_patch_stat=True,
     )

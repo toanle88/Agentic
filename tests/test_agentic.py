@@ -1426,6 +1426,17 @@ class PureTests(unittest.TestCase):
             self.assertEqual(agentic.main(['--issue', '42']), 1)
         execute.assert_called_once()
 
+    def test_main_handles_keyboard_interrupt_as_cancellation(self):
+        with (
+            patch('agentic.execute', side_effect=KeyboardInterrupt),
+            patch('agentic.record_diagnostic') as record_diagnostic,
+            patch('sys.stderr', new_callable=io.StringIO) as stderr,
+        ):
+            self.assertEqual(agentic.main(['--issue', '42']), 0)
+        self.assertIn('[CANCEL] Cancelled by Ctrl-C', stderr.getvalue())
+        record_diagnostic.assert_called_once()
+        self.assertEqual(record_diagnostic.call_args.args[0], 'cancelled')
+
     def test_pr_repair_does_not_fall_into_interactive_shell(self):
         with patch('agentic.execute', return_value=0) as execute:
             self.assertEqual(agentic.main(['--pr', '123', '--repair-ci']), 0)

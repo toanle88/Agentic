@@ -344,7 +344,7 @@ class StreamingTests(unittest.TestCase):
             'DEVELOPER': '36', 'REVIEW': '35', 'TESTS': '34', 'RETRY': '33',
             'GIT': '33', 'PATCH': '95', 'ERROR': '31', 'RESULT': '31',
             'COST': '90', 'NO_CHANGES': '33', 'CANCEL': '33',
-            'DOCTOR': '36', 'TIMEOUT': '33', 'BLOCKED': '33', 'STOP': '33',
+            'DOCTOR': '36', 'CI-REPAIR': '33', 'TIMEOUT': '33', 'BLOCKED': '33', 'STOP': '33',
             'INVESTIGATION': '95', 'INVESTIGATOR': '95', 'AUDIT': '95',
         }
         with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \

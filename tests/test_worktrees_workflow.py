@@ -1184,6 +1184,30 @@ class WorkflowTests(_GitRepositoryTestCase):
         self.assertEqual(result['attempts'], 1)
 
 
+    def test_develop_does_not_retry_provider_invocation_failures(self):
+        run = agentic.create_worktree(self.repo, 'main', 41)
+        folder = agentic.logs_path(self.repo, run)
+        issue = agentic.Issue(41, 'Provider failure', 'Implement it')
+        config = {
+            'max_retries': 5,
+            'max_files': None,
+            'developer_agent': {'provider': 'codex'},
+        }
+        with (patch('agentic.run_agent', return_value=(
+                    False, 'authentication failed: provider is not logged in',
+              )) as run_agent,
+              patch('sys.stdout', new_callable=StringIO) as output):
+            self.assertTrue(agentic.develop(run, issue, 'main', config, folder))
+
+        run_agent.assert_called_once()
+        result = json.loads((folder / 'result.json').read_text(encoding='utf-8'))
+        self.assertEqual(result['status'], 'BLOCKED')
+        self.assertEqual(result['attempts'], 1)
+        self.assertIn('retries skipped', result['reason'])
+        self.assertIn('authentication failed', result['reason'])
+        self.assertIn('[RESULT] BLOCKED', output.getvalue())
+
+
     def test_develop_local_retry_exhaustion_reports_reusable_task_file_command(self):
         run = agentic.create_worktree(self.repo, 'main', 43)
         folder = agentic.logs_path(self.repo, run)
@@ -1471,7 +1495,7 @@ class WorkflowTests(_GitRepositoryTestCase):
                       output.getvalue())
 
 
-    def test_develop_blocks_repeated_finding_after_patch_change(self):
+    def test_develop_returns_repeated_finding_after_patch_change_to_developer(self):
         run = agentic.create_worktree(self.repo, 'main', 36)
         folder = agentic.logs_path(self.repo, run)
         issue = agentic.Issue(36, 'Repeated finding after edit', '')
@@ -1499,16 +1523,22 @@ class WorkflowTests(_GitRepositoryTestCase):
                 'findings': ['Wire the production adapter'],
                 '_repeated_findings': [{}],
             }, 'digest-two', 'base'),
+            (True, 'tests passed', {
+                'approved': True,
+                'summary': 'Good',
+                'findings': [],
+            }, 'digest-three', 'base'),
         ]
         with (patch('agentic.run_agent', side_effect=[
-                  (True, reports[0]), (True, reports[1]),
+                  (True, reports[0]), (True, reports[1]), (True, reports[1]),
               ]) as run_agent,
               patch('agentic.verify_and_review', side_effect=reviews)):
             self.assertTrue(agentic.develop(run, issue, 'main', config, folder))
-        self.assertEqual(run_agent.call_count, 2)
-        blocked = json.loads((folder / 'blocked.json').read_text())
-        self.assertEqual(blocked['status'], 'blocked')
-        self.assertEqual(blocked['patch_digest'], 'digest-two')
+        self.assertEqual(run_agent.call_count, 3)
+        third_prompt = run_agent.call_args_list[2].args[1]
+        self.assertIn('Wire the production adapter', third_prompt)
+        result = json.loads((folder / 'result.json').read_text())
+        self.assertEqual(result['status'], 'APPROVED')
 
 
     def test_offline_fake_provider_retries_failed_tests_and_approves_review(self):
