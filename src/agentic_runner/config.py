@@ -191,6 +191,11 @@ DEFAULT_TEST_TIMEOUT = 300
 DEFAULT_DEVELOPER_TIMEOUT = 600
 DEFAULT_REVIEWER_TIMEOUT = 300
 MAX_CONFIG_BYTES = 256_000
+# Keep each configured command profile bounded independently.  The byte budget
+# counts the UTF-8 bytes of every argv part, which is the data that reaches an
+# argv-only process launch (without shell quoting or separators).
+MAX_CONFIGURED_COMMANDS = 64
+MAX_CONFIGURED_COMMAND_ARG_BYTES = 64_000
 DEFAULT_TASK_TIMEOUT = 1800
 MAX_TASK_TIMEOUT = 86400
 DEFAULT_OPENROUTER_COMMAND_TIMEOUT = 300
@@ -220,12 +225,25 @@ def _effective_timeout(value: int | None, default: int) -> int:
 
 def _validate_argv_commands(value: Any, field: str) -> list[list[str]]:
     """Validate an optional list of literal argv commands."""
-    if not isinstance(value, list) or not all(
+    if not isinstance(value, list):
+        raise ValueError(f"{field} must be a list of nonempty argv arrays")
+    if len(value) > MAX_CONFIGURED_COMMANDS:
+        raise ValueError(
+            f"{field} may contain at most {MAX_CONFIGURED_COMMANDS} commands"
+        )
+    if not all(
         isinstance(command, list) and command
         and all(isinstance(part, str) and part for part in command)
         for command in value
     ):
         raise ValueError(f"{field} must be a list of nonempty argv arrays")
+    argv_bytes = sum(
+        len(part.encode("utf-8")) for command in value for part in command
+    )
+    if argv_bytes > MAX_CONFIGURED_COMMAND_ARG_BYTES:
+        raise ValueError(
+            f"{field} argv exceeds {MAX_CONFIGURED_COMMAND_ARG_BYTES}-byte UTF-8 limit"
+        )
     return value
 
 
@@ -565,18 +583,12 @@ def load_config(path: Path) -> dict[str, Any]:
     auto_publish = automation.get("auto_publish", False)
     if type(auto_publish) is not bool:
         raise ValueError("automation.auto_publish must be a boolean")
-    commands = data.get("test_commands")
-    if not isinstance(commands, list) or not commands or not all(
-        isinstance(c, list) and c and all(isinstance(part, str) and part for part in c)
-        for c in commands
-    ):
+    commands = _validate_argv_commands(data.get("test_commands"), "test_commands")
+    if not commands:
         raise ValueError("test_commands must be a nonempty list of argv arrays")
-    slow_commands = data.get("slow_test_commands", [])
-    if not isinstance(slow_commands, list) or not all(
-        isinstance(c, list) and c and all(isinstance(part, str) and part for part in c)
-        for c in slow_commands
-    ):
-        raise ValueError("slow_test_commands must be a list of argv arrays")
+    slow_commands = _validate_argv_commands(
+        data.get("slow_test_commands", []), "slow_test_commands",
+    )
     dependency_files = _validate_dependency_files(data.get("dependency_files", []))
     dependency_setup_commands = _validate_argv_commands(
         data.get("dependency_setup_commands", []), "dependency_setup_commands",

@@ -24,6 +24,7 @@ from .config import (
     sandbox_env_for_provider,
 )
 from .execution import _doctor_public_detail
+from .execution_stream import _process_group_kwargs, _stop_process_tree
 from .models import DEFAULT_GITHUB_HOST
 from .output import style_system_text, timestamped_status
 from .providers import (
@@ -74,19 +75,23 @@ def _run_configured_command(
     started = time.monotonic()
     if env is None:
         env, _ = restricted_test_environment()
+    process = None
     try:
-        process = subprocess.run(
+        process = subprocess.Popen(
             sandbox_command(
                 argv, cwd, sandbox, pass_env=[], preserve_git_metadata=False,
             ),
             cwd=cwd,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.STDOUT,
-            timeout=timeout,
-            check=False,
             env=env,
+            **_process_group_kwargs(),
         )
+        process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        if process is not None:
+            _stop_process_tree(process)
         return {
             "argv": list(argv),
             "status": "timeout",
