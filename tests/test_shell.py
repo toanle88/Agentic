@@ -867,10 +867,14 @@ class ShellTests(unittest.TestCase):
             finally:
                 agentic_shell_input._restore_interactive_output(previous)
 
-        self.assertIn('[CI-REPAIR] streamed output', ''.join(state.history))
+        self.assertIn(
+            '[CI-REPAIR] streamed output',
+            agentic_shell_input.strip_ansi(''.join(state.history)),
+        )
         self.assertNotIn('fake-agentic', output.getvalue())
-        viewport = output.getvalue().index('\033[1;7r')
-        self.assertGreater(output.getvalue().index('[CI-REPAIR] starting'), viewport)
+        rendered = output.getvalue()
+        viewport = rendered.index('\033[1;7r')
+        self.assertGreater(rendered.index('starting'), viewport)
 
 
     def test_welcome_banner_does_not_emit_color_when_output_is_not_a_terminal(self):
