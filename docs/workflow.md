@@ -420,7 +420,9 @@ resume the run. This marker also stores the issue fingerprint and resumes when
 the issue changes, even if no code patch was produced previously.
 
 Final development results are explicit: `RETRY_EXHAUSTED` means every
-configured attempt was used and another repair may help; `BLOCKED` means the
+configured attempt was used and another repair may help; `CI_STATUS_UNKNOWN`
+means GitHub did not provide a reliable CI status within the bounded polling
+window, so no additional code-repair attempt was consumed; `BLOCKED` means the
 requirements, contract, or decision needed to proceed is missing; and
 `NO_CHANGES` means checks passed but the developer produced no patch. The
 terminal summary reports attempts used, the configured retry limit, the latest

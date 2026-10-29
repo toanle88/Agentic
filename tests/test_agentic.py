@@ -189,6 +189,7 @@ class PureTests(unittest.TestCase):
         rendered = output.getvalue()
         self.assertIn('\033[36m[SUMMARY]\033[0m', rendered)
         self.assertIn('\033[36m[DEVELOPER]\033[0m', rendered)
+        self.assertIn('\033[95m[INVESTIGATOR]\033[0m', rendered)
         self.assertIn('\033[35m[REVIEW]\033[0m', rendered)
         self.assertIn('\033[36munknown\033[0m', rendered)
         self.assertEqual(strip_ansi(rendered), plain_output.getvalue())

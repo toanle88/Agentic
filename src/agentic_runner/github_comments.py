@@ -52,6 +52,7 @@ _STATUS_PRESENTATION = {
     "unknown": ("❔", "Unknown"),
     "passed": ("✅", "Passed"),
     "RETRY_EXHAUSTED": ("⚠️", "Retry exhausted"),
+    "CI_STATUS_UNKNOWN": ("❔", "CI status unknown"),
     "NO_CHANGES": ("ℹ️", "No changes"),
     "FAILED": ("❌", "Failed"),
     "BLOCKED": ("⛔", "Blocked"),

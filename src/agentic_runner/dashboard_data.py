@@ -655,7 +655,7 @@ def _result(folder: Path) -> dict[str, Any] | None:
         return None
     status = value.get("status")
     if not isinstance(status, str) or status not in {
-        "APPROVED", "RETRY_EXHAUSTED", "BLOCKED", "NO_CHANGES",
+        "APPROVED", "RETRY_EXHAUSTED", "CI_STATUS_UNKNOWN", "BLOCKED", "NO_CHANGES",
     }:
         return None
     return value
@@ -1102,6 +1102,8 @@ def _run_snapshot(
         action_reasons.append("rejected review")
     if result is not None and result.get("status") == "RETRY_EXHAUSTED":
         action_reasons.append("retries exhausted")
+    if result is not None and result.get("status") == "CI_STATUS_UNKNOWN":
+        action_reasons.append("CI status unavailable")
     if result is not None and result.get("status") == "NO_CHANGES":
         action_reasons.append("no code changes")
     if publication_state == "pending":

@@ -659,23 +659,43 @@ def poll_ci(
     if not expected_head_sha:
         raise RuntimeError("Cannot monitor CI without the pushed PR head SHA")
     started = monotonic()
+
+    def retry_status_query() -> bool:
+        """Wait for the bounded poll window before retrying a GitHub query."""
+        remaining = timeout_seconds - (monotonic() - started)
+        if remaining <= 0:
+            return False
+        sleep(min(interval_seconds, max(0.1, remaining)))
+        return True
+
     while True:
-        head = _gh_json(repo, [
-            "pr", "view", str(pull_request.number), "--repo", github_repo,
-            "--json", "headRefName,headRefOid",
-        ], github_host, run_command=run_command)
+        try:
+            head = _gh_json(repo, [
+                "pr", "view", str(pull_request.number), "--repo", github_repo,
+                "--json", "headRefName,headRefOid",
+            ], github_host, run_command=run_command)
+        except RuntimeError:
+            # A transient GraphQL/API failure is not evidence that the repair
+            # failed. Keep the bounded polling contract and report an explicit
+            # unknown state if GitHub never becomes readable.
+            if not retry_status_query():
+                return "status_unknown"
+            continue
         current_head = head.get("headRefOid") if isinstance(head, dict) else None
         current_branch = head.get("headRefName") if isinstance(head, dict) else None
         if current_head != expected_head_sha or current_branch != pull_request.head:
-            remaining = timeout_seconds - (monotonic() - started)
-            if remaining <= 0:
+            if not retry_status_query():
                 return "head_changed"
-            sleep(min(interval_seconds, max(0.1, remaining)))
             continue
-        raw = _gh_json(repo, [
-            "pr", "checks", str(pull_request.number), "--repo", github_repo,
-            "--json", "name,state,bucket",
-        ], github_host, run_command=run_command)
+        try:
+            raw = _gh_json(repo, [
+                "pr", "checks", str(pull_request.number), "--repo", github_repo,
+                "--json", "name,state,bucket",
+            ], github_host, run_command=run_command)
+        except RuntimeError:
+            if not retry_status_query():
+                return "status_unknown"
+            continue
         checks = raw if isinstance(raw, list) else []
         statuses = [
             (str(item.get("state", "")).casefold(), str(item.get("bucket", "")).casefold())
@@ -693,9 +713,8 @@ def poll_ci(
             for state, bucket in statuses
         ):
             return "failed"
-        if monotonic() - started >= timeout_seconds:
+        if not retry_status_query():
             return "timeout"
-        sleep(min(interval_seconds, max(0.1, timeout_seconds - (monotonic() - started))))
 
 
 def _truncation_event(reason: str) -> dict[str, str]:

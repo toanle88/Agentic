@@ -184,6 +184,64 @@ class CIRepairTests(unittest.TestCase):
             usage = json.loads((folder / "run.json").read_text(encoding="utf-8"))
             self.assertFalse(usage["workflow_metrics"]["approved"])
 
+    def test_unknown_remote_status_does_not_claim_retries_are_exhausted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            worktree = root / "worktree"
+            folder = root / "run"
+            repo.mkdir()
+            worktree.mkdir()
+            folder.mkdir()
+            (folder / "review-approval.json").write_text(
+                json.dumps({"status": "approved"}), encoding="utf-8",
+            )
+            (folder / "result.json").write_text(
+                json.dumps({"status": "APPROVED"}), encoding="utf-8",
+            )
+            config = {
+                "max_retries": 0,
+                "max_files": None,
+                "task_timeout_seconds": 60,
+                "test_commands": [["true"]],
+                "developer_agent": {"provider": "codex"},
+                "reviewer_agent": {"provider": "codex"},
+                "sandbox": {},
+                "ci_repair": {"max_attempts": 2, "poll_timeout_seconds": 1},
+            }
+
+            with (
+                patch.object(agentic_cli, "github_repo_from_remote", return_value="owner/repo"),
+                patch.object(agentic_cli, "_github_preflight"),
+                patch.object(agentic_cli, "get_pull_request", return_value=self.pr),
+                patch.object(agentic_cli, "find_worktree_for_branch",
+                             return_value=Run(None, self.pr.head, worktree)),
+                patch.object(agentic_cli, "logs_path", return_value=folder),
+                patch.object(agentic_cli, "worktree_lock", return_value=nullcontext()),
+                patch.object(agentic_cli, "verify_worktree_for_pr"),
+                patch.object(agentic_cli, "git", return_value=""),
+                patch.object(agentic_cli, "worktree_change_fingerprint", return_value="clean"),
+                patch.object(agentic_cli, "can_resume_dirty_worktree", return_value=False),
+                patch.object(agentic_cli, "record_issue_metadata"),
+                patch.object(agentic_cli, "record_security_policy"),
+                patch.object(agentic_cli, "fetch_ci_evidence", return_value=CIEvidence(
+                    "code/test", (), (), self.pr.head_sha,
+                )),
+                patch.object(agentic_cli, "test_commands_for_profile", return_value=[["true"]]),
+                patch.object(agentic_cli, "develop", return_value=True),
+                patch.object(agentic_cli, "_auto_publish_enabled", return_value=True),
+                patch.object(agentic_cli, "push_existing_pr", return_value="pushed-head"),
+                patch.object(agentic_cli, "poll_ci", return_value="status_unknown"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "could not be verified"):
+                    agentic_cli.repair_ci(repo, self.pr.number, config)
+
+            result = json.loads((folder / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["status"], "CI_STATUS_UNKNOWN")
+            self.assertEqual(result["attempts"], 1)
+            self.assertEqual(result["max_retries"], 2)
+            self.assertFalse((folder / "review-approval.json").exists())
+
     def test_github_preflight_uses_the_active_cli_environment(self):
         with patch("agentic_runner.cli.shutil.which", return_value="/usr/bin/gh") as which:
             with patch(
@@ -684,6 +742,25 @@ class CIRepairTests(unittest.TestCase):
                     sleep=lambda _: current_time.__setitem__(0, current_time[0] + 1),
                     monotonic=lambda: current_time[0]),
             "head_changed",
+        )
+
+    def test_poll_ci_reports_unknown_when_github_status_queries_keep_failing(self):
+        current_time = [0.0]
+
+        def failing_command(*args, **kwargs):
+            raise RuntimeError("GitHub GraphQL API unavailable")
+
+        self.assertEqual(
+            poll_ci(
+                Path("."), "owner/repo", self.pr, "github.test",
+                timeout_seconds=1, interval_seconds=1,
+                run_command=failing_command,
+                sleep=lambda seconds: current_time.__setitem__(
+                    0, current_time[0] + seconds,
+                ),
+                monotonic=lambda: current_time[0],
+            ),
+            "status_unknown",
         )
 
     def test_repair_limits_and_durable_event_history_are_bounded(self):
