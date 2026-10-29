@@ -27,7 +27,7 @@ from typing import Any, Iterable, NamedTuple
 from .review import finding_severity
 from .file_boundaries import _is_reparse_or_symbolic_link
 from .persistence import read_text_bounded, read_text_prefix, read_text_tail
-from .telemetry import read_issue_history, read_run_usage
+from .telemetry import read_issue_history, read_issue_snapshot, read_run_usage
 
 
 RUN_NAME = re.compile(
@@ -74,12 +74,16 @@ _RUN_SNAPSHOT_CACHE_LOCK = threading.RLock()
 _SNAPSHOT_FILES: contextvars.ContextVar[tuple[Path, ...] | None] = contextvars.ContextVar(
     "agentic_dashboard_snapshot_files", default=None,
 )
+_SNAPSHOT_INDEX_FILES: contextvars.ContextVar[tuple[Path, ...] | None] = contextvars.ContextVar(
+    "agentic_dashboard_snapshot_index_files", default=None,
+)
 
 
 class _FolderMetadata(NamedTuple):
     activity_ns: int | None
     signature: tuple[tuple[str, int, int, int | str], ...]
     files: tuple[Path, ...]
+    index_files: tuple[Path, ...]
 
 
 if os.name == "nt":
@@ -830,8 +834,9 @@ def _folder_metadata(folder: Path) -> _FolderMetadata:
     try:
         activity_ns = folder.stat().st_mtime_ns
     except OSError:
-        return _FolderMetadata(None, (), ())
+        return _FolderMetadata(None, (), (), ())
     files: list[tuple[int, str, Path]] = []
+    index_files: list[Path] = []
     signature: list[tuple[int, str, int, int | str]] = []
     # Keep the inventory digest independent of scandir order without retaining
     # one metadata tuple per artifact.
@@ -861,6 +866,8 @@ def _folder_metadata(folder: Path) -> _FolderMetadata:
                 signature_candidate = (
                     stat.st_mtime_ns, entry.name, stat.st_size, signature_change_time,
                 )
+                if NUMBERED_FILE.fullmatch(entry.name):
+                    index_files.append(folder / entry.name)
                 inventory_item = (
                     f"{entry.name}\0{stat.st_size}\0{stat.st_mtime_ns}\0"
                     f"{signature_change_time}\n"
@@ -884,7 +891,7 @@ def _folder_metadata(folder: Path) -> _FolderMetadata:
                 elif file_candidate > files[0]:
                     heapq.heapreplace(files, file_candidate)
     except OSError:
-        return _FolderMetadata(activity_ns, (), ())
+        return _FolderMetadata(activity_ns, (), (), ())
 
     bounded_signature = [
         (name, size, modified, change_time)
@@ -903,7 +910,9 @@ def _folder_metadata(folder: Path) -> _FolderMetadata:
     bounded_files = tuple(
         path for _, _, path in sorted(files, key=lambda item: (item[0], item[1]), reverse=True)
     )
-    return _FolderMetadata(activity_ns, tuple(bounded_signature), bounded_files)
+    return _FolderMetadata(
+        activity_ns, tuple(bounded_signature), bounded_files, tuple(index_files),
+    )
 
 
 def _folder_activity_ns(folder: Path) -> int | None:
@@ -935,7 +944,8 @@ def _run_snapshot(
         if all_files is None:
             all_files = _all_log_files(folder)
     all_files = list(all_files)
-    index = _numbered_file_index(all_files)
+    index_files = _SNAPSHOT_INDEX_FILES.get()
+    index = _numbered_file_index(index_files or all_files)
     investigation, investigation_path = _investigation(folder, index)
     audit, audit_path = _audit(folder)
     review, review_path = _review(folder, index)
@@ -1057,6 +1067,11 @@ def _run_snapshot(
         branch = f"agent/task-{task}-{match.group('task_token')}"
         issue_value = None
     raw_issue_metadata = usage.get("issue_metadata")
+    issue_body = ""
+    if issue_value is not None:
+        raw_issue_snapshot = read_issue_snapshot(folder)
+        if isinstance(raw_issue_snapshot, dict) and isinstance(raw_issue_snapshot.get("body"), str):
+            issue_body = raw_issue_snapshot["body"]
     if isinstance(raw_issue_metadata, dict) and issue_value is not None:
         issue_metadata: dict[str, Any] = {
             "number": issue_value,
@@ -1118,6 +1133,7 @@ def _run_snapshot(
         "publication": publication, "publication_state": publication_state,
         "action_required": bool(action_reasons), "action_reasons": action_reasons,
         "issue_metadata": issue_metadata,
+        "issue_body": issue_body,
         "issue_changes": read_issue_history(folder),
         "last_activity": _timestamp(last_activity) if last_activity else "unknown",
         "review": review, "blocked": blocked, "result": result, "tests": tests,
@@ -1165,7 +1181,7 @@ def collect_runs(logs_root: Path) -> list[dict[str, Any]]:
     runs: list[dict[str, Any]] = []
     for folder in selected_folders:
         cache_key = (root_key, folder.name)
-        metadata = metadata_by_folder.get(folder.name, _FolderMetadata(None, (), ()))
+        metadata = metadata_by_folder.get(folder.name, _FolderMetadata(None, (), (), ()))
         snapshot: dict[str, Any] | None = None
         for _ in range(_MAX_SNAPSHOT_RETRIES):
             normalized_signature = metadata.signature
@@ -1176,9 +1192,11 @@ def collect_runs(logs_root: Path) -> list[dict[str, Any]]:
                 break
 
             snapshot_token = _SNAPSHOT_FILES.set(metadata.files)
+            index_token = _SNAPSHOT_INDEX_FILES.set(metadata.index_files)
             try:
                 candidate = _run_snapshot(folder)
             finally:
+                _SNAPSHOT_INDEX_FILES.reset(index_token)
                 _SNAPSHOT_FILES.reset(snapshot_token)
             current_metadata = _folder_metadata(folder)
             current_signature = current_metadata.signature
