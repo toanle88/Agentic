@@ -983,6 +983,21 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("Next action", html)
         self.assertIn("suggestedCommand", html)
 
+    def test_dashboard_detail_renders_terminal_block_reason(self):
+        html = agentic_dashboard.render_dashboard([{
+            "id": "blocked-run",
+            "label": "Issue #35",
+            "status": "blocked",
+            "result": {
+                "status": "BLOCKED",
+                "reason": "Repeated identical test failure",
+            },
+        }], "demo", ".demo-agent-runs")
+
+        self.assertIn("Blocked reason", html)
+        self.assertIn("renderTerminalBlockReason", html)
+        self.assertIn("blocked-reason", html)
+
     def test_dashboard_token_sort_contract_uses_timestamp_and_run_id_tie_breaker(self):
         html = agentic_dashboard.render_dashboard([], "demo", ".demo-agent-runs")
         self.assertIn("recorded_at||invocation.timestamp||invocation.finished_at", html)
