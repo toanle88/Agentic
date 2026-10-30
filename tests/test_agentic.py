@@ -1,4 +1,5 @@
 """Offline tests: no GitHub or Codex credentials needed."""
+import datetime
 import json
 import io
 import os
@@ -173,16 +174,23 @@ class PureTests(unittest.TestCase):
             def isatty(self):
                 return True
 
+        class FixedDateTime(datetime.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 1, 1, 12, 0, 0, tzinfo=tz)
+
         with tempfile.TemporaryDirectory() as temp:
             plain_output = io.StringIO()
             run = agentic.Run(1, 'agent/issue-1-test', Path('/tmp/worktree'))
-            with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+            with patch('agentic_runner.output.datetime.datetime', FixedDateTime), \
+                 patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
                  patch.object(agentic.sys, 'stdout', plain_output):
                 agentic.print_run_summary(run, 'APPROVED', 'continue', logs_path=Path(temp))
 
             output = TTYBuffer()
             run = agentic.Run(1, 'agent/issue-1-test', Path('/tmp/worktree'))
-            with patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
+            with patch('agentic_runner.output.datetime.datetime', FixedDateTime), \
+                 patch.dict('os.environ', {'NO_COLOR': '', 'AGENTIC_PLAIN': ''}), \
                  patch.object(agentic.sys, 'stdout', output):
                 agentic.print_run_summary(run, 'APPROVED', 'continue', logs_path=Path(temp))
 

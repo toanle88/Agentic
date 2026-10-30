@@ -241,6 +241,20 @@ run.blocked && run.status !== \"no_changes\" && run.result?.status !== \"NO_CHAN
   document.querySelector("#theme").addEventListener("click",function(){document.documentElement.dataset.theme=document.documentElement.dataset.theme==="light"?"dark":"light"});
   document.querySelector("#refresh").addEventListener("click",refreshDashboard);
   document.querySelector("#export-json").addEventListener("click",function(){downloadSummary("json")});document.querySelector("#export-csv").addEventListener("click",function(){downloadSummary("csv")});
+  function renderTerminalBlockReason(){
+    var run=runs.filter(function(item){return item.id===state.selected})[0], detail=document.querySelector("#detail");
+    if(!run||run.status!=="blocked"||!detail||detail.querySelector(".blocked-reason"))return;
+    var terminal=run.result||run.blocked||{}, reason=terminal.reason||terminal.summary||"No block reason recorded.";
+    var section=document.createElement("section"), heading=document.createElement("strong"), content=document.createElement("p");
+    section.className="callout rejected blocked-reason";
+    heading.textContent="Blocked reason";
+    content.textContent=reason;
+    section.append(heading,content);
+    var firstCallout=detail.querySelector(".callout");
+    if(firstCallout)firstCallout.insertAdjacentElement("afterend",section);else detail.prepend(section);
+  }
+  var renderRunDetail=renderDetail;
+  renderDetail=function(){renderRunDetail();renderTerminalBlockReason()};
   updateOptions();setView("dashboard");renderAll();if(/^https?:$/.test(location.protocol))window.setInterval(refreshDashboard,30000);
 })();
 </script>'''
