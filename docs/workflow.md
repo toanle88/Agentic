@@ -235,8 +235,11 @@ run folder. Older candidates, entries, and artifacts are omitted from that
 snapshot. Dashboard parsing, exports, and durable artifact reads retain their
 existing per-record byte limits. Git command output is capped at 8 MiB before
 it is materialized, so an oversized status or proposed diff fails closed
-instead of growing memory before prompt truncation. Large review prompts still
-retain the complete manifest/statistics within their documented prompt bounds.
+instead of growing memory before prompt truncation. Patch digesting streams the
+exact binary diff into its hash, does not materialize the complete diff, and
+fails closed at 256 MiB, so large binary patches remain supported without
+weakening the ordinary command-output bound. Large review prompts still retain
+the complete manifest/statistics within their documented prompt bounds.
 
 Review findings do not receive generated identifiers. Each transmitted finding
 retains a normalized requirement and action target, and exact duplicates with
