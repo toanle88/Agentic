@@ -6,7 +6,8 @@ The compatibility-facing agentic module re-exports these helpers.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+import codecs
 import datetime as dt
 import hashlib
 import json
@@ -53,6 +54,7 @@ AUDIT_KEY = hashlib.sha256(b"agentic-repository-audit-v1").hexdigest()[:12]
 MAX_SELECTION_RUNS = 5
 RELATIVE_WORKTREE_GIT = (2, 48, 0)
 MAX_COMMAND_OUTPUT_BYTES = 8 * 1024 * 1024
+MAX_DIGEST_OUTPUT_BYTES = 256 * 1024 * 1024
 MAX_LOCAL_TASK_BYTES = 256_000
 _GIT_SAFETY_CONFIG = GIT_SAFETY_CONFIG
 
@@ -343,14 +345,21 @@ def issue_fingerprint(issue: Issue) -> str:
 
 def _run_command(argv: list[str], cwd: Path, *, timeout: int = 180,
                  check: bool = True, env: dict[str, str] | None = None,
-                 max_output_bytes: int | None = None) -> subprocess.CompletedProcess[str]:
+                 max_output_bytes: int | None = None,
+                 output_consumer: Callable[[bytes], None] | None = None,
+                 ) -> subprocess.CompletedProcess[str]:
     """Subprocess without a shell; issue data never becomes shell code."""
     if max_output_bytes is None:
-        max_output_bytes = MAX_COMMAND_OUTPUT_BYTES
+        # Streamed consumers do not materialize command output, so they use
+        # the process timeout and consumer-specific safeguards instead of the
+        # normal in-memory output bound.
+        max_output_bytes = (
+            None if output_consumer is not None else MAX_COMMAND_OUTPUT_BYTES
+        )
     if max_output_bytes is not None and max_output_bytes < 1:
         raise ValueError("max_output_bytes must be positive")
     try:
-        if max_output_bytes is None:
+        if max_output_bytes is None and output_consumer is None:
             result = subprocess.run(argv, cwd=cwd, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, text=True, timeout=timeout,
                                     check=False, env=env)
@@ -376,16 +385,23 @@ def _run_command(argv: list[str], cwd: Path, *, timeout: int = 180,
                         if not chunk:
                             return
                         total += len(chunk)
-                        if total > max_output_bytes:
+                        if max_output_bytes is not None and total > max_output_bytes:
                             overflow = True
                             try:
                                 _stop_process_tree(process)
                             except OSError:
                                 pass
                             return
-                        chunks.append(chunk)
+                        if output_consumer is None:
+                            chunks.append(chunk)
+                        else:
+                            output_consumer(chunk)
                 except BaseException as exc:  # pragma: no cover - OS-specific pipe failures
                     read_error = exc
+                    try:
+                        _stop_process_tree(process)
+                    except OSError:
+                        pass
 
             reader = Thread(target=read_output, daemon=True)
             reader.start()
@@ -412,7 +428,10 @@ def _run_command(argv: list[str], cwd: Path, *, timeout: int = 180,
             if read_error is not None:
                 raise RuntimeError("Could not read command output") from read_error
             result = subprocess.CompletedProcess(
-                argv, returncode, b"".join(chunks).decode("utf-8", errors="replace"), None,
+                argv, returncode,
+                "" if output_consumer is not None
+                else b"".join(chunks).decode("utf-8", errors="replace"),
+                None,
             )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f"Could not execute {argv[0]!r}: {exc}") from exc
@@ -435,6 +454,7 @@ def _is_filter_probe(argv: list[str]) -> bool:
 def _hardened_git_command(
     argv: list[str], cwd: Path, *, timeout: int, check: bool,
     env: dict[str, str] | None, max_output_bytes: int | None,
+    output_consumer: Callable[[bytes], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run any Git argv through the repository-configuration safety boundary."""
     environment = hardened_git_environment(env)
@@ -451,22 +471,50 @@ def _hardened_git_command(
     return _run_command(
         hardened_git_argv(argv), cwd, timeout=timeout, check=check,
         env=environment, max_output_bytes=max_output_bytes,
+        output_consumer=output_consumer,
     )
 
 
 def command(argv: list[str], cwd: Path, *, timeout: int = 180,
             check: bool = True, env: dict[str, str] | None = None,
-            max_output_bytes: int | None = None) -> subprocess.CompletedProcess[str]:
+            max_output_bytes: int | None = None,
+            output_consumer: Callable[[bytes], None] | None = None,
+            ) -> subprocess.CompletedProcess[str]:
     """Run argv safely, routing every Git invocation through one dispatcher."""
     if _is_git_command(argv) and not _is_filter_probe(argv):
         return _hardened_git_command(
             argv, cwd, timeout=timeout, check=check, env=env,
-            max_output_bytes=max_output_bytes,
+            max_output_bytes=max_output_bytes, output_consumer=output_consumer,
         )
     return _run_command(
         argv, cwd, timeout=timeout, check=check, env=env,
-        max_output_bytes=max_output_bytes,
+        max_output_bytes=max_output_bytes, output_consumer=output_consumer,
     )
+
+
+def digest_command(argv: list[str], cwd: Path, *, timeout: int = 180,
+                   env: dict[str, str] | None = None,
+                   max_output_bytes: int | None = None) -> str:
+    """Hash command output incrementally without materializing it in memory."""
+    if max_output_bytes is None:
+        max_output_bytes = MAX_DIGEST_OUTPUT_BYTES
+    digest = hashlib.sha256()
+
+    # Match the historical command-result behavior: decode UTF-8 with
+    # replacement before hashing, while doing so incrementally across pipe
+    # chunk boundaries.
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
+    def consume(chunk: bytes) -> None:
+        digest.update(decoder.decode(chunk).encode("utf-8"))
+
+    command(
+        argv, cwd, timeout=timeout, env=env,
+        max_output_bytes=max_output_bytes,
+        output_consumer=consume,
+    )
+    digest.update(decoder.decode(b"", final=True).encode("utf-8"))
+    return digest.hexdigest()
 
 
 def git(repo: Path, *args: str, check: bool = True,
