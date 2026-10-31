@@ -5,6 +5,33 @@ import os
 from collections.abc import Mapping
 
 
+def validate_git_branch_name(branch: str) -> str:
+    """Validate a branch name using Git's ref-format restrictions.
+
+    Branch names are repository or GitHub-derived input. Keep this check local
+    so malformed input is rejected before any Git command receives it.
+    """
+    if not isinstance(branch, str) or not branch:
+        raise ValueError("base branch must be a non-empty Git branch name")
+    if branch.startswith("-"):
+        raise ValueError("base branch must not start with '-'")
+    if branch == "@" or ".." in branch or "@{" in branch or "//" in branch:
+        raise ValueError(f"invalid Git branch name: {branch!r}")
+    if branch.startswith("/") or branch.endswith("/") or branch.endswith("."):
+        raise ValueError(f"invalid Git branch name: {branch!r}")
+    if any(
+        part in {".", ".."}
+        or part.startswith(".")
+        or part.endswith(".lock")
+        for part in branch.split("/")
+    ):
+        raise ValueError(f"invalid Git branch name: {branch!r}")
+    forbidden = set(" ~^:?*[\\")
+    if any(char.isspace() or ord(char) < 32 or ord(char) == 127 or char in forbidden for char in branch):
+        raise ValueError(f"invalid Git branch name: {branch!r}")
+    return branch
+
+
 GIT_SAFETY_CONFIG = (
     "-c", "core.fsmonitor=false",
     "-c", f"core.hooksPath={os.devnull}",

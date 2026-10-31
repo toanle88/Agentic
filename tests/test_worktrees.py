@@ -90,6 +90,18 @@ class GitTest(_GitRepositoryTestCase):
                     'owner/repo',
                 )
 
+    def test_github_metadata_rejects_invalid_default_branch(self):
+        result = subprocess.CompletedProcess(
+            ['gh'], 0,
+            stdout=json.dumps({
+                'nameWithOwner': 'owner/repo',
+                'defaultBranchRef': {'name': '--upload-pack=evil'},
+            }),
+        )
+        with patch.object(agentic_worktrees, 'command', return_value=result):
+            with self.assertRaises(ValueError):
+                agentic_worktrees.github_metadata(self.repo)
+
     def test_create_discover_reuse_worktree_without_state_file(self):
         run = agentic.create_worktree(self.repo, 'main', 42)
         found = agentic.runs_for_issue(self.repo, 42)

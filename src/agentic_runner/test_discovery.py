@@ -639,10 +639,12 @@ def validate_test_candidates(
     restricted_environment, _ = restricted_test_environment(
         blocked_names=credential_names or (),
     )
+    operation_started = time.monotonic()
+    operation_deadline = operation_started + timeout
     for item in candidates[:MAX_CANDIDATES]:
         argv = list(item["argv"])
         started = time.monotonic()
-        deadline = started + timeout
+        deadline = operation_deadline
         base = {
             "argv": argv,
             "display": _display_command(argv),
@@ -658,14 +660,14 @@ def validate_test_candidates(
                 env=restricted_environment,
             )
             if module_timed_out:
-                results.append({**base, "status": "timeout", "detail": f"exceeded {timeout}s", "duration_seconds": timeout})
+                results.append({**base, "status": "timeout", "detail": f"discovery exceeded {timeout}s", "duration_seconds": timeout})
                 continue
             if not module_available:
                 results.append({**base, "status": "missing-dependency", "detail": f"Python module {argv[2]!r} is not installed"})
                 continue
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            results.append({**base, "status": "timeout", "detail": f"exceeded {timeout}s", "duration_seconds": timeout})
+            results.append({**base, "status": "timeout", "detail": f"discovery exceeded {timeout}s", "duration_seconds": timeout})
             continue
         try:
             returncode, output, timed_out = _run_candidate(
@@ -673,13 +675,13 @@ def validate_test_candidates(
                 env=None if sandbox_enabled else restricted_environment,
             )
         except subprocess.TimeoutExpired:
-            results.append({**base, "status": "timeout", "detail": f"exceeded {timeout}s", "duration_seconds": timeout})
+            results.append({**base, "status": "timeout", "detail": f"discovery exceeded {timeout}s", "duration_seconds": timeout})
             continue
         except OSError as exc:
             results.append({**base, "status": "missing-dependency", "detail": f"could not start: {str(exc)[:MAX_REASON_CHARS]}"})
             continue
         if timed_out:
-            results.append({**base, "status": "timeout", "detail": f"exceeded {timeout}s", "duration_seconds": timeout})
+            results.append({**base, "status": "timeout", "detail": f"discovery exceeded {timeout}s", "duration_seconds": timeout})
             continue
         duration = round(time.monotonic() - started, 3)
         if returncode == 0:
