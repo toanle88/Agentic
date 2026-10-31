@@ -296,7 +296,31 @@ class PureTests(unittest.TestCase):
         repo = Path('/repo')
         with patch('agentic.git') as git_mock:
             agentic.refresh_base(repo, 'main')
-        git_mock.assert_called_once_with(repo, 'fetch', 'origin', 'main')
+        git_mock.assert_called_once_with(
+            repo, 'fetch', '--', 'origin',
+            'refs/heads/main:refs/remotes/origin/main',
+        )
+
+    def test_refresh_base_rejects_option_like_and_malformed_branches(self):
+        repo = Path('/repo')
+        invalid = (
+            '-c', '--upload-pack=evil', 'bad..name', 'bad name', 'bad.lock',
+            '.hidden/main', 'release/.hidden',
+        )
+        with patch('agentic.git') as git_mock:
+            for branch in invalid:
+                with self.subTest(branch=branch), self.assertRaises(ValueError):
+                    agentic.refresh_base(repo, branch)
+        git_mock.assert_not_called()
+
+    def test_refresh_base_preserves_valid_slash_branch_in_explicit_refspec(self):
+        repo = Path('/repo')
+        with patch('agentic.git') as git_mock:
+            agentic.refresh_base(repo, 'release/2026-10')
+        git_mock.assert_called_once_with(
+            repo, 'fetch', '--', 'origin',
+            'refs/heads/release/2026-10:refs/remotes/origin/release/2026-10',
+        )
 
 
     def test_resume_feedback_loads_latest_failed_review_and_tests(self):

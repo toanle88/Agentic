@@ -224,7 +224,7 @@ class TestDiscovery(unittest.TestCase):
             repo = Path(temp)
             with (patch("agentic_runner.test_discovery._python_module_available", return_value=(True, False)) as probe,
                   patch("agentic_runner.test_discovery._run_candidate", return_value=(0, "", False)) as run,
-                  patch("agentic_runner.test_discovery.time.monotonic", side_effect=[100.0, 100.2, 100.4, 100.5])):
+                  patch("agentic_runner.test_discovery.time.monotonic", side_effect=[100.0, 100.2, 100.4, 100.5, 100.6])):
                 results = validate_test_candidates(
                     repo,
                     [{"argv": [sys.executable, "-m", "pytest"], "reason": "module"}],
@@ -232,8 +232,24 @@ class TestDiscovery(unittest.TestCase):
                 )
 
         self.assertEqual(results[0]["status"], "passed")
-        self.assertAlmostEqual(probe.call_args.args[2], 0.8)
-        self.assertAlmostEqual(run.call_args.args[2], 0.6)
+        self.assertAlmostEqual(probe.call_args.args[2], 0.6)
+        self.assertAlmostEqual(run.call_args.args[2], 0.5)
+
+    def test_validation_uses_one_deadline_for_all_candidates(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            candidates = [
+                {"argv": ["check-one"], "reason": "first"},
+                {"argv": ["check-two"], "reason": "second"},
+            ]
+            with (patch("agentic_runner.test_discovery._executable_available", return_value=True),
+                  patch("agentic_runner.test_discovery._run_candidate", return_value=(0, "", False)) as run,
+                  patch("agentic_runner.test_discovery.time.monotonic",
+                        side_effect=[0.0, 0.1, 0.2, 0.9, 0.95, 1.1, 1.1, 1.1])):
+                results = validate_test_candidates(repo, candidates, timeout=1)
+
+        self.assertEqual([item["status"] for item in results], ["passed", "timeout"])
+        run.assert_called_once()
 
     def test_module_probe_timeout_is_not_reported_as_missing_dependency(self):
         with tempfile.TemporaryDirectory() as temp:

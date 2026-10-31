@@ -28,6 +28,7 @@ from .git_policy import (
     hardened_git_environment,
     hardened_git_argv,
     git_filter_probe_argv,
+    validate_git_branch_name,
 )
 from .models import DEFAULT_GITHUB_HOST, Issue, PullRequest, Run, StatePaths
 from .persistence import read_text_bounded
@@ -653,7 +654,9 @@ def repair_relative_worktree(repo: Path, worktree: Path) -> bool:
 
 def refresh_base(repo: Path, base: str) -> None:
     """Update the remote-tracking base ref before validating or publishing."""
-    git(repo, "fetch", "origin", base)
+    base = validate_git_branch_name(base)
+    refspec = f"refs/heads/{base}:refs/remotes/origin/{base}"
+    git(repo, "fetch", "--", "origin", refspec)
 
 
 @contextmanager
@@ -766,7 +769,7 @@ def github_metadata(repo: Path, github_host: str = DEFAULT_GITHUB_HOST) -> tuple
         _github_command(github_host, "repo", "view", "--json", "nameWithOwner,defaultBranchRef"),
         repo, env=_github_environment(github_host),
     ).stdout)
-    return data["nameWithOwner"], data["defaultBranchRef"]["name"]
+    return data["nameWithOwner"], validate_git_branch_name(data["defaultBranchRef"]["name"])
 
 
 def fetch_issues(
@@ -840,9 +843,9 @@ def default_base_branch(repo: Path) -> str:
     remote_head = git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", check=False)
     prefix = "refs/remotes/origin/"
     if remote_head.startswith(prefix):
-        return remote_head.removeprefix(prefix)
+        return validate_git_branch_name(remote_head.removeprefix(prefix))
     current = git(repo, "branch", "--show-current", check=False)
-    return current or "main"
+    return validate_git_branch_name(current or "main")
 
 
 def discover_runs(repo: Path) -> list[Run]:

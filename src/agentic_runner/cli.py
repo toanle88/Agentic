@@ -54,7 +54,7 @@ from .config import (  # noqa: F401
     test_commands_for_profile,
 )
 from .repository_metadata import read_repository_metadata
-from .git_policy import hardened_git_argv, hardened_git_environment
+from .git_policy import hardened_git_argv, hardened_git_environment, validate_git_branch_name
 from .context import (  # noqa: F401
     FEEDBACK_CONTEXT_CHARS,
     INSTRUCTION_CONTEXT_CHARS as _INSTRUCTION_CONTEXT_CHARS,
@@ -451,7 +451,9 @@ def git(repo: Path, *args: str, check: bool = True,
 
 
 def refresh_base(repo: Path, base: str) -> None:
-    git(repo, "fetch", "origin", base)
+    base = validate_git_branch_name(base)
+    refspec = f"refs/heads/{base}:refs/remotes/origin/{base}"
+    git(repo, "fetch", "--", "origin", refspec)
 
 
 def _github_command(host: str, *args: str) -> list[str]:
@@ -1829,7 +1831,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--discovery-timeout", type=int, default=DISCOVERY_TIMEOUT_SECONDS,
-        help="With --discover-tests, maximum seconds for each candidate check (default: 60)",
+        help="With --discover-tests, maximum seconds for candidate validation (default: 60)",
     )
     parser.add_argument("--agents", action="store_true", help="With init, create a starter AGENTS.md")
     parser.add_argument(
