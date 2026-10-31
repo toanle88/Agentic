@@ -1,6 +1,7 @@
 """Focused workflow tests."""
 import json
 import contextlib
+import hashlib
 import os
 import re
 import shlex
@@ -355,6 +356,42 @@ class WorkflowTests(_GitRepositoryTestCase):
             with self.assertRaisesRegex(RuntimeError, "output exceeded"):
                 agentic_worktrees.command(["git", "diff"], self.repo)
 
+    def test_digest_command_streams_large_output_without_materializing_it(self):
+        payload = b"\x00" + os.urandom(agentic_worktrees.MAX_COMMAND_OUTPUT_BYTES + 1)
+        (self.repo / "large.bin").write_bytes(payload)
+        agentic_worktrees.git(self.repo, "add", "large.bin")
+
+        digest = agentic_worktrees.digest_command(
+            [
+                "git", "-c", "diff.external=", "diff", "--no-ext-diff",
+                "--no-textconv", "--cached", "--binary", "HEAD",
+            ],
+            self.repo,
+        )
+
+        self.assertRegex(digest, r"^[0-9a-f]{64}$")
+
+    def test_digest_command_matches_materialized_output(self):
+        payload = b"\x00deterministic binary payload"
+        (self.repo / "small.bin").write_bytes(payload)
+        agentic_worktrees.git(self.repo, "add", "small.bin")
+        argv = [
+            "git", "-c", "diff.external=", "diff", "--no-ext-diff",
+            "--no-textconv", "--cached", "--binary", "HEAD",
+        ]
+
+        materialized = agentic_worktrees.command(argv, self.repo).stdout
+        expected = hashlib.sha256(materialized.encode("utf-8")).hexdigest()
+
+        self.assertEqual(agentic_worktrees.digest_command(argv, self.repo), expected)
+
+    def test_digest_command_bounds_streamed_output(self):
+        with patch.object(agentic_worktrees, "MAX_DIGEST_OUTPUT_BYTES", 1):
+            with self.assertRaisesRegex(RuntimeError, "output exceeded"):
+                agentic_worktrees.digest_command(
+                    [sys.executable, "-c", "print('too much')"], self.repo,
+                )
+
     def test_bounded_command_timeout_terminates_descendants(self):
         marker = self.repo / "timeout-descendant-alive"
         child = (
@@ -631,8 +668,10 @@ class WorkflowTests(_GitRepositoryTestCase):
         (run.worktree / 'fix.py').write_text('fixed=True\n')
         command_calls = []
         git_calls = []
+        digest_calls = []
         real_command = agentic_workflow.command
         real_git = agentic_workflow.git
+        real_digest = agentic_workflow.digest_command
 
         def capture_command(argv, cwd, **kwargs):
             command_calls.append(argv)
@@ -642,12 +681,17 @@ class WorkflowTests(_GitRepositoryTestCase):
             git_calls.append(["git", *args])
             return real_git(cwd, *args, **kwargs)
 
+        def capture_digest(argv, cwd, **kwargs):
+            digest_calls.append(argv)
+            return real_digest(argv, cwd, **kwargs)
+
         with (patch.object(agentic_workflow, 'command', side_effect=capture_command),
-              patch.object(agentic_workflow, 'git', side_effect=capture_git)):
+              patch.object(agentic_workflow, 'git', side_effect=capture_git),
+              patch.object(agentic_workflow, 'digest_command', side_effect=capture_digest)):
             agentic_workflow.prepare_patch(run.worktree, 'main', 10)
 
         diff_commands = [
-            argv for argv in [*command_calls, *git_calls]
+            argv for argv in [*command_calls, *git_calls, *digest_calls]
             if argv and argv[0] == 'git' and 'diff' in argv
         ]
         self.assertGreaterEqual(len(diff_commands), 5)
