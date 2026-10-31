@@ -85,6 +85,7 @@ from .worktrees import (
     AUDIT_BRANCH_RE,
     AUDIT_KEY,
     command,
+    digest_command,
     eligible,
     get_pull_request,
     git,
@@ -1516,13 +1517,12 @@ def prepare_patch(worktree: Path, base: str, max_files: int | None) -> tuple[str
         worktree, "-c", "core.whitespace=cr-at-eol", "-c", "diff.external=", "diff",
         "--no-ext-diff", "--no-textconv", "--cached", "--check", base_sha,
     )
-    diff = command(
+    digest = digest_command(
         [
             "git", "-c", "diff.external=", "diff", "--no-ext-diff", "--no-textconv",
             "--cached", "--binary", base_sha,
         ], worktree,
-    ).stdout
-    digest = hashlib.sha256(diff.encode("utf-8")).hexdigest()
+    )
     summary = git(
         worktree, "-c", "diff.external=", "diff", "--no-ext-diff", "--no-textconv",
         "--cached", "--stat", base_sha,
