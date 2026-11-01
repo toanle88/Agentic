@@ -45,8 +45,11 @@ OPENROUTER_LOG_BYTES = 200_000
 OPENROUTER_FINAL_MESSAGE_CHARS = 50_000
 OPENROUTER_IDENTICAL_TOOL_CALL_LIMIT = 4
 OPENROUTER_IDENTICAL_TOOL_CALL_HARD_LIMIT = 6
+OPENROUTER_MAX_TOOL_CALLS_PER_RESPONSE = 32
+OPENROUTER_MAX_TOOL_CALLS = 256
 OPENROUTER_EXPLORATION_TOOLS = frozenset({"list_files", "read_file", "search_files"})
 _TRUNCATION_MARKER = "\n[agentic_stream_truncated: size limit reached]\n"
+_TOOL_CALL_BUDGET_MARKER = "[agentic_tool_call_budget_exceeded]"
 _MALFORMED_TOOL_CALL_NAME = "read_file"
 
 
@@ -254,6 +257,7 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
     last_message = ""
     usage_records: list[dict[str, Any]] = []
     mutation_state = {"bytes": 0}
+    tool_call_count = 0
     identical_tool_calls: dict[str, int] = {}
     truncated_read_paths: set[str] = set()
     force_final_response = False
@@ -416,9 +420,25 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
             message = choices[0].get("message")
             if not isinstance(message, dict):
                 raise RuntimeError("OpenRouter response did not contain a message")
+            raw_tool_calls = message.get("tool_calls")
+            response_tool_call_count = (
+                len(raw_tool_calls) if isinstance(raw_tool_calls, list) else 0
+            )
+            if response_tool_call_count > OPENROUTER_MAX_TOOL_CALLS_PER_RESPONSE:
+                raise RuntimeError(
+                    f"{_TOOL_CALL_BUDGET_MARKER}: response contains "
+                    f"{response_tool_call_count} tool calls; limit is "
+                    f"{OPENROUTER_MAX_TOOL_CALLS_PER_RESPONSE}"
+                )
+            if tool_call_count + response_tool_call_count > OPENROUTER_MAX_TOOL_CALLS:
+                raise RuntimeError(
+                    f"{_TOOL_CALL_BUDGET_MARKER}: cumulative tool-call limit "
+                    f"of {OPENROUTER_MAX_TOOL_CALLS} reached"
+                )
             normalized_message = _normalized_assistant_message(message)
             messages.append(normalized_message)
             tool_calls = normalized_message.get("tool_calls") or []
+            tool_call_count += response_tool_call_count
             content = _message_text(normalized_message.get("content"))
             if content:
                 last_message = bounded_final_message(content)
@@ -429,6 +449,10 @@ def run_openrouter(worktree: Path, prompt: str, *, output: Path,
                 break
             finished = False
             for tool_call in tool_calls:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"OpenRouter agent exceeded total timeout of {timeout}s"
+                    )
                 if not isinstance(tool_call, dict):
                     continue
                 function = tool_call.get("function")

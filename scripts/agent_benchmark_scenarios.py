@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 from threading import Thread
 import time
@@ -159,9 +160,7 @@ def prepare_repository(source: Path, destination: Path) -> None:
     """Copy a fixture into an isolated repository and initialize Git if needed."""
     if not source.is_dir():
         raise ValueError(f"repository fixture does not exist: {source}")
-    if any(path.is_symlink() for path in source.rglob("*")):
-        raise ValueError(f"repository fixture contains unsupported symlinks: {source}")
-    shutil.copytree(source, destination, symlinks=True)
+    _copy_benchmark_tree(source, destination)
     if not (destination / ".git").exists():
         _run_git(destination, "init", "--initial-branch", "main")
         _run_git(destination, "add", "-A")
@@ -170,6 +169,46 @@ def prepare_repository(source: Path, destination: Path) -> None:
             "-c", "user.email=agentic-benchmark@example.invalid",
             "commit", "-m", "benchmark fixture",
         )
+
+
+def _copy_benchmark_tree(source: Path, destination: Path) -> None:
+    """Copy only regular, single-link fixture files into a fresh directory."""
+    try:
+        source_metadata = source.lstat()
+    except OSError as exc:
+        raise ValueError(f"could not inspect repository fixture: {source}") from exc
+    if stat.S_ISLNK(source_metadata.st_mode) or not stat.S_ISDIR(source_metadata.st_mode):
+        raise ValueError(f"repository fixture is not a directory: {source}")
+    destination.mkdir(parents=False, exist_ok=False)
+    for entry in source.iterdir():
+        try:
+            metadata = entry.lstat()
+        except OSError as exc:
+            raise ValueError(f"could not inspect repository fixture entry: {entry}") from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError(f"repository fixture contains unsupported symlinks: {source}")
+        target = destination / entry.name
+        if stat.S_ISDIR(metadata.st_mode):
+            _copy_benchmark_tree(entry, target)
+        elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
+            shutil.copy2(entry, target, follow_symlinks=False)
+        elif stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"repository fixture contains a hard-linked file: {entry}")
+        else:
+            raise ValueError(f"repository fixture contains a special file: {entry}")
+
+
+def _copy_benchmark_file(source: Path, destination: Path, label: str) -> None:
+    """Copy a task file only after rejecting links and special files."""
+    try:
+        metadata = source.lstat()
+    except OSError as exc:
+        raise ValueError(f"could not inspect {label}: {source}") from exc
+    if stat.S_ISLNK(metadata.st_mode):
+        raise ValueError(f"{label} is a symbolic link")
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise ValueError(f"{label} is not a regular single-link file")
+    shutil.copy2(source, destination, follow_symlinks=False)
 
 
 def _run_checks(
@@ -317,7 +356,7 @@ def run_scenario(
     task_source = _path_under_root(root, task["task_file"], f"task {task['id']} task file")
     prepare_repository(source, repo)
     task_file = run_root / Path(task["task_file"]).name
-    shutil.copy2(task_source, task_file)
+    _copy_benchmark_file(task_source, task_file, f"task {task['id']} task file")
     result_file = run_root / "result.json"
     state_dir = run_root / "state"
     state_dir.mkdir()

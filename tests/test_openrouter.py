@@ -579,6 +579,64 @@ class OpenRouterTests(unittest.TestCase):
             self.assertIn('tool_result', raw)
             self.assertIn('tool name must be a non-empty string', raw)
 
+    def test_openrouter_rejects_excess_tool_calls_before_execution(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            limit = agentic_openrouter._loop.OPENROUTER_MAX_TOOL_CALLS_PER_RESPONSE
+            response = {'choices': [{'message': {
+                'role': 'assistant', 'content': None,
+                'tool_calls': [{
+                    'id': f'call-{index}', 'function': {
+                        'name': 'read_file', 'arguments': '{"path":"missing.txt"}',
+                    },
+                } for index in range(limit + 1)],
+            }}]}
+            with (patch.dict(agentic.os.environ, {'ROUTER_KEY': 'secret'}, clear=False),
+                  patch('agentic_openrouter._openrouter_request', return_value=response),
+                  patch('agentic_openrouter._openrouter_tool_call') as tool_call):
+                ok, message = agentic.run_openrouter(
+                    root, 'prompt', output=root / 'developer.txt', model='openai/test',
+                    api_key_env='ROUTER_KEY',
+                )
+        self.assertFalse(ok)
+        self.assertIn('[agentic_tool_call_budget_exceeded]', message)
+        tool_call.assert_not_called()
+
+    def test_openrouter_enforces_cumulative_tool_call_budget(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            per_response = 2
+            cumulative = 2
+            responses = [
+                {'choices': [{'message': {
+                    'role': 'assistant', 'content': None,
+                    'tool_calls': [{
+                        'id': f'call-{index}', 'function': {
+                            'name': 'read_file',
+                            'arguments': json.dumps({'path': f'missing-{index}.txt'}),
+                        },
+                    } for index in range(per_response)],
+                }}]},
+                {'choices': [{'message': {
+                    'role': 'assistant', 'content': None,
+                    'tool_calls': [{
+                        'id': 'call-2', 'function': {
+                            'name': 'read_file', 'arguments': '{"path":"other.txt"}',
+                        },
+                    }],
+                }}]},
+            ]
+            with (patch.dict(agentic.os.environ, {'ROUTER_KEY': 'secret'}, clear=False),
+                  patch.object(agentic_openrouter._loop, 'OPENROUTER_MAX_TOOL_CALLS_PER_RESPONSE', per_response),
+                  patch.object(agentic_openrouter._loop, 'OPENROUTER_MAX_TOOL_CALLS', cumulative),
+                  patch('agentic_openrouter._openrouter_request', side_effect=responses)):
+                ok, message = agentic.run_openrouter(
+                    root, 'prompt', output=root / 'developer.txt', model='openai/test',
+                    api_key_env='ROUTER_KEY', max_tool_turns=3,
+                )
+        self.assertFalse(ok)
+        self.assertIn('cumulative tool-call limit', message)
+
     def test_openrouter_search_reports_bounded_scans_and_read_failures(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
