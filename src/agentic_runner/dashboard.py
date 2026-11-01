@@ -30,6 +30,10 @@ from .output import timestamped_status
 from .persistence import atomic_write_text
 
 
+MAX_DASHBOARD_PAYLOAD_BYTES = 2_000_000
+MAX_DASHBOARD_VALUE_CHARS = 5_000
+
+
 def default_logs_root(repo: Path, state_dir: Path | None = None) -> Path:
     return state_paths(repo, state_dir).runs
 
@@ -53,6 +57,78 @@ def _json_for_script(value: Any) -> str:
     return base64.b64encode(encoded).decode("ascii")
 
 
+def _bounded_dashboard_value(value: Any, depth: int = 0) -> Any:
+    """Bound direct renderer inputs as well as snapshots from the parser."""
+    if isinstance(value, str):
+        if len(value) <= MAX_DASHBOARD_VALUE_CHARS:
+            return value
+        marker = "\n[… dashboard value truncated …]"
+        return value[:MAX_DASHBOARD_VALUE_CHARS - len(marker)] + marker
+    if depth >= 8:
+        return str(value)[:MAX_DASHBOARD_VALUE_CHARS]
+    if isinstance(value, dict):
+        return {
+            str(key)[:160]: _bounded_dashboard_value(child, depth + 1)
+            for key, child in list(value.items())[:256]
+        }
+    if isinstance(value, (list, tuple)):
+        return [_bounded_dashboard_value(child, depth + 1) for child in value[:128]]
+    return value
+
+
+def _dashboard_render_inputs(
+    runs: list[dict[str, Any]], settings: dict[str, Any], *,
+    repo_name: str = "", logs_name: str = "", generated: str = "",
+) -> tuple[list[dict[str, Any]], str]:
+    """Fit embedded data to a bounded payload while retaining recent runs."""
+    bounded_runs = [
+        _bounded_dashboard_value(run) for run in runs
+        if isinstance(run, dict)
+    ]
+    bounded_settings = _bounded_dashboard_value(settings)
+    bounded_repo_name = _bounded_dashboard_value(repo_name)
+    bounded_logs_name = _bounded_dashboard_value(logs_name)
+    bounded_generated = _bounded_dashboard_value(generated)
+
+    def serialize(candidate: list[dict[str, Any]]) -> tuple[str, int]:
+        value = {
+            "runs": candidate,
+            "repo": bounded_repo_name,
+            "logs": bounded_logs_name,
+            "generated": bounded_generated,
+            "settings": bounded_settings,
+        }
+        data = _json_for_script(value)
+        return data, len(base64.b64decode(data))
+
+    data, size = serialize(bounded_runs)
+    while size > MAX_DASHBOARD_PAYLOAD_BYTES and len(bounded_runs) > 1:
+        bounded_runs = bounded_runs[:max(1, len(bounded_runs) // 2)]
+        data, size = serialize(bounded_runs)
+    if size > MAX_DASHBOARD_PAYLOAD_BYTES:
+        bounded_runs = [
+            {
+                key: run.get(key)
+                for key in ("id", "issue", "label", "status", "stage", "severity", "last_activity")
+                if key in run
+            }
+            for run in bounded_runs[:1]
+        ]
+        data, size = serialize(bounded_runs)
+    if size > MAX_DASHBOARD_PAYLOAD_BYTES:
+        # A direct settings argument can be larger than the complete payload
+        # budget even after value-level bounds.  Preserve the run envelope and
+        # metadata, but drop optional settings before the final serialization.
+        bounded_settings = {}
+        data, size = serialize(bounded_runs)
+    if size > MAX_DASHBOARD_PAYLOAD_BYTES:
+        # Keep the hard limit authoritative even for unusually large bounded
+        # metadata supplied directly to the renderer.
+        bounded_runs = []
+        data, size = serialize(bounded_runs)
+    return bounded_runs, data
+
+
 def _required_replace(value: str, marker: str, replacement: str, *, count: int = 1) -> str:
     """Replace a generated-template marker and fail closed if it moved."""
     if (count < 0 and marker not in value) or (count >= 0 and value.count(marker) < count):
@@ -64,8 +140,13 @@ def render_dashboard(runs: list[dict[str, Any]], repo_name: str, logs_name: str,
                      settings: dict[str, Any] | None = None) -> str:
     """Render a read-only dashboard; browser actions never write repository state."""
     generated = dt.datetime.now().astimezone().isoformat(timespec="seconds")
-    data = _json_for_script({"runs": runs, "repo": repo_name, "logs": logs_name,
-                             "generated": generated, "settings": settings or {}})
+    runs, data = _dashboard_render_inputs(
+        runs,
+        settings or {},
+        repo_name=repo_name,
+        logs_name=logs_name,
+        generated=generated,
+    )
     def escape(value):
         return html.escape(str(value), quote=True)
     fallback_metrics = "".join(

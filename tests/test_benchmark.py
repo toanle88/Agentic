@@ -20,8 +20,8 @@ from scripts.agent_benchmark import (
 )
 from scripts.agent_benchmark_config import MAX_BENCHMARK_BYTES, load_benchmark as load_benchmark_config
 from scripts.agent_benchmark_scenarios import (
-    MAX_RESULT_BYTES, _read_result, _run_bounded_git_command, _run_checks,
-    _run_git, _scenario_record, run_scenario,
+    MAX_RESULT_BYTES, _copy_benchmark_file, _read_result, _run_bounded_git_command,
+    _run_checks, _run_git, _scenario_record, prepare_repository, run_scenario,
 )
 from scripts.agent_benchmark_scenarios import _benchmark_environment
 from scripts.benchmark import run_case
@@ -288,6 +288,43 @@ class BenchmarkTests(unittest.TestCase):
                 self.skipTest(f"hard links unavailable: {exc}")
             result = _read_result(path)
         self.assertEqual(result["status"], "runner-error")
+
+    def test_benchmark_fixture_rejects_hardlinked_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "fixture"
+            source.mkdir()
+            original = source / "original.txt"
+            original.write_text("fixture\n", encoding="utf-8")
+            try:
+                os.link(original, source / "hardlink.txt")
+            except OSError as exc:
+                self.skipTest(f"hard links unavailable: {exc}")
+            with self.assertRaisesRegex(ValueError, "hard-linked"):
+                prepare_repository(source, root / "copy")
+
+    @unittest.skipIf(os.name == "nt", "named pipes are not available in this fixture")
+    def test_benchmark_fixture_rejects_special_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "fixture"
+            source.mkdir()
+            os.mkfifo(source / "blocked.pipe")
+            with self.assertRaisesRegex(ValueError, "special file"):
+                prepare_repository(source, root / "copy")
+
+    def test_benchmark_task_copy_rejects_hardlinked_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "task.md"
+            source.write_text("task\n", encoding="utf-8")
+            linked = root / "linked-task.md"
+            try:
+                os.link(source, linked)
+            except OSError as exc:
+                self.skipTest(f"hard links unavailable: {exc}")
+            with self.assertRaisesRegex(ValueError, "single-link"):
+                _copy_benchmark_file(linked, root / "copy.md", "task file")
 
     def test_malformed_scenario_result_is_a_runner_error(self):
         with tempfile.TemporaryDirectory() as temp:

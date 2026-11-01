@@ -1315,6 +1315,64 @@ console.log(JSON.stringify({{newest, oldest}}));
             self.assertEqual(snapshot["review"]["findings"], ["Add a browser regression test."])
             self.assertEqual(snapshot["review"]["finding_records"][0]["severity"], "HIGH")
 
+    def test_dashboard_bounds_legacy_issue_review_and_investigation_text(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ".demo-agent-runs"
+            run = root / "agent-issue-75-deadbeef"
+            run.mkdir(parents=True)
+            huge = "x" * (agentic_dashboard_data.MAX_TEXT * 3)
+            (run / "issue-snapshot.json").write_text(json.dumps({"body": huge}))
+            (run / "review-001.json").write_text(json.dumps({
+                "approved": False, "summary": huge, "findings": [huge], "skipped": [huge],
+            }))
+            (run / "investigation-001.json").write_text(json.dumps({
+                "summary": huge, "findings": [huge],
+            }))
+            snapshot = agentic_dashboard_data.collect_runs(root)[0]
+
+        self.assertLessEqual(len(snapshot["issue_body"]), agentic_dashboard_data.MAX_TEXT)
+        self.assertLessEqual(len(snapshot["review"]["summary"]), agentic_dashboard_data.MAX_TEXT)
+        self.assertLessEqual(len(snapshot["review"]["findings"][0]), agentic_dashboard_data.MAX_TEXT)
+        self.assertLessEqual(len(snapshot["review"]["skipped"][0]), agentic_dashboard_data.MAX_TEXT)
+        self.assertLessEqual(len(snapshot["investigation"]["summary"]), agentic_dashboard_data.MAX_TEXT)
+        self.assertLessEqual(len(snapshot["investigation"]["findings"][0]), agentic_dashboard_data.MAX_TEXT)
+
+    def test_dashboard_render_payload_has_an_aggregate_size_bound(self):
+        runs = [{
+            "id": f"run-{index}", "label": "x" * 5_000, "status": "approved",
+            "files": [{"name": "log.txt", "content": "y" * 5_000}],
+        } for index in range(500)]
+        html = agentic_dashboard.render_dashboard(runs, "demo", "logs")
+        payload = html.split(
+            '<script type="application/json" id="dashboard-data">', 1,
+        )[1].split("</script>", 1)[0]
+        decoded = base64.b64decode(payload)
+        self.assertLessEqual(
+            len(decoded), agentic_dashboard.MAX_DASHBOARD_PAYLOAD_BYTES,
+        )
+
+    def test_dashboard_render_bounds_direct_envelope_inputs(self):
+        html = agentic_dashboard.render_dashboard(
+            [{"id": "run-1", "status": "approved"}],
+            "r" * 900_000,
+            "l" * 900_000,
+            settings={"note": "s" * 900_000},
+        )
+        payload = html.split(
+            '<script type="application/json" id="dashboard-data">', 1,
+        )[1].split("</script>", 1)[0]
+        decoded = base64.b64decode(payload)
+        data = json.loads(decoded)
+
+        self.assertLessEqual(
+            len(decoded), agentic_dashboard.MAX_DASHBOARD_PAYLOAD_BYTES,
+        )
+        self.assertLessEqual(len(data["repo"]), agentic_dashboard.MAX_DASHBOARD_VALUE_CHARS)
+        self.assertLessEqual(len(data["logs"]), agentic_dashboard.MAX_DASHBOARD_VALUE_CHARS)
+        self.assertLessEqual(
+            len(data["settings"]["note"]), agentic_dashboard.MAX_DASHBOARD_VALUE_CHARS,
+        )
+
     def test_dashboard_parses_legacy_finding_severity_and_blocked_stage(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / ".demo-agent-runs"

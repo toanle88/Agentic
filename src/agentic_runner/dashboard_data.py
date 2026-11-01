@@ -52,6 +52,8 @@ MAX_REVIEW_HISTORY_BYTES = 256_000
 MAX_REVIEW_HISTORY_ENTRIES = 50
 MAX_REVIEW_HISTORY_FINDINGS = 100
 MAX_REVIEW_HISTORY_FIELD = 4_000
+MAX_FINDINGS = 100
+_TRUNCATED_FIELD_MARKER = "\n[… dashboard field truncated …]"
 MAX_DURABLE_JSON_BYTES = 256_000
 MAX_EXPORT_ROWS = 500
 MAX_EXPORT_BYTES = 256_000
@@ -552,22 +554,33 @@ def _finding_severity(value: Any, finding_text: str) -> str:
     return finding_severity(finding_text)
 
 
+def _bounded_field(value: Any, limit: int = MAX_TEXT) -> str:
+    """Keep model/issue text bounded before it enters a dashboard snapshot."""
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    keep = max(0, limit - len(_TRUNCATED_FIELD_MARKER))
+    return text[:keep] + _TRUNCATED_FIELD_MARKER
+
+
 def _finding_records(values: Any) -> tuple[list[str], list[dict[str, str]]]:
     """Keep finding text while exposing bounded filter metadata."""
     if not isinstance(values, list):
         values = [values]
     text: list[str] = []
     records: list[dict[str, str]] = []
-    for value in values:
+    for value in values[:MAX_FINDINGS]:
         if isinstance(value, dict):
-            finding_text = str(value.get("requirement", value.get("text", value.get("message", ""))))
+            finding_text = _bounded_field(
+                value.get("requirement", value.get("text", value.get("message", "")))
+            )
             severity = _finding_severity(value.get("severity", "UNSPECIFIED"), finding_text)
             record = {
                 "text": finding_text,
                 "severity": severity,
             }
         else:
-            finding_text = str(value)
+            finding_text = _bounded_field(value)
             severity = _finding_severity("UNSPECIFIED", finding_text)
             record = {"text": finding_text, "severity": severity}
         text.append(finding_text)
@@ -629,9 +642,9 @@ def _review(folder: Path, index: dict[str, list[Path]] | None = None) -> tuple[d
         skipped = [str(skipped)]
     return {
         "status": "approved" if raw.get("approved") is True else "rejected",
-        "summary": str(raw.get("summary", "No review summary.")),
+        "summary": _bounded_field(raw.get("summary", "No review summary.")),
         "findings": findings, "finding_records": finding_records,
-        "skipped": [str(item) for item in skipped],
+        "skipped": [_bounded_field(item) for item in skipped[:MAX_FINDINGS]],
         "recurring": recurring, "file": path.name, "updated": _timestamp(path),
     }, path
 
@@ -711,8 +724,8 @@ def _investigation(folder: Path, index: dict[str, list[Path]] | None = None) -> 
             "findings": [], "file": path.name, "updated": _timestamp(path),
         }, path
     return {
-        "state": "recorded", "summary": str(raw.get("summary")),
-        "findings": [str(item) for item in findings],
+        "state": "recorded", "summary": _bounded_field(raw.get("summary")),
+        "findings": [_bounded_field(item) for item in findings[:MAX_FINDINGS]],
         "file": path.name, "updated": _timestamp(path),
     }, path
 
@@ -724,13 +737,24 @@ def _audit(folder: Path) -> tuple[dict[str, Any], Path | None]:
     raw = _parse_json_object(_read(path, 100_000))
     if raw is None or not isinstance(raw.get("summary"), str) or not isinstance(raw.get("findings"), list):
         return {"state": "invalid", "summary": "Audit report is not valid JSON.", "findings": [], "measurements": [], "skipped": [], "file": path.name, "updated": _timestamp(path)}, path
-    findings = [item for item in raw["findings"] if isinstance(item, dict)][:40]
+    findings = []
+    for item in raw["findings"][:MAX_FINDINGS]:
+        if not isinstance(item, dict):
+            continue
+        findings.append({
+            str(key)[:80]: _bounded_field(value)
+            for key, value in item.items()
+            if isinstance(key, str)
+        })
     return {
         "state": "recorded",
-        "summary": str(raw.get("summary", ""))[:2_000],
+        "summary": _bounded_field(raw.get("summary", "")),
         "findings": findings,
         "measurements": [item for item in raw.get("measurements", []) if isinstance(item, dict)][:20],
-        "skipped": [str(item) for item in raw.get("skipped", []) if isinstance(item, str)][:20],
+        "skipped": [
+            _bounded_field(item) for item in raw.get("skipped", [])
+            if isinstance(item, str)
+        ][:MAX_FINDINGS],
         "file": path.name,
         "updated": _timestamp(path),
     }, path
@@ -1071,7 +1095,7 @@ def _run_snapshot(
     if issue_value is not None:
         raw_issue_snapshot = read_issue_snapshot(folder)
         if isinstance(raw_issue_snapshot, dict) and isinstance(raw_issue_snapshot.get("body"), str):
-            issue_body = raw_issue_snapshot["body"]
+            issue_body = _bounded_field(raw_issue_snapshot["body"])
     if isinstance(raw_issue_metadata, dict) and issue_value is not None:
         issue_metadata: dict[str, Any] = {
             "number": issue_value,
