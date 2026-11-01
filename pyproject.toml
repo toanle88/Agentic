@@ -16,7 +16,7 @@ dev = [
     "build==1.6.1",
     "coverage==7.6.10",
     "pyright==1.1.414",
-    "ruff==0.17.2",
+    "ruff==0.17.3",
 ]
 docs = [
     "mkdocs-material==9.6.22",
